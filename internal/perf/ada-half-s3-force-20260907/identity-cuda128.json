@@ -1,0 +1,18 @@
+{
+  "cc": "8.9",
+  "sm_count": 142,
+  "nvrtc": [
+    12,
+    8
+  ],
+  "compiler_target": "CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }",
+  "fixed_source_digest": "205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5",
+  "fixed_invocation_digest": "57c3e4f2177104f137d432f19398a4a36799aca4c264634a1ab25d17dbf422ba",
+  "fixed_artifact_digest": "60977db33de28d807ac7dd3dafe2d176914f7b7eab589917a47988050712352c",
+  "header_manifest_digest": "93da3d651789a26680b5af0ad03008c21ddcef2fa256d5439994b16442cde0ab",
+  "nvrtc_library_domain": "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+  "nvrtc_library_known": true,
+  "tuning_table_revision": 42,
+  "evidence_role": "Task6A physical identity control only; not timing admission",
+  "physical_records": 8
+}

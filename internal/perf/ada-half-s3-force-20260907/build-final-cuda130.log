@@ -1,0 +1,10 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-half-s3-force-20260907)
+    Finished `release` profile [optimized] target(s) in 1m 10s
+  Executable unittests src/lib.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/mamba_rs-ab5583122e80f842)
+  Executable tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/arch_compile_gates-26d913251d4706ac)
+  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_correctness-f7aef6b739fe79c6)
+  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_performance-f34471822300c85c)
+  Executable tests/gemm_bi_fixed_sm89_exact_n64.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_exact_n64-f32c5ef50be5f459)
+  Executable tests/gemm_bi_fixed_sm89_pipeline.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1)
+  Executable tests/gemm_bi_tf32_cohort_binding.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f48a3ccb04f0698)
+FINAL_BUILD130_EXIT=0

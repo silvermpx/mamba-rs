@@ -1,0 +1,24 @@
+
+running 1 test
+test fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live has been running for over 60 seconds
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+test fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 92.32s
+
+COLD130_EXIT=0
+
+running 1 test
+test fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live has been running for over 60 seconds
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=180 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=180 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=188 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=188 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+test fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 87.94s
+
+COLD132_EXIT=0

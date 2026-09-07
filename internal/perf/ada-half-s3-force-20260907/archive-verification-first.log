@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-force-20260907/verify-archives.py", line 29, in <module>
+    assert identities.get(member.name) == actual, (tag, "source mismatch", member.name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('128', 'source mismatch', '._Cargo.toml')

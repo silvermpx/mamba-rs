@@ -15,6 +15,7 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
 
 const CANDIDATE: FixedTile = FixedTile::Tc128Sm89Pipeline;
 const SWIZZLE_CANDIDATE: FixedTile = FixedTile::Tc128Sm89Swizzle;
+const S3_CANDIDATE: FixedTile = FixedTile::Tc128Sm89S3;
 const RUNGS: [FixedTile; 5] = [
     FixedTile::Tc16,
     FixedTile::Tc64,
@@ -64,11 +65,23 @@ fn fixed_sm89_half_swizzle_has_a_distinct_forced_route() {
 }
 
 #[test]
+fn fixed_sm89_half_s3_has_a_distinct_forced_route() {
+    assert_ne!(S3_CANDIDATE, CANDIDATE);
+    assert_ne!(S3_CANDIDATE, SWIZZLE_CANDIDATE);
+    assert_eq!(format!("{S3_CANDIDATE:?}"), "Tc128Sm89S3");
+}
+
+#[test]
 #[ignore = "requires exact Ada CC8.9 and live independent half holders"]
 fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
+    println!(
+        "S3_MODULE_IDENTITIES compiler={:?} artifacts={:?}",
+        ctx.kernels.compiler_identity(),
+        ctx.kernels.artifact_set_identity()
+    );
     assert!(ctx.kernels.fixed_sm89_half_pipeline.is_some());
     assert!(ctx.kernels.fixed_sm89_half_pipeline_rejection.is_none());
     let swizzle = ctx
@@ -108,6 +121,36 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
             occupancy
         );
     }
+    let s3 = ctx.kernels.fixed_sm89_half_s3.as_ref().unwrap_or_else(|| {
+        panic!(
+            "s3 holder rejected: {:?}",
+            ctx.kernels.fixed_sm89_half_s3_rejection
+        )
+    });
+    assert!(ctx.kernels.fixed_sm89_half_s3_rejection.is_none());
+    for (dtype, function) in [(WeightDtype::Bf16, &s3.bf16), (WeightDtype::F16, &s3.f16)] {
+        let local = function.local_size_bytes().expect("local bytes");
+        let registers = function.num_regs().expect("registers");
+        let static_shared = function.shared_size_bytes().expect("static shared");
+        let max_threads = function.max_threads_per_block().expect("max threads");
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(256, 98_304, None)
+            .expect("occupancy");
+        assert_eq!(local, 0);
+        assert_eq!(static_shared, 0);
+        assert!((1..=188).contains(&registers));
+        assert!(max_threads >= 256);
+        assert!(occupancy >= 1);
+        println!(
+            "S3_RESOURCE dtype={} local={} registers={} static_shared={} max_threads={} active_blocks={} dynamic_shared=98304",
+            dtype.as_str(),
+            local,
+            registers,
+            static_shared,
+            max_threads,
+            occupancy
+        );
+    }
 }
 
 #[test]
@@ -120,6 +163,12 @@ fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
 #[ignore = "requires exact Ada CC8.9 and the admitted forced half swizzle"]
 fn fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits() {
     fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE));
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9 and the admitted forced half s3"]
+fn fixed_sm89_half_s3_forced_hot_a_e_prefix_view_graph_bits() {
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(S3_CANDIDATE));
 }
 
 fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
@@ -194,8 +243,20 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                     let reference = raw_half(&ctx, &full);
                     for m in [hot_m, hot_m - 1, hot_m + 1, 1, 17, 129] {
                         for (row_offset, output_offset) in [(0, 8), (17, 8), (17, 1)] {
-                            let initial = vec![0x7fff; output_offset + m * n + 9];
+                            let guards = vec![0x7fff; output_offset + m * n + 9];
+                            let mut expected = guards.clone();
+                            expected[output_offset..output_offset + m * n]
+                                .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
+                            let mut initial = guards;
+                            for (poison, gold) in initial[output_offset..output_offset + m * n]
+                                .iter_mut()
+                                .zip(&expected[output_offset..output_offset + m * n])
+                            {
+                                *poison = *gold ^ 0xffff;
+                                assert_ne!(*poison, *gold);
+                            }
                             let mut output = upload_half(&ctx, &initial);
+                            assert_eq!(raw_half(&ctx, &output), initial, "initial poison readback");
                             let view = FixedFwdOperands {
                                 c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                                 x: typed(a.cached_ptr() + (row_offset * k * 2) as u64, dtype),
@@ -237,16 +298,16 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                                     );
                                 } else {
                                     assert!(
-                                        !matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE),
+                                        !matches!(
+                                            picked,
+                                            CANDIDATE | SWIZZLE_CANDIDATE | S3_CANDIDATE
+                                        ),
                                         "AUTO candidate escaped scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
                                     );
                                 }
                             } else {
-                                assert_eq!(picked, SWIZZLE_CANDIDATE);
+                                assert_eq!(picked, forced.unwrap());
                             }
-                            let mut expected = initial.clone();
-                            expected[output_offset..output_offset + m * n]
-                                .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
                             assert!(
                                 raw_half(&ctx, &output) == expected,
                                 "AUTO prefix/view/guard bits"
@@ -254,7 +315,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                             let graph =
                                 unsafe { capture_into_graph(&ctx.stream, || run().map(|_| ())) }
                                     .expect("capture actual AUTO");
-                            if matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE) {
+                            if matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE | S3_CANDIDATE) {
                                 assert_half_graph(
                                     &graph,
                                     picked,
@@ -267,6 +328,11 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                                 output
                                     .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                     .expect("poison graph output");
+                                assert_eq!(
+                                    raw_half(&ctx, &output),
+                                    initial,
+                                    "poison upload readback"
+                                );
                                 graph.launch().expect("AUTO graph replay");
                                 assert!(
                                     raw_half(&ctx, &output) == expected,
@@ -304,7 +370,7 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         k: 65,
         n: 131,
     };
-    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
         fixed_forward_with_tile(&ctx, good, shape, candidate).expect("odd-stride positive control");
     }
     for bad in [
@@ -345,7 +411,7 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
             ..good
         },
     ] {
-        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             assert!(
                 fixed_forward_with_tile(&ctx, bad, shape, candidate).is_err(),
                 "unsafe operands admitted by {candidate:?}"
@@ -375,7 +441,7 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
             ..shape
         },
     ] {
-        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             assert!(
                 fixed_forward_with_tile(&ctx, good, bad, candidate).is_err(),
                 "unsafe shape admitted by {candidate:?}: {bad:?}"
@@ -388,8 +454,16 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         w: typed(0, dt),
         bias_ptr: None,
     };
+    for k in [2_147_483_521, 2_147_483_584] {
+        let error = fixed_forward_with_tile(&ctx, good, FixedShape { m: 1, k, n: 1 }, S3_CANDIDATE)
+            .expect_err("S3 lookahead overflow must reject before issuing any GPU work");
+        assert!(
+            error.contains("S3 padded K"),
+            "unexpected boundary rejection: {error}"
+        );
+    }
     for no_output in [FixedShape { m: 0, ..shape }, FixedShape { n: 0, ..shape }] {
-        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             fixed_forward_with_tile(&ctx, empty, no_output, candidate)
                 .expect("empty output is a no-op");
         }
@@ -444,6 +518,33 @@ fn assert_half_graph(
     operands: FixedFwdOperands,
     shape: FixedShape,
 ) {
+    assert_half_graph_params(
+        graph,
+        tile,
+        dtype,
+        operands,
+        shape,
+        [
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            shape.m as u32,
+            shape.n as u32,
+            shape.k as u32,
+            shape.k as u32,
+            shape.n as u32,
+            shape.n as u32,
+        ],
+    );
+}
+
+fn assert_half_graph_params(
+    graph: &CudaGraph,
+    tile: FixedTile,
+    dtype: WeightDtype,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    bundle: [u32; 8],
+) {
     let mut count = 0;
     assert_eq!(
         unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
@@ -471,6 +572,7 @@ fn assert_half_graph(
     let (family, shared) = match tile {
         FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
         FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
+        FixedTile::Tc128Sm89S3 => ("s3", 98_304),
         _ => panic!("not an Ada half physical route: {tile:?}"),
     };
     let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{}", dtype.as_str());
@@ -527,17 +629,187 @@ fn assert_half_graph(
     assert!(!bundle_pointer.is_null());
     assert_eq!(
         unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() },
-        [
-            1.0f32.to_bits(),
-            0.0f32.to_bits(),
-            shape.m as u32,
-            shape.n as u32,
-            shape.k as u32,
-            shape.k as u32,
-            shape.n as u32,
-            shape.n as u32,
-        ]
+        bundle
     );
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawHalfParams([u32; 8]);
+unsafe impl cudarc::driver::DeviceRepr for RawHalfParams {}
+
+fn launch_raw_half(
+    ctx: &GpuCtx,
+    tile: FixedTile,
+    dtype: WeightDtype,
+    ops: FixedFwdOperands,
+    params: RawHalfParams,
+) {
+    use cudarc::driver::PushKernelArg;
+    let (holder, shared) = match tile {
+        SWIZZLE_CANDIDATE => (
+            ctx.kernels.fixed_sm89_half_swizzle.as_ref().unwrap(),
+            69_632,
+        ),
+        S3_CANDIDATE => (ctx.kernels.fixed_sm89_half_s3.as_ref().unwrap(), 98_304),
+        _ => panic!("unsupported raw half route"),
+    };
+    let bias = ops.bias_ptr.unwrap_or(0);
+    let mut launch = ctx.stream.launch_builder(holder.get(dtype));
+    launch
+        .arg(&ops.c.ptr)
+        .arg(&ops.x.ptr)
+        .arg(&ops.w.ptr)
+        .arg(&bias)
+        .arg(&params);
+    unsafe {
+        launch.launch(cudarc::driver::LaunchConfig {
+            grid_dim: (params.0[2].div_ceil(128) * params.0[3].div_ceil(128), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: shared,
+        })
+    }
+    .expect("raw five-argument half launch");
+}
+
+#[test]
+#[ignore = "requires Ada production NVRTC holders; nonunit scalars and independent physical strides"]
+fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    let ctx = GpuCtx::new(&device).expect("NVRTC context");
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (m, k, n, lda, ldb, ldc, offset) in [
+            (129, 256, 136, 264, 144, 144, 8),
+            (17, 65, 131, 69, 137, 139, 1),
+            (17, 0, 131, 3, 137, 139, 1),
+        ] {
+            let a_bits: Vec<_> = (0..offset + m * lda + 9)
+                .map(|i| half_bits(((i % 7) as f32 - 3.0) / 32.0, dtype))
+                .collect();
+            let b_bits: Vec<_> = (0..offset + k * ldb + 9)
+                .map(|i| half_bits(((i % 11) as f32 - 5.0) / 32.0, dtype))
+                .collect();
+            let bias_bits: Vec<_> = (0..n)
+                .map(|i| f32::from_bits([0x3dcccccd, 0xbeaaaaab][i % 2]))
+                .collect();
+            let a = upload_half(&ctx, &a_bits);
+            let b = upload_half(&ctx, &b_bits);
+            let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_bits).unwrap();
+            for (alpha, beta, has_bias) in [
+                (0.75f32, 0.0f32, false),
+                (-0.5, 0.25, false),
+                (1.0, -0.25, true),
+            ] {
+                let initial = vec![half_bits(3.0, dtype); offset + m * ldc + 9];
+                let oracle = upload_half(&ctx, &initial);
+                let mut output = upload_half(&ctx, &initial);
+                let ops = FixedFwdOperands {
+                    c: typed(output.cached_ptr() + 2 * offset as u64, dtype),
+                    x: typed(
+                        if k == 0 {
+                            0
+                        } else {
+                            a.cached_ptr() + 2 * offset as u64
+                        },
+                        dtype,
+                    ),
+                    w: typed(
+                        if k == 0 {
+                            0
+                        } else {
+                            b.cached_ptr() + 2 * offset as u64
+                        },
+                        dtype,
+                    ),
+                    bias_ptr: has_bias.then_some(bias.cached_ptr()),
+                };
+                let params = RawHalfParams([
+                    alpha.to_bits(),
+                    beta.to_bits(),
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                    lda as u32,
+                    ldb as u32,
+                    ldc as u32,
+                ]);
+                launch_raw_half(
+                    &ctx,
+                    SWIZZLE_CANDIDATE,
+                    dtype,
+                    FixedFwdOperands {
+                        c: typed(oracle.cached_ptr() + 2 * offset as u64, dtype),
+                        ..ops
+                    },
+                    params,
+                );
+                let expected = raw_half(&ctx, &oracle);
+                let mut poison = initial.clone();
+                for row in 0..m {
+                    for column in 0..n {
+                        let i = offset + row * ldc + column;
+                        if beta == 0.0 {
+                            poison[i] = expected[i] ^ 0xffff;
+                        }
+                        assert_ne!(
+                            poison[i], expected[i],
+                            "each independently reset output must differ from gold"
+                        );
+                    }
+                }
+                for _ in 0..2 {
+                    output
+                        .upload_bytes(&ctx.stream, bytemuck::cast_slice(&poison))
+                        .unwrap();
+                    assert_eq!(raw_half(&ctx, &output), poison);
+                    launch_raw_half(&ctx, S3_CANDIDATE, dtype, ops, params);
+                    assert_eq!(
+                        raw_half(&ctx, &output),
+                        expected,
+                        "raw S3 scalar/stride/guard bits"
+                    );
+                }
+                let graph = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        launch_raw_half(&ctx, S3_CANDIDATE, dtype, ops, params);
+                        Ok(())
+                    })
+                }
+                .unwrap();
+                assert_half_graph_params(
+                    &graph,
+                    S3_CANDIDATE,
+                    dtype,
+                    ops,
+                    FixedShape { m, k, n },
+                    params.0,
+                );
+                for _ in 0..2 {
+                    output
+                        .upload_bytes(&ctx.stream, bytemuck::cast_slice(&poison))
+                        .unwrap();
+                    assert_eq!(raw_half(&ctx, &output), poison);
+                    graph.launch().unwrap();
+                    assert_eq!(
+                        raw_half(&ctx, &output),
+                        expected,
+                        "raw S3 independently reset graph bits"
+                    );
+                }
+            }
+            assert_eq!(raw_half(&ctx, &a), a_bits);
+            assert_eq!(raw_half(&ctx, &b), b_bits);
+            assert_eq!(
+                bias.to_cpu(&ctx.stream)
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                bias_bits.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
 }
 
 #[test]
@@ -550,7 +822,14 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         // K192/N136 is aligned and reuses the asynchronous two-stage ring.
         // K65/N131 separately exercises scalar staging and masked output.
-        for (k, n) in [(64, 136), (192, 136), (65, 131), (0, 131)] {
+        for (k, n) in [
+            (64, 136),
+            (128, 136),
+            (192, 136),
+            (256, 136),
+            (65, 131),
+            (0, 131),
+        ] {
             for corpus in 0..4 {
                 let mut a_bits: Vec<_> = (0..rows * k)
                     .map(|i| half_bits(((i * 7 % 19) as f32 - 9.0) * 0.03125, dtype))
@@ -631,8 +910,20 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                             (17, 8, true, false),
                             (17, 8, false, true),
                         ] {
-                            let initial = vec![0x7fff; output_offset + m * n + 9];
+                            let guards = vec![0x7fff; output_offset + m * n + 9];
+                            let mut expected = guards.clone();
+                            expected[output_offset..output_offset + m * n]
+                                .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
+                            let mut initial = guards;
+                            for (poison, gold) in initial[output_offset..output_offset + m * n]
+                                .iter_mut()
+                                .zip(&expected[output_offset..output_offset + m * n])
+                            {
+                                *poison = *gold ^ 0xffff;
+                                assert_ne!(*poison, *gold);
+                            }
                             let mut output = upload_half(&ctx, &initial);
+                            assert_eq!(raw_half(&ctx, &output), initial, "initial poison readback");
                             let view = FixedFwdOperands {
                                 c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                                 x: typed(
@@ -660,13 +951,18 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                 ..operands
                             };
                             let shape = FixedShape { m, k, n };
-                            let mut expected = initial.clone();
-                            expected[output_offset..output_offset + m * n]
-                                .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
-                            for tile in [CANDIDATE, SWIZZLE_CANDIDATE].into_iter().chain(RUNGS) {
+                            for tile in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE]
+                                .into_iter()
+                                .chain(RUNGS)
+                            {
                                 output
                                     .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                     .expect("poison C");
+                                assert_eq!(
+                                    raw_half(&ctx, &output),
+                                    initial,
+                                    "poison upload readback"
+                                );
                                 fixed_forward_with_tile(&ctx, view, shape, tile).unwrap_or_else(
                                     |e| panic!("{tile:?} {dtype:?} M={m} K={k} N={n}: {e}"),
                                 );
@@ -676,12 +972,17 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                     "rung/prefix/view/guard bits: {tile:?} {dtype:?} M={m} K={k} N={n} row={row_offset} bias={has_bias} corpus={corpus}"
                                 );
                             }
-                            for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                            for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
                                 let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
                                 for _ in 0..2 {
                                     output
                                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                         .expect("poison repeat");
+                                    assert_eq!(
+                                        raw_half(&ctx, &output),
+                                        initial,
+                                        "poison upload readback"
+                                    );
                                     run().expect("eager repeat");
                                     assert_eq!(
                                         raw_half(&ctx, &output),
@@ -696,6 +997,11 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                     output
                                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                         .expect("poison replay");
+                                    assert_eq!(
+                                        raw_half(&ctx, &output),
+                                        initial,
+                                        "poison upload readback"
+                                    );
                                     graph.launch().expect("graph replay");
                                     assert_eq!(
                                         raw_half(&ctx, &output),
@@ -805,10 +1111,11 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
                     c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                     ..reference_ops
                 };
-                for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
                     output
                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&poison))
                         .expect("poison rounding-edge output");
+                    assert_eq!(raw_half(&ctx, &output), poison, "poison upload readback");
                     fixed_forward_with_tile(&ctx, operands, shape, candidate)
                         .unwrap_or_else(|error| panic!("{candidate:?}: {error}"));
                     let actual = raw_half(&ctx, &output);
@@ -836,14 +1143,13 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9), "this gate requires Ada");
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
-    // 16 incumbent launches + 128 executed candidate launches = 144 GEMMs.
-    // Another 32 candidate calls only enqueue capture nodes, not executions.
-    // Module admission probes are outside this test-body count.
+    // All three independently admitted half routes execute eager and captured
+    // cases; module-admission probes precede the guarded test body.
     const HALF_GUARD: usize = 8;
     const BIAS_GUARD: usize = 4;
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (m, k, n, exceptional) in [
-            (129, 192, 136, false), // aligned cp.async, three slabs, M/N tails
+            (129, 256, 136, false), // aligned cp.async, three slabs, M/N tails
             (17, 65, 131, false),   // scalar staging and masked scalar output
             (17, 0, 131, false),    // actual null A/B, with and without bias
             (17, 192, 136, true),   // one exceptional A/B/bias corpus
@@ -919,7 +1225,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                     "incumbent output suffix guard"
                 );
                 for (row_offset, output_offset) in [(0, HALF_GUARD), (1, 1)] {
-                    let initial = vec![0x7fff; output_offset + m * n + HALF_GUARD];
+                    let mut initial = vec![0x7fff; output_offset + m * n + HALF_GUARD];
                     let mut output = upload_half(&ctx, &initial);
                     let view = FixedFwdOperands {
                         c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
@@ -938,12 +1244,20 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                     let reference_start = HALF_GUARD + row_offset * n;
                     expected[output_offset..output_offset + m * n]
                         .copy_from_slice(&reference[reference_start..reference_start + m * n]);
-                    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                    for (poison, gold) in initial[output_offset..output_offset + m * n]
+                        .iter_mut()
+                        .zip(&expected[output_offset..output_offset + m * n])
+                    {
+                        *poison = *gold ^ 0xffff;
+                        assert_ne!(*poison, *gold);
+                    }
+                    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
                         let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
                         for _ in 0..2 {
                             output
                                 .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                 .expect("poison sanitizer eager output");
+                            assert_eq!(raw_half(&ctx, &output), initial, "poison upload readback");
                             run().expect("forced NVRTC Ada half eager");
                             assert_eq!(
                                 raw_half(&ctx, &output),
@@ -958,6 +1272,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                             output
                                 .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                 .expect("poison sanitizer graph output");
+                            assert_eq!(raw_half(&ctx, &output), initial, "poison upload readback");
                             graph.launch().expect("sanitizer graph replay");
                             assert_eq!(
                                 raw_half(&ctx, &output),

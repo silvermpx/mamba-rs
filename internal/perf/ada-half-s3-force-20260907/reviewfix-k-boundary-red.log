@@ -1,0 +1,20 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-half-s3-force-20260907)
+    Finished `release` profile [optimized] target(s) in 54.38s
+     Running unittests src/lib.rs (/root/target-ada-half-s3-force-cuda128-20260907/release/deps/mamba_rs-dff4450b76bb1de5)
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_half_s3_rejects_overflow_in_unconditional_refill_index ... FAILED
+
+failures:
+
+failures:
+    mamba_ssm::gpu::gemm_bi_fixed::sm89_half_s3_rejects_overflow_in_unconditional_refill_index
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 689 filtered out; finished in 0.00s
+
+
+thread 'mamba_ssm::gpu::gemm_bi_fixed::sm89_half_s3_rejects_overflow_in_unconditional_refill_index' (1751830) panicked at src/mamba_ssm/gpu/gemm_bi_fixed.rs:2989:5:
+assertion failed: validate_sm89_half_s3_k(2_147_483_584).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--lib`
+K_BOUNDARY_RED_EXIT=101

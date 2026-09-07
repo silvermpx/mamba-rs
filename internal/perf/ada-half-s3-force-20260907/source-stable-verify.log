@@ -1,0 +1,7 @@
+kernels/gemm_bi_fixed/sm89_half_s3.cu: OK
+src/mamba_ssm/gpu/gemm_bi_fixed.rs: OK
+src/mamba_ssm/gpu/gemm_bi_triad/modules.rs: OK
+src/mamba_ssm/gpu/kernels.rs: OK
+tests/arch_compile_gates.rs: OK
+tests/gemm_bi_fixed_performance.rs: OK
+tests/gemm_bi_fixed_sm89_pipeline.rs: OK

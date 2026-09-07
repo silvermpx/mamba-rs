@@ -1,0 +1,216 @@
+2026-09-07T02:32:46Z
+COMMAND bash COMMAND -euo COMMAND pipefail COMMAND -c COMMAND hostname\;\ echo\ EXIT_hostname=0\;\ date\ -u\;\ echo\ EXIT_date=0\;\ nvidia-smi\ -q\;\ echo\ EXIT_nvidia_smi=0\;\ nvcc\ --version\;\ echo\ EXIT_nvcc=0\;\ rustc\ -Vv\;\ echo\ EXIT_rustc=0\;\ cargo\ -V\;\ echo\ EXIT_cargo=0\;\ sha256sum\ \"\$CUDA_HOME/bin/ptxas\"\;\ echo\ EXIT_ptxas_hash=0\;\ shopt\ -s\ nullglob\;\ libs=\(\"\$CUDA_HOME\"/targets/x86_64-linux/lib/libnvrtc.so.\*\)\;\ test\ \$\{#libs\[@\]\}\ -ge\ 1\;\ sha256sum\ \"\$\{libs\[@\]\}\"\;\ echo\ EXIT_nvrtc_hashes=0 
+EXIT identity 0
+EXIT_rustc=0
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+EXIT_cargo=0
+daba837a68265cae38c832d13399b61dab811891de9b8914defddef143b849f2  /usr/local/cuda-13.0/bin/ptxas
+EXIT_ptxas_hash=0
+a49e67e8e74590f1e98de55c39c6287efd3f59e3c3797464d7bbe0fe01349b11  /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13
+a49e67e8e74590f1e98de55c39c6287efd3f59e3c3797464d7bbe0fe01349b11  /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13.0.88
+EXIT_nvrtc_hashes=0
+2026-09-07T02:32:46Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --lib 
+EXIT library 0
+test ops::fast_math::tests::test_fast_exp_inplace_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_scalar_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_ssm_range ... ok
+test ops::norms::tests::test_bcnorm_per_group ... ok
+test ops::norms::tests::test_rms_norm_weighted_unit_weight ... ok
+
+test result: ok. 644 passed; 0 failed; 46 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+2026-09-07T02:32:47Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_performance 
+EXIT force-static 0
+test half_to_f32_sm120_hot_b_paired_tile_screen ... ignored, requires a quiet 170-SM SM120 CUDA device and screens mixed-output hot B
+test half_to_f32_sm120_tma_hot_shapes_smoke ... ignored, requires a quiet SM120 CUDA device and emits mixed-output TMA data
+test half_to_f32_sm120_tma_ladder_matches_portable_bits ... ignored, requires an SM120 CUDA device
+test tcw64_matches_tc128_bits ... ignored, requires an SM80+ CUDA device
+test triad_sm120_tf32_nn_reference_smoke ... ignored, requires an SM120 CUDA device and emits specialized TF32 reference data
+
+test result: ok. 48 passed; 0 failed; 63 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+2026-09-07T02:32:47Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND arch_compile_gates COMMAND fixed_sm89_half_ COMMAND -- COMMAND --nocapture 
+EXIT source 0
+     Running tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/arch_compile_gates-26d913251d4706ac)
+
+running 2 tests
+test fixed_sm89_half_s3_production_source_contract ... ok
+test fixed_sm89_half_swizzle_production_source_and_layout_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.00s
+
+2026-09-07T02:32:47Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND arch_compile_gates COMMAND compiles_for_sm89 COMMAND -- COMMAND --exact COMMAND --nocapture 
+EXIT compile-sm89 0
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/arch_compile_gates-26d913251d4706ac)
+
+running 1 test
+test compiles_for_sm89 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 98.74s
+
+2026-09-07T02:34:26Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live COMMAND -- COMMAND --ignored COMMAND --exact COMMAND --nocapture 
+EXIT cold 0
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 3.81s
+
+2026-09-07T02:34:30Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live COMMAND -- COMMAND --ignored COMMAND --exact COMMAND --nocapture 
+EXIT warm 0
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 3.02s
+
+2026-09-07T02:34:34Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND -- COMMAND --include-ignored COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT half-full 0
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+test fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits ... ok
+test fixed_sm89_half_swizzle_has_a_distinct_forced_route ... ok
+test fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 80.35s
+
+2026-09-07T02:35:54Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_correctness COMMAND fixed_sm89_rna_wide_actual_auto COMMAND -- COMMAND --ignored COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT retained-rna 0
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2049 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2048 exceptional=true bias=true row_offset=1 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2048 exceptional=true bias=true row_offset=1 output_offset=4 actual_auto=true
+ok
+test fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 38.83s
+
+2026-09-07T02:36:33Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_sm89_exact_n64 COMMAND -- COMMAND --include-ignored COMMAND --skip COMMAND fixed_sm89_exact_n64_auto_prefix_view_graph_bits COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT retained-exact 0
+{"record":"FixedSm89ExactN64ForcePreflightV1","dims_mkn":[17,65,131],"three_incumbents_eager_graph_raw":true,"independent_cpu_reference":true,"public_force":true}
+{"record":"FixedSm89ExactN64CorrectnessV1","dtype":"f32","op":"nn","requested":"F32Sm89N64CopyPlan","actual":"gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1","dims_mkn":[17,65,131],"strides_lda_ldb_ldc":[65,131,131],"storage_rows":34,"row_view":17,"float_offsets_abc":[0,0,3],"bias":true,"alpha_bits":1065353216,"beta_bits":0,"corpus":"Signed","public_force":true,"full_raw_bits":true,"cpu_numeric":true,"eager_repeats":3,"captured_replays":2,"guards":true,"input_immutability":true}
+{"record":"FixedSm89ExactN64ForcePreflightV1","dims_mkn":[17,96,136],"three_incumbents_eager_graph_raw":true,"independent_cpu_reference":false,"public_force":true}
+{"record":"FixedSm89ExactN64CorrectnessV1","dtype":"f32","op":"nn","requested":"F32Sm89N64CopyPlan","actual":"gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1","dims_mkn":[17,96,136],"strides_lda_ldb_ldc":[96,136,136],"storage_rows":17,"row_view":0,"float_offsets_abc":[0,0,0],"bias":true,"alpha_bits":1065353216,"beta_bits":0,"corpus":"Mixed","public_force":true,"full_raw_bits":true,"cpu_numeric":false,"eager_repeats":3,"captured_replays":2,"guards":true,"input_immutability":true}
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.63s
+
+2026-09-07T02:36:44Z
+COMMAND env COMMAND MAMBA_FIXED_ADA_VENDOR=1 COMMAND MAMBA_FIXED_VENDOR_EXACT_CC=8.9 COMMAND MAMBA_FIXED_ADA_ROWS=bf16\,f16 COMMAND MAMBA_FIXED_ADA_CELLS=hot_a COMMAND MAMBA_FIXED_ADA_BIAS=0\,1 COMMAND MAMBA_FIXED_ADA_WINDOWS=1 COMMAND MAMBA_FIXED_VENDOR_TILES=Tc128Sm89S3 COMMAND MAMBA_FIXED_VENDOR_PATHS=eager COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-13000 COMMAND --test COMMAND gemm_bi_fixed_performance COMMAND fixed_ada_forced_rungs_paired_precision_cublas COMMAND -- COMMAND --ignored COMMAND --exact COMMAND --nocapture 
+EXIT eager-physical 0
+{"schema":"MambaBiFixedExplicitForcedRungV2","cc":"8.9","sm_count":142,"nvrtc":[13,0],"compiler_target":"CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }","fixed_source_digest":"205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5","fixed_invocation_digest":"adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155","fixed_artifact_digest":"d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9","header_manifest_digest":"5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78","nvrtc_library_domain":"709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d","nvrtc_library_known":true,"row":"f16","cell":"hot_a","m":4621,"k":384,"n":1928,"tuning_table_revision":42,"dtype":"f16","input_dtype":"f16","output_dtype":"f16","auto_tile":"Tc128Sm89Pipeline","forced_tile":"Tc128Sm89S3","op":"nn","path":"eager","graphs":{"auto":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":71680}]},"forced":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":98304}]},"vendor":null},"graph_replay_bits_equal":false,"raw_storage_bits_equal":true,"vendor_repeat_bits_equal":true,"timing":"cuda_events","alpha":1,"beta":0,"bias":false,"vendor_gemm_beta":0,"vendor_bias_broadcast_timed":false,"vendor_comparator":"CUBLAS_COMPUTE_32F","normalized_error_tolerance":0.0025,"custom_normalized_error_tolerance":0.0025,"vendor_normalized_error_tolerance":0.0025,"vendor_compute":"CUBLAS_COMPUTE_32F","reference_compute":"CUBLAS_COMPUTE_32F_PEDANTIC","reference_output_dtype":"f32","auto_bits_equal":true,"repeat_bits_equal":true,"auto_normalized_error":0.00037455624448934127,"forced_normalized_error":0.00037455624448934127,"vendor_normalized_error":0.00037455624448934127,"order":"vendor_forced_auto","windows":1,"auto_iterations":79,"forced_iterations":84,"vendor_iterations":66,"auto_p50_us":63.7342778942253,"forced_p50_us":59.657902944655646,"vendor_p50_us":75.1578157598322,"forced_over_auto_p50":0.9360410899087162,"forced_over_auto_p95":0.9360410899087162,"forced_over_vendor_p50":0.7937684503138471,"forced_over_vendor_p95":0.7937684503138471,"auto_samples_us":[63.7342778942253],"forced_samples_us":[59.657902944655646],"vendor_samples_us":[75.1578157598322]}
+{"schema":"MambaBiFixedExplicitForcedRungV2","cc":"8.9","sm_count":142,"nvrtc":[13,0],"compiler_target":"CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }","fixed_source_digest":"205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5","fixed_invocation_digest":"adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155","fixed_artifact_digest":"d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9","header_manifest_digest":"5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78","nvrtc_library_domain":"709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d","nvrtc_library_known":true,"row":"f16","cell":"hot_a","m":4621,"k":384,"n":1928,"tuning_table_revision":42,"dtype":"f16","input_dtype":"f16","output_dtype":"f16","auto_tile":"Tc128Sm89Pipeline","forced_tile":"Tc128Sm89S3","op":"nn","path":"eager","graphs":{"auto":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":71680}]},"forced":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":98304}]},"vendor":null},"graph_replay_bits_equal":false,"raw_storage_bits_equal":true,"vendor_repeat_bits_equal":true,"timing":"cuda_events","alpha":1,"beta":0,"bias":true,"vendor_gemm_beta":1,"vendor_bias_broadcast_timed":true,"vendor_comparator":"CUBLAS_COMPUTE_32F","normalized_error_tolerance":0.0025,"custom_normalized_error_tolerance":0.0025,"vendor_normalized_error_tolerance":0.0025,"vendor_compute":"CUBLAS_COMPUTE_32F","reference_compute":"CUBLAS_COMPUTE_32F_PEDANTIC","reference_output_dtype":"f32","auto_bits_equal":true,"repeat_bits_equal":true,"auto_normalized_error":0.0004287406634884601,"forced_normalized_error":0.0004287406634884601,"vendor_normalized_error":0.0004287406634884601,"order":"auto_forced_vendor","windows":1,"auto_iterations":77,"forced_iterations":82,"vendor_iterations":46,"auto_p50_us":64.83117016878995,"forced_p50_us":61.065365628498355,"vendor_p50_us":109.07756763955821,"forced_over_auto_p50":0.9419136731530958,"forced_over_auto_p95":0.9419136731530958,"forced_over_vendor_p50":0.559834317449084,"forced_over_vendor_p95":0.559834317449084,"auto_samples_us":[64.83117016878995],"forced_samples_us":[61.065365628498355],"vendor_samples_us":[109.07756763955821]}
+{"schema":"MambaBiFixedExplicitForcedRungV2","cc":"8.9","sm_count":142,"nvrtc":[13,0],"compiler_target":"CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }","fixed_source_digest":"205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5","fixed_invocation_digest":"adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155","fixed_artifact_digest":"d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9","header_manifest_digest":"5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78","nvrtc_library_domain":"709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d","nvrtc_library_known":true,"row":"f16","cell":"hot_a","m":4621,"k":384,"n":1928,"tuning_table_revision":42,"dtype":"f16","input_dtype":"f16","output_dtype":"f16","auto_tile":"Tc128Sm89Pipeline","forced_tile":"Tc128Sm89S3","op":"nn","path":"eager","graphs":{"auto":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":71680}]},"forced":{"node_count":1,"non_kernel_nodes":0,"kernels":[{"symbol":"gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16","grid":[592,1,1],"block":[256,1,1],"shared_bytes":98304}]},"vendor":null},"graph_replay_bits_equal":false,"raw_storage_bits_equal":true,"vendor_repeat_bits_equal":true,"timing":"cuda_events","alpha":1,"beta":0,"bias":true,"vendor_gemm_beta":1,"vendor_bias_broadcast_timed":true,"vendor_comparator":"CUBLAS_COMPUTE_32F","normalized_error_tolerance":0.0025,"custom_normalized_error_tolerance":0.0025,"vendor_normalized_error_tolerance":0.0025,"vendor_compute":"CUBLAS_COMPUTE_32F","reference_compute":"CUBLAS_COMPUTE_32F_PEDANTIC","reference_output_dtype":"f32","auto_bits_equal":true,"repeat_bits_equal":true,"auto_normalized_error":0.0004287406634884601,"forced_normalized_error":0.0004287406634884601,"vendor_normalized_error":0.0004287406634884601,"order":"vendor_forced_auto","windows":1,"auto_iterations":77,"forced_iterations":82,"vendor_iterations":46,"auto_p50_us":64.81786826988319,"forced_p50_us":61.05288063607565,"vendor_p50_us":109.09495146378227,"forced_over_auto_p50":0.9419143558049271,"forced_over_auto_p95":0.9419143558049271,"forced_over_vendor_p50":0.5596306686688816,"forced_over_vendor_p95":0.5596306686688816,"auto_samples_us":[64.81786826988319],"forced_samples_us":[61.05288063607565],"vendor_samples_us":[109.09495146378227]}
+{"schema":"MambaBiFixedExplicitForcedRungCompleteV2","cc":"8.9","sm_count":142,"nvrtc":[13,0],"compiler_target":"CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }","fixed_source_digest":"205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5","fixed_invocation_digest":"adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155","fixed_artifact_digest":"d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9","header_manifest_digest":"5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78","nvrtc_library_domain":"709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d","nvrtc_library_known":true,"exact_comparators":{"f32_exact":"CUBLAS_COMPUTE_32F_PEDANTIC","f32_exact_fast":"CUBLAS_COMPUTE_32F_FAST_TF32"},"records":8,"rejected":0,"passed":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 4.67s
+
+2026-09-07T02:36:49Z
+COMMAND sha256sum COMMAND /root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1 
+EXIT sanitizer-binary 0
+4edbe61327d3d8a14a739e039ceaefa21d4f14accdebf66a8eec6ecbab936313  /root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1
+2026-09-07T02:36:49Z
+COMMAND compute-sanitizer COMMAND --tool COMMAND memcheck COMMAND --report-api-errors COMMAND no COMMAND --error-exitcode COMMAND 99 COMMAND /root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1 COMMAND --ignored COMMAND --exact COMMAND fixed_sm89_half_pipeline_sanitizer_smoke COMMAND --nocapture 
+EXIT sanitizer-memcheck 0
+========= COMPUTE-SANITIZER
+
+running 1 test
+test fixed_sm89_half_pipeline_sanitizer_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 4.50s
+
+========= ERROR SUMMARY: 0 errors
+2026-09-07T02:36:54Z
+COMMAND compute-sanitizer COMMAND --tool COMMAND racecheck COMMAND --report-api-errors COMMAND no COMMAND --error-exitcode COMMAND 99 COMMAND /root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1 COMMAND --ignored COMMAND --exact COMMAND fixed_sm89_half_pipeline_sanitizer_smoke COMMAND --nocapture 
+EXIT sanitizer-racecheck 0
+========= COMPUTE-SANITIZER
+
+running 1 test
+test fixed_sm89_half_pipeline_sanitizer_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 17.36s
+
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+2026-09-07T02:37:11Z
+COMMAND compute-sanitizer COMMAND --tool COMMAND synccheck COMMAND --report-api-errors COMMAND no COMMAND --error-exitcode COMMAND 99 COMMAND /root/target-ada-half-s3-force-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1 COMMAND --ignored COMMAND --exact COMMAND fixed_sm89_half_pipeline_sanitizer_smoke COMMAND --nocapture 
+EXIT sanitizer-synccheck 0
+========= COMPUTE-SANITIZER
+
+running 1 test
+test fixed_sm89_half_pipeline_sanitizer_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 3.80s
+
+========= ERROR SUMMARY: 0 errors
+2026-09-07T02:37:15Z
+COMMAND ptxas COMMAND -arch=sm_89 COMMAND -O3 COMMAND -v COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/fixed.ptx COMMAND -o COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/fixed.cubin 
+EXIT ptxas 0
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.168 ms
+ptxas info    : Compiling entry function 'ssm_step_forward' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.168 ms
+2026-09-07T02:37:24Z
+COMMAND cuobjdump COMMAND --dump-resource-usage COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/fixed.cubin 
+EXIT resources 0
+ Function ssm_step_forward_f16:
+  REG:36 STACK:512 SHARED:0 LOCAL:0 CONSTANT[0]:428 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function ssm_step_forward_bf16:
+  REG:36 STACK:512 SHARED:0 LOCAL:0 CONSTANT[0]:428 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function ssm_step_forward_f32:
+  REG:39 STACK:512 SHARED:0 LOCAL:0 CONSTANT[0]:428 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function ssm_step_forward:
+  REG:39 STACK:512 SHARED:0 LOCAL:0 CONSTANT[0]:428 TEXTURE:0 SURFACE:0 SAMPLER:0
+2026-09-07T02:37:24Z
+COMMAND cuobjdump COMMAND --dump-sass COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/fixed.cubin 
+EXIT sass 0
+                                                                                                     /* 0x000fc00000000000 */
+        /*1be0*/                   NOP;                                                              /* 0x0000000000007918 */
+                                                                                                     /* 0x000fc00000000000 */
+        /*1bf0*/                   NOP;                                                              /* 0x0000000000007918 */
+                                                                                                     /* 0x000fc00000000000 */
+		..........
+
+
+2026-09-07T02:37:27Z
+COMMAND python3 COMMAND analyze-artifact.py COMMAND /root/mamba-kcache-ada-half-s3-force-final-cuda130-attempt1-20260907/mamba-kernels-v1-adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155.bin COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/fixed.ptx COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/sass.log COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/resources.log COMMAND /root/evidence-ada-half-s3-force-20260907/cuda130-attempt1/ptxas.log COMMAND 188 
+EXIT artifact-proof 0
+        "mma": 128,
+        "matrix_load": 72,
+        "async_copy": 24,
+        "barrier": 5
+      }
+    }
+  ]
+}
+2026-09-07T02:37:28Z
+COMMAND bash COMMAND -euo COMMAND pipefail COMMAND -c COMMAND find\ src\ kernels\ tests\ -type\ f\ -print0\ \|\ sort\ -z\ \|\ xargs\ -0\ sha256sum\;\ echo\ EXIT_source_hashes=0\;\ sha256sum\ Cargo.toml\ Cargo.lock\;\ echo\ EXIT_build_input_hashes=0\;\ find\ \"\$CARGO_TARGET_DIR/release/deps\"\ -maxdepth\ 1\ -type\ f\ -executable\ -print0\ \|\ sort\ -z\ \|\ xargs\ -0\ sha256sum\;\ echo\ EXIT_binary_hashes=0\;\ find\ \"\$MAMBA_RS_KERNEL_CACHE\"\ -type\ f\ -print0\ \|\ sort\ -z\ \|\ xargs\ -0\ sha256sum\;\ echo\ EXIT_cache_hashes=0 
+EXIT identities-final 0
+6d6f73ffa6a775bf2963965b5557994030a0f0f6094f00b9fb6c29d1af3a641b  /root/target-ada-half-s3-force-cuda130-20260907/release/deps/libserde_derive-3dea175a1b9768e7.so
+2612a517d8dceef0a6fdd773f489ce773c8e695094bb8c71d291bf6395f2514d  /root/target-ada-half-s3-force-cuda130-20260907/release/deps/libzerocopy_derive-96a1c036ccdef7bd.so
+6e9173e4c5a7624979fc2ac5ab2e21e2a75a3df848d59bad4208cea45e63ecee  /root/target-ada-half-s3-force-cuda130-20260907/release/deps/mamba_rs-ab5583122e80f842
+EXIT_binary_hashes=0
+d9fb2c9fc89234ef6fd51966f41a291438cd49f68a2881bc696df4041c39c9e3  /root/mamba-kcache-ada-half-s3-force-final-cuda130-attempt1-20260907/mamba-kernels-v1-adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155.bin
+c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c  /root/mamba-kcache-ada-half-s3-force-final-cuda130-attempt1-20260907/mamba-kernels-v1-ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b.bin
+32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0  /root/mamba-kcache-ada-half-s3-force-final-cuda130-attempt1-20260907/mamba-kernels-v1-feac83eb41fcc629d0c4bf9be1758d9e92c431728e17c1f46cfcd5c5a9ebc27d.bin
+EXIT_cache_hashes=0
+2026-09-07T02:37:28Z
+TOOLKIT_COMPLETE 13.0
+FINAL_MATRIX130_EXIT=0

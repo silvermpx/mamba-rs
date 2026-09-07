@@ -1,0 +1,26 @@
+{
+  "verdict": "PASS",
+  "results": [
+    {
+      "toolkit": "128",
+      "archived_sources": 356,
+      "archived_test_binaries": 6,
+      "archived_cache_envelopes": 3,
+      "fixed_identity_match": true
+    },
+    {
+      "toolkit": "130",
+      "archived_sources": 356,
+      "archived_test_binaries": 7,
+      "archived_cache_envelopes": 3,
+      "fixed_identity_match": true
+    },
+    {
+      "toolkit": "132",
+      "archived_sources": 356,
+      "archived_test_binaries": 7,
+      "archived_cache_envelopes": 3,
+      "fixed_identity_match": true
+    }
+  ]
+}

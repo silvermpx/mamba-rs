@@ -1,0 +1,111 @@
+2026-09-07T02:22:28Z
+COMMAND bash COMMAND -euo COMMAND pipefail COMMAND -c COMMAND hostname\;\ echo\ EXIT_hostname=0\;\ date\ -u\;\ echo\ EXIT_date=0\;\ nvidia-smi\ -q\;\ echo\ EXIT_nvidia_smi=0\;\ nvcc\ --version\;\ echo\ EXIT_nvcc=0\;\ rustc\ -Vv\;\ echo\ EXIT_rustc=0\;\ cargo\ -V\;\ echo\ EXIT_cargo=0\;\ sha256sum\ \"\$CUDA_HOME/bin/ptxas\"\;\ echo\ EXIT_ptxas_hash=0\;\ shopt\ -s\ nullglob\;\ libs=\(\"\$CUDA_HOME\"/targets/x86_64-linux/lib/libnvrtc.so.\*\)\;\ test\ \$\{#libs\[@\]\}\ -ge\ 1\;\ sha256sum\ \"\$\{libs\[@\]\}\"\;\ echo\ EXIT_nvrtc_hashes=0 
+EXIT identity 0
+EXIT_rustc=0
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+EXIT_cargo=0
+c960a4f238b17d5c5d3c01ad2bbc1ebd2c5aecc459cb4d223bff10b45f9b8fca  /usr/local/cuda-12.8/bin/ptxas
+EXIT_ptxas_hash=0
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93
+EXIT_nvrtc_hashes=0
+2026-09-07T02:22:28Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --lib 
+EXIT library 0
+test ops::fast_math::tests::test_fast_exp_inplace_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_scalar_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_ssm_range ... ok
+test ops::norms::tests::test_bcnorm_per_group ... ok
+test ops::norms::tests::test_rms_norm_weighted_unit_weight ... ok
+
+test result: ok. 644 passed; 0 failed; 46 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+2026-09-07T02:23:13Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_performance 
+EXIT force-static 0
+test half_to_f32_sm120_hot_b_paired_tile_screen ... ignored, requires a quiet 170-SM SM120 CUDA device and screens mixed-output hot B
+test half_to_f32_sm120_tma_hot_shapes_smoke ... ignored, requires a quiet SM120 CUDA device and emits mixed-output TMA data
+test half_to_f32_sm120_tma_ladder_matches_portable_bits ... ignored, requires an SM120 CUDA device
+test tcw64_matches_tc128_bits ... ignored, requires an SM80+ CUDA device
+test triad_sm120_tf32_nn_reference_smoke ... ignored, requires an SM120 CUDA device and emits specialized TF32 reference data
+
+test result: ok. 48 passed; 0 failed; 63 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+2026-09-07T02:24:07Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND arch_compile_gates COMMAND fixed_sm89_half_ COMMAND -- COMMAND --nocapture 
+EXIT source 0
+     Running tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda128-20260907/release/deps/arch_compile_gates-67fe0697f472d578)
+
+running 2 tests
+test fixed_sm89_half_s3_production_source_contract ... ok
+test fixed_sm89_half_swizzle_production_source_and_layout_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.00s
+
+2026-09-07T02:24:12Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND arch_compile_gates COMMAND compiles_for_sm89 COMMAND -- COMMAND --exact COMMAND --nocapture 
+EXIT compile-sm89 0
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda128-20260907/release/deps/arch_compile_gates-67fe0697f472d578)
+
+running 1 test
+test compiles_for_sm89 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 102.49s
+
+2026-09-07T02:25:55Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live COMMAND -- COMMAND --ignored COMMAND --exact COMMAND --nocapture 
+EXIT cold 0
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 72.76s
+
+2026-09-07T02:27:09Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live COMMAND -- COMMAND --ignored COMMAND --exact COMMAND --nocapture 
+EXIT warm 0
+SWIZZLE_RESOURCE dtype=bf16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+SWIZZLE_RESOURCE dtype=f16 local=0 registers=177 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=69632
+S3_RESOURCE dtype=bf16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 3.09s
+
+2026-09-07T02:27:13Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_sm89_pipeline COMMAND -- COMMAND --include-ignored COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT half-full 0
+S3_RESOURCE dtype=f16 local=0 registers=182 static_shared=0 max_threads=256 active_blocks=1 dynamic_shared=98304
+ok
+test fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits ... ok
+test fixed_sm89_half_swizzle_has_a_distinct_forced_route ... ok
+test fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 76.93s
+
+2026-09-07T02:28:30Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_correctness COMMAND fixed_sm89_rna_wide_actual_auto COMMAND -- COMMAND --ignored COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT retained-rna 0
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2049 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2048 exceptional=true bias=true row_offset=1 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2048 exceptional=true bias=true row_offset=1 output_offset=4 actual_auto=true
+ok
+test fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 40.33s
+
+2026-09-07T02:29:11Z
+COMMAND cargo COMMAND test COMMAND --release COMMAND --features COMMAND cuda\,cudarc/cuda-12080 COMMAND --test COMMAND gemm_bi_fixed_sm89_exact_n64 COMMAND -- COMMAND --include-ignored COMMAND --test-threads=1 COMMAND --nocapture 
+EXIT retained-exact 101
+failures:
+
+failures:
+    fixed_sm89_exact_n64_auto_prefix_view_graph_bits
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.77s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_sm89_exact_n64`
+FINAL_MATRIX128_EXIT=101

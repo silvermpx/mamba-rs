@@ -1,0 +1,45 @@
+{
+  "verdict": "PASS",
+  "cache": "/root/mamba-kcache-ada-half-s3-force-final-cuda130-attempt1-20260907/mamba-kernels-v1-adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155.bin",
+  "cache_sha256": "d9fb2c9fc89234ef6fd51966f41a291438cd49f68a2881bc696df4041c39c9e3",
+  "compile_key": "adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155",
+  "artifact_sha256": "d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9",
+  "proofs": [
+    {
+      "symbol": "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+      "registers": 182,
+      "stack": 0,
+      "static_shared": 0,
+      "local": 0,
+      "spill_stores": 0,
+      "spill_loads": 0,
+      "sass_counts": {
+        "commit": 3,
+        "wait0": 2,
+        "wait1": 2,
+        "mma": 128,
+        "matrix_load": 72,
+        "async_copy": 24,
+        "barrier": 5
+      }
+    },
+    {
+      "symbol": "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+      "registers": 182,
+      "stack": 0,
+      "static_shared": 0,
+      "local": 0,
+      "spill_stores": 0,
+      "spill_loads": 0,
+      "sass_counts": {
+        "commit": 3,
+        "wait0": 2,
+        "wait1": 2,
+        "mma": 128,
+        "matrix_load": 72,
+        "async_copy": 24,
+        "barrier": 5
+      }
+    }
+  ]
+}

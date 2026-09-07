@@ -10871,6 +10871,16 @@ macro_rules! define_fixed_force_plain_tile_registry {
     };
 }
 
+#[test]
+fn fixed_force_registry_contains_selectable_ada_s3() {
+    assert!(
+        fixed_force_tile_universe()
+            .iter()
+            .any(|tile| format!("{tile:?}") == "Tc128Sm89S3"),
+        "the public force universe must include the S3 route"
+    );
+}
+
 define_fixed_force_plain_tile_registry!(
     F32N128S2,
     Tf32M128S2,
@@ -10890,6 +10900,7 @@ define_fixed_force_plain_tile_registry!(
     Tc128,
     Tc128Sm89Pipeline,
     Tc128Sm89Swizzle,
+    Tc128Sm89S3,
     TcWn64,
     TcW64,
     Tc64,
@@ -11117,6 +11128,13 @@ fn fixed_force_spec(
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16"
         }
         FixedTile::Tc128Sm89Swizzle => return Err(invalid()),
+        FixedTile::Tc128Sm89S3 if cc == (8, 9) && row == "bf16" => {
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16"
+        }
+        FixedTile::Tc128Sm89S3 if cc == (8, 9) && row == "f16" => {
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16"
+        }
+        FixedTile::Tc128Sm89S3 => return Err(invalid()),
         FixedTile::TcWn64 if row == "bf16" => "gemm_bi_nn_tcwn64_bf16",
         FixedTile::TcWn64 if row == "f16" => "gemm_bi_nn_tcwn64_f16",
         FixedTile::TcWn64 => return Err(invalid()),
@@ -11313,6 +11331,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
     } else if matches!(row, "bf16" | "f16") {
         tiles.push(FixedTile::Tc128Sm89Pipeline);
         tiles.push(FixedTile::Tc128Sm89Swizzle);
+        tiles.push(FixedTile::Tc128Sm89S3);
     } else if matches!(row, "f32_exact" | "f32_exact_fast") {
         tiles.push(FixedTile::F32Sm89N64CopyPlan);
     }
@@ -11386,6 +11405,7 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
     let (family, expected_shared) = match tile {
         FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
         FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
+        FixedTile::Tc128Sm89S3 => ("s3", 98_304),
         _ => return Err(format!("{tile:?} is not an Ada half physical descriptor")),
     };
     let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{suffix}");
@@ -11446,6 +11466,7 @@ fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: FixedTile) -
             FixedTile::Tf32RnaM128N128S3
                 | FixedTile::Tc128Sm89Pipeline
                 | FixedTile::Tc128Sm89Swizzle
+                | FixedTile::Tc128Sm89S3
         )
 }
 
@@ -11464,7 +11485,11 @@ fn fixed_explicit_vendor_rna_wide_eager_needs_identity_graph() {
         &["eager"],
         FixedTile::Tf32M64S2,
     ));
-    for tile in [FixedTile::Tc128Sm89Pipeline, FixedTile::Tc128Sm89Swizzle] {
+    for tile in [
+        FixedTile::Tc128Sm89Pipeline,
+        FixedTile::Tc128Sm89Swizzle,
+        FixedTile::Tc128Sm89S3,
+    ] {
         assert!(
             fixed_explicit_vendor_needs_identity_graph(&["eager"], tile),
             "Ada half {tile:?} needs an untimed identity graph even for eager-only timing"
@@ -11929,11 +11954,13 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
         }
         assert!(!sm120.contains(&FixedTile::Tc128Sm89Pipeline));
         assert!(!sm120.contains(&FixedTile::Tc128Sm89Swizzle));
+        assert!(!sm120.contains(&FixedTile::Tc128Sm89S3));
         let ada = fixed_explicit_vendor_tiles(row, (8, 9));
-        assert_eq!(ada.len(), 8);
+        assert_eq!(ada.len(), 9);
         assert!(ada.contains(&FixedTile::Legacy));
         assert!(ada.contains(&FixedTile::Tc128Sm89Pipeline));
         assert!(ada.contains(&FixedTile::Tc128Sm89Swizzle));
+        assert!(ada.contains(&FixedTile::Tc128Sm89S3));
         assert!(
             ada.iter()
                 .all(|tile| !matches!(tile, FixedTile::Sm120Half(_)))
@@ -12395,6 +12422,18 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
             69_632,
         ),
+        (
+            FixedTile::Tc128Sm89S3,
+            WeightDtype::Bf16,
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+            98_304,
+        ),
+        (
+            FixedTile::Tc128Sm89S3,
+            WeightDtype::F16,
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+            98_304,
+        ),
     ] {
         valid(
             tile,
@@ -12417,7 +12456,7 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
             (1, (256, 2, 1), required_shared),
             (1, (256, 1, 2), required_shared),
             (1, (256, 1, 1), 0),
-            (1, (256, 1, 1), 98_304),
+            (1, (256, 1, 1), required_shared + 1),
         ] {
             assert!(
                 valid(
@@ -13102,7 +13141,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         };
                     let auto_identity_inventory = matches!(
                         selected,
-                        FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                        FixedTile::Tc128Sm89Pipeline
+                            | FixedTile::Tc128Sm89Swizzle
+                            | FixedTile::Tc128Sm89S3
                     )
                     .then(|| {
                         fixed_explicit_vendor_graph_inventory(
@@ -13119,6 +13160,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         FixedTile::Tf32RnaM128N128S3
                             | FixedTile::Tc128Sm89Pipeline
                             | FixedTile::Tc128Sm89Swizzle
+                            | FixedTile::Tc128Sm89S3
                     )
                     .then(|| {
                         fixed_explicit_vendor_graph_inventory(
@@ -13132,7 +13174,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             },
                             matches!(
                                 tile,
-                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                                FixedTile::Tc128Sm89Pipeline
+                                    | FixedTile::Tc128Sm89Swizzle
+                                    | FixedTile::Tc128Sm89S3
                             )
                             .then_some((
                                 tile,
@@ -13194,7 +13238,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             "AUTO",
                             matches!(
                                 selected,
-                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                                FixedTile::Tc128Sm89Pipeline
+                                    | FixedTile::Tc128Sm89Swizzle
+                                    | FixedTile::Tc128Sm89S3
                             )
                             .then_some((
                                 selected,
@@ -13215,7 +13261,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             },
                             matches!(
                                 tile,
-                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                                FixedTile::Tc128Sm89Pipeline
+                                    | FixedTile::Tc128Sm89Swizzle
+                                    | FixedTile::Tc128Sm89S3
                             )
                             .then_some((
                                 tile,

@@ -1,0 +1,1256 @@
+ptxas info    : 33 bytes gmem, 72 bytes cmem[4]
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 182 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 206.279 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 182 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 200.597 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 178 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 155.700 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 178 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 155.639 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 150 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 133.986 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 135 registers, used 1 barriers, 32768 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 225.500 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 172 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 155.341 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 172 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 150.384 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tcwn64_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tcwn64_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 233 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 320.510 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tcwn64_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tcwn64_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 233 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 317.025 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tcw64_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tcw64_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 233 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 331.521 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tcw64_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tcw64_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 233 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 326.073 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc16_f32out_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc16_f32out_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 66.774 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc16_f32out_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc16_f32out_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 67.253 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc16_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc16_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 65.517 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc16_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc16_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 66.897 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc64_f32out_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc64_f32out_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 36864 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 98.593 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc64_f32out_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc64_f32out_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 36864 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 99.783 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc64_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc64_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 36864 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 100.004 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc64_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc64_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 36864 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 98.958 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc128_f32out_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc128_f32out_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 98.539 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc128_f32out_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc128_f32out_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 101.998 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc128_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc128_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 165.660 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tc128_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tc128_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 162.896 ms
+ptxas info    : Compiling entry function 'matvec_bi_f32_f32' for 'sm_89'
+ptxas info    : Function properties for matvec_bi_f32_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 24.020 ms
+ptxas info    : Compiling entry function 'matvec_bi_f16_f32' for 'sm_89'
+ptxas info    : Function properties for matvec_bi_f16_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 18.149 ms
+ptxas info    : Compiling entry function 'matvec_bi_bf16_f32' for 'sm_89'
+ptxas info    : Function properties for matvec_bi_bf16_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 18.101 ms
+ptxas info    : Compiling entry function 'matvec_bi_f16_f16' for 'sm_89'
+ptxas info    : Function properties for matvec_bi_f16_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 18.654 ms
+ptxas info    : Compiling entry function 'matvec_bi_bf16_bf16' for 'sm_89'
+ptxas info    : Function properties for matvec_bi_bf16_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 18.119 ms
+ptxas info    : Compiling entry function 'gemm_bi_f32_f32' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_f32_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 114 registers, used 1 barriers, 16384 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 41.097 ms
+ptxas info    : Compiling entry function 'gemm_bi_f16_f32' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_f16_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0], 16 bytes cmem[2]
+ptxas info    : Compile time = 36.131 ms
+ptxas info    : Compiling entry function 'gemm_bi_bf16_f32' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_bf16_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 104 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 37.645 ms
+ptxas info    : Compiling entry function 'gemm_bi_f16_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_f16_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0], 16 bytes cmem[2]
+ptxas info    : Compile time = 39.512 ms
+ptxas info    : Compiling entry function 'gemm_bi_bf16_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_bf16_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 104 registers, used 1 barriers, 24576 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 40.791 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tf32_v1_m16n32_bk32_s4' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tf32_v1_m16n32_bk32_s4
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 71 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 38.343 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tf32_v1_m64n64_bk32_s3' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tf32_v1_m64n64_bk32_s3
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 93 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 60.265 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tf32_v1_m64n64_bk32_s2' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tf32_v1_m64n64_bk32_s2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 124 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 68.077 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tf32_v1_m128n64_bk32_s3' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tf32_v1_m128n64_bk32_s3
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 140 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 93.365 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_tf32_v1_m128n64_bk32_s2' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_tf32_v1_m128n64_bk32_s2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 138 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 88.553 ms
+ptxas info    : Compiling entry function 'gemm_bi_f32_f32_n128_s2' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_f32_f32_n128_s2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 112 registers, used 1 barriers, 49152 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 117.431 ms
+ptxas info    : Compiling entry function 'gemm_bi_f32_f32_s2' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_f32_f32_s2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 135 registers, used 1 barriers, 32768 bytes smem, 416 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 161.660 ms
+ptxas info    : Compiling entry function 'adamw_step_multi_f16' for 'sm_89'
+ptxas info    : Function properties for adamw_step_multi_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 36 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 11.107 ms
+ptxas info    : Compiling entry function 'adamw_step_multi_bf16' for 'sm_89'
+ptxas info    : Function properties for adamw_step_multi_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 36 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 10.370 ms
+ptxas info    : Compiling entry function 'adamw_step_multi_f32' for 'sm_89'
+ptxas info    : Function properties for adamw_step_multi_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 36 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 9.455 ms
+ptxas info    : Compiling entry function 'adamw_step_f32' for 'sm_89'
+ptxas info    : Function properties for adamw_step_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 29 registers, used 0 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 13.592 ms
+ptxas info    : Compiling entry function 'adamw_step_f32_capturable' for 'sm_89'
+ptxas info    : Function properties for adamw_step_f32_capturable
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers, 420 bytes cmem[0]
+ptxas info    : Compile time = 14.194 ms
+ptxas info    : Compiling entry function 'grad_region_scale_dev_f32' for 'sm_89'
+ptxas info    : Function properties for grad_region_scale_dev_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 15.016 ms
+ptxas info    : Compiling entry function 'grad_region_sumsq_partial_f32' for 'sm_89'
+ptxas info    : Function properties for grad_region_sumsq_partial_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 33 registers, used 1 barriers, 2048 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 16.420 ms
+ptxas info    : Compiling entry function 'grad_clip_coef_f32' for 'sm_89'
+ptxas info    : Function properties for grad_clip_coef_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers, 384 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 10.308 ms
+ptxas info    : Compiling entry function 'grad_sumsq_partial_f32' for 'sm_89'
+ptxas info    : Function properties for grad_sumsq_partial_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers, 2048 bytes smem, 372 bytes cmem[0]
+ptxas info    : Compile time = 5.780 ms
+ptxas info    : Compiling entry function 'scale_grads_skip_f32' for 'sm_89'
+ptxas info    : Function properties for scale_grads_skip_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.587 ms
+ptxas info    : Compiling entry function 'scale_grads_dev_f32' for 'sm_89'
+ptxas info    : Function properties for scale_grads_dev_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 2.669 ms
+ptxas info    : Compiling entry function 'scale_grads_f32' for 'sm_89'
+ptxas info    : Function properties for scale_grads_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 2.582 ms
+ptxas info    : Compiling entry function 'check_inf_nan_f32' for 'sm_89'
+ptxas info    : Function properties for check_inf_nan_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.777 ms
+ptxas info    : Compiling entry function 'reduce_bias_f16' for 'sm_89'
+ptxas info    : Function properties for reduce_bias_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 1 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 2.310 ms
+ptxas info    : Compiling entry function 'reduce_bias_bf16' for 'sm_89'
+ptxas info    : Function properties for reduce_bias_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 1 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 2.323 ms
+ptxas info    : Compiling entry function 'reduce_bias_f32' for 'sm_89'
+ptxas info    : Function properties for reduce_bias_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 1 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 2.252 ms
+ptxas info    : Compiling entry function 'pack_xdbl_cols_f16' for 'sm_89'
+ptxas info    : Function properties for pack_xdbl_cols_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 2.433 ms
+ptxas info    : Compiling entry function 'pack_xdbl_cols_bf16' for 'sm_89'
+ptxas info    : Function properties for pack_xdbl_cols_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 2.431 ms
+ptxas info    : Compiling entry function 'pack_xdbl_cols_f32' for 'sm_89'
+ptxas info    : Function properties for pack_xdbl_cols_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 2.250 ms
+ptxas info    : Compiling entry function 'scatter_add_cols_f16' for 'sm_89'
+ptxas info    : Function properties for scatter_add_cols_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.915 ms
+ptxas info    : Compiling entry function 'scatter_add_cols_bf16' for 'sm_89'
+ptxas info    : Function properties for scatter_add_cols_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 2.040 ms
+ptxas info    : Compiling entry function 'scatter_add_cols_f32' for 'sm_89'
+ptxas info    : Function properties for scatter_add_cols_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.971 ms
+ptxas info    : Compiling entry function 'concat_halves_f16' for 'sm_89'
+ptxas info    : Function properties for concat_halves_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 2.045 ms
+ptxas info    : Compiling entry function 'concat_halves_bf16' for 'sm_89'
+ptxas info    : Function properties for concat_halves_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 2.038 ms
+ptxas info    : Compiling entry function 'concat_halves_f32' for 'sm_89'
+ptxas info    : Function properties for concat_halves_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 2.045 ms
+ptxas info    : Compiling entry function 'vec_cast_zplus_f16' for 'sm_89'
+ptxas info    : Function properties for vec_cast_zplus_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.000 ms
+ptxas info    : Compiling entry function 'vec_cast_zplus_bf16' for 'sm_89'
+ptxas info    : Function properties for vec_cast_zplus_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.929 ms
+ptxas info    : Compiling entry function 'vec_cast_zplus_f32' for 'sm_89'
+ptxas info    : Function properties for vec_cast_zplus_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.875 ms
+ptxas info    : Compiling entry function 'vec_add_inplace_f16' for 'sm_89'
+ptxas info    : Function properties for vec_add_inplace_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.025 ms
+ptxas info    : Compiling entry function 'vec_add_inplace_bf16' for 'sm_89'
+ptxas info    : Function properties for vec_add_inplace_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.069 ms
+ptxas info    : Compiling entry function 'vec_add_inplace_f32' for 'sm_89'
+ptxas info    : Function properties for vec_add_inplace_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.968 ms
+ptxas info    : Compiling entry function 'softplus_copy_f16' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 2.154 ms
+ptxas info    : Compiling entry function 'softplus_copy_bf16' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 2.172 ms
+ptxas info    : Compiling entry function 'softplus_copy_f32' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 2.227 ms
+ptxas info    : Compiling entry function 'softplus_copy_v_f16' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_v_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 6.790 ms
+ptxas info    : Compiling entry function 'softplus_copy_v_bf16' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_v_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 6.655 ms
+ptxas info    : Compiling entry function 'softplus_copy_v_f32' for 'sm_89'
+ptxas info    : Function properties for softplus_copy_v_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 3.828 ms
+ptxas info    : Compiling entry function 'elementwise_mul_v_f16' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_v_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.503 ms
+ptxas info    : Compiling entry function 'elementwise_mul_v_bf16' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_v_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.501 ms
+ptxas info    : Compiling entry function 'elementwise_mul_v_f32' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_v_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.046 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_v_f16' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_v_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 23 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 8.853 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_v_bf16' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_v_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 23 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 8.853 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_v_f32' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_v_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 6.320 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_f16' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.890 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_bf16' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.875 ms
+ptxas info    : Compiling entry function 'gate_mul_silu_f32' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.708 ms
+ptxas info    : Compiling entry function 'split_gate_f16' for 'sm_89'
+ptxas info    : Function properties for split_gate_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.866 ms
+ptxas info    : Compiling entry function 'split_gate_bf16' for 'sm_89'
+ptxas info    : Function properties for split_gate_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.875 ms
+ptxas info    : Compiling entry function 'split_gate_f32' for 'sm_89'
+ptxas info    : Function properties for split_gate_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.868 ms
+ptxas info    : Compiling entry function 'split_gate_silu_f16' for 'sm_89'
+ptxas info    : Function properties for split_gate_silu_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 6.010 ms
+ptxas info    : Compiling entry function 'split_gate_silu_bf16' for 'sm_89'
+ptxas info    : Function properties for split_gate_silu_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 5.995 ms
+ptxas info    : Compiling entry function 'split_gate_silu_f32' for 'sm_89'
+ptxas info    : Function properties for split_gate_silu_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 5.844 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_tiled_f16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_tiled_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 3.792 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_tiled_bf16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_tiled_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 3.804 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_tiled_f32' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_tiled_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 3.795 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_f16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.769 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_bf16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.769 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_f32' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.756 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_f16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 2.091 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_bf16' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 1.947 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_f32' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 2.169 ms
+ptxas info    : Compiling entry function 'gather_cols_f16' for 'sm_89'
+ptxas info    : Function properties for gather_cols_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.791 ms
+ptxas info    : Compiling entry function 'gather_cols_bf16' for 'sm_89'
+ptxas info    : Function properties for gather_cols_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.803 ms
+ptxas info    : Compiling entry function 'gather_cols_f32' for 'sm_89'
+ptxas info    : Function properties for gather_cols_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.938 ms
+ptxas info    : Compiling entry function 'residual_add_f32_f16' for 'sm_89'
+ptxas info    : Function properties for residual_add_f32_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.073 ms
+ptxas info    : Compiling entry function 'residual_add_f32_bf16' for 'sm_89'
+ptxas info    : Function properties for residual_add_f32_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.046 ms
+ptxas info    : Compiling entry function 'residual_add_f16' for 'sm_89'
+ptxas info    : Function properties for residual_add_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.096 ms
+ptxas info    : Compiling entry function 'residual_add_bf16' for 'sm_89'
+ptxas info    : Function properties for residual_add_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.108 ms
+ptxas info    : Compiling entry function 'residual_add_f32' for 'sm_89'
+ptxas info    : Function properties for residual_add_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.006 ms
+ptxas info    : Compiling entry function 'elementwise_mul_f16' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.097 ms
+ptxas info    : Compiling entry function 'elementwise_mul_bf16' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.099 ms
+ptxas info    : Compiling entry function 'elementwise_mul_f32' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 0.968 ms
+ptxas info    : Compiling entry function 'bias_broadcast_f16' for 'sm_89'
+ptxas info    : Function properties for bias_broadcast_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 1.676 ms
+ptxas info    : Compiling entry function 'bias_broadcast_bf16' for 'sm_89'
+ptxas info    : Function properties for bias_broadcast_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 1.662 ms
+ptxas info    : Compiling entry function 'bias_broadcast_f32' for 'sm_89'
+ptxas info    : Function properties for bias_broadcast_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 1.597 ms
+ptxas info    : Compiling entry function 'softplus_copy' for 'sm_89'
+ptxas info    : Function properties for softplus_copy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.911 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor_tiled' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor_tiled
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 3.616 ms
+ptxas info    : Compiling entry function 'gather_bc_cols_tmajor' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols_tmajor
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.400 ms
+ptxas info    : Compiling entry function 'gather_bc_cols' for 'sm_89'
+ptxas info    : Function properties for gather_bc_cols
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 1.854 ms
+ptxas info    : Compiling entry function 'residual_add' for 'sm_89'
+ptxas info    : Function properties for residual_add
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 0.901 ms
+ptxas info    : Compiling entry function 'gather_last_timestep_f16' for 'sm_89'
+ptxas info    : Function properties for gather_last_timestep_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.685 ms
+ptxas info    : Compiling entry function 'gather_last_timestep_bf16' for 'sm_89'
+ptxas info    : Function properties for gather_last_timestep_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.685 ms
+ptxas info    : Compiling entry function 'gather_last_timestep_f32' for 'sm_89'
+ptxas info    : Function properties for gather_last_timestep_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.702 ms
+ptxas info    : Compiling entry function 'gather_last_timestep' for 'sm_89'
+ptxas info    : Function properties for gather_last_timestep
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.769 ms
+ptxas info    : Compiling entry function 'concat_halves' for 'sm_89'
+ptxas info    : Function properties for concat_halves
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.874 ms
+ptxas info    : Compiling entry function 'gating_backward_f16' for 'sm_89'
+ptxas info    : Function properties for gating_backward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 8.396 ms
+ptxas info    : Compiling entry function 'gating_backward_bf16' for 'sm_89'
+ptxas info    : Function properties for gating_backward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 8.367 ms
+ptxas info    : Compiling entry function 'gating_backward_f32' for 'sm_89'
+ptxas info    : Function properties for gating_backward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 8.044 ms
+ptxas info    : Compiling entry function 'gating_backward' for 'sm_89'
+ptxas info    : Function properties for gating_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 7.619 ms
+ptxas info    : Compiling entry function 'gate_mul_silu' for 'sm_89'
+ptxas info    : Function properties for gate_mul_silu
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.734 ms
+ptxas info    : Compiling entry function 'split_gate' for 'sm_89'
+ptxas info    : Function properties for split_gate
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.862 ms
+ptxas info    : Compiling entry function 'split_gate_silu' for 'sm_89'
+ptxas info    : Function properties for split_gate_silu
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 5.841 ms
+ptxas info    : Compiling entry function 'scatter_add_cols' for 'sm_89'
+ptxas info    : Function properties for scatter_add_cols
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.817 ms
+ptxas info    : Compiling entry function 'gather_cols' for 'sm_89'
+ptxas info    : Function properties for gather_cols
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.785 ms
+ptxas info    : Compiling entry function 'exp_negate2' for 'sm_89'
+ptxas info    : Function properties for exp_negate2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.096 ms
+ptxas info    : Compiling entry function 'exp_negate' for 'sm_89'
+ptxas info    : Function properties for exp_negate
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.051 ms
+ptxas info    : Compiling entry function 'elementwise_mul' for 'sm_89'
+ptxas info    : Function properties for elementwise_mul
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 1.061 ms
+ptxas info    : Compiling entry function 'vec_add_inplace' for 'sm_89'
+ptxas info    : Function properties for vec_add_inplace
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.041 ms
+ptxas info    : Compiling entry function 'fill_scalar' for 'sm_89'
+ptxas info    : Function properties for fill_scalar
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 0.893 ms
+ptxas info    : Compiling entry function 'reduce_sum_axis0' for 'sm_89'
+ptxas info    : Function properties for reduce_sum_axis0
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 1 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 2.844 ms
+ptxas info    : Compiling entry function 'colsum_segments' for 'sm_89'
+ptxas info    : Function properties for colsum_segments
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 6.718 ms
+ptxas info    : Compiling entry function 'colsum_accumulate' for 'sm_89'
+ptxas info    : Function properties for colsum_accumulate
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 4.296 ms
+ptxas info    : Compiling entry function 'bias_broadcast' for 'sm_89'
+ptxas info    : Function properties for bias_broadcast
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 1.772 ms
+ptxas info    : Compiling entry function 'cast_f16_to_f32' for 'sm_89'
+ptxas info    : Function properties for cast_f16_to_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.980 ms
+ptxas info    : Compiling entry function 'cast_bf16_to_f32' for 'sm_89'
+ptxas info    : Function properties for cast_bf16_to_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.965 ms
+ptxas info    : Compiling entry function 'cast_f32_to_f16' for 'sm_89'
+ptxas info    : Function properties for cast_f32_to_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.976 ms
+ptxas info    : Compiling entry function 'cast_f32_to_bf16' for 'sm_89'
+ptxas info    : Function properties for cast_f32_to_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 0.986 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward_f32in_f16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward_f32in_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 1 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 14.110 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward_f32in_bf16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward_f32in_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 1 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 14.205 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward_f16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 12.180 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward_bf16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 11.869 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward_f32' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 1 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 11.054 ms
+ptxas info    : Compiling entry function 'rmsnorm_backward' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 1 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 14.484 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward_f32in_f16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward_f32in_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 15.783 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward_f32in_bf16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward_f32in_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 15.099 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward_f16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 14.844 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 14.859 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward_f32' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 14.311 ms
+ptxas info    : Compiling entry function 'rmsnorm_forward' for 'sm_89'
+ptxas info    : Function properties for rmsnorm_forward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 14.305 ms
+ptxas info    : Compiling entry function 'softplus_backward_f16' for 'sm_89'
+ptxas info    : Function properties for softplus_backward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.811 ms
+ptxas info    : Compiling entry function 'softplus_backward_bf16' for 'sm_89'
+ptxas info    : Function properties for softplus_backward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.787 ms
+ptxas info    : Compiling entry function 'softplus_backward_f32' for 'sm_89'
+ptxas info    : Function properties for softplus_backward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.651 ms
+ptxas info    : Compiling entry function 'silu_backward_f16' for 'sm_89'
+ptxas info    : Function properties for silu_backward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.437 ms
+ptxas info    : Compiling entry function 'silu_backward_bf16' for 'sm_89'
+ptxas info    : Function properties for silu_backward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.549 ms
+ptxas info    : Compiling entry function 'silu_backward_f32' for 'sm_89'
+ptxas info    : Function properties for silu_backward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.538 ms
+ptxas info    : Compiling entry function 'softplus_backward' for 'sm_89'
+ptxas info    : Function properties for softplus_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 5.168 ms
+ptxas info    : Compiling entry function 'silu_backward' for 'sm_89'
+ptxas info    : Function properties for silu_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.421 ms
+ptxas info    : Compiling entry function 'softplus_forward' for 'sm_89'
+ptxas info    : Function properties for softplus_forward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 1.969 ms
+ptxas info    : Compiling entry function 'softplus_forward_f16' for 'sm_89'
+ptxas info    : Function properties for softplus_forward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 2.045 ms
+ptxas info    : Compiling entry function 'softplus_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for softplus_forward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 2.033 ms
+ptxas info    : Compiling entry function 'softplus_forward_f32' for 'sm_89'
+ptxas info    : Function properties for softplus_forward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 1.868 ms
+ptxas info    : Compiling entry function 'silu_forward' for 'sm_89'
+ptxas info    : Function properties for silu_forward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 4.550 ms
+ptxas info    : Compiling entry function 'silu_forward_f16' for 'sm_89'
+ptxas info    : Function properties for silu_forward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 4.669 ms
+ptxas info    : Compiling entry function 'silu_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for silu_forward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 4.659 ms
+ptxas info    : Compiling entry function 'silu_forward_f32' for 'sm_89'
+ptxas info    : Function properties for silu_forward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 364 bytes cmem[0]
+ptxas info    : Compile time = 4.542 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dw_tiled_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dw_tiled_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 18.850 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dw_tiled_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dw_tiled_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 18.589 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dw_tiled_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dw_tiled_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 18.930 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dx_tiled_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dx_tiled_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 36.178 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dx_tiled_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dx_tiled_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 37.007 ms
+ptxas info    : Compiling entry function 'conv1d_bwd_dx_tiled_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_bwd_dx_tiled_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 35.575 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_tiled_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_tiled_f16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 412 bytes cmem[0]
+ptxas info    : Compile time = 36.805 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_tiled_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_tiled_bf16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 412 bytes cmem[0]
+ptxas info    : Compile time = 35.957 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_tiled_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_tiled_f32
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 412 bytes cmem[0]
+ptxas info    : Compile time = 35.689 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_tiled_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_tiled_f16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 39.817 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_tiled_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_tiled_bf16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 37.851 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_tiled_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_tiled_f32
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 38.545 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_backward_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_backward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 56 registers, used 0 barriers, 424 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 49.735 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_backward_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_backward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 56 registers, used 0 barriers, 424 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 51.204 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_backward_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_backward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 55 registers, used 0 barriers, 424 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 48.126 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_backward' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 55 registers, used 0 barriers, 424 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 47.935 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_f16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 32.027 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_bf16
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 33.815 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_f32
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 32.055 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 30.484 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 32.707 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 31.204 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward_nosave' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward_nosave
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 33.027 ms
+ptxas info    : Compiling entry function 'conv1d_burnin_forward' for 'sm_89'
+ptxas info    : Function properties for conv1d_burnin_forward
+    32 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 0 barriers, 32 bytes cumulative stack size, 424 bytes cmem[0]
+ptxas info    : Compile time = 31.801 ms
+ptxas info    : Compiling entry function 'conv1d_step_backward' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_backward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 412 bytes cmem[0]
+ptxas info    : Compile time = 6.418 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_silu_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_silu_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 15.359 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_silu_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_silu_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 15.522 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_silu_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_silu_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 14.326 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_f16' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 10.783 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 10.220 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward_f32' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 9.862 ms
+ptxas info    : Compiling entry function 'conv1d_step_forward' for 'sm_89'
+ptxas info    : Function properties for conv1d_step_forward
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 10.791 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_fold_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_fold_f16
+    256 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 159 registers, used 1 barriers, 256 bytes cumulative stack size, 500 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 151.200 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_fold_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_fold_bf16
+    256 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 158 registers, used 1 barriers, 256 bytes cumulative stack size, 500 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 153.388 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_fold_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_fold_f32
+    256 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 159 registers, used 1 barriers, 256 bytes cumulative stack size, 500 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 130.032 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 129 registers, used 1 barriers, 492 bytes cmem[0], 40 bytes cmem[2]
+ptxas info    : Compile time = 62.856 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 129 registers, used 1 barriers, 492 bytes cmem[0], 40 bytes cmem[2]
+ptxas info    : Compile time = 62.678 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_bwd_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_bwd_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 149 registers, used 1 barriers, 492 bytes cmem[0], 40 bytes cmem[2]
+ptxas info    : Compile time = 59.853 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd_nosave_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd_nosave_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 77 registers, used 1 barriers, 444 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 63.931 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd_nosave_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd_nosave_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 77 registers, used 1 barriers, 444 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 63.397 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers, 460 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 59.606 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers, 460 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 57.140 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd_nosave' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd_nosave
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 77 registers, used 1 barriers, 444 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 61.594 ms
+ptxas info    : Compiling entry function 'ssm_parallel_scan_fwd' for 'sm_89'
+ptxas info    : Function properties for ssm_parallel_scan_fwd
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers, 460 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 53.503 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_a_log' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_a_log
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 2.154 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_a_log_chunks' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_a_log_chunks
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 2.942 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_D' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_D
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 3.740 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_tmajor_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_tmajor_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 9.936 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_tmajor_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_tmajor_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 10.184 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_tmajor_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_tmajor_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 9.346 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 9.582 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 9.661 ms
+ptxas info    : Compiling entry function 'ssm_reduce_d_BC_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_reduce_d_BC_f32
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 8.283 ms
+ptxas info    : Compiling entry function 'ssm_backward_local_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_backward_local_f16
+    1024 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 1024 bytes cumulative stack size, 480 bytes cmem[0]
+ptxas info    : Compile time = 23.399 ms
+ptxas info    : Compiling entry function 'ssm_backward_local_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_backward_local_bf16
+    1024 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 1024 bytes cumulative stack size, 480 bytes cmem[0]
+ptxas info    : Compile time = 23.314 ms
+ptxas info    : Compiling entry function 'ssm_backward_local_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_backward_local_f32
+    1024 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 1024 bytes cumulative stack size, 480 bytes cmem[0]
+ptxas info    : Compile time = 28.585 ms
+ptxas info    : Compiling entry function 'ssm_backward_local' for 'sm_89'
+ptxas info    : Function properties for ssm_backward_local
+    1024 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 1024 bytes cumulative stack size, 480 bytes cmem[0]
+ptxas info    : Compile time = 30.303 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_f16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 448 bytes cmem[0]
+ptxas info    : Compile time = 21.674 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_bf16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 448 bytes cmem[0]
+ptxas info    : Compile time = 22.226 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_f32
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 448 bytes cmem[0]
+ptxas info    : Compile time = 23.179 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_nosave_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_nosave_f16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 444 bytes cmem[0]
+ptxas info    : Compile time = 34.850 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_nosave_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_nosave_bf16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 444 bytes cmem[0]
+ptxas info    : Compile time = 34.345 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_nosave_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_nosave_f32
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 444 bytes cmem[0]
+ptxas info    : Compile time = 32.201 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward_nosave' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward_nosave
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 444 bytes cmem[0]
+ptxas info    : Compile time = 33.888 ms
+ptxas info    : Compiling entry function 'ssm_burnin_forward' for 'sm_89'
+ptxas info    : Function properties for ssm_burnin_forward
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 448 bytes cmem[0]
+ptxas info    : Compile time = 22.867 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_gate_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_gate_f16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers, 512 bytes cumulative stack size, 440 bytes cmem[0]
+ptxas info    : Compile time = 14.500 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_gate_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_gate_bf16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 440 bytes cmem[0]
+ptxas info    : Compile time = 15.050 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_gate_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_gate_f32
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 440 bytes cmem[0]
+ptxas info    : Compile time = 13.553 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_f16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers, 512 bytes cumulative stack size, 432 bytes cmem[0]
+ptxas info    : Compile time = 14.029 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_bf16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 512 bytes cumulative stack size, 432 bytes cmem[0]
+ptxas info    : Compile time = 14.008 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_gather_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_gather_f32
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 432 bytes cmem[0]
+ptxas info    : Compile time = 13.458 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_f16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_f16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 36 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.950 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_bf16' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_bf16
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 36 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.956 ms
+ptxas info    : Compiling entry function 'ssm_step_forward_f32' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward_f32
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.572 ms
+ptxas info    : Compiling entry function 'ssm_step_forward' for 'sm_89'
+ptxas info    : Function properties for ssm_step_forward
+    512 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 512 bytes cumulative stack size, 428 bytes cmem[0]
+ptxas info    : Compile time = 13.536 ms

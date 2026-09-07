@@ -17,6 +17,43 @@ const SCALAR_NN_M32N64_SPLITK32_SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact
 const SCALAR_NN_M32N64_SPLITK32_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu";
 
 #[test]
+fn fixed_sm89_half_s3_production_source_contract() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/kernels/gemm_bi_fixed/sm89_half_s3.cu"
+    ))
+    .expect("production S3 source must be available to the Fixed composer");
+    for token in [
+        "kSharedBytes = 98304",
+        "cp.async.wait_group 1",
+        "cp.async.wait_group 0",
+        "cp.async.commit_group",
+        "sm89_fixed_half_swizzle::",
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+    ] {
+        assert!(source.contains(token), "missing S3 contract: {token}");
+    }
+    for token in [
+        "struct HalfOps",
+        "struct CopyPlan",
+        "void load_fragments(",
+        "void consume_fragments(",
+        "void vector_epilogue(",
+        "void scalar_epilogue(",
+        "gemm_bi_tn_",
+        "gemm_bi_nt_",
+        "atomic",
+        "split_k",
+    ] {
+        assert!(
+            !source.contains(token),
+            "S3 must reuse helpers and own only its mainloop: {token}"
+        );
+    }
+}
+
+#[test]
 fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let host_proof =
@@ -231,6 +268,8 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push_str(&compose(&[include_str!(
             "../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
         )]));
+        source.push('\n');
+        source.push_str(include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"));
     }
     if arch == "compute_120" {
         source.push('\n');
@@ -3433,6 +3472,93 @@ fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
     }
 }
 
+fn assert_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) {
+    const SYMBOLS: [&str; 2] = [
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+    ];
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half s3 PTX");
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_s3"))
+        .map(|entry| entry.symbol.as_str())
+        .collect();
+    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
+    let expected = if arch == "sm_89" {
+        SYMBOLS.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    assert_eq!(
+        actual.len(),
+        unique.len(),
+        "{arch} duplicated Fixed half s3 export"
+    );
+    assert_eq!(unique, expected, "{arch} Fixed half s3 export inventory");
+    for symbol in expected {
+        let entry = parsed.entry(symbol);
+        let mma = if symbol.ends_with("_bf16") {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        assert_compile_gate_entry_tokens(
+            "Fixed SM89 half s3",
+            entry,
+            &[
+                mma,
+                "cp.async.cg.shared.global",
+                "cp.async.commit_group",
+                "bar.sync",
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+        );
+        let schedule = compile_gate_ptx_tokens(&entry.body)
+            .iter()
+            .filter(|token| !token.text.starts_with(char::from(34)))
+            .map(|token| token.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        for wait in ["cp.async.wait_group 0 ;", "cp.async.wait_group 1 ;"] {
+            assert!(schedule.contains(wait), "{symbol} missing {wait}");
+        }
+        let parameters = ptx_parameters(&entry.text, symbol);
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        assert_eq!(declarations.len(), 5, "{arch}/{symbol} five-argument ABI");
+        assert!(
+            declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 ")),
+            "{arch}/{symbol} pointer ABI"
+        );
+        assert!(
+            declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
+            "{arch}/{symbol} parameter-bundle ABI"
+        );
+        assert!(
+            !compile_gate_ptx_tokens(&entry.body)
+                .into_iter()
+                .any(|token| {
+                    token.text == ".local"
+                        || token.text.starts_with("ld.local")
+                        || token.text.starts_with("st.local")
+                        || token.text.starts_with("atom.")
+                        || token.text.starts_with("atom::")
+                        || token.text.starts_with("red.")
+                        || token.text.starts_with("red::")
+                        || token.text.starts_with("redux.")
+                }),
+            "{arch}/{symbol} contains a numeric atomic or reduction"
+        );
+    }
+}
+
 fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
     let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed RNA-wide PTX");
     let actual: Vec<_> = parsed
@@ -3500,6 +3626,7 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
     assert_fixed_sm89_half_swizzle_ptx(arch, ptx);
+    assert_fixed_sm89_half_s3_ptx(arch, ptx);
     assert_fixed_sm89_rna_wide_ptx(arch, ptx);
     assert_fixed_exact_n64_copyplan_ptx(
         arch,

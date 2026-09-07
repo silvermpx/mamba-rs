@@ -35,9 +35,25 @@ Final corrected tests include285 functional cases per dtype,126 with bias,
 independently poisoned graph output and captured-argument checks. Source and
 final evidence review accept retention; original incomplete graph-test runs
 are excluded. See `internal/perf/ada-half-cutlass-s3-20260907/ARCHIVE.md`.
-Next is production force wiring, independent CUDA12.8/13.0/13.2 qualification,
-then measured AUTO promotion. Standalone NVCC results do not establish that
-production NVRTC work; BF16's p95 margin is only0.36%.
+Production force wiring and independent CUDA12.8/13.0/13.2 functional
+qualification are now complete: `FixedTile::Tc128Sm89S3`, BF16/F16, exact
+five-argument ABI, 98304 dynamic shared bytes. Final full-half suites pass
+11 tests on each toolkit, with clean memcheck/racecheck/synccheck and retained
+Fixed routes. Live S3 register counts are182/182/188 across the toolkits,
+with zero local/stack/spills. All old CUDA and Triad compositions remain
+unchanged; actual SM89 cohorts and SM120 compile contracts pass on13.2.
+Source review closed a near-INT_MAX lookahead overflow through an S3-only
+host K+127 guard; the CUDA body remains the tested candidate.
+See `internal/perf/ada-half-s3-force-20260907/ARCHIVE.md` and `final-report.md`.
+Next is production paired S3 / actual AUTO / cuBLAS Fast timing and only
+then measured AUTO promotion. AUTO remains revision42. Standalone NVCC
+speedups are not production NVRTC timing; BF16's old p95 margin is only0.36%.
+
+Existing cross-toolkit backlog is explicit: SM89 exact-F32 CopyPlan and TF32-C
+M64S2 load and are force-reachable on12.8/13.0, but their literal AUTO
+promotions remain13.2-only pending paired measurements on those toolkits.
+These are qualification gaps, not missing loaders. See
+`internal/perf/ada-half-s3-force-20260907/existing-toolkit-auto-gaps.md`.
 
 P0 Nsight evidence under `internal/perf/ada-half-b0-ncu-20260907/` shows
 53.40% tensor-pipe activity for production versus 73.48% for cuBLAS, with
