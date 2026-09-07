@@ -1,0 +1,21 @@
+{
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907",
+  "cache_artifacts": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+  },
+  "cache_mode": "0o700",
+  "cache_unchanged_old_three": true,
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+  "schema": "MambaTriadAdaFinalistTask2FailedBuildReleaseSupplementV1",
+  "telemetry": {
+    "apps": "",
+    "apps_exit": 0,
+    "apps_stderr": "",
+    "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n",
+    "gpu_exit": 0,
+    "gpu_stderr": ""
+  },
+  "utc": "2026-09-07T19:30:54Z"
+}

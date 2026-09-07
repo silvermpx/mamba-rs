@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/root/evidence-ada-triad-finalist-integration-20260907/task2-build-cuda132-checkpoint1/run-build-host.py", line 289, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/evidence-ada-triad-finalist-integration-20260907/task2-build-cuda132-checkpoint1/run-build-host.py", line 225, in main
+    raise RuntimeError(f"host-only test suffix {suffix} matched {matches}")
+RuntimeError: host-only test suffix sm89_finalist_is_forced_only_and_uses_only_its_own_pointer_binding matched []

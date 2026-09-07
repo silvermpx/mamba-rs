@@ -1,0 +1,6 @@
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::driver_abi_merge_rejects_cross_module_symbol_aliases ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 707 filtered out; finished in 0.00s
+

@@ -1,0 +1,6 @@
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_register_caps_freeze_the_rect_wide_symbol_without_weakening_generic_caps ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 707 filtered out; finished in 0.00s
+

@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/root/evidence-ada-triad-finalist-integration-20260907/task2-build-cuda132-checkpoint3/run-build-host.py", line 297, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/evidence-ada-triad-finalist-integration-20260907/task2-build-cuda132-checkpoint3/run-build-host.py", line 161, in main
+    manifest = source_manifest()
+               ^^^^^^^^^^^^^^^^^
+  File "/root/evidence-ada-triad-finalist-integration-20260907/task2-build-cuda132-checkpoint3/run-build-host.py", line 131, in source_manifest
+    raise RuntimeError(f"frozen source mismatch: {mismatches}")
+RuntimeError: frozen source mismatch: {'src/mamba_ssm/gpu/context.rs': {'expected': 'b26404adfae4e2164a92a699a34fcd58b52152b170ada9db948da590ad855fea', 'actual': 'fefb4decd46cbbe48a7ea01cc471de192513c442ac9265269f84b9c58204b2f7'}}
