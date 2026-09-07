@@ -1,0 +1,20 @@
+{
+  "schema": "MambaBiTriadStateEvidenceRootV1",
+  "manifest": "manifest-selected.sha256",
+  "manifest_sha256": "5056b92788e30421a71c8d1873007518b16333cfa1c8cc20c10e07bb52a82994",
+  "manifest_entries": 10,
+  "shared_artifact_binding": "../ada-triad-two-cell-ncu-20260907/artifact-binding.json",
+  "shared_artifact_binding_sha256": "038489f35ee0b3c18fc97e8a0b6db286b8995705c7f0885ef7f04faf8318dffd",
+  "identity_sha256": "05d412f79a21a100947c9c6302d5e6fc3cf23ad21b47c40335fa59e4d22b6b59",
+  "binary_sha256": "cf38911f01f3e194834567f35fd1785a5353a14c83b3519572378343e9fef72f",
+  "raw": {
+    "auto60_sha256": "4a9b9df996ee7aa02e9bc7f5a369de9faf070581d187bc4ada047cf02f6ffa5d",
+    "auto_records": 120,
+    "vendor45_sha256": "0a98df58ee01fd1b4ecd53e7a476b279e0bd15bbdc7cbb6ff4f97f591811eef5",
+    "vendor_records": 90
+  },
+  "excluded_mutable_documents": [
+    "plan.md",
+    "report.md"
+  ]
+}

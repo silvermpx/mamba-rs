@@ -9,14 +9,45 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Fresh Ada Triad state and two-cell profiles are complete (2026-09-07), using
+the unchanged CUDA13.2 binary built at59f1a949. Once21 raw snapshot independently
+replays120 custom eager/graph +90 vendor Fast/Pedantic records. Against Fast
+eager/eager, both p50+p95 win in3/60 cells: BF16 NN d128_in, F16 NN d128_in,
+F16 NT prism. ExactF32 and TF32 each0/15; BF161/15; F162/15. The other57 lose.
+TF32 NT d768_in is275.016 vs117.136us; TN prism242.639 vs99.733us. These are
+independent quantile ratios on zero-initialized synthetic operands, not paired
+admission, full-mantissa bit proof, end-to-end training or fresh5090 results.
+Full physical symbols, all60 rows, raw logs and replay:
+`internal/perf/ada-triad-state-20260907/report.md`.
+
+NCU attributes all NT excess shared wavefronts and all TN excess to LDGSTS
+copy sites; the ordinary MMA fragment LDS sites have actual=ideal. NT excess
+is5,750,784 (+40.625% relative to ideal), TN1,729,494 (+16.739%). Both are
+one CTA/SM by registers/shared, about37% active-cycle HMMA; TN has only93CTAs
+for142SM. No claim that this isolates all Fast loss or proves bad global
+coalescing. Profile/report/binding/reuse audit:
+`internal/perf/ada-triad-two-cell-ncu-20260907/`. The field measured_source_sha
+fb878... is a legacy FOUR-Fixed-file digest, NOT the complete Triad binding;
+full368-file map SHA is163519fc90a7e35f0cde5587b66afe9a0ab0bda98a727161e648fe0d95dc74b5.
+
+Next bounded experiment: test-only direct TF32 NT M128N64/BK32/S3 compact XOR
+shared-copy destination (36->32 floats/row, physical_k=k^((row&7)<<2)), reusing
+Fixed staging lessons but preserving per-thread global copy ownership, RNA,
+ascending MMA and NT epilogue. It is NOT implemented/admitted by this checkpoint.
+Existing NT tournament is split-K-specific and its cuBLAS companion SM120-sealed;
+do not weaken those guards. Use one focused test, small full-mantissa actual-AUTO
+bit/repeat/graph/resource checks then once7; no unchanged full-state rerun per
+prototype. Keep the old separate split8 discovery WIP untouched. No kernel was
+deleted and no new production route is claimed by these measurement reports.
+
 Assembled Fixed AUTO45 source and evidence are committed as `b221b71e`
 (`promote qualified Ada Fixed AUTO45 routes`), human identity/no trailers.
 The 131-entry phase2 manifest verifies against that commit; immutable raw logs
 retain their harmless terminal blank lines. The subsequent holder-comment
 cleanup changes Rust documentation only and is not a new GPU qualification.
-Prepared Triad discovery WIP remains separate and uncommitted. Next executable
-task: the two-cell current-AUTO diagnostic profile in
-`internal/perf/ada-triad-two-cell-ncu-20260907/plan.md`.
+Prepared Triad discovery WIP remains separate and uncommitted. The subsequently
+completed two-cell current-AUTO profile is summarized above; its acquisition
+plan remains `internal/perf/ada-triad-two-cell-ncu-20260907/plan.md`.
 
 Fixed AUTO45 assembly (2026-09-07) is now qualified: exact five rows are
 connected to public AUTO and all five once101 runs pass against the replaced

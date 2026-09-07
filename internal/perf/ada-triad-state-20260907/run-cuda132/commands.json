@@ -1,0 +1,42 @@
+[
+  {
+    "label": "auto60",
+    "args": [
+      "/root/target-ada-exact-toolkit-auto-triad-two-cell-ncu1-cuda132-20260907/release/deps/gemm_bi_performance_matrix-15e772a3a3d63b19",
+      "gemm_bi_deterministic_performance_matrix",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "env": {
+      "CUDA_VISIBLE_DEVICES": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+      "GEMM_BI_QUAL_CELL_IDS": "f32_policy_exact/nn/d128_in_proj/contiguous,f32_policy_exact/nn/d128_out_proj/contiguous,f32_policy_exact/nn/d768_in_proj/contiguous,f32_policy_exact/nn/d768_out_proj/contiguous,f32_policy_exact/nn/prism_in_proj/contiguous,f32_policy_exact/tn/d128_in_proj/contiguous,f32_policy_exact/tn/d128_out_proj/contiguous,f32_policy_exact/tn/d768_in_proj/contiguous,f32_policy_exact/tn/d768_out_proj/contiguous,f32_policy_exact/tn/prism_in_proj/contiguous,f32_policy_exact/nt/d128_in_proj/contiguous,f32_policy_exact/nt/d128_out_proj/contiguous,f32_policy_exact/nt/d768_in_proj/contiguous,f32_policy_exact/nt/d768_out_proj/contiguous,f32_policy_exact/nt/prism_in_proj/contiguous,f32_policy_allow_tf32/nn/d128_in_proj/contiguous,f32_policy_allow_tf32/nn/d128_out_proj/contiguous,f32_policy_allow_tf32/nn/d768_in_proj/contiguous,f32_policy_allow_tf32/nn/d768_out_proj/contiguous,f32_policy_allow_tf32/nn/prism_in_proj/contiguous,f32_policy_allow_tf32/tn/d128_in_proj/contiguous,f32_policy_allow_tf32/tn/d128_out_proj/contiguous,f32_policy_allow_tf32/tn/d768_in_proj/contiguous,f32_policy_allow_tf32/tn/d768_out_proj/contiguous,f32_policy_allow_tf32/tn/prism_in_proj/contiguous,f32_policy_allow_tf32/nt/d128_in_proj/contiguous,f32_policy_allow_tf32/nt/d128_out_proj/contiguous,f32_policy_allow_tf32/nt/d768_in_proj/contiguous,f32_policy_allow_tf32/nt/d768_out_proj/contiguous,f32_policy_allow_tf32/nt/prism_in_proj/contiguous,bf16_policy_tc/nn/d128_in_proj/contiguous,bf16_policy_tc/nn/d128_out_proj/contiguous,bf16_policy_tc/nn/d768_in_proj/contiguous,bf16_policy_tc/nn/d768_out_proj/contiguous,bf16_policy_tc/nn/prism_in_proj/contiguous,bf16_policy_tc/tn/d128_in_proj/contiguous,bf16_policy_tc/tn/d128_out_proj/contiguous,bf16_policy_tc/tn/d768_in_proj/contiguous,bf16_policy_tc/tn/d768_out_proj/contiguous,bf16_policy_tc/tn/prism_in_proj/contiguous,bf16_policy_tc/nt/d128_in_proj/contiguous,bf16_policy_tc/nt/d128_out_proj/contiguous,bf16_policy_tc/nt/d768_in_proj/contiguous,bf16_policy_tc/nt/d768_out_proj/contiguous,bf16_policy_tc/nt/prism_in_proj/contiguous,f16_policy_tc/nn/d128_in_proj/contiguous,f16_policy_tc/nn/d128_out_proj/contiguous,f16_policy_tc/nn/d768_in_proj/contiguous,f16_policy_tc/nn/d768_out_proj/contiguous,f16_policy_tc/nn/prism_in_proj/contiguous,f16_policy_tc/tn/d128_in_proj/contiguous,f16_policy_tc/tn/d128_out_proj/contiguous,f16_policy_tc/tn/d768_in_proj/contiguous,f16_policy_tc/tn/d768_out_proj/contiguous,f16_policy_tc/tn/prism_in_proj/contiguous,f16_policy_tc/nt/d128_in_proj/contiguous,f16_policy_tc/nt/d128_out_proj/contiguous,f16_policy_tc/nt/d768_in_proj/contiguous,f16_policy_tc/nt/d768_out_proj/contiguous,f16_policy_tc/nt/prism_in_proj/contiguous",
+      "GEMM_BI_QUAL_PATH_ORDER": "ab",
+      "GEMM_BI_QUAL_VARIANT": "ada-triad-state21",
+      "GEMM_BI_QUAL_WINDOWS": "21"
+    },
+    "started_utc": "2026-09-07T14:51:16Z",
+    "exit": 0
+  },
+  {
+    "label": "vendor45",
+    "args": [
+      "/root/target-ada-exact-toolkit-auto-triad-two-cell-ncu1-cuda132-20260907/release/deps/gemm_bi_performance_matrix-15e772a3a3d63b19",
+      "gemm_bi_cublas_performance_denominators",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "env": {
+      "CUDA_VISIBLE_DEVICES": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+      "GEMM_BI_CUBLAS_CELL_IDS": "cublas/f32/nn/d128_in_proj,cublas/f32/nn/d128_out_proj,cublas/f32/nn/d768_in_proj,cublas/f32/nn/d768_out_proj,cublas/f32/nn/prism_in_proj,cublas/f32/tn/d128_in_proj,cublas/f32/tn/d128_out_proj,cublas/f32/tn/d768_in_proj,cublas/f32/tn/d768_out_proj,cublas/f32/tn/prism_in_proj,cublas/f32/nt/d128_in_proj,cublas/f32/nt/d128_out_proj,cublas/f32/nt/d768_in_proj,cublas/f32/nt/d768_out_proj,cublas/f32/nt/prism_in_proj,cublas/bf16/nn/d128_in_proj,cublas/bf16/nn/d128_out_proj,cublas/bf16/nn/d768_in_proj,cublas/bf16/nn/d768_out_proj,cublas/bf16/nn/prism_in_proj,cublas/bf16/tn/d128_in_proj,cublas/bf16/tn/d128_out_proj,cublas/bf16/tn/d768_in_proj,cublas/bf16/tn/d768_out_proj,cublas/bf16/tn/prism_in_proj,cublas/bf16/nt/d128_in_proj,cublas/bf16/nt/d128_out_proj,cublas/bf16/nt/d768_in_proj,cublas/bf16/nt/d768_out_proj,cublas/bf16/nt/prism_in_proj,cublas/f16/nn/d128_in_proj,cublas/f16/nn/d128_out_proj,cublas/f16/nn/d768_in_proj,cublas/f16/nn/d768_out_proj,cublas/f16/nn/prism_in_proj,cublas/f16/tn/d128_in_proj,cublas/f16/tn/d128_out_proj,cublas/f16/tn/d768_in_proj,cublas/f16/tn/d768_out_proj,cublas/f16/tn/prism_in_proj,cublas/f16/nt/d128_in_proj,cublas/f16/nt/d128_out_proj,cublas/f16/nt/d768_in_proj,cublas/f16/nt/d768_out_proj,cublas/f16/nt/prism_in_proj",
+      "GEMM_BI_QUAL_PATH_ORDER": "ab",
+      "GEMM_BI_QUAL_VARIANT": "ada-triad-state21",
+      "GEMM_BI_QUAL_WINDOWS": "21"
+    },
+    "started_utc": "2026-09-07T14:51:35Z",
+    "exit": 0
+  }
+]

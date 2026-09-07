@@ -1,0 +1,10 @@
+{
+  "complete": true,
+  "release_error": null,
+  "binary": "/root/target-ada-exact-toolkit-auto-triad-two-cell-ncu1-cuda132-20260907/release/deps/gemm_bi_performance_matrix-15e772a3a3d63b19",
+  "binary_sha": "cf38911f01f3e194834567f35fd1785a5353a14c83b3519572378343e9fef72f",
+  "reports": {
+    "tn-prism": "d941b7ba812c532d73fa7b7b45d0a5f9f95eb5fd52fd0f8cf6f7e63204ba4a87",
+    "nt-d768": "4c81ba41699824bfb97b352ff6301ed8ab651187a5e6d55e092667101a539fa2"
+  }
+}

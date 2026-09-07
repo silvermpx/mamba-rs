@@ -1,0 +1,137 @@
+[
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--version"
+    ],
+    "output": "ncu-version.log",
+    "started_utc": "2026-09-07T14:45:01Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--help"
+    ],
+    "output": "ncu-help.log",
+    "started_utc": "2026-09-07T14:45:01Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--config-file",
+      "off",
+      "--target-processes",
+      "application-only",
+      "--kernel-name-base",
+      "mangled",
+      "--kernel-name",
+      "regex:^gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3$",
+      "--launch-skip",
+      "130",
+      "--launch-count",
+      "1",
+      "--replay-mode",
+      "kernel",
+      "--clock-control",
+      "none",
+      "--cache-control",
+      "none",
+      "--pipeline-boost-state",
+      "dynamic",
+      "--section",
+      "LaunchStats",
+      "--section",
+      "Occupancy",
+      "--section",
+      "SpeedOfLight",
+      "--section",
+      "ComputeWorkloadAnalysis",
+      "--section",
+      "SchedulerStats",
+      "--section",
+      "WarpStateStats",
+      "--section",
+      "MemoryWorkloadAnalysis",
+      "--section",
+      "InstructionStats",
+      "--section",
+      "SourceCounters",
+      "--metrics",
+      "dram__bytes.sum,dram__bytes_read.sum,dram__bytes_write.sum,lts__t_sectors.sum,lts__t_sectors_lookup_hit.sum,lts__t_sectors_lookup_miss.sum,l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum,l1tex__t_bytes_pipe_lsu_mem_global_op_st.sum",
+      "--export",
+      "/root/evidence-ada-triad-two-cell-ncu-20260907/profile-cuda132/tn-prism",
+      "/root/target-ada-exact-toolkit-auto-triad-two-cell-ncu1-cuda132-20260907/release/deps/gemm_bi_performance_matrix-15e772a3a3d63b19",
+      "gemm_bi_deterministic_performance_matrix",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "output": "ncu-tn-prism.log",
+    "started_utc": "2026-09-07T14:45:01Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--config-file",
+      "off",
+      "--import",
+      "/root/evidence-ada-triad-two-cell-ncu-20260907/profile-cuda132/tn-prism.ncu-rep",
+      "--page",
+      "details",
+      "--csv"
+    ],
+    "output": "tn-prism-details.csv",
+    "started_utc": "2026-09-07T14:45:07Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--config-file",
+      "off",
+      "--import",
+      "/root/evidence-ada-triad-two-cell-ncu-20260907/profile-cuda132/tn-prism.ncu-rep",
+      "--page",
+      "raw",
+      "--csv"
+    ],
+    "output": "tn-prism-raw.csv",
+    "started_utc": "2026-09-07T14:45:07Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--config-file",
+      "off",
+      "--import",
+      "/root/evidence-ada-triad-two-cell-ncu-20260907/profile-cuda132/tn-prism.ncu-rep",
+      "--page",
+      "source",
+      "--print-source",
+      "sass",
+      "--csv"
+    ],
+    "output": "tn-prism-sass.csv",
+    "started_utc": "2026-09-07T14:45:08Z",
+    "exit": 0
+  },
+  {
+    "args": [
+      "/usr/local/cuda-13.2/bin/ncu",
+      "--config-file",
+      "off",
+      "--import",
+      "/root/evidence-ada-triad-two-cell-ncu-20260907/profile-cuda132/tn-prism.ncu-rep",
+      "--page",
+      "session"
+    ],
+    "output": "tn-prism-session.txt",
+    "started_utc": "2026-09-07T14:45:09Z",
+    "exit": 0
+  }
+]

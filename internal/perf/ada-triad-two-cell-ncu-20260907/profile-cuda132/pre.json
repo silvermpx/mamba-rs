@@ -1,0 +1,10 @@
+{
+  "phase": "PRE",
+  "utc": "2026-09-07T14:45:01Z",
+  "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n",
+  "gpu_stderr": "",
+  "gpu_exit": 0,
+  "apps": "",
+  "apps_stderr": "",
+  "apps_exit": 0
+}

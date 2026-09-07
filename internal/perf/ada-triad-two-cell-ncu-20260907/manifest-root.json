@@ -1,0 +1,19 @@
+{
+  "schema": "MambaBiTriadTwoCellNcuEvidenceRootV1",
+  "manifest": "manifest-selected.sha256",
+  "manifest_sha256": "41f8a52f5baad31e25523ee4c42c51adf3bd888319596c80f2489fb937ca97b1",
+  "manifest_entries": 35,
+  "artifact_binding": "artifact-binding.json",
+  "artifact_binding_sha256": "038489f35ee0b3c18fc97e8a0b6db286b8995705c7f0885ef7f04faf8318dffd",
+  "binary_sha256": "cf38911f01f3e194834567f35fd1785a5353a14c83b3519572378343e9fef72f",
+  "full_source_manifest_sha256": "163519fc90a7e35f0cde5587b66afe9a0ab0bda98a727161e648fe0d95dc74b5",
+  "measured_source_sha256": "fb878081a62a3b54964056ff61f5f270e9486abd284b07444bf38a536dc85385",
+  "reports": {
+    "tn-prism": "d941b7ba812c532d73fa7b7b45d0a5f9f95eb5fd52fd0f8cf6f7e63204ba4a87",
+    "nt-d768": "4c81ba41699824bfb97b352ff6301ed8ab651187a5e6d55e092667101a539fa2"
+  },
+  "excluded_mutable_documents": [
+    "plan.md",
+    "fixed-reuse-audit.md"
+  ]
+}
