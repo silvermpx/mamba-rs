@@ -102,3 +102,7 @@ tempfile = "3"
 version = "0.19.9"
 optional = true
 features = ["driver", "cublas", "nvrtc", "cuda-version-from-build-system"]
+# The gate crate (`make ci-fast`, the pre-push hook, CI) lives beside the
+# package; it is never published.
+[workspace]
+members = ["xtask"]
