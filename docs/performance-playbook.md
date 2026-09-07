@@ -165,6 +165,33 @@ this codebase; apply them in order.
 Use this protocol for Fixed inference and Triad NN/TN/NT work. Its purpose is
 to prevent long sequences of plausible but causally unsupported tile changes.
 
+**User-approved fast discovery cycle (2026-09-07).** Separate candidate search
+from production qualification. This cost ordering supersedes older task briefs
+that require the entire qualification matrix before every candidate timing:
+
+- Discover on one representative installed toolkit (currently CUDA 13.2 on
+  Ada). Reuse the current census, known losing experiments and existing test
+  routes; do not rebuild the inventory for every edit.
+- For each hypothesis, check compilation/resources and the affected layout
+  model, then a small meaningful bit-correctness, repeat, eager/graph and bias
+  set. Use short paired timings to reject losers early. These are discovery
+  results, not full qualification or authority to change AUTO.
+- Collect promising candidates, integrate a finalist batch, freeze its
+  source/binary identities, and run the full numerical, physical and paired
+  performance qualification for the promoted domains once. A changed shared
+  CUDA module still requires retained-route qualification on that final build.
+- After a fix, rerun affected checks and reuse evidence whose source, binary
+  and contract dependencies are unchanged. Do not automatically restart all
+  toolkits, all precisions or all 101-window runs.
+- Do not hold Triad discovery until every Fixed inference cell beats cuBLAS
+  Fast. Run a bounded inference experiment, record remaining gaps, then include
+  the worst Triad cells in the next discovery cycle.
+
+The detailed safety requirements below remain production-promotion gates;
+they are not a mandate to run every expensive gate before a prototype can be
+discarded. A quick pass never implies complete bit-exact qualification, a
+cross-toolkit admission, or a cuBLAS Fast victory.
+
 1. **Freeze the exact cell contract from machine-readable evidence.** Read the
    current production census/raw JSONL and record operation, dtype, M/K/N,
    strides, bias, alpha/beta, CUDA toolkit, CC/SM count, dispatcher revision,
@@ -175,8 +202,8 @@ to prevent long sequences of plausible but causally unsupported tile changes.
    admission result.
 2. **Inventory before inventing.** Enumerate every existing kernel, loader
    holder, force route, AUTO selector cell, graph identity, supported CUDA
-   toolkit and architecture fallback. Run a full census to find unwired
-   champions before writing another kernel. A candidate is not production
+   toolkit and architecture fallback. Reuse the verified census; update only
+   changed or missing domains to find unwired champions. A candidate is not production
    work until the dispatcher, loader, tests and graph route all select it.
 3. **Define the comparator literally.** `CUBLAS_COMPUTE_32F`,
    `CUBLAS_COMPUTE_32F_FAST_TF32` and PEDANTIC are different denominators.
@@ -201,7 +228,8 @@ to prevent long sequences of plausible but causally unsupported tile changes.
    deterministic GEMM, also prove one CTA per output and the unchanged
    ascending MMA/reduction order. Host layout success is necessary, not a
    performance claim.
-7. **Use fail-closed GPU gates in increasing cost order.** Compile/PTXAS and
+7. **Use fail-closed GPU gates in increasing cost order.** During discovery,
+   apply the small targeted checks above. For production qualification, compile/PTXAS and
    reject illegal shared memory, register overflow, local memory or spills;
    check runtime occupancy and exact function/grid/block/shared/ABI; then run
    ordinary, exceptional, tail, alignment, stride, view, redzone,

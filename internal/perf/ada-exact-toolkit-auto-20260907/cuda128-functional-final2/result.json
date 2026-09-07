@@ -1,0 +1,11 @@
+{
+  "toolkit": "12.8",
+  "operation": "functional",
+  "exits": {
+    "exact-auto": 0,
+    "half-holders": 0,
+    "half-auto": 0,
+    "fixed-rna-hot-a": 0,
+    "fixed-rna-all-cells": 0
+  }
+}

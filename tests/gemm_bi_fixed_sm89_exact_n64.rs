@@ -1214,7 +1214,7 @@ fn run_auto_view(
 }
 
 #[test]
-#[ignore = "actual Ada CUDA13.2 AUTO promotion, full-hot Legacy prefix/view raw-bit boundaries"]
+#[ignore = "actual Ada CUDA12.8/13.0/13.2 AUTO promotion, full-hot Legacy prefix/view raw-bit boundaries"]
 fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
     let ctx = admit_context();
     assert_eq!(
@@ -1223,8 +1223,12 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
             .multiprocessor_count(),
         142
     );
-    assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
-    assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
+    let compiler = ctx.kernels.compiler_identity();
+    assert!(matches!(
+        compiler.nvrtc_version,
+        (12, 8) | (13, 0) | (13, 2)
+    ));
+    assert!(compiler.nvrtc_library_known);
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
     ctx.set_bi_tensor_cores(false);

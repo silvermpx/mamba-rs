@@ -182,7 +182,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
-        assert_eq!(TUNING_TABLE_REVISION, 43);
+        assert_eq!(TUNING_TABLE_REVISION, 44);
         assert!(compiler.nvrtc_library_known);
         assert!(matches!(
             compiler.nvrtc_version,

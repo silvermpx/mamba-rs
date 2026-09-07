@@ -1,0 +1,13 @@
+{
+  "toolkit": "13.2",
+  "operation": "functional",
+  "exits": {
+    "exact-auto": 0,
+    "half-holders": 0,
+    "half-auto": 0,
+    "fixed-rna-hot-a": 0,
+    "fixed-rna-all-cells": 0,
+    "triad-tf32-cohort": 0,
+    "triad-tf32-bias": 0
+  }
+}

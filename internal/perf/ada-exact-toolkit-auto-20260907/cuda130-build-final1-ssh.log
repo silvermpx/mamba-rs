@@ -1,0 +1,20 @@
+COMMAND ["/usr/local/cuda-13.0/bin/nvcc", "--version"]
+COMMAND_EXIT nvcc.log 0
+COMMAND ["rustc", "-Vv"]
+COMMAND_EXIT rustc.log 0
+COMMAND ["cargo", "-V"]
+COMMAND_EXIT cargo.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--lib", "--", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT library.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--test", "gemm_bi_fixed_performance", "toolkit_admission::tests::", "--", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT focused.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--test", "gemm_bi_fixed_performance", "--", "--test-threads=1"]
+COMMAND_EXIT performance-nonignored.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--test", "gemm_bi_fixed_sm89_exact_n64", "--", "--test-threads=1"]
+COMMAND_EXIT exact-nonignored.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--test", "gemm_bi_fixed_sm89_pipeline", "--", "--test-threads=1"]
+COMMAND_EXIT half-nonignored.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-13000", "--test", "gemm_bi_tf32_cohort_binding", "--", "--test-threads=1"]
+COMMAND_EXIT tf32-cohort-nonignored.log 0
+BUILD_COMPLETE {"toolkit": "13.0", "feature": "cuda,cudarc/cuda-13000", "cuda": "/usr/local/cuda-13.0", "target": "/root/target-ada-exact-toolkit-auto-final1-cuda130-20260907", "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-final1-cuda130-20260907", "cache_mode": "0o700", "measured_source_sha": "2ac1c93ba3e4682138a0df3341a26921438334382532d6943277268320655285", "binaries": {"/root/target-ada-exact-toolkit-auto-final1-cuda130-20260907/release/deps/gemm_bi_fixed_performance-f34471822300c85c": "1b8b31e201c7d252e52a418637ebb5706651ceeb0c56dc42c0dfce145decc170", "/root/target-ada-exact-toolkit-auto-final1-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_exact_n64-f32c5ef50be5f459": "7057630fb635807d745ed6a21604aa2e357258acbe56e6d85b7cf1a70811d24e", "/root/target-ada-exact-toolkit-auto-final1-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1": "53b037ace3df6b13d3cfa0d0a91a75221b55aa251a1ccca9de27fac5da53e613", "/root/target-ada-exact-toolkit-auto-final1-cuda130-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f48a3ccb04f0698": "8c36e4c001a5b65eb726c2fb60e3d22e8404924649ec63a984a90b91d6ae7d75"}, "tools": {"/usr/local/cuda-13.0/bin/nvcc": "b8e2347d9d7fcadf8812a27324d515de99d033d3e48611811ece7e66d7895f8a", "/usr/local/cuda-13.0/bin/ptxas": "daba837a68265cae38c832d13399b61dab811891de9b8914defddef143b849f2"}, "libraries": {"/usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13": "a49e67e8e74590f1e98de55c39c6287efd3f59e3c3797464d7bbe0fe01349b11", "/usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13.0.88": "a49e67e8e74590f1e98de55c39c6287efd3f59e3c3797464d7bbe0fe01349b11", "/usr/local/cuda-13.0/targets/x86_64-linux/lib/libcublas.so.13.1.1.3": "25cde432108543626df85d887c730bf2cab96803ca16f9654e4abc8d2b45833e", "/usr/local/cuda-13.0/targets/x86_64-linux/lib/libcublas.so.13": "25cde432108543626df85d887c730bf2cab96803ca16f9654e4abc8d2b45833e"}, "support_tools": {"/root/evidence-ada-exact-toolkit-auto-20260907/run.py": "b9849a455871fbdf7168b6fc4d212329d60dd9aa15327b0aca4d6b1921316967", "/root/evidence-ada-exact-toolkit-auto-20260907/analyze.py": "d661f6adc280e8cbecf5e812ff298693826cd9eb692bcdc4deff9ec246773c8a", "/root/evidence-ada-exact-toolkit-auto-20260907/remote.py": "a1aadafa46c41543e8665cf5ee59acb502c79c145811dd6166a99d2a627ebe28", "/root/evidence-ada-f32-tf32-toolkit-20260907/analyze.py": "e8bebda48987a699392f7c8bdbdf8f74b61349a2d3aebc20a36bf1e222026182"}}
+WRAPPER_COMPLETE

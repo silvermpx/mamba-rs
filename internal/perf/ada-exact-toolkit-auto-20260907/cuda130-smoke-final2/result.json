@@ -1,0 +1,18 @@
+{
+  "test_exit": 0,
+  "post_exit": 0,
+  "toolkit": "13.0",
+  "family": "f32_exact_post_auto",
+  "stage": "smoke1",
+  "windows": 1,
+  "literals": "hot_a:0,hot_a:1,hot_b:0,hot_b:1,hot_d:0,hot_d:1,hot_e:0,hot_e:1",
+  "source_sha": "2ac1c93ba3e4682138a0df3341a26921438334382532d6943277268320655285",
+  "binary_sha": "1b8b31e201c7d252e52a418637ebb5706651ceeb0c56dc42c0dfce145decc170",
+  "jsonl_sha": "674f582d9b8bd17e2b4b933960f1eb330695eee3acee3537531d871633773b4b",
+  "test_log_sha": "638d211222a323c507ce6d97b30e3cb81cf489c3e4b2b87162c5193ca97acd85",
+  "cache_files": {
+    "/root/mamba-kcache-ada-exact-toolkit-auto-final2-cuda130-20260907/mamba-kernels-v1-adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155.bin": "d9fb2c9fc89234ef6fd51966f41a291438cd49f68a2881bc696df4041c39c9e3",
+    "/root/mamba-kcache-ada-exact-toolkit-auto-final2-cuda130-20260907/mamba-kernels-v1-ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b.bin": "c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c",
+    "/root/mamba-kcache-ada-exact-toolkit-auto-final2-cuda130-20260907/mamba-kernels-v1-feac83eb41fcc629d0c4bf9be1758d9e92c431728e17c1f46cfcd5c5a9ebc27d.bin": "32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0"
+  }
+}

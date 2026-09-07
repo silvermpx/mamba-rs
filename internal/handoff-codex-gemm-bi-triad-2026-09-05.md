@@ -9,6 +9,25 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest integration (2026-09-07): actual Fixed AUTO44 now selects the qualified
+exact-F32 CopyPlan for A/B/D/E, bias/no-bias, on CUDA12.8/13.0 as well as13.2.
+All16 new toolkit-literals pass once-only post101 p50 AND p95 against former
+Legacy in every eager/graph/parity stratum; worst-stratum median ratios are
+0.814778..0.845826. cuBLAS Fast still wins: worst-per-cell AUTO/Fast p95 is
+1.540643..2.240107. All3 matching builds and retained Fixed functional checks
+pass; Triad cohort retention is13.2-only. CUDA bodies and numerical ABI5 /
+schedule8 are unchanged. See internal/perf/ada-exact-toolkit-auto-20260907/
+final-report.md and raw/binding files. The older Task7/43 paragraphs below
+are historical checkpoints, not missing current aligned-hot wiring.
+
+User-approved process correction: candidate discovery now uses one CUDA13.2
+build, a small meaningful bit/repeat/eager/graph set and short paired timing;
+full qualification is for a frozen integrated finalist batch. Reuse unchanged
+evidence and rerun affected checks after fixes. Do not wait for every inference
+Fast gap to close before Triad discovery. This supersedes older per-prototype
+full-gate ordering; see docs/performance-playbook.md section9. Current GPU work
+is targeted TF32 E0 profiling, followed by bounded inference/Triad discovery.
+
 Latest measured checkpoint (2026-09-07): existing exact-F32 CopyPlan passed
 paired21 and fresh101 against actualLegacy AUTO on CUDA12.8 and13.0 for
 A/B/D/E, bothbias: all16toolkit-literals win p50 ANDp95 in every eager/graph

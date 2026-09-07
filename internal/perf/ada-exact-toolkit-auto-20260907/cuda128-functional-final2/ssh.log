@@ -1,0 +1,14 @@
+{"phase": "PRE", "utc": "2026-09-07T08:14:52Z", "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n", "gpu_stderr": "", "gpu_exit": 0, "apps": "", "apps_stderr": "", "apps_exit": 0}
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda128-20260907/release/deps/gemm_bi_fixed_sm89_exact_n64-3f0f46c23b21937b", "--ignored", "--exact", "fixed_sm89_exact_n64_auto_prefix_view_graph_bits", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT exact-auto.log 0
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda128-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-275dff2d2ec8e1fd", "--ignored", "--exact", "fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT half-holders.log 0
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda128-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-275dff2d2ec8e1fd", "--ignored", "--exact", "fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT half-auto.log 0
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda128-20260907/release/deps/gemm_bi_fixed_correctness-bb38dc807b901804", "--ignored", "--exact", "fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT fixed-rna-hot-a.log 0
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda128-20260907/release/deps/gemm_bi_fixed_correctness-bb38dc807b901804", "--ignored", "--exact", "fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT fixed-rna-all-cells.log 0
+{"phase": "POST", "utc": "2026-09-07T08:18:43Z", "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 15 %, 1 %\n", "gpu_stderr": "", "gpu_exit": 0, "apps": "", "apps_stderr": "", "apps_exit": 0}
+FUNCTIONAL_RESULT {"toolkit": "12.8", "operation": "functional", "exits": {"exact-auto": 0, "half-holders": 0, "half-auto": 0, "fixed-rna-hot-a": 0, "fixed-rna-all-cells": 0}}
+WRAPPER_COMPLETE

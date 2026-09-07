@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-exact-toolkit-auto-final1-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0)
+
+running 14 tests
+test toolkit_admission::tests::immutable_gate_rejects_changed_a_b_or_bias_and_order_proof_is_directional ... ok
+test toolkit_admission::tests::launch_contract_rejects_every_physical_field ... ok
+test toolkit_admission::tests::literal_inventory_is_exact_for_smoke_and_screen_and_subset_only_for_confirm ... ok
+test toolkit_admission::tests::mirrored_schedule_reverses_comparison_traversal_and_four_positions ... ok
+test toolkit_admission::tests::post44_controls_reject_missing_malformed_stale_family_or_subset ... ok
+test toolkit_admission::tests::post44_controls_schema_roles_and_directions_are_explicit_and_disjoint ... ok
+test toolkit_admission::tests::prelaunch_gate_rejects_revisions_and_artifact_before_first_launch ... ok
+test toolkit_admission::tests::raw_closure_recomputes_pairs_and_summaries_and_rejects_forgery ... ok
+test toolkit_admission::tests::raw_ratio_is_sum_b_over_sum_a_and_rejects_wrong_or_invalid_records ... ok
+test toolkit_admission::tests::real_loss_or_mixed_p95_is_valid_evidence_but_not_admission ... ok
+test toolkit_admission::tests::strict_controls_bind_family_stage_toolkit_source_binary_and_literals ... ok
+test toolkit_admission::tests::strict_controls_reject_missing_malformed_stale_or_cartesian_inputs ... ok
+test toolkit_admission::tests::tf32_actual_auto_contract_is_rna_wide_not_old_m128s2 ... ok
+test toolkit_admission::tests::timing_boundary_rejects_a_b_bias_before_a_restoring_replay ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 119 filtered out; finished in 0.00s
+

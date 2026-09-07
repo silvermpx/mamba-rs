@@ -1,0 +1,3 @@
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-12080", "--test", "gemm_bi_fixed_performance", "toolkit_admission::tests::", "--", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT focused.log 0
+FOCUSED_RESULT {"exit": 0, "toolkit": "12.8"}

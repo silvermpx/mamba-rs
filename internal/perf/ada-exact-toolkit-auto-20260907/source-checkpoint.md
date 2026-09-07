@@ -1,0 +1,9 @@
+# Immutable Task8 source checkpoint
+
+Base `b78aebf466b72428eaaaf2654a7e671949b62d20`; nine-file Rust diff SHA256 `980a0408b8c16670a45743ed4f4e93f4c0b65f51f5f811c456b57aede0b3e0b6`; measured four-file source SHA256 `2ac1c93ba3e4682138a0df3341a26921438334382532d6943277268320655285`.
+
+Rust files: `gemm_bi_fixed.rs` `d7c34ff26abb0580fcac0bbb139368ed8bc1a0fb850eab9bfa1716f15f6deed8`; `kernel_identity.rs` `5528d6a44d0a9047080af07e868def6f4eaac24e7873e3e15e59a3f63ca772ca`; `dispatch.rs` `48b557a8e0d97b4bc3b3a1f3ad1bd3c297d691bacf1ff2bfcb90580273cd0acd`; `launch.rs` `816ef4474281d94e0f6462cb8695e4356f40e8ec554b2dbbfc7009fa6247b047`; `gemm_bi_fixed_performance.rs` `72a01dd9eddc7f700b2d187b1c4e409637d2700a6f5380f2bb5cc8c741e079d2`; `gemm_bi_fixed_sm89_exact_n64.rs` `ec97206591dbb74fd07a6f7f09a4152b5c3eb9d0a4af2e72758b013f8e9749f3`; `gemm_bi_fixed_sm89_pipeline.rs` `26e56fb8ff5f92de10ae4103ff841dff5425d32bc59371ed9768b45961a30890`; `gemm_bi_tf32_cohort_binding.rs` `687d495e5e46f4095324de1ac974caa8d6b785372fb467946bfd0f0ae4f4b1db`; `fixed_sm89_toolkit_admission.rs` `2d797ba45f01c7b1983f21ce27eb39e1bd3f2c9a4f5aa82ab6abd95a5e27ddb7`.
+
+Tools: `run.py` `b9849a455871fbdf7168b6fc4d212329d60dd9aa15327b0aca4d6b1921316967`; `remote.py` `a1aadafa46c41543e8665cf5ee59acb502c79c145811dd6166a99d2a627ebe28`; `analyze.py` `d661f6adc280e8cbecf5e812ff298693826cd9eb692bcdc4deff9ec246773c8a`; `test_validation.py` `b19aae8b27ba0ffba7ce608df334a3f7408a0b19d4d05347ba2130f0ea0fa40c`.
+
+Passed before freeze: direct rustfmt check for all nine Rust files; `git diff --check`; exact formatted-source focused support 14/14 (`cuda128-sourcegreen1/focused.log`, SHA256 `c3af89ff295a50846e72f8f748593e816daca592a6afddee3861b5cf0a13ebc1`); source-stable Python analyzer 5/5. Pending runtime gates are enumerated in `ada-exact-toolkit-auto-task8-report.md`. No performance timing started.

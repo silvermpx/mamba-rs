@@ -5230,11 +5230,16 @@ mod sm120_exact_n64_auto_tests {
     }
 }
 
-// Actual production NVRTC13.2 / 142-SM Ada paired qualification, 101 windows
-// in both orders and both eager/graph paths: exactly A/B/D/E, each bias row.
-// This is a version-scoped measured route, not a claim for every 13.2 stack.
+// Actual production NVRTC12.8/13.0/13.2 / 142-SM Ada paired qualification,
+// 101 windows in both orders and both eager/graph paths: exactly A/B/D/E,
+// each bias row. This is a finite version-scoped measured route, not a claim
+// for every CUDA 12/13 stack or any future toolkit.
 // A/D confirmation: fixed-exact-promotions-ada-20260906-318b3fbd09c8,
 // SHA256 9224161eec3a578f472c07810647952c56604a980d699876b187887a929c575a.
+// CUDA12.8 screen/confirm: d43c360d844065a3691f933b0b743a18e8482d2d36de787ef0ed2392e30e53bf /
+// eb3b0abee0e336c7c93f9c5eddec698dae8a3fc1d8363ca337047b835758ad96.
+// CUDA13.0 screen/confirm: cae9db1864bd64700ee3033196eae4c6f8a0abd7a3a1cf09a407889cb7727682 /
+// 0b27351512f3265b156a29aaf7fadcaf4a84870cac06e1c1b36ce3e358f20711.
 // This dispatch-only promotion reuses the unchanged loaded Fixed artifact.
 fn fixed_sm89_exact_n64_auto_eligible(
     operands: FixedFwdOperands,
@@ -5247,7 +5252,7 @@ fn fixed_sm89_exact_n64_auto_eligible(
 ) -> bool {
     loaded
         && nvrtc_library_known
-        && nvrtc == (13, 2)
+        && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         && device.compute_capability == (8, 9)
         && device.multiprocessors == 142
         && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
@@ -5283,6 +5288,7 @@ mod sm89_exact_n64_auto_tests {
         multiprocessors: 142,
         compute_capability: (8, 9),
     };
+    const QUALIFIED_NVRTC: [(i32, i32); 3] = [(12, 8), (13, 0), (13, 2)];
     // Literal admitted rows from production-paired-101-v1.jsonl, SHA256
     // 91493d7994999bfa48473803a1e29a7cc516a98b5264478c264457c3ba34db86.
     // B/no-bias wins against own AUTO/Legacy, not against PEDANTIC.
@@ -5313,16 +5319,32 @@ mod sm89_exact_n64_auto_tests {
         }
     }
 
-    fn eligible(operands: FixedFwdOperands, shape: FixedShape) -> bool {
+    fn eligible_for(nvrtc: (i32, i32), operands: FixedFwdOperands, shape: FixedShape) -> bool {
         fixed_sm89_exact_n64_auto_eligible(
             operands,
             shape,
             DEVICE,
-            (13, 2),
+            nvrtc,
             true,
             true,
             F32TriadPolicy::ExactScalarFmaV1,
         )
+    }
+
+    fn eligible(operands: FixedFwdOperands, shape: FixedShape) -> bool {
+        eligible_for((13, 2), operands, shape)
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_routes_all_twenty_four_qualified_toolkit_literals() {
+        for nvrtc in QUALIFIED_NVRTC {
+            for (m, k, n, bias) in ROWS {
+                assert!(
+                    eligible_for(nvrtc, operands(bias), FixedShape { m, k, n }),
+                    "qualified CopyPlan route missing: NVRTC={nvrtc:?} M={m} K={k} N={n} bias={bias}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5357,31 +5379,33 @@ mod sm89_exact_n64_auto_tests {
 
     #[test]
     fn fixed_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes() {
-        for (m, k, n, bias) in ROWS {
-            for (m, k, n) in [
-                (m - 1, k, n),
-                (m + 1, k, n),
-                (m, k - 1, n),
-                (m, k + 1, n),
-                (m, k, n - 1),
-                (m, k, n + 1),
-                (0, k, n),
-                (1, k, n),
-                (17, k, n),
-                (63, k, n),
-                (64, k, n),
-                (65, k, n),
-                (127, k, n),
-                (128, k, n),
-                (129, k, n),
-                (m, 0, n),
-                (m, k, 0),
-                (4621, 1928, 384),
-            ] {
-                assert!(
-                    !eligible(operands(bias), FixedShape { m, k, n }),
-                    "unmeasured M={m} K={k} N={n} bias={bias}"
-                );
+        for nvrtc in QUALIFIED_NVRTC {
+            for (m, k, n, bias) in ROWS {
+                for (m, k, n) in [
+                    (m - 1, k, n),
+                    (m + 1, k, n),
+                    (m, k - 1, n),
+                    (m, k + 1, n),
+                    (m, k, n - 1),
+                    (m, k, n + 1),
+                    (0, k, n),
+                    (1, k, n),
+                    (17, k, n),
+                    (63, k, n),
+                    (64, k, n),
+                    (65, k, n),
+                    (127, k, n),
+                    (128, k, n),
+                    (129, k, n),
+                    (m, 0, n),
+                    (m, k, 0),
+                    (4621, 1928, 384),
+                ] {
+                    assert!(
+                        !eligible_for(nvrtc, operands(bias), FixedShape { m, k, n }),
+                        "unmeasured NVRTC={nvrtc:?} M={m} K={k} N={n} bias={bias}"
+                    );
+                }
             }
         }
     }
@@ -5394,41 +5418,59 @@ mod sm89_exact_n64_auto_tests {
             let check = |device, nvrtc, known, loaded, policy| {
                 fixed_sm89_exact_n64_auto_eligible(ops, shape, device, nvrtc, known, loaded, policy)
             };
-            for cc in [
-                (8, 0),
-                (8, 6),
-                (8, 7),
-                (9, 0),
-                (10, 0),
-                (10, 3),
-                (11, 0),
-                (12, 0),
-                (12, 1),
-            ] {
+            for nvrtc in QUALIFIED_NVRTC {
+                for cc in [
+                    (8, 0),
+                    (8, 6),
+                    (8, 7),
+                    (9, 0),
+                    (10, 0),
+                    (10, 3),
+                    (11, 0),
+                    (12, 0),
+                    (12, 1),
+                ] {
+                    assert!(!check(
+                        FixedTileDevice {
+                            compute_capability: cc,
+                            ..DEVICE
+                        },
+                        nvrtc,
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ));
+                }
+                for multiprocessors in [0, 1, 141, 143, 170] {
+                    assert!(!check(
+                        FixedTileDevice {
+                            multiprocessors,
+                            ..DEVICE
+                        },
+                        nvrtc,
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ));
+                }
+                for (known, loaded) in [(false, true), (true, false), (false, false)] {
+                    assert!(!check(
+                        DEVICE,
+                        nvrtc,
+                        known,
+                        loaded,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ));
+                }
                 assert!(!check(
-                    FixedTileDevice {
-                        compute_capability: cc,
-                        ..DEVICE
-                    },
-                    (13, 2),
+                    DEVICE,
+                    nvrtc,
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::AllowDeterministicTf32V1
                 ));
             }
-            for multiprocessors in [0, 1, 141, 143, 170] {
-                assert!(!check(
-                    FixedTileDevice {
-                        multiprocessors,
-                        ..DEVICE
-                    },
-                    (13, 2),
-                    true,
-                    true,
-                    F32TriadPolicy::ExactScalarFmaV1
-                ));
-            }
-            for version in [(0, 0), (12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
+            for version in [(0, 0), (12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
                 assert!(!check(
                     DEVICE,
                     version,
@@ -5437,91 +5479,81 @@ mod sm89_exact_n64_auto_tests {
                     F32TriadPolicy::ExactScalarFmaV1
                 ));
             }
-            for (known, loaded) in [(false, true), (true, false), (false, false)] {
-                assert!(!check(
-                    DEVICE,
-                    (13, 2),
-                    known,
-                    loaded,
-                    F32TriadPolicy::ExactScalarFmaV1
-                ));
-            }
-            assert!(!check(
-                DEVICE,
-                (13, 2),
-                true,
-                true,
-                F32TriadPolicy::AllowDeterministicTf32V1
-            ));
         }
     }
 
     #[test]
     fn fixed_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype() {
-        for (m, k, n, bias) in ROWS {
-            let good = operands(bias);
-            let shape = FixedShape { m, k, n };
-            for pointer in [0, 0x1001, 0x1002, 0x1003, 0x1004, 0x1008, 0x100c] {
-                for bad in [
-                    FixedFwdOperands {
-                        c: TypedPtr {
-                            ptr: pointer,
-                            ..good.c
+        for nvrtc in QUALIFIED_NVRTC {
+            for (m, k, n, bias) in ROWS {
+                let good = operands(bias);
+                let shape = FixedShape { m, k, n };
+                for pointer in [0, 0x1001, 0x1002, 0x1003, 0x1004, 0x1008, 0x100c] {
+                    for bad in [
+                        FixedFwdOperands {
+                            c: TypedPtr {
+                                ptr: pointer,
+                                ..good.c
+                            },
+                            ..good
                         },
-                        ..good
-                    },
-                    FixedFwdOperands {
-                        x: TypedPtr {
-                            ptr: pointer,
-                            ..good.x
+                        FixedFwdOperands {
+                            x: TypedPtr {
+                                ptr: pointer,
+                                ..good.x
+                            },
+                            ..good
                         },
-                        ..good
-                    },
-                    FixedFwdOperands {
-                        w: TypedPtr {
-                            ptr: pointer,
-                            ..good.w
+                        FixedFwdOperands {
+                            w: TypedPtr {
+                                ptr: pointer,
+                                ..good.w
+                            },
+                            ..good
                         },
-                        ..good
-                    },
-                ] {
-                    assert!(!eligible(bad, shape), "invalid or non-A16/B16/C16 operand");
+                    ] {
+                        assert!(
+                            !eligible_for(nvrtc, bad, shape),
+                            "invalid or non-A16/B16/C16 operand"
+                        );
+                    }
                 }
-            }
-            for pointer in [0, 0x4001, 0x4002, 0x4003] {
-                assert!(!eligible(
-                    FixedFwdOperands {
-                        bias_ptr: Some(pointer),
-                        ..good
-                    },
-                    shape
-                ));
-            }
-            for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-                for bad in [
-                    FixedFwdOperands {
-                        c: TypedPtr { dtype, ..good.c },
-                        ..good
-                    },
-                    FixedFwdOperands {
-                        x: TypedPtr { dtype, ..good.x },
-                        ..good
-                    },
-                    FixedFwdOperands {
-                        w: TypedPtr { dtype, ..good.w },
-                        ..good
-                    },
-                    FixedFwdOperands {
-                        c: TypedPtr { dtype, ..good.c },
-                        x: TypedPtr { dtype, ..good.x },
-                        w: TypedPtr { dtype, ..good.w },
-                        ..good
-                    },
-                ] {
-                    assert!(
-                        !eligible(bad, shape),
-                        "only homogeneous exact F32 is admitted"
-                    );
+                for pointer in [0, 0x4001, 0x4002, 0x4003] {
+                    assert!(!eligible_for(
+                        nvrtc,
+                        FixedFwdOperands {
+                            bias_ptr: Some(pointer),
+                            ..good
+                        },
+                        shape
+                    ));
+                }
+                for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                    for bad in [
+                        FixedFwdOperands {
+                            c: TypedPtr { dtype, ..good.c },
+                            ..good
+                        },
+                        FixedFwdOperands {
+                            x: TypedPtr { dtype, ..good.x },
+                            ..good
+                        },
+                        FixedFwdOperands {
+                            w: TypedPtr { dtype, ..good.w },
+                            ..good
+                        },
+                        FixedFwdOperands {
+                            c: TypedPtr { dtype, ..good.c },
+                            x: TypedPtr { dtype, ..good.x },
+                            w: TypedPtr { dtype, ..good.w },
+                            ..good
+                        },
+                    ] {
+                        assert!(
+                            !eligible_for(nvrtc, bad, shape),
+                            "only homogeneous exact F32 is admitted"
+                        );
+                    }
                 }
             }
         }
@@ -6336,7 +6368,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 43, 8),
+            (5, 44, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

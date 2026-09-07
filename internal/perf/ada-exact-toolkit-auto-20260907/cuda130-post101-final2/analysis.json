@@ -1,0 +1,224 @@
+{
+  "eligible": [
+    "hot_a:0",
+    "hot_a:1",
+    "hot_b:0",
+    "hot_b:1",
+    "hot_d:0",
+    "hot_d:1",
+    "hot_e:0",
+    "hot_e:1"
+  ],
+  "family": "f32_exact_post_auto",
+  "identity": {
+    "binary_sha": "1b8b31e201c7d252e52a418637ebb5706651ceeb0c56dc42c0dfce145decc170",
+    "cc": "8.9",
+    "compiler_target": "sm_89",
+    "family": "f32_exact_post_auto",
+    "fixed_artifact_digest": "d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9",
+    "fixed_invocation_digest": "adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155",
+    "fixed_source_digest": "205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5",
+    "header_manifest_digest": "5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78",
+    "kind": "identity",
+    "literal_control": "hot_a:0,hot_a:1,hot_b:0,hot_b:1,hot_d:0,hot_d:1,hot_e:0,hot_e:1",
+    "logical_ops": 20,
+    "numeric_abi_revision": 5,
+    "nvrtc_library_domain": "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+    "nvrtc_library_known": true,
+    "paths": [
+      "eager",
+      "graph"
+    ],
+    "promotion_basis": {
+      "cuda128_confirm_sha": "eb3b0abee0e336c7c93f9c5eddec698dae8a3fc1d8363ca337047b835758ad96",
+      "cuda128_screen_sha": "d43c360d844065a3691f933b0b743a18e8482d2d36de787ef0ed2392e30e53bf",
+      "cuda130_confirm_sha": "0b27351512f3265b156a29aaf7fadcaf4a84870cac06e1c1b36ce3e358f20711",
+      "cuda130_screen_sha": "cae9db1864bd64700ee3033196eae4c6f8a0abd7a3a1cf09a407889cb7727682",
+      "task7_final_review_sha": "750e0d02b524229c7a987894eee214af5e33e57f75499779b7263352b33697ac",
+      "task7_selected_manifest_sha": "822560b7978f641543418e5971033b872dd83198157d8456d20317998c4c58d7",
+      "task7_source_sha": "97f3d43fc315c96238f41f9f39bc15418518b5493e216fb9bc0a8f03a46e5bc7"
+    },
+    "schedule_revision": 8,
+    "schema": "MambaBiFixedAdaExactPostAutoV1",
+    "screen_artifact_sha": null,
+    "screen_sha": null,
+    "sm_count": 142,
+    "source_sha": "2ac1c93ba3e4682138a0df3341a26921438334382532d6943277268320655285",
+    "stage": "post101",
+    "start_parities": [
+      0,
+      1
+    ],
+    "toolkit": "13.0",
+    "tuning_revision": 44,
+    "uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+    "vendor_algorithm": "CUBLAS_GEMM_DEFAULT",
+    "vendor_atomics": "CUBLAS_ATOMICS_NOT_ALLOWED",
+    "vendor_compute": "CUBLAS_COMPUTE_32F_FAST_TF32",
+    "vendor_math": "CUBLAS_DEFAULT_MATH",
+    "vendor_pointer_mode": "CUBLAS_POINTER_MODE_HOST",
+    "warmup_eager": 128,
+    "windows": 101
+  },
+  "jsonl_sha": "a7b80ab4ad84488ebfaa006909a43dc85ba1db648793b086c44b76e8a623a21e",
+  "literals": [
+    "hot_a:0",
+    "hot_a:1",
+    "hot_b:0",
+    "hot_b:1",
+    "hot_d:0",
+    "hot_d:1",
+    "hot_e:0",
+    "hot_e:1"
+  ],
+  "own_strata": {
+    "hot_a:0": [
+      [
+        0.8429693562018091,
+        0.8814667422733163
+      ],
+      [
+        0.8440639190943083,
+        0.875254358363876
+      ],
+      [
+        0.8427531104308769,
+        0.8799719868870693
+      ],
+      [
+        0.8458262509054415,
+        0.8702603718886572
+      ]
+    ],
+    "hot_a:1": [
+      [
+        0.8408015213543427,
+        0.8888792300688686
+      ],
+      [
+        0.8429086559018163,
+        0.8849456370314689
+      ],
+      [
+        0.8426986591808587,
+        0.8822565419672183
+      ],
+      [
+        0.8426379313433291,
+        0.8812904079408804
+      ]
+    ],
+    "hot_b:0": [
+      [
+        0.8110938186196982,
+        0.8429826164185497
+      ],
+      [
+        0.824086583741684,
+        0.8488352476871851
+      ],
+      [
+        0.815895586223382,
+        0.8484087492179417
+      ],
+      [
+        0.8168478115550784,
+        0.8452624169720269
+      ]
+    ],
+    "hot_b:1": [
+      [
+        0.815857051015355,
+        0.838746547031307
+      ],
+      [
+        0.815831384648246,
+        0.8417081486408633
+      ],
+      [
+        0.8167897618570222,
+        0.8383114217916292
+      ],
+      [
+        0.8171827630182967,
+        0.8356209416673843
+      ]
+    ],
+    "hot_d:0": [
+      [
+        0.8269252558054374,
+        0.8485941044230696
+      ],
+      [
+        0.8270967596888231,
+        0.8472691574942134
+      ],
+      [
+        0.8271433406646501,
+        0.8460742748052676
+      ],
+      [
+        0.8288707744477672,
+        0.8469384146159127
+      ]
+    ],
+    "hot_d:1": [
+      [
+        0.8278729314762001,
+        0.851997192393095
+      ],
+      [
+        0.8289350747202786,
+        0.8604615231024804
+      ],
+      [
+        0.8291896328032592,
+        0.8544094583471152
+      ],
+      [
+        0.8274014967415275,
+        0.8502081064946608
+      ]
+    ],
+    "hot_e:0": [
+      [
+        0.8141360872692817,
+        0.829534904867392
+      ],
+      [
+        0.8151233616614089,
+        0.8263949298876865
+      ],
+      [
+        0.8146107140512164,
+        0.8300172140746289
+      ],
+      [
+        0.8154232157585688,
+        0.829049218911382
+      ]
+    ],
+    "hot_e:1": [
+      [
+        0.8153532717016096,
+        0.8394253821451414
+      ],
+      [
+        0.8139347619074476,
+        0.8328642999396114
+      ],
+      [
+        0.8139938435675849,
+        0.8353469546267757
+      ],
+      [
+        0.8139260832189396,
+        0.8351170239813704
+      ]
+    ]
+  },
+  "stage": "post101",
+  "toolkit": "13.0",
+  "valid": true,
+  "windows": 101
+}

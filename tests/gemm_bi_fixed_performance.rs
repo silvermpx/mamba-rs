@@ -28,8 +28,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
-    digest_hex,
+    ModuleKind, ResolvedGemmOp, TUNING_TABLE_REVISION, digest_hex,
 };
 use sha2::{Digest, Sha256};
 
@@ -14451,6 +14450,17 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
         device_metadata,
         fixed_exact_comparator_completion_metadata(),
     );
+}
+
+#[test]
+#[ignore = "requires explicit Task8 post-AUTO44 controls and the admitted quiet CC8.9 Ada GPU"]
+fn fixed_ada_exact_post_auto_paired_precision_cublas() {
+    assert_eq!(
+        std::env::var("MAMBA_FIXED_ADA_EXACT_POST_AUTO").as_deref(),
+        Ok("1"),
+        "MAMBA_FIXED_ADA_EXACT_POST_AUTO must be exactly 1"
+    );
+    toolkit_admission::run_post_auto();
 }
 
 fn fixed_ada_direct_pair_poison_complement(

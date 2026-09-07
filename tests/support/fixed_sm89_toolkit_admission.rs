@@ -13,14 +13,23 @@ enum Family {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunMode {
+    Task7,
+    PostAuto44,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stage {
     Smoke1,
     Screen21,
     Confirm101,
+    PostSmoke1,
+    Post101,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct Config {
+    mode: RunMode,
     family: Family,
     stage: Stage,
     windows: usize,
@@ -163,8 +172,10 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
             Some(parse_sha("MAMBA_FIXED_ADA_SCREEN_SHA")?),
             Some(parse_sha("MAMBA_FIXED_ADA_SCREEN_ARTIFACT_SHA")?),
         ),
+        Stage::PostSmoke1 | Stage::Post101 => unreachable!("Task7 parser produced Task8 stage"),
     };
     Ok(Config {
+        mode: RunMode::Task7,
         family,
         stage,
         windows,
@@ -174,6 +185,108 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
         binary_sha,
         screen_sha,
         screen_artifact_sha,
+        jsonl: jsonl.to_owned(),
+    })
+}
+
+fn parse_post_config(environment: &BTreeMap<String, String>) -> Result<Config, String> {
+    const ALLOWED: [&str; 13] = [
+        "MAMBA_FIXED_ADA_EXACT_POST_AUTO",
+        "MAMBA_FIXED_ADA_VENDOR",
+        "MAMBA_FIXED_ADA_EXACT_POST_STAGE",
+        "MAMBA_FIXED_ADA_EXACT_POST_WINDOWS",
+        "MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT",
+        "MAMBA_FIXED_ADA_EXACT_POST_LITERALS",
+        "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION",
+        "MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA",
+        "MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA",
+        "MAMBA_FIXED_ADA_EXACT_POST_JSONL",
+        "MAMBA_FIXED_VENDOR_TILES",
+        "MAMBA_FIXED_VENDOR_PATHS",
+        "MAMBA_FIXED_VENDOR_EXACT_CC",
+    ];
+    for key in environment.keys() {
+        let scoped = key.starts_with("MAMBA_FIXED_ADA_")
+            || key.starts_with("MAMBA_FIXED_VENDOR_")
+            || matches!(
+                key.as_str(),
+                "MAMBA_FIXED_HALF_TILE_CANDIDATE"
+                    | "MAMBA_FIXED_AUTO_VENDOR_ROW"
+                    | "MAMBA_FIXED_AUTO_VENDOR_CELL"
+                    | "MAMBA_FIXED_AUTO_VENDOR_BIAS"
+                    | "NVIDIA_TF32_OVERRIDE"
+            );
+        if scoped && !ALLOWED.contains(&key.as_str()) {
+            return Err(format!("stale or foreign Task8 control {key}"));
+        }
+    }
+    let required = |key: &str| {
+        environment
+            .get(key)
+            .map(String::as_str)
+            .ok_or_else(|| format!("missing {key}"))
+    };
+    for (key, expected) in [
+        ("MAMBA_FIXED_ADA_EXACT_POST_AUTO", "1"),
+        ("MAMBA_FIXED_ADA_VENDOR", "1"),
+        ("MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION", "44"),
+        ("MAMBA_FIXED_VENDOR_TILES", "Legacy,F32Sm89N64CopyPlan"),
+        ("MAMBA_FIXED_VENDOR_PATHS", "eager,graph"),
+        ("MAMBA_FIXED_VENDOR_EXACT_CC", "8.9"),
+    ] {
+        if required(key)? != expected {
+            return Err(format!("{key} must be exactly {expected}"));
+        }
+    }
+    let toolkit = required("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT")?;
+    if !matches!(toolkit, "12.8" | "13.0") {
+        return Err(format!("unsupported Task8 toolkit {toolkit:?}"));
+    }
+    let (stage, windows) = match required("MAMBA_FIXED_ADA_EXACT_POST_STAGE")? {
+        "smoke1" => (Stage::PostSmoke1, 1),
+        "post101" => (Stage::Post101, 101),
+        value => return Err(format!("unknown Task8 stage {value:?}")),
+    };
+    if required("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS")? != windows.to_string() {
+        return Err(format!("Task8 stage/window mismatch for {stage:?}"));
+    }
+    let parse_sha = |key: &str| -> Result<String, String> {
+        let value = required(key)?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!("{key} must be a lowercase SHA256"));
+        }
+        Ok(value.to_owned())
+    };
+    let literal_text = required("MAMBA_FIXED_ADA_EXACT_POST_LITERALS")?;
+    let literals = literal_text.split(',').collect::<Vec<_>>();
+    if literals != EXACT_LITERALS {
+        return Err(
+            "Task8 post-AUTO requires the complete canonical exact literal inventory".into(),
+        );
+    }
+    let jsonl = required("MAMBA_FIXED_ADA_EXACT_POST_JSONL")?;
+    if !jsonl.starts_with('/') || !jsonl.ends_with(".jsonl") || jsonl.contains(char::is_whitespace)
+    {
+        return Err(
+            "MAMBA_FIXED_ADA_EXACT_POST_JSONL must be an absolute whitespace-free .jsonl path"
+                .into(),
+        );
+    }
+    Ok(Config {
+        mode: RunMode::PostAuto44,
+        family: Family::Exact,
+        stage,
+        windows,
+        toolkit: toolkit.to_owned(),
+        literals: literals.into_iter().map(str::to_owned).collect(),
+        source_sha: parse_sha("MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA")?,
+        binary_sha: parse_sha("MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA")?,
+        screen_sha: None,
+        screen_artifact_sha: None,
         jsonl: jsonl.to_owned(),
     })
 }
@@ -388,8 +501,53 @@ fn validate_configuration(
 }
 
 const SCHEMA: &str = "MambaBiFixedAdaToolkitAdmissionV1";
+const POST_SCHEMA: &str = "MambaBiFixedAdaExactPostAutoV1";
 const GUARD_WORDS: usize = 64;
 const CANARY: u32 = 0x5a5a_5a5a;
+
+impl RunMode {
+    fn schema(self) -> &'static str {
+        match self {
+            Self::Task7 => SCHEMA,
+            Self::PostAuto44 => POST_SCHEMA,
+        }
+    }
+
+    fn tuning_revision(self) -> u16 {
+        match self {
+            Self::Task7 => 43,
+            Self::PostAuto44 => 44,
+        }
+    }
+
+    fn family_name(self, family: Family) -> &'static str {
+        match self {
+            Self::Task7 => family.name(),
+            Self::PostAuto44 => "f32_exact_post_auto",
+        }
+    }
+
+    fn arms(self) -> [&'static str; 3] {
+        match self {
+            Self::Task7 => ["actualAUTO", "candidate", "Fast"],
+            Self::PostAuto44 => ["Legacy", "AUTO", "Fast"],
+        }
+    }
+
+    fn directions(self) -> [&'static str; 3] {
+        match self {
+            Self::Task7 => ["candidate/AUTO", "AUTO/Fast", "candidate/Fast"],
+            Self::PostAuto44 => ["AUTO/Legacy", "Legacy/Fast", "AUTO/Fast"],
+        }
+    }
+
+    fn own_rule(self) -> &'static str {
+        match self {
+            Self::Task7 => "candidate/AUTO p50 and p95 < 1 in all four path/start strata",
+            Self::PostAuto44 => "AUTO/Legacy p50 and p95 < 1 in all four path/start strata",
+        }
+    }
+}
 
 impl Family {
     fn name(self) -> &'static str {
@@ -434,24 +592,28 @@ impl Stage {
             Self::Smoke1 => "smoke1",
             Self::Screen21 => "screen21",
             Self::Confirm101 => "confirm101",
+            Self::PostSmoke1 => "smoke1",
+            Self::Post101 => "post101",
         }
     }
 }
 
 struct Jsonl {
+    schema: &'static str,
     writer: BufWriter<File>,
     digest: Sha256,
     lines: usize,
 }
 
 impl Jsonl {
-    fn create(path: &str) -> Result<Self, String> {
+    fn create(path: &str, schema: &'static str) -> Result<Self, String> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .map_err(|error| format!("create new Task7 JSONL {path}: {error}"))?;
         Ok(Self {
+            schema,
             writer: BufWriter::new(file),
             digest: Sha256::new(),
             lines: 0,
@@ -459,7 +621,7 @@ impl Jsonl {
     }
 
     fn emit(&mut self, fields: &str) -> Result<(), String> {
-        let line = format!("{{\"schema\":\"{SCHEMA}\",{fields}}}\n");
+        let line = format!("{{\"schema\":\"{}\",{fields}}}\n", self.schema);
         self.writer
             .write_all(line.as_bytes())
             .map_err(|error| format!("write Task7 JSONL: {error}"))?;
@@ -607,6 +769,7 @@ impl Guarded {
 }
 
 struct Case {
+    mode: RunMode,
     family: Family,
     shape: FixedShape,
     has_bias: bool,
@@ -620,6 +783,7 @@ struct Case {
 impl Case {
     fn new(
         ctx: &GpuCtx,
+        mode: RunMode,
         family: Family,
         shape: FixedShape,
         has_bias: bool,
@@ -631,6 +795,7 @@ impl Case {
             .map(|_| Guarded::new(ctx, vec![0.0; shape.m * shape.n]))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
+            mode,
             family,
             shape,
             has_bias,
@@ -662,14 +827,17 @@ impl Case {
 
     fn launch(&self, ctx: &GpuCtx, arm: usize) -> Result<(), String> {
         let operands = self.operands(arm);
-        match arm {
-            0 => {
+        match (self.mode, arm) {
+            (RunMode::Task7, 0) | (RunMode::PostAuto44, 1) => {
                 let selected = launch_fixed_auto_vendor_custom(ctx, operands, self.shape);
-                if selected != self.family.incumbent() {
+                let expected = match self.mode {
+                    RunMode::Task7 => self.family.incumbent(),
+                    RunMode::PostAuto44 => FixedTile::F32Sm89N64CopyPlan,
+                };
+                if selected != expected {
                     return Err(format!(
-                        "Task7 actual AUTO {:?} differs from incumbent {:?}",
-                        selected,
-                        self.family.incumbent()
+                        "actual AUTO {selected:?} differs from required {expected:?} for {:?}",
+                        self.mode,
                     ));
                 }
                 if self
@@ -677,13 +845,18 @@ impl Case {
                     .get()
                     .is_some_and(|previous| previous != selected)
                 {
-                    return Err("Task7 actual AUTO enum drifted between launches".into());
+                    return Err("actual AUTO enum drifted between launches".into());
                 }
                 self.selected.set(Some(selected));
                 Ok(())
             }
-            1 => fixed_forward_with_tile(ctx, operands, self.shape, self.family.candidate()),
-            2 => {
+            (RunMode::Task7, 1) => {
+                fixed_forward_with_tile(ctx, operands, self.shape, self.family.candidate())
+            }
+            (RunMode::PostAuto44, 0) => {
+                fixed_forward_with_tile(ctx, operands, self.shape, FixedTile::Legacy)
+            }
+            (_, 2) => {
                 fixed_ada_vendor_launch(
                     ctx,
                     operands,
@@ -692,7 +865,7 @@ impl Case {
                 );
                 Ok(())
             }
-            3 => {
+            (_, 3) => {
                 fixed_ada_vendor_launch(
                     ctx,
                     operands,
@@ -701,7 +874,7 @@ impl Case {
                 );
                 Ok(())
             }
-            _ => Err("unknown Task7 arm".into()),
+            _ => Err("unknown toolkit admission arm".into()),
         }
     }
 
@@ -1071,6 +1244,8 @@ fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
 fn source_sha() -> Result<String, String> {
     let mut digest = Sha256::new();
     for path in [
+        "src/mamba_ssm/gpu/gemm_bi_fixed.rs",
+        "src/mamba_ssm/gpu/kernel_identity.rs",
         "tests/gemm_bi_fixed_performance.rs",
         "tests/support/fixed_sm89_toolkit_admission.rs",
     ] {
@@ -1260,15 +1435,20 @@ fn timing_boundary_gate<T>(
     post_timing_workflows()
 }
 
-fn run_inner() -> Result<(), String> {
+fn run_inner(mode: RunMode) -> Result<(), String> {
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-    let config = parse_config(&environment)?;
+    let config = match mode {
+        RunMode::Task7 => parse_config(&environment)?,
+        RunMode::PostAuto44 => parse_post_config(&environment)?,
+    };
     if cfg!(debug_assertions) {
-        return Err("Task7 toolkit admission requires --release".into());
+        return Err("toolkit admission requires --release".into());
     }
-    if TUNING_TABLE_REVISION != 43 {
+    if TUNING_TABLE_REVISION != config.mode.tuning_revision() {
         return Err(format!(
-            "Task7 requires tuning revision43, got {TUNING_TABLE_REVISION}"
+            "{:?} requires tuning revision{}, got {TUNING_TABLE_REVISION}",
+            config.mode,
+            config.mode.tuning_revision(),
         ));
     }
     let measured_source_sha = source_sha()?;
@@ -1278,7 +1458,7 @@ fn run_inner() -> Result<(), String> {
             "Task7 source/binary binding mismatch source={measured_source_sha} binary={measured_binary_sha}"
         ));
     }
-    let mut output = Jsonl::create(&config.jsonl)?;
+    let mut output = Jsonl::create(&config.jsonl, config.mode.schema())?;
     let device = GpuDevice::new(0).map_err(|error| format!("Task7 CUDA device: {error}"))?;
     if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
         return Err(format!(
@@ -1303,6 +1483,20 @@ fn run_inner() -> Result<(), String> {
     let modes = cublas_modes(&ctx)?;
     let artifact = ctx.kernels.artifact_set_identity().fixed;
     let artifact_sha = digest_hex(&artifact.artifact_digest);
+    let promotion_basis = match config.mode {
+        RunMode::Task7 => String::new(),
+        RunMode::PostAuto44 => concat!(
+            "\"promotion_basis\":{",
+            "\"task7_source_sha\":\"97f3d43fc315c96238f41f9f39bc15418518b5493e216fb9bc0a8f03a46e5bc7\",",
+            "\"cuda128_screen_sha\":\"d43c360d844065a3691f933b0b743a18e8482d2d36de787ef0ed2392e30e53bf\",",
+            "\"cuda128_confirm_sha\":\"eb3b0abee0e336c7c93f9c5eddec698dae8a3fc1d8363ca337047b835758ad96\",",
+            "\"cuda130_screen_sha\":\"cae9db1864bd64700ee3033196eae4c6f8a0abd7a3a1cf09a407889cb7727682\",",
+            "\"cuda130_confirm_sha\":\"0b27351512f3265b156a29aaf7fadcaf4a84870cac06e1c1b36ce3e358f20711\",",
+            "\"task7_final_review_sha\":\"750e0d02b524229c7a987894eee214af5e33e57f75499779b7263352b33697ac\",",
+            "\"task7_selected_manifest_sha\":\"822560b7978f641543418e5971033b872dd83198157d8456d20317998c4c58d7\"},"
+        )
+        .to_owned(),
+    };
     prelaunch_gate(
         compiler.numeric_abi_revision,
         compiler.schedule_revision,
@@ -1313,7 +1507,7 @@ fn run_inner() -> Result<(), String> {
     output.emit(&format!(
         concat!(
             "\"kind\":\"identity\",\"family\":\"{}\",\"stage\":\"{}\",",
-            "\"windows\":{},\"toolkit\":\"{}\",\"tuning_revision\":43,",
+            "\"windows\":{},\"toolkit\":\"{}\",\"tuning_revision\":{},",
             "\"numeric_abi_revision\":{},\"schedule_revision\":{},",
             "\"uuid\":\"{}\",\"cc\":\"8.9\",\"sm_count\":142,",
             "\"compiler_target\":\"sm_89\",\"nvrtc_library_known\":true,",
@@ -1322,12 +1516,13 @@ fn run_inner() -> Result<(), String> {
             "\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",",
             "\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",",
             "\"literal_control\":\"{}\",\"paths\":[\"eager\",\"graph\"],",
-            "\"start_parities\":[0,1],\"warmup_eager\":128,\"logical_ops\":20,{}"
+            "\"start_parities\":[0,1],\"warmup_eager\":128,\"logical_ops\":20,{}{}"
         ),
-        config.family.name(),
+        config.mode.family_name(config.family),
         config.stage.name(),
         config.windows,
         config.toolkit,
+        config.mode.tuning_revision(),
         compiler.numeric_abi_revision,
         compiler.schedule_revision,
         "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
@@ -1349,10 +1544,11 @@ fn run_inner() -> Result<(), String> {
         digest_hex(&compiler.header_manifest_digest),
         digest_hex(&compiler.nvrtc_library_domain),
         config.literals.join(","),
+        promotion_basis,
         modes,
     ))?;
-    let arms = ["actualAUTO", "candidate", "Fast"];
-    let directions = ["candidate/AUTO", "AUTO/Fast", "candidate/Fast"];
+    let arms = config.mode.arms();
+    let directions = config.mode.directions();
     let mut configurations = 0;
     for literal_name in &config.literals {
         let (shape, has_bias) = literal(literal_name)?;
@@ -1366,7 +1562,7 @@ fn run_inner() -> Result<(), String> {
         {
             return Err("Task7 TF32 literal shape differs from C".into());
         }
-        let case = Case::new(&ctx, config.family, shape, has_bias)?;
+        let case = Case::new(&ctx, config.mode, config.family, shape, has_bias)?;
         for arm in 0..4 {
             case.launch(&ctx, arm)?;
         }
@@ -1377,7 +1573,7 @@ fn run_inner() -> Result<(), String> {
             .collect::<Result<Vec<_>, _>>()?;
         if expected[0] != expected[1] {
             return Err(format!(
-                "Task7 candidate changed incumbent raw bits for {literal_name}"
+                "custom owner arms changed exact raw bits for {literal_name}"
             ));
         }
         finite_order_control(&case, &expected)?;
@@ -1463,29 +1659,37 @@ fn run_inner() -> Result<(), String> {
         }
         case.launch(&ctx, 1)?;
         case.inputs(&ctx)?;
+        let route_fields = match config.mode {
+            RunMode::Task7 => format!(
+                "\"actual_auto\":\"{:?}\",\"candidate\":\"{:?}\",\"graphs\":{{\"actualAUTO\":{},\"candidate\":{},\"Fast\":{}}}",
+                config.family.incumbent(),
+                config.family.candidate(),
+                physical[0],
+                physical[1],
+                physical[2],
+            ),
+            RunMode::PostAuto44 => format!(
+                "\"former_incumbent\":\"Legacy\",\"actual_auto\":\"F32Sm89N64CopyPlan\",\"public_auto_enum_verified\":true,\"graphs\":{{\"Legacy\":{},\"AUTO\":{},\"Fast\":{}}}",
+                physical[0], physical[1], physical[2],
+            ),
+        };
         output.emit(&format!(
             concat!(
                 "\"kind\":\"physical\",\"family\":\"{}\",\"stage\":\"{}\",",
-                "\"literal\":\"{}\",\"bias\":{},\"shape\":[{},{},{}],",
-                "\"actual_auto\":\"{:?}\",\"candidate\":\"{:?}\",",
-                "\"graphs\":{{\"actualAUTO\":{},\"candidate\":{},\"Fast\":{}}},",
+                "\"literal\":\"{}\",\"bias\":{},\"shape\":[{},{},{}],{},",
                 "\"custom_bits_equal\":true,\"fast_repeat_bits\":true,",
                 "\"poison_upload_readback\":true,\"noop_rejected\":true,",
                 "\"guards\":true,\"immutable_inputs\":true,\"bias_orientation\":true,",
                 "\"finite_ordering_controls\":true"
             ),
-            config.family.name(),
+            config.mode.family_name(config.family),
             config.stage.name(),
             literal_name,
             has_bias,
             shape.m,
             shape.k,
             shape.n,
-            config.family.incumbent(),
-            config.family.candidate(),
-            physical[0],
-            physical[1],
-            physical[2],
+            route_fields,
         ))?;
         let mut own_strata = Vec::with_capacity(4);
         for path in ["eager", "graph"] {
@@ -1557,7 +1761,7 @@ fn run_inner() -> Result<(), String> {
                             "\"comparison\":{},\"position\":{},\"arm\":\"{}\",",
                             "\"logical_ops\":20,\"us\":{}"
                         ),
-                        config.family.name(),
+                        config.mode.family_name(config.family),
                         config.stage.name(),
                         literal_name,
                         path,
@@ -1584,7 +1788,7 @@ fn run_inner() -> Result<(), String> {
                             "\"direction\":\"{}\",\"observations\":[{},{},{},{}],",
                             "\"ratio\":{}"
                         ),
-                        config.family.name(),
+                        config.mode.family_name(config.family),
                         config.stage.name(),
                         literal_name,
                         path,
@@ -1611,7 +1815,7 @@ fn run_inner() -> Result<(), String> {
                             "\"comparison\":{},\"direction\":\"{}\",\"windows\":{},",
                             "\"p50\":{},\"p95\":{}"
                         ),
-                        config.family.name(),
+                        config.mode.family_name(config.family),
                         config.stage.name(),
                         literal_name,
                         path,
@@ -1639,7 +1843,7 @@ fn run_inner() -> Result<(), String> {
                         "\"start_parity\":{},\"samples\":{},\"pairs\":{},",
                         "\"summaries\":3,\"physical_bits_guards_inputs\":true"
                     ),
-                    config.family.name(),
+                    config.mode.family_name(config.family),
                     config.stage.name(),
                     literal_name,
                     path,
@@ -1654,12 +1858,13 @@ fn run_inner() -> Result<(), String> {
             concat!(
                 "\"kind\":\"literal_decision\",\"family\":\"{}\",\"stage\":\"{}\",",
                 "\"literal\":\"{}\",\"own_admission\":{},",
-                "\"own_rule\":\"candidate/AUTO p50 and p95 < 1 in all four path/start strata\""
+                "\"own_rule\":\"{}\""
             ),
-            config.family.name(),
+            config.mode.family_name(config.family),
             config.stage.name(),
             literal_name,
             literal_admitted(&own_strata)?,
+            config.mode.own_rule(),
         ))?;
     }
     if configurations != config.literals.len() * 4 {
@@ -1669,7 +1874,13 @@ fn run_inner() -> Result<(), String> {
 }
 
 pub(super) fn run() {
-    run_inner().unwrap_or_else(|error| panic!("Task7 toolkit admission rejected: {error}"));
+    run_inner(RunMode::Task7)
+        .unwrap_or_else(|error| panic!("Task7 toolkit admission rejected: {error}"));
+}
+
+pub(super) fn run_post_auto() {
+    run_inner(RunMode::PostAuto44)
+        .unwrap_or_else(|error| panic!("Task8 post-AUTO admission rejected: {error}"));
 }
 
 #[cfg(test)]
@@ -1705,12 +1916,122 @@ mod tests {
         ])
     }
 
+    fn exact_post(stage: &str, windows: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("MAMBA_FIXED_ADA_EXACT_POST_AUTO".into(), "1".into()),
+            ("MAMBA_FIXED_ADA_VENDOR".into(), "1".into()),
+            ("MAMBA_FIXED_ADA_EXACT_POST_STAGE".into(), stage.into()),
+            ("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS".into(), windows.into()),
+            ("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT".into(), "12.8".into()),
+            (
+                "MAMBA_FIXED_ADA_EXACT_POST_LITERALS".into(),
+                EXACT_LITERALS.join(","),
+            ),
+            (
+                "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION".into(),
+                "44".into(),
+            ),
+            ("MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA".into(), sha('c')),
+            ("MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA".into(), sha('d')),
+            (
+                "MAMBA_FIXED_ADA_EXACT_POST_JSONL".into(),
+                "/root/evidence/task8-post.jsonl".into(),
+            ),
+            (
+                "MAMBA_FIXED_VENDOR_TILES".into(),
+                "Legacy,F32Sm89N64CopyPlan".into(),
+            ),
+            ("MAMBA_FIXED_VENDOR_PATHS".into(), "eager,graph".into()),
+            ("MAMBA_FIXED_VENDOR_EXACT_CC".into(), "8.9".into()),
+        ])
+    }
+
+    #[test]
+    fn post44_controls_schema_roles_and_directions_are_explicit_and_disjoint() {
+        let smoke = parse_post_config(&exact_post("smoke1", "1")).unwrap();
+        assert_eq!(smoke.mode, RunMode::PostAuto44);
+        assert_eq!(smoke.family, Family::Exact);
+        assert_eq!(smoke.stage, Stage::PostSmoke1);
+        assert_eq!(smoke.windows, 1);
+        assert_eq!(smoke.literals, EXACT_LITERALS.map(str::to_owned));
+        assert_eq!(smoke.mode.schema(), "MambaBiFixedAdaExactPostAutoV1");
+        assert_eq!(smoke.mode.tuning_revision(), 44);
+        assert_eq!(smoke.mode.arms(), ["Legacy", "AUTO", "Fast"]);
+        assert_eq!(
+            smoke.mode.directions(),
+            ["AUTO/Legacy", "Legacy/Fast", "AUTO/Fast"]
+        );
+
+        let post = parse_post_config(&exact_post("post101", "101")).unwrap();
+        assert_eq!(post.stage, Stage::Post101);
+        assert_eq!(post.windows, 101);
+        assert!(parse_config(&exact_post("smoke1", "1")).is_err());
+        assert!(parse_post_config(&exact_screen()).is_err());
+    }
+
+    #[test]
+    fn post44_controls_reject_missing_malformed_stale_family_or_subset() {
+        for key in [
+            "MAMBA_FIXED_ADA_EXACT_POST_AUTO",
+            "MAMBA_FIXED_ADA_VENDOR",
+            "MAMBA_FIXED_ADA_EXACT_POST_STAGE",
+            "MAMBA_FIXED_ADA_EXACT_POST_WINDOWS",
+            "MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT",
+            "MAMBA_FIXED_ADA_EXACT_POST_LITERALS",
+            "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION",
+            "MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA",
+            "MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA",
+            "MAMBA_FIXED_ADA_EXACT_POST_JSONL",
+            "MAMBA_FIXED_VENDOR_TILES",
+            "MAMBA_FIXED_VENDOR_PATHS",
+            "MAMBA_FIXED_VENDOR_EXACT_CC",
+        ] {
+            let mut environment = exact_post("smoke1", "1");
+            environment.remove(key);
+            assert!(
+                parse_post_config(&environment).is_err(),
+                "accepted missing {key}"
+            );
+        }
+        for (key, value) in [
+            ("MAMBA_FIXED_ADA_EXACT_POST_AUTO", "true"),
+            ("MAMBA_FIXED_ADA_EXACT_POST_STAGE", "confirm101"),
+            ("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS", "21"),
+            ("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT", "13.2"),
+            ("MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION", "43"),
+            ("MAMBA_FIXED_ADA_EXACT_POST_LITERALS", "hot_a:0"),
+            ("MAMBA_FIXED_VENDOR_TILES", "F32Sm89N64CopyPlan"),
+        ] {
+            let mut environment = exact_post("smoke1", "1");
+            environment.insert(key.into(), value.into());
+            assert!(
+                parse_post_config(&environment).is_err(),
+                "accepted {key}={value}"
+            );
+        }
+        for stale in [
+            "MAMBA_FIXED_ADA_TOOLKIT_ADMISSION",
+            "MAMBA_FIXED_ADA_ROWS",
+            "MAMBA_FIXED_ADA_SCREEN_SHA",
+            "MAMBA_FIXED_ADA_EXACT_POST_FAMILY",
+            "NVIDIA_TF32_OVERRIDE",
+        ] {
+            let mut environment = exact_post("smoke1", "1");
+            environment.insert(stale.into(), "1".into());
+            assert!(
+                parse_post_config(&environment).is_err(),
+                "accepted stale {stale}"
+            );
+        }
+    }
+
     #[test]
     fn strict_controls_bind_family_stage_toolkit_source_binary_and_literals() {
         let config = parse_config(&exact_screen()).unwrap();
         assert_eq!(
             config,
             Config {
+                mode: RunMode::Task7,
                 family: Family::Exact,
                 stage: Stage::Screen21,
                 windows: 21,

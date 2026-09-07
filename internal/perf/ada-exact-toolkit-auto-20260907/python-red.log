@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-exact-toolkit-auto-20260907/test_validation.py", line 15, in <module>
+    SPEC.loader.exec_module(analyze)
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1132, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1190, in get_data
+FileNotFoundError: [Errno 2] No such file or directory: '/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-exact-toolkit-auto-20260907/analyze.py'
