@@ -1,0 +1,15 @@
+
+running 1 test
+test f32_t256_small_bits_prefix_tail_and_resources ... 
+thread 'f32_t256_small_bits_prefix_tail_and_resources' (2987629) panicked at tests/gemm_bi_fixed_f32_t256_discovery.rs:140:23:
+called `Result::unwrap()` on an `Err` value: "resource gate regs=80 local=24 shared=32768 occupancy=3"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    f32_t256_small_bits_prefix_tail_and_resources
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 5.39s
+

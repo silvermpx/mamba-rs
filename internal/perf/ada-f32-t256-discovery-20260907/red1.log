@@ -1,0 +1,105 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.22
+   Compiling serde_core v1.0.228
+   Compiling libc v0.2.186
+   Compiling crossbeam-epoch v0.9.20
+   Compiling autocfg v1.5.1
+   Compiling bitflags v2.13.1
+   Compiling typenum v1.20.1
+   Compiling rustix v1.1.4
+   Compiling crossbeam-deque v0.8.7
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling libm v0.2.16
+   Compiling rayon-core v1.13.0
+   Compiling paste v1.0.15
+   Compiling serde v1.0.228
+   Compiling zerocopy v0.8.54
+   Compiling serde_json v1.0.150
+   Compiling fastrand v2.4.1
+   Compiling equivalent v1.0.2
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling cudarc v0.19.9
+   Compiling allocator-api2 v0.2.21
+   Compiling once_cell v1.21.4
+   Compiling foldhash v0.2.0
+   Compiling reborrow v0.5.5
+   Compiling cpufeatures v0.2.17
+   Compiling either v1.16.0
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling libloading v0.9.0
+   Compiling raw-cpuid v11.6.0
+   Compiling generic-array v0.14.7
+   Compiling pulp v0.22.3
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling rayon v1.12.0
+   Compiling tempfile v3.27.0
+   Compiling hashbrown v0.16.1
+   Compiling bytemuck_derive v1.11.0
+   Compiling zerocopy-derive v0.8.54
+   Compiling serde_derive v1.0.228
+   Compiling bytemuck v1.25.1
+   Compiling num-complex v0.4.6
+   Compiling safetensors v0.8.0
+   Compiling half v2.7.1
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+warning: constant `T256_START` is never used
+ --> tests/gemm_bi_fixed_f32_t256_discovery.rs:8:7
+  |
+8 | const T256_START: &str =
+  |       ^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `T256_END` is never used
+  --> tests/gemm_bi_fixed_f32_t256_discovery.rs:10:7
+   |
+10 | const T256_END: &str =
+   |       ^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_fixed_f32_t256_discovery") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 51.60s
+     Running tests/gemm_bi_fixed_f32_t256_discovery.rs (/root/target-ada-exact-toolkit-auto-f32t256d1-cuda132-20260907/release/deps/gemm_bi_fixed_f32_t256_discovery-affc2122f2c3c086)
+
+running 5 tests
+test f32_t256_b0_paired_discovery ... ignored, bounded CUDA13.2/CC8.9 exact-F32 T256 paired discovery
+test f32_t256_small_bits_prefix_tail_and_resources ... ignored, bounded CUDA13.2/CC8.9 exact-F32 T256 correctness discovery
+
+thread 'f32_t256_copy_plan_covers_each_vector_once' (2950033) panicked at tests/gemm_bi_fixed_f32_t256_discovery.rs:52:13:
+assertion failed: a.insert(a_copy(thread, slice))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'f32_t256_threads_partition_the_output' (2950035) panicked at tests/gemm_bi_fixed_f32_t256_discovery.rs:69:9:
+assertion `left == right` failed
+  left: 0
+ right: 16
+
+thread 'f32_t256_extracts_the_pinned_existing_body' (2950034) panicked at tests/gemm_bi_fixed_f32_t256_discovery.rs:37:5:
+assertion `left == right` failed
+  left: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+ right: "8db567604e13ff8afba012235b59b58c6579b5c4857be4bb7164dbb639a38541"
+test f32_t256_copy_plan_covers_each_vector_once ... FAILED
+test f32_t256_threads_partition_the_output ... FAILED
+test f32_t256_extracts_the_pinned_existing_body ... FAILED
+
+failures:
+
+failures:
+    f32_t256_copy_plan_covers_each_vector_once
+    f32_t256_extracts_the_pinned_existing_body
+    f32_t256_threads_partition_the_output
+
+test result: FAILED. 0 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_f32_t256_discovery`

@@ -1,0 +1,76 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:381:18
+    |
+381 |     Ok((pct(&all,.5),pct(&all,.95)))
+    |                  ^^
+    |
+help: must have an integer part
+    |
+381 |     Ok((pct(&all,0.5),pct(&all,.95)))
+    |                  +
+
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:381:31
+    |
+381 |     Ok((pct(&all,.5),pct(&all,.95)))
+    |                               ^^^
+    |
+help: must have an integer part
+    |
+381 |     Ok((pct(&all,.5),pct(&all,0.95)))
+    |                               +
+
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:380:993
+    |
+380 | ...?},\"ratios\":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                   ^^
+    |
+help: must have an integer part
+    |
+380 |     for (order,cf) in [("abba",true),("baab",false)] { let mut cs=Vec::new();let mut os=Vec::new();let mut rs=Vec::new(); for _ in 0..windows { let (c1,o1,o2,c2)=if cf{(measure(runtime,fixture,Arm::Candidate,ci)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,Arm::Candidate,ci)?)}else{let o1=measure(runtime,fixture,other,oi)?;let c1=measure(runtime,fixture,Arm::Candidate,ci)?;let c2=measure(runtime,fixture,Arm::Candidate,ci)?;let o2=measure(runtime,fixture,other,oi)?;(c1,o1,o2,c2)};let c=(c1+c2)*0.5;let o=(o1+o2)*0.5;cs.push(c);os.push(o);rs.push(c/o);all.push(c/o); } println!("{{\"schema\":\"MambaBiFixedF32T256TimingV1\",\"comparator\":\"{}\",\"order\":\"{}\",\"windows\":{},\"candidate_iterations\":{},\"comparator_iterations\":{},\"candidate_p50_us\":{},\"comparator_p50_us\":{},\"ratio_p50\":{},\"ratio_p95\":{},\"candidate_samples_us\":{:?},\"comparator_samples_us\":{:?},\"ratios\":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,0.5),pct(&os,.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 +
+
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:380:1005
+    |
+380 | ...":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                   ^^
+    |
+help: must have an integer part
+    |
+380 |     for (order,cf) in [("abba",true),("baab",false)] { let mut cs=Vec::new();let mut os=Vec::new();let mut rs=Vec::new(); for _ in 0..windows { let (c1,o1,o2,c2)=if cf{(measure(runtime,fixture,Arm::Candidate,ci)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,Arm::Candidate,ci)?)}else{let o1=measure(runtime,fixture,other,oi)?;let c1=measure(runtime,fixture,Arm::Candidate,ci)?;let c2=measure(runtime,fixture,Arm::Candidate,ci)?;let o2=measure(runtime,fixture,other,oi)?;(c1,o1,o2,c2)};let c=(c1+c2)*0.5;let o=(o1+o2)*0.5;cs.push(c);os.push(o);rs.push(c/o);all.push(c/o); } println!("{{\"schema\":\"MambaBiFixedF32T256TimingV1\",\"comparator\":\"{}\",\"order\":\"{}\",\"windows\":{},\"candidate_iterations\":{},\"comparator_iterations\":{},\"candidate_p50_us\":{},\"comparator_p50_us\":{},\"ratio_p50\":{},\"ratio_p95\":{},\"candidate_samples_us\":{:?},\"comparator_samples_us\":{:?},\"ratios\":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,0.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             +
+
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:380:1017
+    |
+380 | ...her.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                   ^^
+    |
+help: must have an integer part
+    |
+380 |     for (order,cf) in [("abba",true),("baab",false)] { let mut cs=Vec::new();let mut os=Vec::new();let mut rs=Vec::new(); for _ in 0..windows { let (c1,o1,o2,c2)=if cf{(measure(runtime,fixture,Arm::Candidate,ci)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,Arm::Candidate,ci)?)}else{let o1=measure(runtime,fixture,other,oi)?;let c1=measure(runtime,fixture,Arm::Candidate,ci)?;let c2=measure(runtime,fixture,Arm::Candidate,ci)?;let o2=measure(runtime,fixture,other,oi)?;(c1,o1,o2,c2)};let c=(c1+c2)*0.5;let o=(o1+o2)*0.5;cs.push(c);os.push(o);rs.push(c/o);all.push(c/o); } println!("{{\"schema\":\"MambaBiFixedF32T256TimingV1\",\"comparator\":\"{}\",\"order\":\"{}\",\"windows\":{},\"candidate_iterations\":{},\"comparator_iterations\":{},\"candidate_p50_us\":{},\"comparator_p50_us\":{},\"ratio_p50\":{},\"ratio_p95\":{},\"candidate_samples_us\":{:?},\"comparator_samples_us\":{:?},\"ratios\":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,0.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         +
+
+error: float literals must have an integer part
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:380:1029
+    |
+380 | ...der,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,.5),pct(&rs,.95),cs,os,rs); }
+    |                                                                  ^^^
+    |
+help: must have an integer part
+    |
+380 |     for (order,cf) in [("abba",true),("baab",false)] { let mut cs=Vec::new();let mut os=Vec::new();let mut rs=Vec::new(); for _ in 0..windows { let (c1,o1,o2,c2)=if cf{(measure(runtime,fixture,Arm::Candidate,ci)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,other,oi)?,measure(runtime,fixture,Arm::Candidate,ci)?)}else{let o1=measure(runtime,fixture,other,oi)?;let c1=measure(runtime,fixture,Arm::Candidate,ci)?;let c2=measure(runtime,fixture,Arm::Candidate,ci)?;let o2=measure(runtime,fixture,other,oi)?;(c1,o1,o2,c2)};let c=(c1+c2)*0.5;let o=(o1+o2)*0.5;cs.push(c);os.push(o);rs.push(c/o);all.push(c/o); } println!("{{\"schema\":\"MambaBiFixedF32T256TimingV1\",\"comparator\":\"{}\",\"order\":\"{}\",\"windows\":{},\"candidate_iterations\":{},\"comparator_iterations\":{},\"candidate_p50_us\":{},\"comparator_p50_us\":{},\"ratio_p50\":{},\"ratio_p95\":{},\"candidate_samples_us\":{:?},\"comparator_samples_us\":{:?},\"ratios\":{:?}}}",other.name(),order,windows,ci,oi,pct(&cs,.5),pct(&os,.5),pct(&rs,.5),pct(&rs,0.95),cs,os,rs); }
+    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     +
+
+error: invalid suffix `p` for number literal
+   --> tests/gemm_bi_fixed_f32_t256_discovery.rs:246:72
+    |
+246 |         f32::from_bits(sign | exponent | (state as u32 & 0x7f_ffff)) * 0x1p-120f32
+    |                                                                        ^^^^ invalid suffix `p`
+    |
+    = help: the suffix must be one of the numeric types (`u32`, `isize`, `f32`, etc.)
+
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_f32_t256_discovery") due to 7 previous errors

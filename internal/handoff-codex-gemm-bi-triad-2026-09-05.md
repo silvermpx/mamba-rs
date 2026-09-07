@@ -18,8 +18,10 @@ resources, clocks, raw counters, the failed parser attempt and successful
 Fast-only continuation are retained in
 internal/perf/ada-f32-b0-ncu-20260907/report.md. Do not repeat the captures or
 implement the earlier unsupported A-bank-XOR idea. One test-only existing
-CopyPlan-T256 transplant tests occupancy without changing arithmetic; it is
-not yet an Ada winner. In parallel, the three retained TF32/F16 finalists
+CopyPlan-T256 transplant tested resources without changing arithmetic and
+STOPPED at24localbytes despite80registers/3CTA; no GPUbits or7/21timing ran.
+See internal/perf/ada-f32-t256-discovery-20260907/README.md. This is an
+unqualified resource STOP, not a measured loss. The three TF32/F16 finalists
 are being assembled into forced production routes using the existing test
 harnesses, with all-three-toolkit qualification before literal AUTO changes.
 The active execution brief/ownership is in the existing SDD ledger; keep

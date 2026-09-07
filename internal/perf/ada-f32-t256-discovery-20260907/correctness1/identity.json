@@ -1,0 +1,10 @@
+{
+  "binary": "/root/target-ada-exact-toolkit-auto-f32t256d1-cuda132-20260907/release/deps/gemm_bi_fixed_f32_t256_discovery-affc2122f2c3c086",
+  "binary_sha": "121231b5f683977b8ef0d9b1ee6121f574c0ff8b959aee90611c5490b2f0c1b3",
+  "test_source_sha": "61ef706224948a291e2b94174ef73042f1fc119a3a83a1599f260a3480326ed2",
+  "extracted_source_sha": "5015fbfcd457e92759f2f37a9093175d7e37c941fdd1d8d91258fedb06dddb84",
+  "fragment_sha": "8db567604e13ff8afba012235b59b58c6579b5c4857be4bb7164dbb639a38541",
+  "toolkit": "13.2",
+  "target": "/root/target-ada-exact-toolkit-auto-f32t256d1-cuda132-20260907",
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-f32t256d1-cuda132-20260907"
+}
