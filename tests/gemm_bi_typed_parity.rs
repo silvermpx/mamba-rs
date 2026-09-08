@@ -58,6 +58,8 @@ mod triad_half_tn_microtile_source;
 mod triad_half_tn_regpipe_source;
 #[path = "support/triad_half_tn_s4_source.rs"]
 mod triad_half_tn_s4_source;
+#[path = "support/triad_half_tn_vec2_epilogue_source.rs"]
+mod triad_half_tn_vec2_epilogue_source;
 
 use common::gpu_quiet::QuietGpu;
 use triad_half_tile_screen::{
@@ -3159,6 +3161,7 @@ enum AdaHalfTnCandidateKind {
     Tc64Bk64S2Regpipe,
     M64N128Bk64S2Compact,
     FixedS3Bxor,
+    Tc64Bk64S2RegpipeVec2,
 }
 
 impl AdaHalfTnCandidate {
@@ -3176,6 +3179,7 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => "tc64_bk64_s2_regpipe",
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "m64n128_bk64_s2_compact_xor",
             AdaHalfTnCandidateKind::FixedS3Bxor => "fixed_s3_bxor",
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => "tc64_bk64_s2_regpipe_vec2_epilogue",
         }
     }
 
@@ -3230,6 +3234,12 @@ impl AdaHalfTnCandidate {
             (AdaHalfTnCandidateKind::FixedS3Bxor, WeightDtype::F16) => {
                 format!("{}f16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX)
             }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2, WeightDtype::Bf16) => {
+                format!("{}bf16", triad_half_tn_vec2_epilogue_source::SYMBOL_PREFIX)
+            }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2, WeightDtype::F16) => {
+                format!("{}f16", triad_half_tn_vec2_epilogue_source::SYMBOL_PREFIX)
+            }
             (_, WeightDtype::F32) => panic!("TN microtile requires a half dtype"),
         }
     }
@@ -3256,6 +3266,7 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => (64, 64, 128, 32_768, 0),
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => (64, 128, 256, 49_152, 0),
             AdaHalfTnCandidateKind::FixedS3Bxor => (128, 128, 256, 0, 98_304),
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => (64, 64, 128, 32_768, 0),
         }
     }
 
@@ -3268,13 +3279,15 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => "Tc64Bk64S2Regpipe",
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "M64N128Bk64S2Compact",
             AdaHalfTnCandidateKind::FixedS3Bxor => "FixedS3Bxor",
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => "Tc64Bk64S2RegpipeVec2",
         }
     }
 
     const fn required_occupancy(&self) -> u32 {
         match self.kind {
             AdaHalfTnCandidateKind::Tc64Bk64S2Compact
-            | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => 3,
+            | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
+            | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => 3,
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => 2,
             _ => 1,
         }
@@ -3497,6 +3510,22 @@ fn compile_ada_half_tn_regpipe_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, 
     compile_ada_half_tn_isolated_candidate(
         t,
         AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe,
+        transformed,
+        &bf16_symbol,
+        &f16_symbol,
+        false,
+    )
+}
+
+fn compile_ada_half_tn_regpipe_vec2_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
+    let transformed = triad_half_tn_vec2_epilogue_source::candidate_source(include_str!(
+        "../kernels/gemm_bi_triad/sm80.cu"
+    ))?;
+    let bf16_symbol = format!("{}bf16", triad_half_tn_vec2_epilogue_source::SYMBOL_PREFIX);
+    let f16_symbol = format!("{}f16", triad_half_tn_vec2_epilogue_source::SYMBOL_PREFIX);
+    compile_ada_half_tn_isolated_candidate(
+        t,
+        AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2,
         transformed,
         &bf16_symbol,
         &f16_symbol,
@@ -3754,7 +3783,8 @@ fn gate_ada_half_tn_resources(
     let required_occupancy = candidate.required_occupancy();
     let register_cap = match candidate.kind {
         AdaHalfTnCandidateKind::M64N128Bk64S2Compact => 128,
-        AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => 168,
+        AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
+        | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => 168,
         _ => i32::MAX,
     };
     let schema = candidate.schema_name();
@@ -3764,12 +3794,15 @@ fn gate_ada_half_tn_resources(
         | AdaHalfTnCandidateKind::Tc64Bk64S2Compact
         | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
         | AdaHalfTnCandidateKind::M64N128Bk64S2Compact
-        | AdaHalfTnCandidateKind::FixedS3Bxor => "source_sha256",
+        | AdaHalfTnCandidateKind::FixedS3Bxor
+        | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => "source_sha256",
         AdaHalfTnCandidateKind::Rect128x64 => "source_fragment_sha256",
     };
     if matches!(
         candidate.kind,
-        AdaHalfTnCandidateKind::M64N128Bk64S2Compact | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
+        AdaHalfTnCandidateKind::M64N128Bk64S2Compact
+            | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
+            | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2
     ) {
         println!(
             "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"register_cap\":{register_cap},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{dynamic_shared},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
@@ -3974,6 +4007,7 @@ fn run_ada_half_tn_candidate_cells(
                     AdaHalfTnCandidateKind::M64N128Bk64S2Compact
                         | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
                         | AdaHalfTnCandidateKind::FixedS3Bxor
+                        | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2
                 ) && (fixture.a.ptr() % 256 != 0
                     || fixture.b.ptr() % 256 != 0
                     || fixture.candidate.ptr() % 256 != 0
@@ -4603,6 +4637,39 @@ fn run_ada_half_tn_tc64_bk64_s2_regpipe_batch() -> Result<(), String> {
 fn ada_half_tn_tc64_bk64_s2_regpipe_d768_in_vs_current_and_fast_discovery_once7()
 -> Result<(), String> {
     run_ada_half_tn_tc64_bk64_s2_regpipe_batch()
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half TN regpipe vec2 epilogue"]
+fn ada_half_tn_tc64_bk64_s2_regpipe_vec2_d768_in_vs_current_and_fast_discovery_once7()
+-> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half TN regpipe vec2 discovery requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-tn-regpipe-vec2/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half TN regpipe vec2 requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_tn_regpipe_vec2_candidate(&t)?;
+    let _cohort = quiet.require_cohort("half-tn-regpipe-vec2/cohort")?;
+    run_ada_half_tn_candidate_cells(
+        &t,
+        &[candidate],
+        &[("d768_in_proj", (2_048, 768, 3_072))],
+        true,
+        &[AdaHalfTnArm::CurrentTc64, AdaHalfTnArm::Fast],
+    )?;
+    drop(t);
+    quiet
+        .verify_post_cohort("half-tn-regpipe-vec2/post")
+        .map(|_| ())
 }
 
 fn run_ada_half_tn_m64n128_compact_batch(

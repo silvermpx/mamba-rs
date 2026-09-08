@@ -1,0 +1,22 @@
+{
+  "binary_sha256": "ec4928ea17a61ce654419e9067540dfb0a9aeea838f83f8f009448aa550fae56",
+  "capture_exit": 0,
+  "export_recovery_after_receipt_nameerror": true,
+  "helper_sha256": "f3e66016fc6d9f2e584ac79486f09261c3be207790aad01f784ffcf3a63fddee",
+  "launch_count": 1,
+  "launch_skip": 0,
+  "report_sha256": "e2136304c010e7d352ee5e604b7653b4d5d0eca1d239033feb0d11525b79b142",
+  "schema": "AdaHalfTnRegpipeNcuReceiptV1",
+  "sections": [
+    "LaunchStats",
+    "Occupancy",
+    "SpeedOfLight",
+    "ComputeWorkloadAnalysis",
+    "SchedulerStats",
+    "WarpStateStats",
+    "MemoryWorkloadAnalysis"
+  ],
+  "symbol": "gemm_bi_tn_test_tc64_bk64_s2_regpipe_f16",
+  "test": "ada_half_tn_tc64_bk64_s2_regpipe_d768_in_vs_current_and_fast_discovery_once7",
+  "typed_source_sha256": "15cb1a3d5e9840cf3342ed605fc727afee509f9a04dfead1f5dee0afbbd8f092"
+}

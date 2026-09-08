@@ -1,0 +1,10 @@
+{
+  "binary_sha256": "ec4928ea17a61ce654419e9067540dfb0a9aeea838f83f8f009448aa550fae56",
+  "capture_exit": 0,
+  "launch_count": 1,
+  "launch_skip": 0,
+  "report_sha256": "64678678eecaf10ac4a468a3b4365d8cae306cc8e866bce52d3112d7c67aa315",
+  "schema": "AdaHalfTnRegpipeNcuSourceSupplementV1",
+  "section": "SourceCounters",
+  "symbol": "gemm_bi_tn_test_tc64_bk64_s2_regpipe_f16"
+}
