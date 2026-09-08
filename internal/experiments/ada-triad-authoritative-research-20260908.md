@@ -4,6 +4,14 @@ User requested parallel authoritative research tied to actual kernel changes.
 Discovery remains on Ada/CUDA13.2; Fixed inference and SM120 routes are frozen.
 No full gates or toolkit sweep for each prototype.
 
+The user explicitly reaffirmed this as the persistent working method, not a
+one-off experiment. Its canonical rules are the first section of
+`internal/agent-operational-rules.md`; the handoff and full-wiring plan point there.
+Continue from measured remaining gaps and retained champions, research concrete
+mechanisms in parallel, screen briefly, stop valid losers, and qualify once after
+the whole-Triad shortlist is assembled. Do not substitute repeated verification
+of old wins for new candidate search.
+
 ## Selected hypotheses and falsification
 
 | Priority / cell | Concrete mechanism | Expected benefit / risk | First evidence |

@@ -1,5 +1,16 @@
 # Handoff: the deterministic GEMM triad (gemm_bi_triad) — state on 2026-09-05
 
+MANDATORY continuation method, reaffirmed by the user on2026-09-08: read
+`internal/agent-operational-rules.md#binding-search-method-research---candidates---short-measurements-2026-09-08`
+before taking the next kernel task. Find the bottleneck -> primary-source
+research plus parallel agent analysis -> a small concrete candidate shortlist ->
+focused bits/resources and paired once7 -> record new wins / stop valid losers.
+Use retained-best and cuBLAS Fast comparisons, preserve exact bits, keep one GPU
+timing owner. Whole-Triad shortlist first; joint integration and ONE toolkit
+qualification batch later. Older per-candidate full-gate instructions below are
+historical and do not override this method. Do not spend the next session
+reconfirming the same completed kernels instead of finding replacements.
+
 Written for the next engineer (Codex) taking the branch. Everything below was
 measured or verified in this tree; where a number is quoted, the evidence
 directory that holds it is named. Read this file, then

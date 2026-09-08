@@ -1,5 +1,47 @@
 # Agent Operational Rules
 
+## Binding search method: research -> candidates -> short measurements (2026-09-08)
+
+The user explicitly requires this method to persist across agents, restarts and
+future kernel work. Do not return to serial blind tile tweaks or spend a night
+reconfirming a few already measured kernels. This section and the discovery-first
+override below supersede older per-candidate full-qualification plans.
+
+1. Start from the remaining op/dtype/shape gaps and the best retained candidate,
+   not only the old public AUTO route. Inspect reusable winning bodies and their
+   actual dispatcher reachability before inventing new arithmetic.
+2. Identify a limiting mechanism from source, resource counts or a focused
+   profile. Consult primary NVIDIA/CUTLASS/PTX documentation and, where useful,
+   constrained nvMatmulHeuristics suggestions. If local tuning stalls, research
+   and independent agent analysis are the next action, not another blind sweep.
+   Predicted runtimes and another architecture's wins are hypotheses, not results.
+3. Use parallel agents for independent mechanism analysis / candidate preparation;
+   assign file ownership and keep one timed GPU executor. Give each candidate a
+   concrete mechanism, unchanged-bit argument, resource budget and stop condition.
+   Prepare a small, distinct shortlist; do not combine untested mechanisms blindly.
+4. First run focused mapping/resource checks, exact bits, repeats, graph and guards;
+   then one short paired eager/graph once7 screen with aligned buffers. Compare
+   against the retained best and explicit cuBLAS Fast. Keep actual AUTO identity
+   and bit checks, but do not repeatedly time it when that adds no new decision.
+   Preserve the original reduction/rounding contract, including exact F32.
+5. A valid loser stops unless there is a NEW source/profile-backed hypothesis.
+   Repair an invalid harness without labeling the kernel a performance loser.
+   Freeze each measured source and raw receipt once; avoid repeated report/review
+   loops, full matrices or profiling whose result cannot change the next choice.
+6. Report NEW measured improvements immediately, separating AUTO improvement,
+   retained-best improvement and a robust Fast win. Update the central shortlist
+   and remaining gaps; near parity is not a Fast win. Preserve candidates used on
+   other shapes/architectures even when they lose on the current Ada cell.
+7. Assemble the replacement shortlist across the WHOLE Triad, then integrate the
+   chosen winners together and run ONE supported-toolkit qualification batch.
+   Do not start once21/full gates/sanitizers/CUDA matrices after every prototype.
+   Commit bounded completed changes; keep experiments separate from production.
+
+Working examples, primary sources and falsification criteria:
+`internal/experiments/ada-triad-authoritative-research-20260908.md`.
+Selection/remaining-gap index:
+`internal/perf/ada-triad-discovery-shortlist-20260908.md`.
+
 ## Active user override: discovery first (2026-09-08)
 
 - Coverage is the WHOLE Triad: NN, NT and TN, all five measured shape families
