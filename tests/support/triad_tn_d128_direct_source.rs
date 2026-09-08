@@ -1,9 +1,37 @@
 pub const M16N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m16n16_f64fold_v1";
+pub const M16N16_T128_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m16n16_t128_f64fold_v1";
 pub const M8N32_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n32_f64fold_v1";
+pub const M8N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n16_f64fold_v1";
 
 const ORIGINAL_NAMESPACE: &str = "namespace GemmBiTnUnderfillDirect {";
 const ADAPTED_NAMESPACE: &str = "namespace GemmBiTnAdaD128Direct {";
 const USING_BOUNDARY: &str = "using M32N32 = Kernel<32, 32, 128, 0, false, false>;";
+
+pub fn compose_warp_source(original: &str) -> Result<String, String> {
+    let mut source = compose_source(original)?;
+    const END: &str = "} // namespace GemmBiTnAdaD128Direct";
+    replace_once(
+        &mut source,
+        END,
+        &format!(
+            r#"using M16N16T128 = Kernel<16, 16, 128, 0, false, true>;
+static_assert(M16N16T128::OutputsPerThread == 2, "thread ownership");
+static_assert(M16N16T128::SharedBytes == 4096, "shared bytes");
+static_assert(M16N16T128::RowTiles * M16N16T128::ColumnTiles == 256, "grid");
+{END}"#
+        ),
+        "namespace end",
+    )?;
+    let mut wrapper = export(M16N16_T128_SYMBOL, "M16N16T128");
+    replace_once(
+        &mut wrapper,
+        "__launch_bounds__(64, 4)",
+        "__launch_bounds__(128, 4)",
+        "warp launch bounds",
+    )?;
+    source.push_str(&wrapper);
+    Ok(source)
+}
 
 pub fn compose_source(original: &str) -> Result<String, String> {
     require_once(original, ORIGINAL_NAMESPACE, "source namespace")?;
@@ -68,6 +96,30 @@ static_assert(M8N32::RowTiles * M8N32::ColumnTiles == 256,
     Ok(source)
 }
 
+pub fn compose_wave_source(original: &str) -> Result<String, String> {
+    const NAMESPACE_END: &str = "} // namespace GemmBiTnAdaD128Direct\n";
+    const M8N16_CONTRACT: &str = concat!(
+        "using M8N16 = Kernel<8, 16, 64, 0, false, true>;\n",
+        "static_assert(M8N16::OutputsPerThread == 2,\n",
+        "              \"M8N16 thread ownership changed\");\n",
+        "static_assert(M8N16::SharedBytes == 3072,\n",
+        "              \"M8N16 shared-memory contract changed\");\n",
+        "static_assert(M8N16::Stage == 384,\n",
+        "              \"M8N16 stage extent changed\");\n",
+        "static_assert(M8N16::RowTiles * M8N16::ColumnTiles == 512,\n",
+        "              \"M8N16 flat-grid contract changed\");\n\n"
+    );
+    let mut source = compose_source(original)?;
+    replace_once(
+        &mut source,
+        NAMESPACE_END,
+        &format!("{M8N16_CONTRACT}{NAMESPACE_END}"),
+        "adapted namespace end",
+    )?;
+    source.push_str(&export(M8N16_SYMBOL, "M8N16"));
+    Ok(source)
+}
+
 fn export(symbol: &str, alias: &str) -> String {
     format!(
         r#"extern "C" __global__ __launch_bounds__(64, 4)
@@ -108,6 +160,25 @@ mod tests {
     use super::*;
 
     const ORIGINAL: &str = include_str!("../gemm_bi_scalar_tn_underfill_direct_experiment.cu");
+
+    #[test]
+    fn more_warps_preserves_tile_reuse_and_doubles_compute_threads() {
+        let source = compose_warp_source(ORIGINAL).unwrap();
+        assert!(source.contains("using M16N16T128 = Kernel<16, 16, 128, 0, false, true>;"));
+        assert!(source.contains("M16N16T128::OutputsPerThread == 2"));
+        assert!(source.contains("M16N16T128::SharedBytes == 4096"));
+        assert!(source.contains("M16N16T128::RowTiles * M16N16T128::ColumnTiles == 256"));
+        assert!(source.contains(&format!(
+            "__launch_bounds__(128, 4)\nvoid {M16N16_T128_SYMBOL}("
+        )));
+        assert_eq!(source.matches("partial[owned] = __fmaf_rn(").count(), 1);
+        assert_eq!(
+            source
+                .matches("sums[owned] = __dadd_rn(sums[owned], value);")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn adapter_changes_only_the_exact_d128_contract_and_two_exports() {
@@ -153,5 +224,39 @@ mod tests {
         ] {
             assert!(compose_source(&changed).is_err());
         }
+    }
+
+    #[test]
+    fn wave_adapter_preserves_the_original_adapter_and_adds_only_m8n16() {
+        let original = compose_source(ORIGINAL).unwrap();
+        let wave = compose_wave_source(ORIGINAL).unwrap();
+        assert_eq!(wave.matches(M16N16_SYMBOL).count(), 1);
+        assert_eq!(wave.matches(M8N32_SYMBOL).count(), 1);
+        assert_eq!(wave.matches(M8N16_SYMBOL).count(), 1);
+        assert_eq!(wave.matches("extern \"C\" __global__").count(), 3);
+        assert!(wave.contains("using M8N16 = Kernel<8, 16, 64, 0, false, true>;"));
+        assert!(wave.contains("M8N16::OutputsPerThread == 2"));
+        assert!(wave.contains("M8N16::SharedBytes == 3072"));
+        assert!(wave.contains("M8N16::Stage == 384"));
+        assert!(wave.contains("M8N16::RowTiles * M8N16::ColumnTiles == 512"));
+        assert_eq!(
+            wave.replacen(
+                concat!(
+                    "using M8N16 = Kernel<8, 16, 64, 0, false, true>;\n",
+                    "static_assert(M8N16::OutputsPerThread == 2,\n",
+                    "              \"M8N16 thread ownership changed\");\n",
+                    "static_assert(M8N16::SharedBytes == 3072,\n",
+                    "              \"M8N16 shared-memory contract changed\");\n",
+                    "static_assert(M8N16::Stage == 384,\n",
+                    "              \"M8N16 stage extent changed\");\n",
+                    "static_assert(M8N16::RowTiles * M8N16::ColumnTiles == 512,\n",
+                    "              \"M8N16 flat-grid contract changed\");\n\n"
+                ),
+                "",
+                1,
+            )
+            .replacen(&export(M8N16_SYMBOL, "M8N16"), "", 1),
+            original,
+        );
     }
 }

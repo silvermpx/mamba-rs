@@ -9,6 +9,42 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest 2026-09-08, commit df8948ff: short discovery FIRST. This overrides the
+older next-step instructions below: do not restart once21/all-CUDA/full gates
+or repeat the old three NN wins. Batch new performance finalists on Ada13.2,
+then integrate and confirm together. Fixed inference and SM120 are unchanged.
+
+Later checkpoint ce247d0d: half TN eight-cell batch completed, all bits PASS,
+all candidate/Fast pairs lose. Best M32N32 p50/Fast 1.42–1.85 across dtypes,
+d128-in/out and eager/graph. Its ~.69/current ratio is UNPAIRED diagnostic only,
+not a robust win. Final main1721ab31/helperb1d73379; see
+`perf/ada-triad-half-tn-d128-microtiles-20260908/README.md`. Current work expands
+NN S3 to untested half shapes with Fast, plus A-only raw-RNA prepack for TF32
+TN Prism/d768-in (whole pack+GEMM pipeline timed). Neither has a result yet.
+F32 M8N16/64 and M16N16/128 also passed bits but had p95 losses to retained
+M16N16/64. Do not resweep them or present their small median gains as champions.
+
+NEW F32 TN d128-in direct fold, `(1024,128,512)`: M16N16 removes the 16 MiB
+partial buffer and second launch, preserves existing FP32-chunk/FP64-fold bits.
+Candidate/public AUTO p50 .3813–.4644 (54–62% lower observed time), but
+candidate/explicit cuBLAS Fast p50 2.5625–3.0086. One exact once7 GPU test PASS;
+raw and limitations: `perf/ada-triad-f32-tn-d128-direct-20260908/README.md`.
+These one-GEMM event timings include launch overhead, not kernel-only duration.
+Targeted NCU precedes another tile hypothesis. M8N32 is the weaker alternative.
+
+NEW denominator for TF32 NN N96 d768-out: explicit cuBLAS Fast gives p50
+1.0000–1.00794, worst p95 1.0240: near parity, NOT a Fast win. Candidate/current/
+true AUTO match bits. Main ce9839a6/helper d9098e55, short13.2 only; see the
+new top section of `perf/ada-triad-nn-addhalf-n96-screen-20260908/README.md`.
+The old 18% gain versus AUTO below is not a newly discovered improvement.
+
+Half TN next batch: test-only M32N32/128-thread and M16N32/64-thread BK32/S3
+microtiles, d128-in/out × F16/BF16 (eight candidate cells), preserving current
+TC64 K16 MMA order and F32 dW output. Owner Carver; sole GPU executor Avicenna.
+Current freeze main e27eb891/helper b1d73379 includes Fast finite/self-bit
+checks and separate 20-GEMM timing oracles. No result or production admission
+claimed until its short GPU run finishes. Preserve all unrelated WIP.
+
 Latest2026-09-08, NEW N96 result (not a recap of CopyPlan/half wins): test-only
 TF32 Triad NN M128N96/BK32/S3 AddHalf candidate advances on Ada13.2 d768-out
 `(M,K,N)=(2048,1536,768)`. Candidate/truepublicAUTO p50 .814103-.819355,

@@ -45,3 +45,33 @@ is preserved under `evidence/build1/`; the checked u32 launch-size repair built
 successfully in `evidence/final/build2.log`.
 
 No once21, all-toolkit, full-suite or production promotion run is claimed.
+
+## Profile and two rejected latency ablations
+
+The one-launch M16N16 NCU capture reports 35.84 us, 3.54 achieved active warps
+per SM (7.38% occupancy), .19 eligible warps per scheduler and 46.31% FP64
+pipeline activity. Short-scoreboard samples concentrate at the FP64 fold and
+loop dependencies, not at cp.async wait sites. This does not justify another
+asynchronous-copy stage sweep or weakening the exact FP64 fold.
+
+| New ablation | candidate/retained-M16N16 p50 range | worst p95 | Result |
+| --- | ---: | ---: | --- |
+| M8N16, 64 threads, 512 CTAs | .9700–.9881 | 1.1957 | no stable gain |
+| M16N16, 128 threads, 256 CTAs | .9604–.9736 | 1.0749 | no stable gain |
+
+Both pass the existing public SplitM64 bit oracle and zero-local resource
+checks, but neither passes the short-screen p95 criterion; retain M16N16/64.
+These are valid measured losses, not retries or missing-dispatch findings.
+The first doubles tile count and increases aggregate copy traffic; the second
+doubles compute warps without increasing tile traffic. Both remain roughly
+2.9–3.3x Fast in their separate paired cohorts. Do not multiply independently
+measured ratios to claim a new public-AUTO or Fast speedup.
+
+Final test/adapter SHAs: `af293ce53c48522e06a34731ba05fb7414fcbacc59ca8332aadf0e862bcdd941`
+and `0f10332f96008829b03c5b6447ff0050e3c6e387c31c97a52986742fffba7973`.
+The earlier M8N16 freeze was main5c93ea58/helper2d47b01a; final adapters preserve
+its generated body. Exact tests end in `more_waves_once7` / `more_warps_once7`.
+Each executed once and passed; each has 56 independently replayed brackets.
+Raw is under `evidence/final/more-waves/once7-cuda132/` (SHA b3f6d23a…) and
+`evidence/final/more-warps/once7-cuda132/` (SHA 2b6ca488…). NCU raw, SASS,
+report and command receipt are under `evidence/final/ncu-m16n16/`.

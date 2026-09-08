@@ -2,6 +2,10 @@
 
 ## Active user override: discovery first (2026-09-08)
 
+- Coverage is the WHOLE Triad: NN, NT and TN, all five measured shape families
+  and all four precisions. TF32/F16/BF16 target cuBLAS Fast wins; exact F32
+  targets the closest achievable Fast performance without weakening its bits.
+  A retained candidate or one near-parity cell does not close a precision/op.
 - Current task is to FIND faster Triad candidates, not repeatedly confirm the
   existing three scalar NN wins. Stop pending integration/once21/all-toolkit
   runs until a batch of performance finalists is assembled.

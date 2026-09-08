@@ -739,7 +739,14 @@ mod cuda_tournament {
     }
 
     // Bounded Ada discovery. The existing SM120 tournament is unchanged.
-    fn ada_direct_runtime() -> Result<Runtime, String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum AdaDirectVariant {
+        Base,
+        MoreWaves,
+        MoreWarps,
+    }
+
+    fn ada_direct_runtime(variant: AdaDirectVariant) -> Result<Runtime, String> {
         use super::triad_tn_d128_direct_source as source;
         let device = GpuDevice::new(0)?;
         if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
@@ -755,9 +762,12 @@ mod cuda_tournament {
         if compiler.nvrtc_version != (13, 2) || compiler.target.as_str() != "sm_89" {
             return Err(format!("unexpected Ada compiler {compiler:?}"));
         }
-        let cuda = source::compose_source(include_str!(
-            "gemm_bi_scalar_tn_underfill_direct_experiment.cu"
-        ))?;
+        let original = include_str!("gemm_bi_scalar_tn_underfill_direct_experiment.cu");
+        let cuda = match variant {
+            AdaDirectVariant::Base => source::compose_source(original)?,
+            AdaDirectVariant::MoreWaves => source::compose_wave_source(original)?,
+            AdaDirectVariant::MoreWarps => source::compose_warp_source(original)?,
+        };
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(
             cuda,
             cudarc::nvrtc::CompileOptions {
@@ -776,7 +786,7 @@ mod cuda_tournament {
             .context()
             .load_module(ptx)
             .map_err(|e| format!("Ada TN module: {e:?}"))?;
-        let load = |symbol, dynamic| -> Result<Kernel, String> {
+        let load = |symbol, dynamic, grid, threads| -> Result<Kernel, String> {
             let function = module
                 .load_function(symbol)
                 .map_err(|e| format!("load {symbol}: {e:?}"))?;
@@ -788,13 +798,13 @@ mod cuda_tournament {
                 .shared_size_bytes()
                 .map_err(|e| format!("shared: {e:?}"))?;
             let occupancy = function
-                .occupancy_max_active_blocks_per_multiprocessor(64, dynamic, None)
+                .occupancy_max_active_blocks_per_multiprocessor(threads, dynamic, None)
                 .map_err(|e| format!("occupancy: {e:?}"))?;
             println!(
                 "{}",
                 serde_json::json!({"schema":"AdaTnDirectResourceV1", "symbol":symbol,
                 "registers":registers,"local_bytes":local,"static_shared":shared,"dynamic_shared":dynamic,
-                "threads":64,"grid":[256,1,1],"occupancy":occupancy})
+                "threads":threads,"grid":[grid,1,1],"occupancy":occupancy})
             );
             if local != 0 || shared != 0 || occupancy == 0 {
                 return Err(format!("unviable Ada direct resources for {symbol}"));
@@ -802,8 +812,8 @@ mod cuda_tournament {
             Ok(Kernel {
                 function,
                 config: LaunchConfig {
-                    grid_dim: (256, 1, 1),
-                    block_dim: (64, 1, 1),
+                    grid_dim: (grid, 1, 1),
+                    block_dim: (threads, 1, 1),
                     shared_mem_bytes: u32::try_from(dynamic)
                         .map_err(|_| "dynamic shared size exceeds u32")?,
                 },
@@ -811,8 +821,20 @@ mod cuda_tournament {
                 static_shared: 0,
             })
         };
-        let primary = load(source::M16N16_SYMBOL, 4096)?;
-        let sensitivity = load(source::M8N32_SYMBOL, 5120)?;
+        let (primary, sensitivity) = match variant {
+            AdaDirectVariant::MoreWaves => (
+                load(source::M8N16_SYMBOL, 3072, 512, 64)?,
+                load(source::M16N16_SYMBOL, 4096, 256, 64)?,
+            ),
+            AdaDirectVariant::MoreWarps => (
+                load(source::M16N16_T128_SYMBOL, 4096, 256, 128)?,
+                load(source::M16N16_SYMBOL, 4096, 256, 64)?,
+            ),
+            AdaDirectVariant::Base => (
+                load(source::M16N16_SYMBOL, 4096, 256, 64)?,
+                load(source::M8N32_SYMBOL, 5120, 256, 64)?,
+            ),
+        };
         Ok(Runtime {
             _device: device,
             ctx,
@@ -969,10 +991,27 @@ mod cuda_tournament {
     #[test]
     #[ignore = "quiet Ada13.2 only; two new direct-fold TN candidates, short once7"]
     fn ada_d128_direct_fold_two_arm_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::Base)
+    }
+
+    #[test]
+    #[ignore = "quiet Ada13.2 only; NCU-guided M8N16 vs retained M16N16 and Fast, once7"]
+    fn ada_d128_direct_fold_more_waves_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::MoreWaves)
+    }
+
+    #[test]
+    #[ignore = "quiet Ada13.2 only; double warps without extra tile traffic, once7"]
+    fn ada_d128_direct_fold_more_warps_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::MoreWarps)
+    }
+
+    fn ada_direct_fold_screen(variant: AdaDirectVariant) -> Result<(), String> {
+        let more_waves = variant != AdaDirectVariant::Base;
         assert!(!cfg!(debug_assertions), "use release");
         let quiet = super::common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("ada-direct-tn/pre")?;
-        let runtime = ada_direct_runtime()?;
+        let runtime = ada_direct_runtime(variant)?;
         production_identity(&runtime)?; // Isolated holder is dropped on return.
         let mut fixture = ada_finite_fixture(&runtime)?;
         let auto_graph = capture(&runtime, &fixture, Arm::Production)?;
@@ -1025,7 +1064,29 @@ mod cuda_tournament {
             }
         }
         quiet.require_cohort("ada-direct-tn/timed")?;
-        for arm in [Arm::M8N32, Arm::M16N32] {
+        let reference_arm = if more_waves {
+            Arm::M16N32
+        } else {
+            Arm::Production
+        };
+        let reference_name = if more_waves {
+            "retained_m16n16"
+        } else {
+            "actual_auto"
+        };
+        let reference_graph = if more_waves {
+            let graph = capture(&runtime, &fixture, reference_arm)?;
+            ada_candidate_graph(&graph, kernel(&runtime, reference_arm))?;
+            graph
+        } else {
+            auto_graph
+        };
+        let arms: &[Arm] = if more_waves {
+            &[Arm::M8N32]
+        } else {
+            &[Arm::M8N32, Arm::M16N32]
+        };
+        for &arm in arms {
             // Existing arm slots are reused, but real symbol/config are emitted.
             let candidate = kernel(&runtime, arm);
             let graph = capture(&runtime, &fixture, arm)?;
@@ -1062,7 +1123,7 @@ mod cuda_tournament {
                                 } else if fast {
                                     (Arm::Production, true, &fast_graph, &fast_bits)
                                 } else {
-                                    (Arm::Production, false, &auto_graph, &exact)
+                                    (reference_arm, false, &reference_graph, &exact)
                                 };
                                 times[slot] = ada_observe(
                                     &runtime,
@@ -1084,7 +1145,7 @@ mod cuda_tournament {
                         println!(
                             "{}",
                             serde_json::json!({"schema":"AdaTnDirectScreenV1","shape":[M,K,N],
-                        "candidate":candidate.symbol,"comparator":if fast{"cublas_fast_tf32"}else{"actual_auto"},
+                        "candidate":candidate.symbol,"comparator":if fast{"cublas_fast_tf32"}else{reference_name},
                         "path":if graph_path{"graph"}else{"eager"},"order":if candidate_first{"ABBA"}else{"BAAB"},
                         "candidate_first":candidate_first,"windows":7,"warmup_brackets":4,"raw_observations_us":raw,
                         "ratio_p50":pair[0],"ratio_p95":pair[1],"ratio_direction":"candidate_over_reference",
@@ -1095,7 +1156,7 @@ mod cuda_tournament {
                 println!(
                     "{}",
                     serde_json::json!({"schema":"AdaTnDirectDecisionV1","candidate":candidate.symbol,
-                    "comparator":if fast{"cublas_fast_tf32"}else{"actual_auto"},"strata":strata,
+                    "comparator":if fast{"cublas_fast_tf32"}else{reference_name},"strata":strata,
                     "retain":strata.iter().flatten().all(|x|*x<0.99),"promotion":false})
                 );
             }
