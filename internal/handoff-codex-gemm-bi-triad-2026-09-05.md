@@ -9,6 +9,13 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+TF32 TN transpose+N96 now screened on all3 large shapes: NEW d768-out40%
+and Prism15–17% actualAUTO improvements; focused bits/guards/scratch PASS.
+Still NOT Fast wins (graph1.20x/2.00x). Main e5f1a811/helperf969041b,
+`perf/ada-triad-tf32-tn-transpose-n96-siblings-20260908/report.md`.
+Do not repeat these; next source hypothesis is direct TN N96 staging without
+the global transpose. Half TN all8warp Fixed-S3 adaptation is also in progress.
+
 TF32 TN small register pipeline d128-in/out: bits/resources PASS but neither
 passes all AUTO p95 strata and both lose Fast strongly in graph. Valid STOP,
 no repeat. Main88e238cf/helperbfc9052d, see
