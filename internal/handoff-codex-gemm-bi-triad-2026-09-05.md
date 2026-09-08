@@ -21,6 +21,16 @@ user-authorized idle-resident gate: five consecutive <=1% compute/memory
 samples and explicit VRAM headroom before timing; no external process was
 stopped. This is sufficient to stop the consistent loss, not a release gate.
 
+NEW 2026-09-09 TF32 NN Prism retained-best: the test-only N96 direct-`float2`
+epilogue removes the shared accumulator round trip and beats retained N96 in
+all four paired strata by1.1–1.8%, with exact full/tail/exception/K0 bits,
+guards, graph replay and resources PASS. It is NOT a Fast win: eager remains
+1.2–1.3% slower than explicit cuBLAS Fast, while graph is within0.6–1.0%.
+d768-out gains only0.2–0.4% and fails the strict retained gate, so stop it on
+that cell. Keep the Prism candidate for one new source-backed combination;
+do not wire or claim release qualification yet. Evidence:
+`internal/perf/ada-triad-tf32-nn-n96-direct-epilogue-20260909/report.md`.
+
 Written for the next engineer (Codex) taking the branch. Everything below was
 measured or verified in this tree; where a number is quoted, the evidence
 directory that holds it is named. Read this file, then
