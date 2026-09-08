@@ -9,6 +9,32 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-08T00:49Z: actual loaded Fixed CopyPlan now beats actual public
+AUTO for all3 F32 NN shapes on CUDA12.8/13.0/13.2. It does NOT beat cuBLAS
+Fast (`CUBLAS_COMPUTE_32F_FAST_TF32`): median ratios remain about1.64–2.45x.
+Strict alpha+1/beta+0/noBias only, full-mantissa target/tail/K0-null/guard and
+repeat/eager/graph bits pass. Source191a27f8/Cargo2e1b5f65, no Fixed CUDA changes.
+Real AUTO is independently qualified, true Fixed holder/artifact separately
+bound. Root replays644brackets/2576observations including all3CUDA NN/NT and below.
+NTd768out transpose16+liveFixedCopyPlan wholepipeline13.2 now advances
+candidate/actualAUTO p50 .5365–.5383 (46.2–46.3%less time), worstp95 .5466;
+source3167072a, eightbitrecords/resources pass. Lower12.8/13.0 nowalsoadvance:
+p50 .4509–.4523/.4508–.4542, worstp95 .4606/.4632, bits/resources pass.
+FinalNTsource005da52e/native5PASS; initial80ea cfg-helper importfail and d755
+reference-resource16-versus0 failurepreserved. Final explicitlyexpectslocal16
+onlyfor test-composed generic reference onlowerCUDA, candidate/transpose0still.
+No arithmetic/timingchange, no retryofvalidloss. All3NT arediscovery, notAUTOyet.
+HalfFixedS3 d768in13.2: F16 advances vsforcedTC128 p50 .8944–.9063,
+worstp95 .9275; BF16 STOP p95 1.0374 despite fastermedians. Both bits pass;
+no half Fast claim or BF16 retry. Frozen431ef535/helper759a1bbd.
+Full current report and raw locations:
+`internal/perf/ada-triad-live-reuse-20260908/README.md`.
+Carver now integrates NN3 into true AUTO with distinct Fixed backend/tag/private
+revision; global45/numericABI/schedule and Fixed/SM120 untouched. Beauvoir owns
+test-only TF32 NN N96 preserving current AddHalfUlp conversion (not silentlyRNA),
+firstd768out only. Avicenna soleGPUexecutor. Root owns evidence/replay and NT
+toolkit-helper repair. No newbranch, no deletion, no completedTriad claim.
+
 Latest2026-09-08T00:08Z: F32 CopyPlan reuse advances all3NN cells on Ada13.2:
 candidate/generic exact p50 ranges .7373-.7405 / .5598-.5670 / .6709-.6811.
 Strict alpha bit+1/beta bit+0/no-bias only; tail and K0/null A/B, repeat/graph,

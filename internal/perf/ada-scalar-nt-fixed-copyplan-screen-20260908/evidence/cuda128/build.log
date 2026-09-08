@@ -1,0 +1,25 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error[E0425]: cannot find function `ada_discovery_toolkit_supported` in this scope
+   --> tests/gemm_bi_scalar_nt_d768_out_m64n64_tournament.rs:444:17
+    |
+444 |             || !ada_discovery_toolkit_supported(compiler.nvrtc_version)
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this function
+    |
+232 +     use crate::ada_discovery_toolkit_supported;
+    |
+
+error[E0425]: cannot find function `ada_discovery_toolkit_supported` in this scope
+   --> tests/gemm_bi_scalar_nt_d768_out_m64n64_tournament.rs:472:17
+    |
+472 |             || !ada_discovery_toolkit_supported(compiler.nvrtc_version)
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this function
+    |
+232 +     use crate::ada_discovery_toolkit_supported;
+    |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `mamba-rs` (test "gemm_bi_scalar_nt_d768_out_m64n64_tournament") due to 2 previous errors

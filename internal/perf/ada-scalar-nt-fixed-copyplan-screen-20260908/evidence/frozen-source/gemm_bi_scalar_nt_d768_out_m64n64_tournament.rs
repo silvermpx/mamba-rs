@@ -64,36 +64,6 @@ fn validate_ada_copyplan_contract(actual: AdaCopyPlanContract) -> Result<(), Str
     Ok(())
 }
 
-fn ada_discovery_toolkit_supported(version: (i32, i32)) -> bool {
-    matches!(version, (12, 8) | (13, 0) | (13, 2))
-}
-
-fn ada_composed_reference_local_bytes(version: (i32, i32)) -> usize {
-    // Observed reference-only compiler output, not a candidate spill allowance.
-    // The supported-toolkit identity gate rejects other versions before use.
-    match version {
-        (12, 8) | (13, 0) => 16,
-        _ => 0,
-    }
-}
-
-#[test]
-fn ada_composed_reference_spills_are_explicitly_toolkit_specific() {
-    assert_eq!(ada_composed_reference_local_bytes((12, 8)), 16);
-    assert_eq!(ada_composed_reference_local_bytes((13, 0)), 16);
-    assert_eq!(ada_composed_reference_local_bytes((13, 2)), 0);
-}
-
-#[test]
-fn ada_discovery_supports_each_planned_toolkit_only() {
-    for version in [(12, 8), (13, 0), (13, 2)] {
-        assert!(ada_discovery_toolkit_supported(version), "{version:?}");
-    }
-    for version in [(0, 0), (12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
-        assert!(!ada_discovery_toolkit_supported(version), "{version:?}");
-    }
-}
-
 #[test]
 fn ada_fixed_copyplan_contract_is_exact_and_distinct_from_portable_m64() {
     let contract = ada_copyplan_contract();
@@ -269,8 +239,7 @@ mod cuda_tournament {
     use super::common::gpu_quiet::QuietGpu;
     use super::{
         AdaBracketOrder, FIXED_COPYPLAN_SYMBOL, NnParams, PRODUCTION_TRANSPOSE_SOURCE, TEST_SOURCE,
-        TRANSPOSE_32X16, ada_candidate_over_auto, ada_composed_reference_local_bytes,
-        ada_copyplan_contract, ada_discovery_toolkit_supported, ada_percentile,
+        TRANSPOSE_32X16, ada_candidate_over_auto, ada_copyplan_contract, ada_percentile,
         ada_retain_decision, fixed_full_mantissa, validate_ada_copyplan_contract,
     };
 
@@ -458,7 +427,7 @@ mod cuda_tournament {
             || multiprocessor_count != 142
             || nvrtc_target != expected_target
             || compiler.target.as_str() != nvrtc_target
-            || !ada_discovery_toolkit_supported(compiler.nvrtc_version)
+            || compiler.nvrtc_version != (13, 2)
             || !compiler.nvrtc_library_known
             || compiler.source_digest == [0; 32]
             || compiler.invocation_digest == [0; 32]
@@ -476,7 +445,7 @@ mod cuda_tournament {
             || artifact.artifact_digest == [0; 32]
         {
             return Err(format!(
-                "Ada d768-out discovery requires the qualified device-target sm_89 NVRTC 12.8/13.0/13.2 TriadScalar artifact domain: cc={compute_capability:?} sms={multiprocessor_count} target={nvrtc_target} compiler={compiler:?} artifact={artifact:?}"
+                "Ada d768-out discovery requires the qualified device-target sm_89 NVRTC 13.2 TriadScalar artifact domain: cc={compute_capability:?} sms={multiprocessor_count} target={nvrtc_target} compiler={compiler:?} artifact={artifact:?}"
             ));
         }
         Ok(())
@@ -486,7 +455,7 @@ mod cuda_tournament {
         let compiler = ctx.kernels.compiler_identity();
         let artifact = ctx.kernels.artifact_set_identity().fixed;
         if compiler.target.as_str() != "sm_89"
-            || !ada_discovery_toolkit_supported(compiler.nvrtc_version)
+            || compiler.nvrtc_version != (13, 2)
             || !compiler.nvrtc_library_known
             || compiler.source_digest == [0; 32]
             || compiler.invocation_digest == [0; 32]
@@ -1486,7 +1455,6 @@ mod cuda_tournament {
         expected_threads: u32,
         expected_static_shared: usize,
         expected_dynamic_shared: usize,
-        expected_local_bytes: usize,
     ) -> Result<(), String> {
         let threads = kernel.config.block_dim.0 * kernel.config.block_dim.1;
         let registers = kernel
@@ -1514,11 +1482,11 @@ mod cuda_tournament {
             )
             .map_err(|error| format!("{} occupancy: {error:?}", kernel.symbol))?;
         println!(
-            "{{\"schema\":\"MambaBiScalarNtAdaDiscoveryResourceV1\",\"symbol\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"expected_local_bytes\":{expected_local_bytes},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":1}}",
+            "{{\"schema\":\"MambaBiScalarNtAdaDiscoveryResourceV1\",\"symbol\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":1}}",
             kernel.symbol, kernel.config.shared_mem_bytes,
         );
         if registers <= 0
-            || local as usize != expected_local_bytes
+            || local != 0
             || static_shared as usize != expected_static_shared
             || kernel.config.shared_mem_bytes as usize != expected_dynamic_shared
             || threads != expected_threads
@@ -1526,7 +1494,7 @@ mod cuda_tournament {
             || occupancy < 1
         {
             return Err(format!(
-                "{} Ada resource floor failed: threads={threads}/{expected_threads} registers={registers} local={local}/{expected_local_bytes} static={static_shared}/{expected_static_shared} dynamic={}/{expected_dynamic_shared} max_threads={max_threads} occupancy={occupancy}/1",
+                "{} Ada resource floor failed: threads={threads}/{expected_threads} registers={registers} local={local} static={static_shared}/{expected_static_shared} dynamic={}/{expected_dynamic_shared} max_threads={max_threads} occupancy={occupancy}/1",
                 kernel.symbol, kernel.config.shared_mem_bytes,
             ));
         }
@@ -1900,22 +1868,6 @@ mod cuda_tournament {
 
         let mut ada_compiler = compiler;
         ada_compiler.target = CudaTarget::new("sm_89").unwrap();
-        for version in [(12, 8), (13, 0), (13, 2)] {
-            let mut supported = ada_compiler;
-            supported.nvrtc_version = version;
-            assert!(
-                validate_ada_qualified_environment((8, 9), 142, "sm_89", supported, artifact,)
-                    .is_ok()
-            );
-        }
-        for version in [(12, 7), (12, 9), (13, 1), (13, 3)] {
-            let mut unsupported = ada_compiler;
-            unsupported.nvrtc_version = version;
-            assert!(
-                validate_ada_qualified_environment((8, 9), 142, "sm_89", unsupported, artifact,)
-                    .is_err()
-            );
-        }
         assert!(
             validate_ada_qualified_environment((8, 9), 142, "sm_89", ada_compiler, artifact,)
                 .is_ok()
@@ -2512,21 +2464,7 @@ mod cuda_tournament {
         candidate_arm: Arm,
     ) -> Result<(Fixture, CudaGraph, CudaGraph, Vec<u32>), String> {
         validate_ada_actual_auto(runtime)?;
-        // This function is the test-composed exact reference. The real AUTO
-        // route is separately qualified and timed through the public wrapper.
-        check_ada_resources(
-            &runtime.generic_nt,
-            256,
-            0,
-            NT_SHARED,
-            ada_composed_reference_local_bytes(
-                runtime
-                    .ctx
-                    .kernels
-                    .triad_scalar_compiler_identity()
-                    .nvrtc_version,
-            ),
-        )?;
+        check_ada_resources(&runtime.generic_nt, 256, 0, NT_SHARED)?;
         let inner = candidate_inner_kernel(runtime, candidate_arm)?;
         let contract = ada_copyplan_contract();
         if candidate_arm == Arm::Transpose16FixedCopyPlan {
@@ -2537,12 +2475,11 @@ mod cuda_tournament {
                 contract.block.0,
                 contract.static_shared,
                 contract.dynamic_shared,
-                0,
             )?;
         } else {
-            check_ada_resources(inner, 128, 0, M64_SHARED, 0)?;
+            check_ada_resources(inner, 128, 0, M64_SHARED)?;
         }
-        check_ada_resources(&runtime.transpose16, 512, TRANSPOSE_STATIC_SHARED, 0, 0)?;
+        check_ada_resources(&runtime.transpose16, 512, TRANSPOSE_STATIC_SHARED, 0)?;
         let mut fixture = new_ada_fixture(runtime)?;
         let auto_graph = capture_ada_actual_auto(runtime, &mut fixture)?;
         let candidate_graph = capture_arm(runtime, &mut fixture, candidate_arm)?;
@@ -2835,7 +2772,7 @@ mod cuda_tournament {
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC8.9/142-SM CUDA12.8/13.0/13.2 Ada GPU"]
+    #[ignore = "requires an exclusive quiet CC8.9/142-SM CUDA13.2 Ada GPU"]
     fn ada_d768_out_transpose16_fixed_copyplan_discovery_once7() -> Result<(), String> {
         assert!(!cfg!(debug_assertions), "Ada discovery requires --release");
         let quiet = QuietGpu::for_cuda_ordinal(0)?;

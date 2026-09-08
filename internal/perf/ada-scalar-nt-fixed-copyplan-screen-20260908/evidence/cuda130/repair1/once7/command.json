@@ -1,0 +1,61 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda130-20260907/release/deps/gemm_bi_scalar_nt_d768_out_m64n64_tournament-f196ce47da3cb2b5",
+    "cuda_tournament::ada_d768_out_transpose16_fixed_copyplan_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "build": {
+    "args": [
+      "cargo",
+      "test",
+      "--release",
+      "--features",
+      "cuda,cudarc/cuda-13000",
+      "--test",
+      "gemm_bi_scalar_nt_d768_out_m64n64_tournament",
+      "--no-run"
+    ],
+    "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda130-20260907/release/deps/gemm_bi_scalar_nt_d768_out_m64n64_tournament-f196ce47da3cb2b5",
+    "binary_sha256": "762967f4d53cdcf316a0a3c0bd25496c6c998664e1b1cb61ac37e3d285e8d298",
+    "elapsed_s": 2.1557533740997314,
+    "exit": 0,
+    "list_exit": 0,
+    "matches": [
+      "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda130-20260907/release/deps/gemm_bi_scalar_nt_d768_out_m64n64_tournament-f196ce47da3cb2b5"
+    ],
+    "source_sha256": "005da52e56a0617262d0d1d1e668dc55425a806f0ad14d185a780aedc5e2c601",
+    "test_present": true,
+    "toolkit": "13.0"
+  },
+  "cache_after": {
+    "mamba-kernels-v1-2d0a66eb8af46189189b46c1fd25d2e88569ff8264420736239fc2d48cdd444c.bin": "5d04d22d16514ae24c7fb21b8eb2fe22045f76e90386a3f9fbfdf712db4729dd",
+    "mamba-kernels-v1-ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b.bin": "c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c",
+    "mamba-kernels-v1-eef2e92802f05cc8eabf65a156d5c3145b12855ed4346d75d7bc6710fd520778.bin": "6f35f458d06129f97ea29ec97503bca13e43bf0b509fd3734d8e4bf8b9fddc79",
+    "mamba-kernels-v1-feac83eb41fcc629d0c4bf9be1758d9e92c431728e17c1f46cfcd5c5a9ebc27d.bin": "32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0"
+  },
+  "cache_before": {
+    "mamba-kernels-v1-2d0a66eb8af46189189b46c1fd25d2e88569ff8264420736239fc2d48cdd444c.bin": "5d04d22d16514ae24c7fb21b8eb2fe22045f76e90386a3f9fbfdf712db4729dd",
+    "mamba-kernels-v1-ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b.bin": "c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c",
+    "mamba-kernels-v1-eef2e92802f05cc8eabf65a156d5c3145b12855ed4346d75d7bc6710fd520778.bin": "6f35f458d06129f97ea29ec97503bca13e43bf0b509fd3734d8e4bf8b9fddc79",
+    "mamba-kernels-v1-feac83eb41fcc629d0c4bf9be1758d9e92c431728e17c1f46cfcd5c5a9ebc27d.bin": "32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0"
+  },
+  "cache_stable": true,
+  "counts": {
+    "bits": 8,
+    "decision": 1,
+    "identity": 1,
+    "resource": 3,
+    "screen": 4
+  },
+  "drain_quiet": true,
+  "drain_utc": "2026-09-08T00:47:46Z",
+  "executed_exactly_one_test": true,
+  "exit": 0,
+  "pre_utc": "2026-09-08T00:47:33Z",
+  "release_quiet": false,
+  "release_utc": "2026-09-08T00:47:41Z",
+  "schema": "MambaBiScalarNtFixedCopyPlanToolkitReceiptV1",
+  "toolkit": "13.0"
+}

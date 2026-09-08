@@ -1,0 +1,17 @@
+{
+  "binary_matches": [],
+  "build_args": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-13020",
+    "--test",
+    "gemm_bi_scalar_nn_m64n64_qualification",
+    "--no-run"
+  ],
+  "build_exit": 101,
+  "elapsed_s": 0.3977346420288086,
+  "schema": "MambaBiScalarNnLiveFixedBuildReceiptV1",
+  "source_sha256": "e7f21f6e80cd59611134ed834314ae4f1f6a7f3b841e43a8e8c2026fd170f16d"
+}

@@ -68,22 +68,6 @@ fn ada_discovery_toolkit_supported(version: (i32, i32)) -> bool {
     matches!(version, (12, 8) | (13, 0) | (13, 2))
 }
 
-fn ada_composed_reference_local_bytes(version: (i32, i32)) -> usize {
-    // Observed reference-only compiler output, not a candidate spill allowance.
-    // The supported-toolkit identity gate rejects other versions before use.
-    match version {
-        (12, 8) | (13, 0) => 16,
-        _ => 0,
-    }
-}
-
-#[test]
-fn ada_composed_reference_spills_are_explicitly_toolkit_specific() {
-    assert_eq!(ada_composed_reference_local_bytes((12, 8)), 16);
-    assert_eq!(ada_composed_reference_local_bytes((13, 0)), 16);
-    assert_eq!(ada_composed_reference_local_bytes((13, 2)), 0);
-}
-
 #[test]
 fn ada_discovery_supports_each_planned_toolkit_only() {
     for version in [(12, 8), (13, 0), (13, 2)] {
@@ -269,8 +253,7 @@ mod cuda_tournament {
     use super::common::gpu_quiet::QuietGpu;
     use super::{
         AdaBracketOrder, FIXED_COPYPLAN_SYMBOL, NnParams, PRODUCTION_TRANSPOSE_SOURCE, TEST_SOURCE,
-        TRANSPOSE_32X16, ada_candidate_over_auto, ada_composed_reference_local_bytes,
-        ada_copyplan_contract, ada_discovery_toolkit_supported, ada_percentile,
+        TRANSPOSE_32X16, ada_candidate_over_auto, ada_copyplan_contract, ada_percentile,
         ada_retain_decision, fixed_full_mantissa, validate_ada_copyplan_contract,
     };
 
@@ -1486,7 +1469,6 @@ mod cuda_tournament {
         expected_threads: u32,
         expected_static_shared: usize,
         expected_dynamic_shared: usize,
-        expected_local_bytes: usize,
     ) -> Result<(), String> {
         let threads = kernel.config.block_dim.0 * kernel.config.block_dim.1;
         let registers = kernel
@@ -1514,11 +1496,11 @@ mod cuda_tournament {
             )
             .map_err(|error| format!("{} occupancy: {error:?}", kernel.symbol))?;
         println!(
-            "{{\"schema\":\"MambaBiScalarNtAdaDiscoveryResourceV1\",\"symbol\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"expected_local_bytes\":{expected_local_bytes},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":1}}",
+            "{{\"schema\":\"MambaBiScalarNtAdaDiscoveryResourceV1\",\"symbol\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":1}}",
             kernel.symbol, kernel.config.shared_mem_bytes,
         );
         if registers <= 0
-            || local as usize != expected_local_bytes
+            || local != 0
             || static_shared as usize != expected_static_shared
             || kernel.config.shared_mem_bytes as usize != expected_dynamic_shared
             || threads != expected_threads
@@ -1526,7 +1508,7 @@ mod cuda_tournament {
             || occupancy < 1
         {
             return Err(format!(
-                "{} Ada resource floor failed: threads={threads}/{expected_threads} registers={registers} local={local}/{expected_local_bytes} static={static_shared}/{expected_static_shared} dynamic={}/{expected_dynamic_shared} max_threads={max_threads} occupancy={occupancy}/1",
+                "{} Ada resource floor failed: threads={threads}/{expected_threads} registers={registers} local={local} static={static_shared}/{expected_static_shared} dynamic={}/{expected_dynamic_shared} max_threads={max_threads} occupancy={occupancy}/1",
                 kernel.symbol, kernel.config.shared_mem_bytes,
             ));
         }
@@ -2512,21 +2494,7 @@ mod cuda_tournament {
         candidate_arm: Arm,
     ) -> Result<(Fixture, CudaGraph, CudaGraph, Vec<u32>), String> {
         validate_ada_actual_auto(runtime)?;
-        // This function is the test-composed exact reference. The real AUTO
-        // route is separately qualified and timed through the public wrapper.
-        check_ada_resources(
-            &runtime.generic_nt,
-            256,
-            0,
-            NT_SHARED,
-            ada_composed_reference_local_bytes(
-                runtime
-                    .ctx
-                    .kernels
-                    .triad_scalar_compiler_identity()
-                    .nvrtc_version,
-            ),
-        )?;
+        check_ada_resources(&runtime.generic_nt, 256, 0, NT_SHARED)?;
         let inner = candidate_inner_kernel(runtime, candidate_arm)?;
         let contract = ada_copyplan_contract();
         if candidate_arm == Arm::Transpose16FixedCopyPlan {
@@ -2537,12 +2505,11 @@ mod cuda_tournament {
                 contract.block.0,
                 contract.static_shared,
                 contract.dynamic_shared,
-                0,
             )?;
         } else {
-            check_ada_resources(inner, 128, 0, M64_SHARED, 0)?;
+            check_ada_resources(inner, 128, 0, M64_SHARED)?;
         }
-        check_ada_resources(&runtime.transpose16, 512, TRANSPOSE_STATIC_SHARED, 0, 0)?;
+        check_ada_resources(&runtime.transpose16, 512, TRANSPOSE_STATIC_SHARED, 0)?;
         let mut fixture = new_ada_fixture(runtime)?;
         let auto_graph = capture_ada_actual_auto(runtime, &mut fixture)?;
         let candidate_graph = capture_arm(runtime, &mut fixture, candidate_arm)?;

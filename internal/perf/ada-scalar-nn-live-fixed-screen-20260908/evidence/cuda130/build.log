@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+    Finished `release` profile [optimized] target(s) in 1.77s
+  Executable tests/gemm_bi_scalar_nn_m64n64_qualification.rs (/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda130-20260907/release/deps/gemm_bi_scalar_nn_m64n64_qualification-05da7e541c7af4f3)

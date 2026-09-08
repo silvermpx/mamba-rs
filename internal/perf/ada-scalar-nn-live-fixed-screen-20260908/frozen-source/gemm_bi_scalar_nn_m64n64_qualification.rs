@@ -73,7 +73,7 @@ fn copyplan_epilogue_supported(alpha: f32, beta: f32, has_bias: bool) -> bool {
     alpha.to_bits() == 1.0_f32.to_bits() && beta.to_bits() == 0 && !has_bias
 }
 
-fn ada_live_toolkit_supported(cc: (u32, u32), sms: u32, nvrtc: (i32, i32)) -> bool {
+fn ada_live_toolkit_supported(cc: (u32, u32), sms: u32, nvrtc: (u32, u32)) -> bool {
     cc == (8, 9) && sms == 142 && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
 }
 
