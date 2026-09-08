@@ -34,6 +34,8 @@ use std::ffi::CStr;
 use std::mem::size_of;
 
 mod common;
+#[path = "support/triad_half_nn_m128n64_source.rs"]
+mod triad_half_nn_m128n64_source;
 #[path = "support/triad_half_nn_n64_source.rs"]
 mod triad_half_nn_n64_source;
 #[path = "support/triad_half_nt_compact_source.rs"]
@@ -2119,6 +2121,7 @@ fn ada_half_nn_d768_out_fast_denominator_diagnostic() -> Result<(), String> {
 #[derive(Clone, Copy)]
 enum AdaHalfNnN64Variant {
     D768In,
+    D768InM128,
     D768Out,
 }
 
@@ -2126,13 +2129,14 @@ impl AdaHalfNnN64Variant {
     const fn name(self) -> &'static str {
         match self {
             Self::D768In => "fixed_n64_m64n64_bk64_s3",
+            Self::D768InM128 => "fixed_n64_m128n64_bk64_s2_d768_in",
             Self::D768Out => "fixed_n64_m128n64_bk64_s2",
         }
     }
 
     const fn dims(self) -> (usize, usize, usize) {
         match self {
-            Self::D768In => (2_048, 768, 3_072),
+            Self::D768In | Self::D768InM128 => (2_048, 768, 3_072),
             Self::D768Out => (2_048, 1_536, 768),
         }
     }
@@ -2140,6 +2144,7 @@ impl AdaHalfNnN64Variant {
     const fn grid(self) -> u32 {
         match self {
             Self::D768In => 1_536,
+            Self::D768InM128 => 768,
             Self::D768Out => 192,
         }
     }
@@ -2148,6 +2153,7 @@ impl AdaHalfNnN64Variant {
 struct AdaHalfNnN64Candidate {
     in_bf16: CudaFunction,
     in_f16: CudaFunction,
+    in_m128_f16: CudaFunction,
     out_bf16: CudaFunction,
     out_f16: CudaFunction,
     source_sha256: String,
@@ -2158,15 +2164,18 @@ impl AdaHalfNnN64Candidate {
         match (variant, dtype) {
             (AdaHalfNnN64Variant::D768In, WeightDtype::Bf16) => &self.in_bf16,
             (AdaHalfNnN64Variant::D768In, WeightDtype::F16) => &self.in_f16,
+            (AdaHalfNnN64Variant::D768InM128, WeightDtype::F16) => &self.in_m128_f16,
             (AdaHalfNnN64Variant::D768Out, WeightDtype::Bf16) => &self.out_bf16,
             (AdaHalfNnN64Variant::D768Out, WeightDtype::F16) => &self.out_f16,
-            (_, WeightDtype::F32) => panic!("N64 candidate requires a half dtype"),
+            (AdaHalfNnN64Variant::D768InM128, WeightDtype::Bf16) | (_, WeightDtype::F32) => {
+                panic!("N64 candidate does not provide this dtype")
+            }
         }
     }
 }
 
 fn compile_ada_half_nn_n64_candidate(t: &Ctx) -> Result<AdaHalfNnN64Candidate, String> {
-    let transformed = triad_half_nn_n64_source::compose_source(
+    let transformed = triad_half_nn_m128n64_source::candidate_source(
         include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu"),
         include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
     )?;
@@ -2214,6 +2223,9 @@ fn compile_ada_half_nn_n64_candidate(t: &Ctx) -> Result<AdaHalfNnN64Candidate, S
     Ok(AdaHalfNnN64Candidate {
         in_bf16: load(triad_half_nn_n64_source::IN_PREFIX, "bf16")?,
         in_f16: load(triad_half_nn_n64_source::IN_PREFIX, "f16")?,
+        in_m128_f16: module
+            .load_function(triad_half_nn_m128n64_source::SYMBOL)
+            .map_err(|error| format!("load {}: {error:?}", triad_half_nn_m128n64_source::SYMBOL))?,
         out_bf16: load(triad_half_nn_n64_source::OUT_PREFIX, "bf16")?,
         out_f16: load(triad_half_nn_n64_source::OUT_PREFIX, "f16")?,
         source_sha256,
@@ -2304,6 +2316,58 @@ fn capture_ada_half_nn_n64(
     }
 }
 
+fn validate_ada_half_nn_m128n64_graph(graph: &CudaGraph) -> Result<(), String> {
+    let mut count = 1_usize;
+    let mut node = std::ptr::null_mut();
+    let nodes_result = unsafe { sys::cuGraphGetNodes(graph.cu_graph(), &mut node, &mut count) };
+    if nodes_result != sys::CUresult::CUDA_SUCCESS || count != 1 || node.is_null() {
+        return Err(format!(
+            "half NN M128N64 graph inventory changed: result={nodes_result:?} count={count}"
+        ));
+    }
+    let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+    let params_result = unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) };
+    if params_result != sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "half NN M128N64 graph parameters: {params_result:?}"
+        ));
+    }
+    let mut name = std::ptr::null();
+    let name_result = unsafe { sys::cuFuncGetName(&mut name, params.func) };
+    if name_result != sys::CUresult::CUDA_SUCCESS || name.is_null() {
+        return Err(format!(
+            "half NN M128N64 graph symbol: result={name_result:?} null={}",
+            name.is_null()
+        ));
+    }
+    let actual = unsafe { CStr::from_ptr(name) }
+        .to_str()
+        .map_err(|error| format!("half NN M128N64 graph symbol UTF-8: {error}"))?;
+    let config = (
+        (params.gridDimX, params.gridDimY, params.gridDimZ),
+        (params.blockDimX, params.blockDimY, params.blockDimZ),
+        params.sharedMemBytes,
+    );
+    if actual != triad_half_nn_m128n64_source::SYMBOL
+        || config != ((768, 1, 1), (128, 1, 1), 49_152)
+    {
+        return Err(format!(
+            "half NN M128N64 graph changed: symbol={actual} config={config:?}"
+        ));
+    }
+    if params.kernelParams.is_null() {
+        return Err("half NN M128N64 graph arguments are null".into());
+    }
+    for index in 0..5 {
+        if unsafe { *params.kernelParams.add(index) }.is_null() {
+            return Err(format!(
+                "half NN M128N64 graph argument {index} storage is null"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum AdaHalfNnAlignedCandidate<'a> {
     FixedS3,
@@ -2389,7 +2453,7 @@ fn observe_ada_half_nn_aligned_candidate(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AdaHalfNnAlignedComparator {
     ForcedTc128,
     FixedS3,
@@ -2904,13 +2968,20 @@ fn ada_half_nn_loaded_pipeline_swizzle_f16_d768_in_vs_s3_and_fast_discovery_once
     run_ada_half_nn_loaded_pipeline_swizzle_batch()
 }
 
-fn run_ada_half_nn_n64_batch() -> Result<(), String> {
+fn run_ada_half_nn_n64_cases(
+    cases: &[(&str, AdaHalfNnN64Variant, WeightDtype)],
+    comparators: &[AdaHalfNnAlignedComparator],
+    quiet_label: &str,
+) -> Result<(), String> {
+    if comparators.len() != 2 {
+        return Err("half NN N64 screen requires exactly two comparators".into());
+    }
     assert!(
         !cfg!(debug_assertions),
         "half NN N64 discovery requires --release"
     );
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
-    let _pre = quiet.require_pre_context("half-nn-n64/pre-context")?;
+    let _pre = quiet.require_pre_context(&format!("{quiet_label}/pre-context"))?;
     let t = Ctx::new_ada()?;
     let compiler = t.ctx.kernels.compiler_identity();
     if compiler.nvrtc_version != (13, 2) {
@@ -2920,142 +2991,233 @@ fn run_ada_half_nn_n64_batch() -> Result<(), String> {
         ));
     }
     let n64 = compile_ada_half_nn_n64_candidate(&t)?;
-    let _cohort = quiet.require_cohort("half-nn-n64/cohort")?;
-    for (cell, variant) in [
-        ("d768_in_proj", AdaHalfNnN64Variant::D768In),
-        ("d768_out_proj", AdaHalfNnN64Variant::D768Out),
-    ] {
-        for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
-            gate_ada_half_nn_n64_resources(&n64, variant, dtype)?;
-            ada_half_resource_gate(&t, AdaHalfArm::PortableTc128, dtype)?;
-            let dims = variant.dims();
-            let fixture = AdaHalfFixture::new_with_guard(&t, dtype, dims, 128);
-            let candidate_graph = capture_ada_half_nn_n64(&t, &fixture, &n64, variant)?;
-            let current_graph = capture_ada_half(&t, &fixture, AdaHalfArm::PortableTc128)?;
-            fixture.reset_fast(&t)?;
-            enqueue_ada_half_nn_fast(&t, &fixture)?;
-            t.ctx
-                .stream
-                .synchronize()
-                .map_err(|error| format!("N64 Fast warmup: {error:?}"))?;
-            let fast_graph = capture_ada_half_nn_fast(&t, &fixture)?;
-            validate_single_node_graph(&candidate_graph, variant.name())?;
-            validate_single_node_graph(&current_graph, "N64 forced TC128")?;
-            validate_nonempty_graph(&fast_graph, "N64 native-half Fast")?;
+    let _cohort = quiet.require_cohort(&format!("{quiet_label}/cohort"))?;
+    for &(cell, variant, dtype) in cases {
+        gate_ada_half_nn_n64_resources(&n64, variant, dtype)?;
+        ada_half_resource_gate(&t, AdaHalfArm::PortableTc128, dtype)?;
+        let dims = variant.dims();
+        let fixture = AdaHalfFixture::new_with_guard(&t, dtype, dims, 128);
+        for (name, pointer) in [
+            ("A", fixture.a.ptr()),
+            ("B", fixture.b.ptr()),
+            ("candidate", fixture.candidate.ptr()),
+            ("reference", fixture.reference.ptr()),
+            ("Fast", fixture.fast.ptr()),
+        ] {
+            if pointer % 256 != 0 {
+                return Err(format!(
+                    "N64 {dtype:?} {cell} {name} pointer is not 256-byte aligned"
+                ));
+            }
+        }
+        let candidate_graph = capture_ada_half_nn_n64(&t, &fixture, &n64, variant)?;
+        let current_graph = capture_ada_half(&t, &fixture, AdaHalfArm::PortableTc128)?;
+        let retained_graph = if comparators.contains(&AdaHalfNnAlignedComparator::FixedS3) {
+            ada_half_resource_gate(&t, AdaHalfArm::FixedSm89Tc128S3, dtype)?;
+            Some(capture_ada_half(
+                &t,
+                &fixture,
+                AdaHalfArm::FixedSm89Tc128S3,
+            )?)
+        } else {
+            None
+        };
+        fixture.reset_fast(&t)?;
+        enqueue_ada_half_nn_fast(&t, &fixture)?;
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("N64 Fast warmup: {error:?}"))?;
+        let fast_graph = capture_ada_half_nn_fast(&t, &fixture)?;
+        validate_single_node_graph(&candidate_graph, variant.name())?;
+        if matches!(variant, AdaHalfNnN64Variant::D768InM128) {
+            validate_ada_half_nn_m128n64_graph(&candidate_graph)?;
+        }
+        validate_single_node_graph(&current_graph, "N64 forced TC128")?;
+        if let Some(graph) = &retained_graph {
+            validate_single_node_graph(graph, "N64 retained Fixed S3")?;
+        }
+        validate_nonempty_graph(&fast_graph, "N64 native-half Fast")?;
 
-            let current_bits = observe_ada_half_many(
+        let current_bits = observe_ada_half_many(
+            &t,
+            &fixture,
+            AdaHalfArm::PortableTc128,
+            &current_graph,
+            AdaHalfPath::Eager,
+            20,
+            None,
+        )?
+        .1;
+        let candidate_ref = AdaHalfNnAlignedCandidate::N64(&n64, variant);
+        for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+            observe_ada_half_many(
                 &t,
                 &fixture,
                 AdaHalfArm::PortableTc128,
                 &current_graph,
-                AdaHalfPath::Eager,
+                path,
                 20,
-                None,
-            )?
-            .1;
-            let candidate_ref = AdaHalfNnAlignedCandidate::N64(&n64, variant);
-            for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+                Some(&current_bits),
+            )?;
+            observe_ada_half_nn_aligned_candidate(
+                &t,
+                &fixture,
+                &candidate_graph,
+                candidate_ref,
+                path,
+                20,
+                &current_bits,
+            )?;
+            if let Some(graph) = &retained_graph {
                 observe_ada_half_many(
                     &t,
                     &fixture,
-                    AdaHalfArm::PortableTc128,
-                    &current_graph,
+                    AdaHalfArm::FixedSm89Tc128S3,
+                    graph,
                     path,
                     20,
                     Some(&current_bits),
                 )?;
-                observe_ada_half_nn_aligned_candidate(
-                    &t,
-                    &fixture,
-                    &candidate_graph,
-                    candidate_ref,
-                    path,
-                    20,
-                    &current_bits,
-                )?;
             }
-            let fast_bits = observe_ada_half_nn_fast_many(
-                &t,
-                &fixture,
-                &fast_graph,
-                AdaHalfPath::Eager,
-                20,
-                None,
-            )?
-            .1;
-            let fast_value = |word| match dtype {
-                WeightDtype::F16 => f16::from_bits(word).to_f32(),
-                WeightDtype::Bf16 => bf16::from_bits(word).to_f32(),
-                WeightDtype::F32 => unreachable!(),
-            };
-            if !fast_bits.iter().all(|&word| fast_value(word).is_finite())
-                || !fast_bits.iter().any(|&word| fast_value(word) != 0.0)
-            {
-                return Err(format!("N64 {dtype:?} {cell} Fast is invalid"));
-            }
-            observe_ada_half_nn_fast_many(
-                &t,
-                &fixture,
-                &fast_graph,
-                AdaHalfPath::Graph,
-                20,
-                Some(&fast_bits),
-            )?;
-
-            let mut decisions = Vec::with_capacity(2);
-            for comparator in [
-                AdaHalfNnAlignedComparator::ForcedTc128,
-                AdaHalfNnAlignedComparator::Fast,
-            ] {
-                let comparator_bits = match comparator {
-                    AdaHalfNnAlignedComparator::ForcedTc128 => &current_bits,
-                    AdaHalfNnAlignedComparator::FixedS3 => unreachable!(),
-                    AdaHalfNnAlignedComparator::Fast => &fast_bits,
-                };
-                let mut strata = Vec::with_capacity(4);
-                for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
-                    for order in [BracketOrder::Abba, BracketOrder::Baab] {
-                        strata.push(screen_ada_half_nn_aligned_pair(
-                            &t,
-                            &fixture,
-                            &candidate_graph,
-                            candidate_ref,
-                            &current_graph,
-                            &fast_graph,
-                            &current_bits,
-                            comparator_bits,
-                            comparator,
-                            cell,
-                            path,
-                            order,
-                        )?);
-                    }
-                }
-                decisions.push((comparator.name(), retain_decision(&strata), strata));
-            }
-            println!(
-                "{{\"schema\":\"MambaBiHalfNnN64AlignedDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"shape\":[{},{},{}],\"variant\":\"{}\",\"guard_half_elements\":128,\"comparators\":[{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}},{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}}],\"promotion\":false}}",
-                dims.0,
-                dims.1,
-                dims.2,
-                variant.name(),
-                decisions[0].0,
-                decisions[0].1,
-                decisions[0].2,
-                decisions[1].0,
-                decisions[1].1,
-                decisions[1].2,
-            );
         }
+        let fast_bits =
+            observe_ada_half_nn_fast_many(&t, &fixture, &fast_graph, AdaHalfPath::Eager, 20, None)?
+                .1;
+        let fast_value = |word| match dtype {
+            WeightDtype::F16 => f16::from_bits(word).to_f32(),
+            WeightDtype::Bf16 => bf16::from_bits(word).to_f32(),
+            WeightDtype::F32 => unreachable!(),
+        };
+        if !fast_bits.iter().all(|&word| fast_value(word).is_finite())
+            || !fast_bits.iter().any(|&word| fast_value(word) != 0.0)
+        {
+            return Err(format!("N64 {dtype:?} {cell} Fast is invalid"));
+        }
+        observe_ada_half_nn_fast_many(
+            &t,
+            &fixture,
+            &fast_graph,
+            AdaHalfPath::Graph,
+            20,
+            Some(&fast_bits),
+        )?;
+
+        let mut decisions = Vec::with_capacity(comparators.len());
+        for &comparator in comparators {
+            let comparator_bits = match comparator {
+                AdaHalfNnAlignedComparator::ForcedTc128 | AdaHalfNnAlignedComparator::FixedS3 => {
+                    &current_bits
+                }
+                AdaHalfNnAlignedComparator::Fast => &fast_bits,
+            };
+            let comparator_graph = match comparator {
+                AdaHalfNnAlignedComparator::ForcedTc128 | AdaHalfNnAlignedComparator::Fast => {
+                    &current_graph
+                }
+                AdaHalfNnAlignedComparator::FixedS3 => retained_graph
+                    .as_ref()
+                    .ok_or("half NN N64 retained S3 graph is missing")?,
+            };
+            let mut strata = Vec::with_capacity(4);
+            for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+                for order in [BracketOrder::Abba, BracketOrder::Baab] {
+                    strata.push(screen_ada_half_nn_aligned_pair(
+                        &t,
+                        &fixture,
+                        &candidate_graph,
+                        candidate_ref,
+                        comparator_graph,
+                        &fast_graph,
+                        &current_bits,
+                        comparator_bits,
+                        comparator,
+                        cell,
+                        path,
+                        order,
+                    )?);
+                }
+            }
+            decisions.push((comparator.name(), retain_decision(&strata), strata));
+        }
+        println!(
+            "{{\"schema\":\"MambaBiHalfNnN64AlignedDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"shape\":[{},{},{}],\"variant\":\"{}\",\"guard_half_elements\":128,\"pointer_mod_256\":{{\"a\":{},\"b\":{},\"candidate\":{},\"reference\":{},\"fast\":{}}},\"comparators\":[{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}},{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}}],\"promotion\":false}}",
+            dims.0,
+            dims.1,
+            dims.2,
+            variant.name(),
+            fixture.a.ptr() % 256,
+            fixture.b.ptr() % 256,
+            fixture.candidate.ptr() % 256,
+            fixture.reference.ptr() % 256,
+            fixture.fast.ptr() % 256,
+            decisions[0].0,
+            decisions[0].1,
+            decisions[0].2,
+            decisions[1].0,
+            decisions[1].1,
+            decisions[1].2,
+        );
     }
     drop(t);
-    quiet.verify_post_cohort("half-nn-n64/post").map(|_| ())
+    quiet
+        .verify_post_cohort(&format!("{quiet_label}/post"))
+        .map(|_| ())
+}
+
+fn run_ada_half_nn_n64_batch() -> Result<(), String> {
+    run_ada_half_nn_n64_cases(
+        &[
+            (
+                "d768_in_proj",
+                AdaHalfNnN64Variant::D768In,
+                WeightDtype::F16,
+            ),
+            (
+                "d768_in_proj",
+                AdaHalfNnN64Variant::D768In,
+                WeightDtype::Bf16,
+            ),
+            (
+                "d768_out_proj",
+                AdaHalfNnN64Variant::D768Out,
+                WeightDtype::F16,
+            ),
+            (
+                "d768_out_proj",
+                AdaHalfNnN64Variant::D768Out,
+                WeightDtype::Bf16,
+            ),
+        ],
+        &[
+            AdaHalfNnAlignedComparator::ForcedTc128,
+            AdaHalfNnAlignedComparator::Fast,
+        ],
+        "half-nn-n64",
+    )
 }
 
 #[test]
 #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; two-shape half NN N64 discovery"]
 fn ada_half_nn_n64_two_shape_vs_current_and_fast_discovery_once7() -> Result<(), String> {
     run_ada_half_nn_n64_batch()
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; M128N64/S2 F16 NN d768-in"]
+fn ada_half_nn_m128n64_s2_f16_d768_in_vs_s3_and_fast_discovery_once7() -> Result<(), String> {
+    run_ada_half_nn_n64_cases(
+        &[(
+            "d768_in_proj",
+            AdaHalfNnN64Variant::D768InM128,
+            WeightDtype::F16,
+        )],
+        &[
+            AdaHalfNnAlignedComparator::FixedS3,
+            AdaHalfNnAlignedComparator::Fast,
+        ],
+        "half-nn-m128n64-s2-f16-d768-in",
+    )
 }
 
 #[test]
