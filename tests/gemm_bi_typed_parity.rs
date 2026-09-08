@@ -48,6 +48,8 @@ mod triad_half_nt_s3_source;
 mod triad_half_tile_screen;
 #[path = "support/triad_half_tn_compact_source.rs"]
 mod triad_half_tn_compact_source;
+#[path = "support/triad_half_tn_fixed_s3_source.rs"]
+mod triad_half_tn_fixed_s3_source;
 #[path = "support/triad_half_tn_m64n128_source.rs"]
 mod triad_half_tn_m64n128_source;
 #[path = "support/triad_half_tn_microtile_source.rs"]
@@ -1259,6 +1261,62 @@ fn validate_nonempty_graph(graph: &CudaGraph, label: &str) -> Result<(), String>
         return Err(format!(
             "Ada half {label} graph must be nonempty: result={result:?} count={count}"
         ));
+    }
+    Ok(())
+}
+
+fn validate_ada_half_tn_fixed_s3_graph(
+    graph: &CudaGraph,
+    fixture: &AdaHalfTnFixture,
+    candidate: &AdaHalfTnCandidate,
+) -> Result<(), String> {
+    let mut count = 1_usize;
+    let mut node = std::ptr::null_mut();
+    let nodes_result = unsafe { sys::cuGraphGetNodes(graph.cu_graph(), &mut node, &mut count) };
+    if nodes_result != sys::CUresult::CUDA_SUCCESS || count != 1 || node.is_null() {
+        return Err(format!(
+            "half TN Fixed S3 graph inventory changed: result={nodes_result:?} count={count}"
+        ));
+    }
+    let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+    let params_result = unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) };
+    if params_result != sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "half TN Fixed S3 graph parameters: {params_result:?}"
+        ));
+    }
+    let mut name = std::ptr::null();
+    let name_result = unsafe { sys::cuFuncGetName(&mut name, params.func) };
+    if name_result != sys::CUresult::CUDA_SUCCESS || name.is_null() {
+        return Err(format!(
+            "half TN Fixed S3 graph symbol: result={name_result:?} null={}",
+            name.is_null()
+        ));
+    }
+    let actual = unsafe { CStr::from_ptr(name) }
+        .to_str()
+        .map_err(|error| format!("half TN Fixed S3 graph symbol UTF-8: {error}"))?;
+    let expected = candidate.symbol(fixture.dtype);
+    let config = (
+        (params.gridDimX, params.gridDimY, params.gridDimZ),
+        (params.blockDimX, params.blockDimY, params.blockDimZ),
+        params.sharedMemBytes,
+    );
+    let expected_config = ((144, 1, 1), (256, 1, 1), 98_304);
+    if actual != expected || config != expected_config {
+        return Err(format!(
+            "half TN Fixed S3 graph changed: symbol={actual} expected={expected} config={config:?}"
+        ));
+    }
+    if params.kernelParams.is_null() {
+        return Err("half TN Fixed S3 graph arguments are null".into());
+    }
+    for index in 0..7 {
+        if unsafe { *params.kernelParams.add(index) }.is_null() {
+            return Err(format!(
+                "half TN Fixed S3 graph argument {index} storage is null"
+            ));
+        }
     }
     Ok(())
 }
@@ -3100,6 +3158,7 @@ enum AdaHalfTnCandidateKind {
     Tc64Bk64S2Compact,
     Tc64Bk64S2Regpipe,
     M64N128Bk64S2Compact,
+    FixedS3Bxor,
 }
 
 impl AdaHalfTnCandidate {
@@ -3116,6 +3175,7 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Tc64Bk64S2Compact => "tc64_bk64_s2_compact_xor",
             AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => "tc64_bk64_s2_regpipe",
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "m64n128_bk64_s2_compact_xor",
+            AdaHalfTnCandidateKind::FixedS3Bxor => "fixed_s3_bxor",
         }
     }
 
@@ -3164,6 +3224,12 @@ impl AdaHalfTnCandidate {
             (AdaHalfTnCandidateKind::M64N128Bk64S2Compact, WeightDtype::F16) => {
                 format!("{}f16", triad_half_tn_m64n128_source::SYMBOL_PREFIX)
             }
+            (AdaHalfTnCandidateKind::FixedS3Bxor, WeightDtype::Bf16) => {
+                format!("{}bf16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX)
+            }
+            (AdaHalfTnCandidateKind::FixedS3Bxor, WeightDtype::F16) => {
+                format!("{}f16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX)
+            }
             (_, WeightDtype::F32) => panic!("TN microtile requires a half dtype"),
         }
     }
@@ -3176,19 +3242,20 @@ impl AdaHalfTnCandidate {
         }
     }
 
-    const fn geometry(&self) -> (usize, usize, u32, i32) {
+    const fn geometry(&self) -> (usize, usize, u32, i32, usize) {
         match self.kind {
             AdaHalfTnCandidateKind::Microtile(
                 triad_half_tn_microtile_source::Microtile::M32N32,
-            ) => (32, 32, 128, 15_360),
+            ) => (32, 32, 128, 15_360, 0),
             AdaHalfTnCandidateKind::Microtile(
                 triad_half_tn_microtile_source::Microtile::M16N32,
-            ) => (16, 32, 64, 12_288),
-            AdaHalfTnCandidateKind::Rect128x64 => (128, 64, 256, 39_936),
-            AdaHalfTnCandidateKind::Tc64Bk32S4 => (64, 64, 128, 36_864),
-            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => (64, 64, 128, 32_768),
-            AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => (64, 64, 128, 32_768),
-            AdaHalfTnCandidateKind::M64N128Bk64S2Compact => (64, 128, 256, 49_152),
+            ) => (16, 32, 64, 12_288, 0),
+            AdaHalfTnCandidateKind::Rect128x64 => (128, 64, 256, 39_936, 0),
+            AdaHalfTnCandidateKind::Tc64Bk32S4 => (64, 64, 128, 36_864, 0),
+            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => (64, 64, 128, 32_768, 0),
+            AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => (64, 64, 128, 32_768, 0),
+            AdaHalfTnCandidateKind::M64N128Bk64S2Compact => (64, 128, 256, 49_152, 0),
+            AdaHalfTnCandidateKind::FixedS3Bxor => (128, 128, 256, 0, 98_304),
         }
     }
 
@@ -3200,6 +3267,7 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Tc64Bk64S2Compact => "Tc64Bk64S2Compact",
             AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe => "Tc64Bk64S2Regpipe",
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "M64N128Bk64S2Compact",
+            AdaHalfTnCandidateKind::FixedS3Bxor => "FixedS3Bxor",
         }
     }
 
@@ -3308,24 +3376,39 @@ fn compile_ada_half_tn_isolated_candidate(
     transformed: String,
     bf16_symbol: &str,
     f16_symbol: &str,
+    fixed_preamble: bool,
 ) -> Result<AdaHalfTnCandidate, String> {
-    let source = [
-        include_str!("../kernels/_typed_prelude.cuh"),
-        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
-        include_str!("../kernels/gemm_bi_triad/common.cuh"),
-        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
-        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
-        &transformed,
-    ]
-    .iter()
-    .map(|part| {
-        part.lines()
-            .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-    .collect::<Vec<_>>()
-    .join("\n");
+    let fixed_common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+        .lines()
+        .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parts: Vec<&str> = if fixed_preamble {
+        vec![
+            include_str!("../kernels/_typed_prelude.cuh"),
+            &fixed_common,
+            &transformed,
+        ]
+    } else {
+        vec![
+            include_str!("../kernels/_typed_prelude.cuh"),
+            include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+            include_str!("../kernels/gemm_bi_triad/common.cuh"),
+            include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+            include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+            &transformed,
+        ]
+    };
+    let source = parts
+        .iter()
+        .map(|part| {
+            part.lines()
+                .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
     let ptx = cudarc::nvrtc::compile_ptx_with_opts(
         source,
@@ -3350,7 +3433,7 @@ fn compile_ada_half_tn_isolated_candidate(
         .context()
         .load_module(ptx)
         .map_err(|error| format!("load half TN isolated candidate module: {error:?}"))?;
-    Ok(AdaHalfTnCandidate {
+    let candidate = AdaHalfTnCandidate {
         kind,
         bf16: module
             .load_function(bf16_symbol)
@@ -3359,7 +3442,21 @@ fn compile_ada_half_tn_isolated_candidate(
             .load_function(f16_symbol)
             .map_err(|error| format!("load half TN isolated F16: {error:?}"))?,
         source_sha256,
-    })
+    };
+    if fixed_preamble {
+        for (dtype, function) in [
+            (WeightDtype::Bf16, &candidate.bf16),
+            (WeightDtype::F16, &candidate.f16),
+        ] {
+            function
+                .set_attribute(
+                    sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    98_304,
+                )
+                .map_err(|error| format!("set half TN {dtype:?} Fixed S3 shared: {error:?}"))?;
+        }
+    }
+    Ok(candidate)
 }
 
 fn compile_ada_half_tn_s4_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
@@ -3371,6 +3468,7 @@ fn compile_ada_half_tn_s4_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, Strin
         transformed,
         triad_half_tn_s4_source::BF16_SYMBOL,
         triad_half_tn_s4_source::F16_SYMBOL,
+        false,
     )
 }
 
@@ -3386,6 +3484,7 @@ fn compile_ada_half_tn_compact_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, 
         transformed,
         &bf16_symbol,
         &f16_symbol,
+        false,
     )
 }
 
@@ -3401,6 +3500,7 @@ fn compile_ada_half_tn_regpipe_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, 
         transformed,
         &bf16_symbol,
         &f16_symbol,
+        false,
     )
 }
 
@@ -3416,6 +3516,24 @@ fn compile_ada_half_tn_m64n128_compact_candidate(t: &Ctx) -> Result<AdaHalfTnCan
         transformed,
         &bf16_symbol,
         &f16_symbol,
+        false,
+    )
+}
+
+fn compile_ada_half_tn_fixed_s3_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
+    let transformed = triad_half_tn_fixed_s3_source::candidate_source(
+        include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
+        include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+    )?;
+    let bf16_symbol = format!("{}bf16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX);
+    let f16_symbol = format!("{}f16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX);
+    compile_ada_half_tn_isolated_candidate(
+        t,
+        AdaHalfTnCandidateKind::FixedS3Bxor,
+        transformed,
+        &bf16_symbol,
+        &f16_symbol,
+        true,
     )
 }
 
@@ -3514,7 +3632,7 @@ fn enqueue_ada_half_tn_candidate(
     candidate: &AdaHalfTnCandidate,
 ) -> Result<(), String> {
     let (m, k, n) = fixture.dims;
-    let (bm, bn, threads, _) = candidate.geometry();
+    let (bm, bn, threads, _, dynamic_shared) = candidate.geometry();
     let alpha = 1.0f32;
     let (m, k, n) = (m as i32, k as i32, n as i32);
     let output = fixture.candidate.ptr();
@@ -3540,7 +3658,7 @@ fn enqueue_ada_half_tn_candidate(
                 1,
             ),
             block_dim: (threads, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: dynamic_shared as u32,
         })
     }
     .map(|_| ())
@@ -3617,7 +3735,7 @@ fn gate_ada_half_tn_resources(
     dtype: WeightDtype,
 ) -> Result<(), String> {
     let function = candidate.function(dtype);
-    let (_, _, threads, expected_static) = candidate.geometry();
+    let (_, _, threads, expected_static, dynamic_shared) = candidate.geometry();
     let registers = function
         .num_regs()
         .map_err(|error| format!("half TN registers: {error:?}"))?;
@@ -3631,7 +3749,7 @@ fn gate_ada_half_tn_resources(
         .max_threads_per_block()
         .map_err(|error| format!("half TN max threads: {error:?}"))?;
     let occupancy = function
-        .occupancy_max_active_blocks_per_multiprocessor(threads, 0, None)
+        .occupancy_max_active_blocks_per_multiprocessor(threads, dynamic_shared, None)
         .map_err(|error| format!("half TN occupancy: {error:?}"))?;
     let required_occupancy = candidate.required_occupancy();
     let register_cap = match candidate.kind {
@@ -3645,7 +3763,8 @@ fn gate_ada_half_tn_resources(
         | AdaHalfTnCandidateKind::Tc64Bk32S4
         | AdaHalfTnCandidateKind::Tc64Bk64S2Compact
         | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
-        | AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "source_sha256",
+        | AdaHalfTnCandidateKind::M64N128Bk64S2Compact
+        | AdaHalfTnCandidateKind::FixedS3Bxor => "source_sha256",
         AdaHalfTnCandidateKind::Rect128x64 => "source_fragment_sha256",
     };
     if matches!(
@@ -3653,14 +3772,14 @@ fn gate_ada_half_tn_resources(
         AdaHalfTnCandidateKind::M64N128Bk64S2Compact | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
     ) {
         println!(
-            "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"register_cap\":{register_cap},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
+            "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"register_cap\":{register_cap},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{dynamic_shared},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
             candidate.name(),
             candidate.symbol(dtype),
             candidate.source_sha256,
         );
     } else {
         println!(
-            "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
+            "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{dynamic_shared},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
             candidate.name(),
             candidate.symbol(dtype),
             candidate.source_sha256,
@@ -3854,6 +3973,7 @@ fn run_ada_half_tn_candidate_cells(
                     candidate.kind,
                     AdaHalfTnCandidateKind::M64N128Bk64S2Compact
                         | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
+                        | AdaHalfTnCandidateKind::FixedS3Bxor
                 ) && (fixture.a.ptr() % 256 != 0
                     || fixture.b.ptr() % 256 != 0
                     || fixture.candidate.ptr() % 256 != 0
@@ -3883,6 +4003,9 @@ fn run_ada_half_tn_candidate_cells(
                     capture_ada_half_tn_arm(t, &fixture, candidate, AdaHalfTnArm::Fast)?,
                 ];
                 validate_single_node_graph(&graphs[0], "candidate")?;
+                if matches!(candidate.kind, AdaHalfTnCandidateKind::FixedS3Bxor) {
+                    validate_ada_half_tn_fixed_s3_graph(&graphs[0], &fixture, candidate)?;
+                }
                 validate_single_node_graph(&graphs[1], "current_tc64")?;
                 validate_nonempty_graph(&graphs[2], "native_half_fast")?;
                 let fast_bits = observe_ada_half_tn(
@@ -4531,6 +4654,38 @@ fn ada_half_tn_m64n128_bk64_s2_compact_d768_out_and_prism_discovery_once7() -> R
             ("prism_in_proj", (4_621, 384, 1_928)),
         ],
     )
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half TN Fixed S3 B-XOR d768-in discovery"]
+fn ada_half_tn_fixed_s3_bxor_d768_in_vs_current_and_fast_discovery_once7() -> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half TN Fixed S3 B-XOR discovery requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-tn-fixed-s3-bxor/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half TN Fixed S3 B-XOR requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_tn_fixed_s3_candidate(&t)?;
+    let _cohort = quiet.require_cohort("half-tn-fixed-s3-bxor/cohort")?;
+    run_ada_half_tn_candidate_cells(
+        &t,
+        &[candidate],
+        &[("d768_in_proj", (2_048, 768, 3_072))],
+        true,
+        &[AdaHalfTnArm::CurrentTc64, AdaHalfTnArm::Fast],
+    )?;
+    drop(t);
+    quiet
+        .verify_post_cohort("half-tn-fixed-s3-bxor/post")
+        .map(|_| ())
 }
 
 fn launch_scalar_tn_slim(

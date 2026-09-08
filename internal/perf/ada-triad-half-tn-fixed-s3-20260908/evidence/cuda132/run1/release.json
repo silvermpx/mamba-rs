@@ -1,0 +1,12 @@
+{
+  "apps": "",
+  "apps_exit": 0,
+  "apps_stderr": "",
+  "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 11, 1, 52, 1800, 46, P0\n",
+  "gpu_exit": 0,
+  "gpu_stderr": "",
+  "identity_no_apps": true,
+  "phase": "RELEASE",
+  "quiet": false,
+  "utc": "2026-09-08T12:31:47Z"
+}

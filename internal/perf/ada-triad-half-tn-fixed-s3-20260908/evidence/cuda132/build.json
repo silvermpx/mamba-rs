@@ -1,0 +1,19 @@
+{
+  "args": [
+    "cargo",
+    "test",
+    "--release",
+    "--test",
+    "gemm_bi_typed_parity",
+    "--features",
+    "cuda,cudarc/cuda-13020",
+    "--no-run"
+  ],
+  "exit": 0,
+  "sources": {
+    "tests/gemm_bi_typed_parity.rs": "15cb1a3d5e9840cf3342ed605fc727afee509f9a04dfead1f5dee0afbbd8f092",
+    "tests/support/triad_half_nt_direct_epilogue_source.rs": "087678c83e2e170f25eac6712abb913cbfeac563177b8d1ab054dbbb35947323",
+    "tests/support/triad_half_nt_fixed_s3_source.rs": "2c41646460a23f92f43417b08b4389bc306386b26d521282c904881b2e1c2fc0",
+    "tests/support/triad_half_tn_fixed_s3_source.rs": "9147da28e1948a1774d45d87823b3c1cb67fbdcaea4e34802151574bfc14493e"
+  }
+}

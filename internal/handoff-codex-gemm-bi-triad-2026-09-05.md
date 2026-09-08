@@ -9,6 +9,12 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Half TN Fixed-S3 d768-in is a valid loss for both half types:7–8% slower than
+current TC64,24–28% above Fast. Bits/resources PASS; keep compact/regpipe.
+Measured typed15cb1a3d/helper9147da28, raw2a3a19ee; root112brackets replayed.
+See `perf/ada-triad-half-tn-fixed-s3-20260908/report.md`. Next bounded hypothesis
+is paired F32 dW epilogue on regpipe; do not resweep the losing S3 tile.
+
 Half NT direct-epilogue probe is a valid loss:14.5–15.6% slower than retained
 S3, also loses Fast; bits/resources PASS. Keep the vector S3 epilogue, do not
 repeat. Typed ada3769c/helper087678c8; see
