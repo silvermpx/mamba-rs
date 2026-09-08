@@ -50,6 +50,25 @@ and [backend properties](https://docs.nvidia.com/cuda/nvidia-matmul-heuristics/a
 
 ## Contract and search protocol
 
+Selected next TF32 structural hypothesis: convert each shared-stage word to
+RNA bits once, then consume those raw bits with the unchanged K8 MMA chain.
+Compact8 NT currently makes16,384 source-level conversion calls per BK32 for
+6,144 unique words. This count is source analysis, not a measured speedup.
+The async producer thread must convert only its own completed copy chunks
+after wait_group and before the existing publishing CTA barrier; stage-reuse
+barriers remain intact. Unconverted scalar fallbacks retain their original
+consumer-side RNA conversion. No global prepack buffer or extra kernel.
+
+The [PTX wait-group contract](https://docs.nvidia.com/cuda/archive/12.0.1/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-wait-group-cp-async-wait-all)
+is thread-local completion/visibility for async copies, not a substitute for
+the CTA publishing barrier. Verify ownership, every ring stage, zero-fill and
+fallback paths before timing. Risks are extra shared read/write traffic,
+conversion on the critical path, register growth and lost occupancy.
+
+If that fails, consider interleaving target-specific copy slices with K8 MMA
+issues using the existing Fixed-N96 schedule, while retaining compact32/S2
+storage. Do not combine both mechanisms in the first experiment.
+
 Keep per-output reduction and rounding unchanged. SplitK/SliceK, tensor
 decomposition of exact F32, and atomics are not drop-in bit-exact optimizations.
 NVIDIA demonstrates how changing association/FMA grouping changes results in

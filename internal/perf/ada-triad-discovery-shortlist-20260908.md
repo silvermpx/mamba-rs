@@ -29,14 +29,14 @@ unpaired timing ratios, marginal parity, and merely faster-than-AUTO results.
 | Scope | Keep / remaining issue | Evidence |
 | --- | --- | --- |
 | F16 NN d768-in | S3 beats TC128; Fast still2–4% ahead. Pipeline/Swizzle are weaker. | [S3](ada-triad-half-nt128-f16in-20260908/README.md), [loaded losses](ada-triad-half-nn-loaded2-20260908/README.md) |
-| Half NT d768-out | B-XOR S3 is26% below TC64; graph Fast remains2–6% ahead. Direct epilogue loses retained S3 by14.5–15.6%; keep vector epilogue. | [NT out](ada-triad-half-nt-fixed-s3-bxor-20260908/report.md), [epilogue loss](ada-triad-half-nt-direct-epilogue-20260908/report.md) |
+| Half NT d768-out | NEW F16 M64N128/S3 beats retained B-XOR S3 by4.5%; graph Fast medians .9812–.9898 but worst p95 1.0105, not strict Fast winner. BF16 sibling pending; preserve its retained S3. | [M64N128 F16](ada-triad-half-nt-m64n128-s3-20260908/report.md), [retained out](ada-triad-half-nt-fixed-s3-bxor-20260908/report.md) |
 | Half TN d768-in | New regpipe-float2 screen reaches graph parity: Fast p50 .9988–1.0022, worst p95 1.0068. No strict Fast win and no paired compact/regpipe ranking. M128N128 Fixed-S3 loses current TC64; excluded. | [Compact](ada-triad-half-tn-compact-20260908/README.md), [float2 parity](ada-triad-half-tn-regpipe-vec2-20260908/report.md), [S3 loss](ada-triad-half-tn-fixed-s3-20260908/report.md) |
 | TF32 NN d768-out / Prism | N96 reduces AUTO time; near Fast parity, not a strict win. N96 d768-in loses and is excluded. | [N96](ada-triad-nn-addhalf-n96-screen-20260908/README.md) |
 | TF32 TN large shapes | Whole raw-transpose+N96 reduces actual AUTO time29–30% in,40% out,15–17% Prism. Graph/Fast respectively1.34,1.20,2.00; no Fast win. | [In](ada-triad-tf32-tn-transpose-n96-20260908/report.md), [out/Prism](ada-triad-tf32-tn-transpose-n96-siblings-20260908/report.md) |
 | TF32 TN direct-N96 d768-in | Direct staging removes transpose but still loses Fast graph35–37%. Not paired against retained transpose+N96; no new-best claim. | [Direct probe](ada-triad-tf32-tn-direct-n96-20260908/report.md) |
 | Exact F32 TN d128-in/out | Direct fixed-order fold substantially improves AUTO; still roughly2–3x Fast. | [In](ada-triad-f32-tn-d128-direct-20260908/README.md), [out](ada-triad-f32-tn-d128-out-direct-20260908/README.md) |
 | Exact F32 NN large / NT d768-out | Preserve the earlier CopyPlan reuse finalists and their existing three-toolkit evidence; these are not new Fast wins. | [Live reuse](ada-triad-live-reuse-20260908/README.md) |
-| Exact F32 NT d768-in / Prism | New whole transpose+CopyPlan candidates cut actual AUTO time56.7–56.8% /12.8–13.0%, with exact bits. Fast still2.36x /3.92x faster in time ratio. Retain for joint integration, no Fast-win count. | [Sibling reuse](ada-f32-nt-copyplan-siblings-20260908/report.md) |
+| Exact F32 NT d768-in / Prism | New whole transpose+CopyPlan candidates cut actual AUTO time56.7–56.8% /12.8–13.0%, with exact bits. Candidate/Fast time ratios remain2.36 /3.92. Retain for joint integration, no Fast-win count. | [Sibling reuse](ada-f32-nt-copyplan-siblings-20260908/report.md) |
 
 This table is not exhaustive closure of60 operation/dtype/shape cells. The old
 [whole-matrix snapshot](ada-triad-state-20260907/report.md) remains historical;

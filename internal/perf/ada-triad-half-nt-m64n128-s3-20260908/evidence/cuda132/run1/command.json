@@ -1,0 +1,28 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_typed_parity-94f76dadc2c09cc4",
+    "ada_half_nt_fixed_s3_m64n128_f16_d768_out_bare_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "ff7e273bc7ec8d84f8e97f8aa7955a3cff64ac45116f4d7fcda146b1b00470a5",
+  "cache_stable": true,
+  "counts": {
+    "MambaBiHalfNtFixedS3M64N128BitsV1": 12,
+    "MambaBiHalfNtFixedS3M64N128DecisionV1": 2,
+    "MambaBiHalfNtFixedS3M64N128ResourceV1": 1,
+    "MambaBiHalfNtFixedS3M64N128ScreenV1": 8,
+    "MambaBiHalfNtFixedS3M64N128TailBitsV1": 1
+  },
+  "drain": "2026-09-08T13:17:35Z",
+  "elapsed_s": 33.55984687805176,
+  "executed_exactly_one": true,
+  "exit": 0,
+  "helper_sha256": "a97c836320d90cf85c633ceaf633f77b1bdf8cd5fb5aca7ce129a609029f6fe0",
+  "pre": "2026-09-08T13:17:01Z",
+  "release": "2026-09-08T13:17:30Z",
+  "source_sha256": "5abc2d62c8340beb72005613e705030532bd6aa54b572403b521e02720bf2b0b",
+  "started_utc": "2026-09-08T13:17:02Z",
+  "test_log_sha256": "319fd7a8f3fa9ad3af5e9b20041a14755f23d1e26ab7bcc481ac63165e11b87f"
+}

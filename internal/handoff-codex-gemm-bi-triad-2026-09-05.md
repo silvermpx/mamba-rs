@@ -9,6 +9,23 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-08: authoritative parallel research and measured follow-through
+are in `experiments/ada-triad-authoritative-research-20260908.md` (NVIDIA,
+CUTLASS, actual constrained nvMatmulHeuristics query; not predicted speed claims).
+Commitde64fbfe retains TWO NEW exact-F32 NT candidates: d768-in actualAUTO
+~640→277us, Prism346→301us, exact target/tail/exception/K0 bits PASS.
+Fast gaps remain2.36x/3.92x; no Fast victory claimed. Report:
+`perf/ada-f32-nt-copyplan-siblings-20260908/report.md`.
+Commit4504cef1 records half-TN float2 graph parity (not strict Fast win), NCU
+showing zero excessive shared wavefronts, and the first research shortlist.
+Discovery still precedes joint integration/full-toolkit gates. Half-NT
+M64N128/S3 F16out now beats retainedS3 by4.5%, but Fastgraph p95 fails;
+see `perf/ada-triad-half-nt-m64n128-s3-20260908/report.md`. BF16 sibling pending.
+Other pending work: TF32 A-only ldmatrix (repair unsupported
+qualification K0 harness, no timing verdict yet); then half-NNin N64 reuse and
+TF32 once-per-stage RNA conversion. Fixed inference/SM120 unchanged. Older
+progress paragraphs below are historical; do not rerun their completed probes.
+
 Direct TF32 TN N96 d768-in passed bits/resources but is NOT a Fast win:
 actualAUTO27% lower; graphFast35–37% slower. Not paired with retained
 transpose+N96, hence no new-best claim. Main36126907/helpera153aeb2;

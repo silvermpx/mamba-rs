@@ -42,6 +42,8 @@ mod triad_half_nt_compact_source;
 mod triad_half_nt_direct_epilogue_source;
 #[path = "support/triad_half_nt_fixed_s3_source.rs"]
 mod triad_half_nt_fixed_s3_source;
+#[path = "support/triad_half_nt_m64n128_s3_source.rs"]
+mod triad_half_nt_m64n128_s3_source;
 #[path = "support/triad_half_nt_s3_source.rs"]
 mod triad_half_nt_s3_source;
 #[path = "support/triad_half_tile_screen.rs"]
@@ -1326,8 +1328,9 @@ fn validate_ada_half_tn_fixed_s3_graph(
 fn validate_ada_half_nt_fixed_s3_graph(
     graph: &CudaGraph,
     dtype: WeightDtype,
-    cell: AdaHalfNtCell,
     symbol_prefix: &str,
+    expected_grid: u32,
+    expected_shared: u32,
 ) -> Result<(), String> {
     let mut count = 1_usize;
     let mut node = std::ptr::null_mut();
@@ -1366,7 +1369,7 @@ fn validate_ada_half_nt_fixed_s3_graph(
         (params.blockDimX, params.blockDimY, params.blockDimZ),
         params.sharedMemBytes,
     );
-    let expected_config = ((cell.fixed_s3_grid(), 1, 1), (256, 1, 1), 98_304);
+    let expected_config = ((expected_grid, 1, 1), (256, 1, 1), expected_shared);
     if actual != expected || config != expected_config {
         return Err(format!(
             "half NT Fixed S3 graph changed: symbol={actual} expected={expected} config={config:?}"
@@ -4799,6 +4802,19 @@ fn enqueue_tc_nt(
     b: u64,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    enqueue_tc_nt_with_alpha(t, schedule, dtype, c, a, b, dims, 1.0)
+}
+
+fn enqueue_tc_nt_with_alpha(
+    t: &Ctx,
+    schedule: BackwardSchedule,
+    dtype: WeightDtype,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+    alpha: f32,
+) -> Result<(), String> {
     let (m, k, n) = dims;
     let (function, edge, threads, shared_mem_bytes) = match schedule {
         BackwardSchedule::Tile128 => (&t.ctx.kernels.gemm_bi_nt_tc_typed, 128, 256, 73_728),
@@ -4813,7 +4829,6 @@ fn enqueue_tc_nt(
         block_dim: (threads, 1, 1),
         shared_mem_bytes,
     };
-    let alpha = 1.0f32;
     let (m, n, k) = (m as i32, n as i32, k as i32);
     let mut launch = t.ctx.stream.launch_builder(function.get(dtype));
     launch.arg(&c);
@@ -4851,6 +4866,7 @@ enum AdaHalfNtCell {
     D768Out,
     D768In,
     Prism,
+    Tail,
 }
 
 impl AdaHalfNtCell {
@@ -4859,6 +4875,7 @@ impl AdaHalfNtCell {
             Self::D768Out => "d768_out_proj",
             Self::D768In => "d768_in_proj",
             Self::Prism => "prism_in_proj",
+            Self::Tail => "tail_67x131x69",
         }
     }
 
@@ -4867,12 +4884,18 @@ impl AdaHalfNtCell {
             Self::D768Out => ADA_HALF_NT_D768_OUT,
             Self::D768In => (2_048, 768, 3_072),
             Self::Prism => (4_621, 384, 1_928),
+            Self::Tail => (67, 131, 69),
         }
     }
 
     fn fixed_s3_grid(self) -> u32 {
         let (m, k_out, _) = self.dims();
         m.div_ceil(128).checked_mul(k_out.div_ceil(128)).unwrap() as u32
+    }
+
+    fn fixed_s3_m64n128_grid(self) -> u32 {
+        let (m, k_out, _) = self.dims();
+        m.div_ceil(64).checked_mul(k_out.div_ceil(128)).unwrap() as u32
     }
 }
 
@@ -4901,6 +4924,7 @@ enum AdaHalfNtCandidateKind {
     CompactBk64S2,
     DirectEpilogue,
     FixedS3Bxor,
+    FixedS3M64N128,
     LoadedTc128,
 }
 
@@ -4911,6 +4935,7 @@ impl AdaHalfNtCandidateKind {
             Self::CompactBk64S2 => "tc64_bk64_s2_compact_xor",
             Self::DirectEpilogue => "fixed_s3_bxor_direct_epilogue",
             Self::FixedS3Bxor => "fixed_s3_bxor",
+            Self::FixedS3M64N128 => "fixed_s3_m64n128",
             Self::LoadedTc128 => "loaded_tc128_bk64_s2",
         }
     }
@@ -4921,6 +4946,7 @@ impl AdaHalfNtCandidateKind {
             Self::CompactBk64S2 => "MambaBiHalfNtCompactResourceV1",
             Self::DirectEpilogue => "MambaBiHalfNtDirectEpilogueResourceV1",
             Self::FixedS3Bxor => "MambaBiHalfNtFixedS3BxorResourceV1",
+            Self::FixedS3M64N128 => "MambaBiHalfNtFixedS3M64N128ResourceV1",
             Self::LoadedTc128 => "MambaBiHalfNtLoadedTc128ResourceV1",
         }
     }
@@ -4931,6 +4957,7 @@ impl AdaHalfNtCandidateKind {
             Self::CompactBk64S2 => "MambaBiHalfNtCompactBitsV1",
             Self::DirectEpilogue => "MambaBiHalfNtDirectEpilogueBitsV1",
             Self::FixedS3Bxor => "MambaBiHalfNtFixedS3BxorBitsV1",
+            Self::FixedS3M64N128 => "MambaBiHalfNtFixedS3M64N128BitsV1",
             Self::LoadedTc128 => "MambaBiHalfNtLoadedTc128BitsV1",
         }
     }
@@ -4941,6 +4968,7 @@ impl AdaHalfNtCandidateKind {
             Self::CompactBk64S2 => "MambaBiHalfNtCompactFastScreenV1",
             Self::DirectEpilogue => "MambaBiHalfNtDirectEpilogueScreenV1",
             Self::FixedS3Bxor => "MambaBiHalfNtFixedS3BxorScreenV1",
+            Self::FixedS3M64N128 => "MambaBiHalfNtFixedS3M64N128ScreenV1",
             Self::LoadedTc128 => "MambaBiHalfNtLoadedTc128ScreenV1",
         }
     }
@@ -4951,6 +4979,7 @@ impl AdaHalfNtCandidateKind {
             Self::CompactBk64S2 => "MambaBiHalfNtCompactFastDecisionV1",
             Self::DirectEpilogue => "MambaBiHalfNtDirectEpilogueDecisionV1",
             Self::FixedS3Bxor => "MambaBiHalfNtFixedS3BxorDecisionV1",
+            Self::FixedS3M64N128 => "MambaBiHalfNtFixedS3M64N128DecisionV1",
             Self::LoadedTc128 => "MambaBiHalfNtLoadedTc128DecisionV1",
         }
     }
@@ -4959,7 +4988,7 @@ impl AdaHalfNtCandidateKind {
         match self {
             Self::Bk32S3 => 30_720,
             Self::CompactBk64S2 => 32_768,
-            Self::DirectEpilogue | Self::FixedS3Bxor => 0,
+            Self::DirectEpilogue | Self::FixedS3Bxor | Self::FixedS3M64N128 => 0,
             Self::LoadedTc128 => 0,
         }
     }
@@ -4968,6 +4997,7 @@ impl AdaHalfNtCandidateKind {
         match self {
             Self::Bk32S3 | Self::CompactBk64S2 => (128, 0, 3),
             Self::DirectEpilogue | Self::FixedS3Bxor => (256, 98_304, 1),
+            Self::FixedS3M64N128 => (256, 73_728, 1),
             Self::LoadedTc128 => (256, 73_728, 1),
         }
     }
@@ -5031,6 +5061,14 @@ fn compile_ada_half_nt_candidate(
                 include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
             )?,
             triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
+            true,
+        ),
+        AdaHalfNtCandidateKind::FixedS3M64N128 => (
+            triad_half_nt_m64n128_s3_source::candidate_source(
+                include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
+                include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+            )?,
+            triad_half_nt_m64n128_s3_source::SYMBOL_PREFIX,
             true,
         ),
         AdaHalfNtCandidateKind::LoadedTc128 => {
@@ -5108,7 +5146,9 @@ fn compile_ada_half_nt_candidate(
     };
     if matches!(
         kind,
-        AdaHalfNtCandidateKind::DirectEpilogue | AdaHalfNtCandidateKind::FixedS3Bxor
+        AdaHalfNtCandidateKind::DirectEpilogue
+            | AdaHalfNtCandidateKind::FixedS3Bxor
+            | AdaHalfNtCandidateKind::FixedS3M64N128
     ) {
         for (dtype, function) in [
             (WeightDtype::Bf16, &candidate.bf16),
@@ -5117,12 +5157,15 @@ fn compile_ada_half_nt_candidate(
             function
                 .set_attribute(
                     sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    98_304,
+                    kind.launch_resources().1 as i32,
                 )
                 .map_err(|error| format!("set half NT {dtype:?} Fixed S3 shared: {error:?}"))?;
         }
     }
-    if kind == AdaHalfNtCandidateKind::DirectEpilogue {
+    if matches!(
+        kind,
+        AdaHalfNtCandidateKind::DirectEpilogue | AdaHalfNtCandidateKind::FixedS3M64N128
+    ) {
         let retained = compile_ada_half_nt_candidate(t, AdaHalfNtCandidateKind::FixedS3Bxor)?;
         Ok(AdaHalfNtS3Candidate {
             retained_bf16: Some(retained.bf16),
@@ -5187,6 +5230,7 @@ impl AdaHalfNtS3Fixture {
             AdaHalfNtCell::D768Out => 0,
             AdaHalfNtCell::D768In => 0x1000,
             AdaHalfNtCell::Prism => 0x2000,
+            AdaHalfNtCell::Tail => 0x3000,
         };
         let a_values = ada_half_values(m * reduction, dtype, 0xa89a_8201 ^ seed);
         let b_values = ada_half_values(k_out * reduction, dtype, 0xb89a_8202 ^ seed);
@@ -5249,6 +5293,16 @@ fn enqueue_ada_half_nt_s3_arm(
     candidate: &AdaHalfNtS3Candidate,
     arm: AdaHalfNtArm,
 ) -> Result<(), String> {
+    enqueue_ada_half_nt_s3_arm_with_alpha(t, fixture, candidate, arm, 1.0)
+}
+
+fn enqueue_ada_half_nt_s3_arm_with_alpha(
+    t: &Ctx,
+    fixture: &AdaHalfNtS3Fixture,
+    candidate: &AdaHalfNtS3Candidate,
+    arm: AdaHalfNtArm,
+    alpha: f32,
+) -> Result<(), String> {
     let dims = fixture.cell.dims();
     let (m, k, n) = dims;
     match arm {
@@ -5267,7 +5321,6 @@ fn enqueue_ada_half_nt_s3_arm(
             let output = fixture.output(arm).ptr();
             let a = fixture.a.ptr();
             let b = fixture.b.ptr();
-            let alpha = 1.0f32;
             let (m, n, k) = (m as i32, n as i32, k as i32);
             let mut launch = t.ctx.stream.launch_builder(match arm {
                 AdaHalfNtArm::Candidate => candidate.function(fixture.dtype),
@@ -5282,11 +5335,17 @@ fn enqueue_ada_half_nt_s3_arm(
                 .arg(&m)
                 .arg(&n)
                 .arg(&k);
-            let (threads, dynamic_shared, _) = candidate.kind.launch_resources();
-            let grid = match candidate.kind {
+            let launch_kind = if arm == AdaHalfNtArm::RetainedS3 {
+                AdaHalfNtCandidateKind::FixedS3Bxor
+            } else {
+                candidate.kind
+            };
+            let (threads, dynamic_shared, _) = launch_kind.launch_resources();
+            let grid = match launch_kind {
                 AdaHalfNtCandidateKind::DirectEpilogue | AdaHalfNtCandidateKind::FixedS3Bxor => {
                     fixture.cell.fixed_s3_grid()
                 }
+                AdaHalfNtCandidateKind::FixedS3M64N128 => fixture.cell.fixed_s3_m64n128_grid(),
                 AdaHalfNtCandidateKind::Bk32S3 | AdaHalfNtCandidateKind::CompactBk64S2 => 32 * 24,
                 AdaHalfNtCandidateKind::LoadedTc128 => unreachable!(),
             };
@@ -5300,7 +5359,7 @@ fn enqueue_ada_half_nt_s3_arm(
             .map(|_| ())
             .map_err(|error| format!("half NT {} launch: {error:?}", candidate.kind.name()))
         }
-        AdaHalfNtArm::CurrentTc64 => enqueue_tc_nt(
+        AdaHalfNtArm::CurrentTc64 => enqueue_tc_nt_with_alpha(
             t,
             BackwardSchedule::Tile64,
             fixture.dtype,
@@ -5308,6 +5367,7 @@ fn enqueue_ada_half_nt_s3_arm(
             fixture.a.ptr(),
             fixture.b.ptr(),
             dims,
+            alpha,
         ),
         AdaHalfNtArm::Fast => {
             use cudarc::cublas::{result, sys as blas_sys};
@@ -5399,6 +5459,82 @@ fn capture_ada_half_nt_s3_arm(
             enqueue_ada_half_nt_s3_arm(t, fixture, candidate, arm)
         })
     }
+}
+
+fn verify_ada_half_nt_m64n128_negative_alpha_tail(
+    t: &Ctx,
+    candidate: &AdaHalfNtS3Candidate,
+) -> Result<(), String> {
+    const ALPHA: f32 = -0.75;
+    let fixture = AdaHalfNtS3Fixture::new_with_guard(t, WeightDtype::F16, AdaHalfNtCell::Tail, 128);
+    let arms = [
+        AdaHalfNtArm::CurrentTc64,
+        AdaHalfNtArm::Candidate,
+        AdaHalfNtArm::RetainedS3,
+    ];
+    let mut eager_bits = Vec::with_capacity(arms.len());
+    for &arm in &arms {
+        fixture.reset(t, arm)?;
+        enqueue_ada_half_nt_s3_arm_with_alpha(t, &fixture, candidate, arm, ALPHA)?;
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("half NT M64N128 tail eager: {error:?}"))?;
+        fixture.validate_inputs(t)?;
+        eager_bits.push(fixture.output(arm).logical_bits(t));
+    }
+    if eager_bits[1] != eager_bits[0] || eager_bits[2] != eager_bits[0] {
+        return Err("half NT M64N128 negative-alpha tail differs from TC64/retained S3".into());
+    }
+
+    for (index, &arm) in arms.iter().enumerate() {
+        fixture.reset(t, arm)?;
+        let graph = unsafe {
+            capture_into_graph(&t.ctx.stream, || {
+                enqueue_ada_half_nt_s3_arm_with_alpha(t, &fixture, candidate, arm, ALPHA)
+            })
+        }?;
+        match arm {
+            AdaHalfNtArm::Candidate => validate_ada_half_nt_fixed_s3_graph(
+                &graph,
+                WeightDtype::F16,
+                triad_half_nt_m64n128_s3_source::SYMBOL_PREFIX,
+                AdaHalfNtCell::Tail.fixed_s3_m64n128_grid(),
+                73_728,
+            )?,
+            AdaHalfNtArm::RetainedS3 => validate_ada_half_nt_fixed_s3_graph(
+                &graph,
+                WeightDtype::F16,
+                triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
+                AdaHalfNtCell::Tail.fixed_s3_grid(),
+                98_304,
+            )?,
+            AdaHalfNtArm::CurrentTc64 => {
+                validate_single_node_graph(&graph, "half NT tail forced TC64")?
+            }
+            AdaHalfNtArm::Fast => unreachable!(),
+        }
+        fixture.reset(t, arm)?;
+        graph
+            .launch()
+            .map_err(|error| format!("half NT M64N128 tail graph: {error:?}"))?;
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("half NT M64N128 tail graph sync: {error:?}"))?;
+        fixture.validate_inputs(t)?;
+        if fixture.output(arm).logical_bits(t) != eager_bits[index] {
+            return Err(format!(
+                "half NT M64N128 negative-alpha tail {} graph differs from eager",
+                arm.name(candidate.kind)
+            ));
+        }
+    }
+    println!(
+        "{{\"schema\":\"MambaBiHalfNtFixedS3M64N128TailBitsV1\",\"dtype\":\"F16\",\"shape\":[67,131,69],\"alpha\":-0.75,\"arms\":[\"forced_tc64\",\"fixed_s3_m64n128\",\"retained_fixed_s3_bxor\"],\"eager_graph_exact\":true,\"words\":{}}}",
+        eager_bits[0].len()
+    );
+    Ok(())
 }
 
 fn observe_ada_half_nt_s3(
@@ -5581,8 +5717,16 @@ fn run_ada_half_nt_cells_batch(
         compile_ada_half_nt_candidate(&t, kind)?
     };
     let _cohort = quiet.require_cohort("half-nt-candidate/cohort")?;
+    if kind == AdaHalfNtCandidateKind::FixedS3M64N128 {
+        verify_ada_half_nt_m64n128_negative_alpha_tail(&t, &candidate)?;
+    }
     for (cell_index, &cell) in cells.iter().enumerate() {
-        for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
+        let dtypes: &[WeightDtype] = if kind == AdaHalfNtCandidateKind::FixedS3M64N128 {
+            &[WeightDtype::F16]
+        } else {
+            &[WeightDtype::F16, WeightDtype::Bf16]
+        };
+        for &dtype in dtypes {
             if cell_index == 0 {
                 gate_ada_half_nt_s3_resources(&candidate, dtype)?;
             }
@@ -5592,6 +5736,7 @@ fn run_ada_half_nt_cells_batch(
                 AdaHalfNtCandidateKind::DirectEpilogue
                     | AdaHalfNtCandidateKind::LoadedTc128
                     | AdaHalfNtCandidateKind::FixedS3Bxor
+                    | AdaHalfNtCandidateKind::FixedS3M64N128
             ) && (fixture.a.ptr() % 256 != 0
                 || fixture.b.ptr() % 256 != 0
                 || fixture.outputs.iter().any(|output| output.ptr() % 256 != 0))
@@ -5601,7 +5746,10 @@ fn run_ada_half_nt_cells_batch(
                     kind.name()
                 ));
             }
-            let active_arms: &[AdaHalfNtArm] = if kind == AdaHalfNtCandidateKind::DirectEpilogue {
+            let active_arms: &[AdaHalfNtArm] = if matches!(
+                kind,
+                AdaHalfNtCandidateKind::DirectEpilogue | AdaHalfNtCandidateKind::FixedS3M64N128
+            ) {
                 &[
                     AdaHalfNtArm::Candidate,
                     AdaHalfNtArm::CurrentTc64,
@@ -5632,21 +5780,40 @@ fn run_ada_half_nt_cells_batch(
                 AdaHalfNtCandidateKind::FixedS3Bxor => validate_ada_half_nt_fixed_s3_graph(
                     &graphs[0],
                     dtype,
-                    cell,
                     triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
+                    cell.fixed_s3_grid(),
+                    98_304,
                 )?,
-                AdaHalfNtCandidateKind::DirectEpilogue => {
+                AdaHalfNtCandidateKind::FixedS3M64N128 => {
                     validate_ada_half_nt_fixed_s3_graph(
                         &graphs[0],
                         dtype,
-                        cell,
-                        triad_half_nt_direct_epilogue_source::SYMBOL_PREFIX,
+                        triad_half_nt_m64n128_s3_source::SYMBOL_PREFIX,
+                        cell.fixed_s3_m64n128_grid(),
+                        73_728,
                     )?;
                     validate_ada_half_nt_fixed_s3_graph(
                         &graphs[AdaHalfNtArm::RetainedS3 as usize],
                         dtype,
-                        cell,
                         triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
+                        cell.fixed_s3_grid(),
+                        98_304,
+                    )?;
+                }
+                AdaHalfNtCandidateKind::DirectEpilogue => {
+                    validate_ada_half_nt_fixed_s3_graph(
+                        &graphs[0],
+                        dtype,
+                        triad_half_nt_direct_epilogue_source::SYMBOL_PREFIX,
+                        cell.fixed_s3_grid(),
+                        98_304,
+                    )?;
+                    validate_ada_half_nt_fixed_s3_graph(
+                        &graphs[AdaHalfNtArm::RetainedS3 as usize],
+                        dtype,
+                        triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
+                        cell.fixed_s3_grid(),
+                        98_304,
                     )?;
                 }
                 _ => {}
@@ -5667,16 +5834,19 @@ fn run_ada_half_nt_cells_batch(
             .1;
             for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
                 for repeat in 0..2 {
-                    let exact_arms: &[AdaHalfNtArm] =
-                        if kind == AdaHalfNtCandidateKind::DirectEpilogue {
-                            &[
-                                AdaHalfNtArm::CurrentTc64,
-                                AdaHalfNtArm::Candidate,
-                                AdaHalfNtArm::RetainedS3,
-                            ]
-                        } else {
-                            &[AdaHalfNtArm::CurrentTc64, AdaHalfNtArm::Candidate]
-                        };
+                    let exact_arms: &[AdaHalfNtArm] = if matches!(
+                        kind,
+                        AdaHalfNtCandidateKind::DirectEpilogue
+                            | AdaHalfNtCandidateKind::FixedS3M64N128
+                    ) {
+                        &[
+                            AdaHalfNtArm::CurrentTc64,
+                            AdaHalfNtArm::Candidate,
+                            AdaHalfNtArm::RetainedS3,
+                        ]
+                    } else {
+                        &[AdaHalfNtArm::CurrentTc64, AdaHalfNtArm::Candidate]
+                    };
                     for &arm in exact_arms {
                         observe_ada_half_nt_s3(
                             &t,
@@ -5853,6 +6023,16 @@ fn ada_half_nt_fixed_s3_direct_epilogue_d768_out_vs_retained_and_fast_discovery_
         128,
         &[AdaHalfNtArm::RetainedS3, AdaHalfNtArm::Fast],
         &[AdaHalfNtCell::D768Out],
+    )
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half NT M64N128 Fixed S3 discovery"]
+fn ada_half_nt_fixed_s3_m64n128_f16_d768_out_bare_discovery_once7() -> Result<(), String> {
+    run_ada_half_nt_d768_out_batch(
+        AdaHalfNtCandidateKind::FixedS3M64N128,
+        128,
+        &[AdaHalfNtArm::RetainedS3, AdaHalfNtArm::Fast],
     )
 }
 

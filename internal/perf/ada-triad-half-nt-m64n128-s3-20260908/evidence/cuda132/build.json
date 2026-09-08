@@ -1,0 +1,14 @@
+{
+  "cmd": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-13020",
+    "--test",
+    "gemm_bi_typed_parity",
+    "--no-run"
+  ],
+  "elapsed_s": 4.552006959915161,
+  "returncode": 0
+}
