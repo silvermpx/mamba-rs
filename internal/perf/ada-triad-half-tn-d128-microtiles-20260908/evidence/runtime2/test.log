@@ -1,0 +1,16 @@
+
+running 1 test
+GPU quiet gate half-tn-microtile/pre-context: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=54MiB sm_clock=1800MHz temperature=40C pstate=P5; quiet_samples=5
+test ada_half_tn_d128_microtiles_vs_current_and_fast_discovery_once7 has been running for over 60 seconds
+GPU quiet gate half-tn-microtile/cohort: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=540MiB sm_clock=1800MHz temperature=42C pstate=P2; quiet_samples=5
+{"schema":"MambaBiHalfTnMicrotileResourceV1","candidate":"m32n32_bk32_s3","dtype":"F16","symbol":"gemm_bi_tn_test_m32n32_sm80_mma_half_v1_f16","source_sha256":"bd014f5e0145ecc65d843e4b49ce9186812d2a9b5e956548370b5d2bff992042","threads":128,"registers":92,"local_bytes":0,"static_shared_bytes":15360,"dynamic_shared_bytes":0,"max_threads":128,"occupancy":5}
+Error: "Ada half native_half_fast graph must contain exactly one kernel node: result=CUDA_SUCCESS count=2"
+test ada_half_tn_d128_microtiles_vs_current_and_fast_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    ada_half_tn_d128_microtiles_vs_current_and_fast_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 68.49s
+
