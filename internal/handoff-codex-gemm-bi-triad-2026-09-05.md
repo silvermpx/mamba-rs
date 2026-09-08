@@ -9,6 +9,13 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest follow-up: loaded Fixed Pipeline/Swizzle on aligned F16 NN d768-in
+both pass target bits but lose retained S3 (30–31% /8% slower) and Fast.
+Keep S3; see `perf/ada-triad-half-nn-loaded2-20260908/README.md`, measured
+typed7859864f/helperff7b4ce1. These are existing-route screens, not new wins.
+Next source work is direct half NT S3 reuse and TF32 TN transpose-to-N96;
+root's separate half TN compact register-pipeline helper is also unmeasured.
+
 Latest discovery checkpoint: half TN M64N128/BK64/S2 compact passes all six
 bit/resource cells but loses current and Fast everywhere; do not resweep it.
 Measured typed ee3d984a/helper a307af83; raw and paired ranges in
