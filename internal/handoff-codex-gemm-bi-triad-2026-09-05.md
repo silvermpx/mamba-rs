@@ -9,6 +9,17 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+FOUR NEW FAST WINS: half NT Fixed-S3 B-XOR d768-in+Prism ×F16/BF16.
+Candidate/Fast p50: in F16 .880–.893, BF16 .896–.927; Prism F16 .500–.509,
+BF16 .778–.802. All four eager/graph strata and p95 pass,32 target bits pass.
+Measured typeddbbcfaf8/helper2c416464, raw9d6cb191, root224brackets replayed.
+See `perf/ada-triad-half-nt-fixed-s3-siblings-20260908/report.md` and the new
+selection index `perf/ada-triad-discovery-shortlist-20260908.md`. There are
+now nine aligned paired Fast-winning replacement cells in that index (five
+earlier NN plus these four NT), not nine public AUTO admissions. Continue
+remaining TN/TF32/ExactF32 discovery before joint integration. Fixed/SM120
+untouched. No all60/three-toolkit/whole-Triad-complete claim.
+
 Half TN d768-in register pipeline passed both dtype bit/resource screens,
 125regs/occ3; still1–2% slower than Fast in graph. It beats forcedTC64 but
 does NOT prove an incremental win over the earlier compact candidate.
