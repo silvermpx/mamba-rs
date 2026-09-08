@@ -1,0 +1,18 @@
+
+running 1 test
+GPU quiet gate tf32-nt-compact-shared-stage-rna-d768-in/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=43C pstate=P5; quiet_samples=5
+test cuda_suite::ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7 has been running for over 60 seconds
+{"schema":"MambaBiTf32NtDiscoveryResourceV1","op":"NT","variant":"compact_shared_stage_rna_d768_in","source_sha256":"2e32fa327d62184551d38e0284cffc128918eef2cadbe5ea399216ce6d684b80","symbol":"gemm_bi_nt_test_shared_rna_sm80_mma_tf32_v1_m128n64_bk32_s2","registers":138,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":1,"required_occupancy":2}
+
+thread 'cuda_suite::ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7' (3199081) panicked at tests/gemm_bi_tf32_nt_compact_xor.rs:4929:53:
+called `Result::unwrap()` on an `Err` value: "compact_shared_stage_rna_d768_in NT resource gate failed: regs=138 local=0 static=0 max_threads=256 max_dynamic=49152 occupancy=1 required_occupancy=2"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda_suite::ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    cuda_suite::ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 118 filtered out; finished in 60.70s
+

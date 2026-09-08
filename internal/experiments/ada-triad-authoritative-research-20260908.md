@@ -87,6 +87,16 @@ the CTA publishing barrier. Verify ownership, every ring stage, zero-fill and
 fallback paths before timing. Risks are extra shared read/write traffic,
 conversion on the critical path, register growth and lost occupancy.
 
+First compiled shared-RNA source (`03e6aa25` main / `96ae0a10` helper) fails
+the resource gate:138regs, local0,49,152B shared, occupancy1 instead of2.
+No bit or speed verdict exists for that attempt. One targeted refinement is
+the candidate-only `__launch_bounds__(256,2)` rather than `(256,1)`, retaining
+the same local0/occupancy2 gate. NVIDIA's
+[launch-bound guidance](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html)
+explains the register-budget effect and possible instruction/spill costs;
+this is a distinct compiler-scheduling hypothesis, not permission to weaken
+resource gates or run a blind register-count sweep.
+
 If that fails, consider interleaving target-specific copy slices with K8 MMA
 issues using the existing Fixed-N96 schedule, while retaining compact32/S2
 storage. Do not combine both mechanisms in the first experiment.
@@ -96,6 +106,16 @@ decomposition of exact F32, and atomics are not drop-in bit-exact optimizations.
 NVIDIA demonstrates how changing association/FMA grouping changes results in
 [Floating Point and IEEE754](https://docs.nvidia.com/cuda/floating-point/index.html#dot-product-an-accuracy-example).
 An independently deterministic alternative would still be a different contract.
+
+Future exact-F32 TN reuse: source analysis finds that direct CopyPlan output
+is NOT a general TN epilogue replacement. CopyPlan uses multiply then FMA,
+whereas TN requires `fma(alpha, accumulator, oldC)`. A potential d768-in
+experiment is raw A transpose -> CopyPlan(alpha1,beta0) into accumulator
+scratch -> exact TN FMA epilogue, timing all three nodes. Preserve NaN payloads
+through the intermediate alpha1 multiplication or reject/adapt raw-acc output;
+do not assume payload identity from ordinary numeric correctness. Prism also
+needs a padded transpose stride4624 instead of4621. This is feasibility only,
+not an implemented/measured winner; prioritize the current short candidate queue.
 
 For each next candidate: identify one limiting mechanism from source/profile;
 consult primary documentation; native mapping/resource proof; focused GPU bits;

@@ -41,8 +41,13 @@ no Fast victory. Main66ed/helperc853, report
 for the next shared-stage RNA comparison. Half-NNin M128N64/S2 is a valid
 2.5–3.4% loss versus retainedS3; stop, report
 `perf/ada-triad-half-nn-m128n64-s2-20260908/report.md`, mainf5d3/helper1220.
-Next source-guided candidates: TF32 once-per-stage RNA and half-TNin
-M64N128/BK64/S2 FOUR-warp regpipe/vec2 (not the losing eight-warp version).
+TF32 once-per-stage RNA03e6/96ae failed the resource gate at138regs/occ1
+before bits/timing; no speed verdict. Next targeted refinement: candidate-only
+launchbounds256/minBlocks2, same local0/occ2 gate. See
+`perf/ada-triad-tf32-nt-shared-rna-20260908/report.md`.
+Parallel candidate: half-TNin M64N128/BK64/S2 FOUR-warp regpipe/vec2
+(not the losing eight-warp version). F32TN three-node CopyPlan feasibility is
+in the research journal; it has not been implemented or measured.
 Fixed inference/SM120 unchanged. Older
 progress paragraphs below are historical; do not rerun their completed probes.
 

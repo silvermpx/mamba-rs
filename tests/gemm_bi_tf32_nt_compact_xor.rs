@@ -33,6 +33,8 @@ const PADDED_DENSE_COPY_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_
 const PADDED_DENSE_PRISM_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_prism.cuh");
 #[path = "support/triad_tf32_nt_compact_a_ldmatrix_source.rs"]
 mod triad_tf32_nt_compact_a_ldmatrix_source;
+#[path = "support/triad_tf32_nt_shared_rna_source.rs"]
+mod triad_tf32_nt_shared_rna_source;
 #[path = "support/triad_tf32_tn_small_regpipe_source.rs"]
 mod triad_tf32_tn_small_regpipe_source;
 #[path = "support/triad_tn_compact_source.rs"]
@@ -62,6 +64,7 @@ enum CandidateVariant {
     PaddedDenseCopy,
     CompactEightWarpS2,
     CompactALdmatrixD768In,
+    CompactSharedRnaD768In,
     CompactEightWarpS2D768Out,
     CompactEightWarpS2Prism,
     PaddedDenseD768Out,
@@ -92,6 +95,7 @@ impl CandidateVariant {
             Self::PaddedDenseCopy => "padded_dense_copy",
             Self::CompactEightWarpS2 => "compact_eight_warp_s2",
             Self::CompactALdmatrixD768In => "compact_a_ldmatrix_d768_in",
+            Self::CompactSharedRnaD768In => "compact_shared_stage_rna_d768_in",
             Self::CompactEightWarpS2D768Out => "compact_eight_warp_s2_d768_out",
             Self::CompactEightWarpS2Prism => "compact_eight_warp_s2_prism",
             Self::PaddedDenseD768Out => "padded_dense_d768_out",
@@ -122,6 +126,7 @@ impl CandidateVariant {
             Self::PaddedDenseCopy => PADDED_DENSE_COPY_SYMBOL,
             Self::CompactEightWarpS2 => COMPACT_EIGHT_WARP_S2_SYMBOL,
             Self::CompactALdmatrixD768In => triad_tf32_nt_compact_a_ldmatrix_source::SYMBOL,
+            Self::CompactSharedRnaD768In => triad_tf32_nt_shared_rna_source::SYMBOL,
             Self::CompactEightWarpS2D768Out | Self::CompactEightWarpS2Prism => {
                 COMPACT_EIGHT_WARP_S2_SYMBOL
             }
@@ -157,6 +162,7 @@ impl CandidateVariant {
             | Self::PaddedDensePrism => 82_944,
             Self::CompactEightWarpS2
             | Self::CompactALdmatrixD768In
+            | Self::CompactSharedRnaD768In
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 49_152,
             Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism => 49_152,
@@ -175,6 +181,7 @@ impl CandidateVariant {
         match self {
             Self::CompactEightWarpS2
             | Self::CompactALdmatrixD768In
+            | Self::CompactSharedRnaD768In
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 2,
             Self::TnCompactEightWarpS2Prism => 2,
@@ -219,6 +226,10 @@ impl CandidateVariant {
             Self::CompactALdmatrixD768In => {
                 let parent = compact_eight_warp_s2_candidate_source()?;
                 triad_tf32_nt_compact_a_ldmatrix_source::candidate_source(&parent)
+            }
+            Self::CompactSharedRnaD768In => {
+                let parent = compact_eight_warp_s2_candidate_source()?;
+                triad_tf32_nt_shared_rna_source::candidate_source(&parent)
             }
             Self::CompactEightWarpS2D768Out | Self::CompactEightWarpS2Prism => {
                 compact_eight_warp_s2_candidate_source()
@@ -276,6 +287,13 @@ impl CandidateVariant {
 
     const fn is_prepack_a(self) -> bool {
         matches!(self, Self::TnPrepackAD768In | Self::TnPrepackAPrism)
+    }
+
+    const fn is_nt_d768_in_shortscreen(self) -> bool {
+        matches!(
+            self,
+            Self::CompactALdmatrixD768In | Self::CompactSharedRnaD768In
+        )
     }
 
     const fn is_transpose_n96(self) -> bool {
@@ -1305,6 +1323,21 @@ fn nt_k0_alpha_one_beta_zero_bits(words: &[u32]) -> Vec<u32> {
     vec![0; words.len()]
 }
 
+fn retain_shared_rna_shortscreen(retained: &[[f64; 2]], fast: &[[f64; 2]]) -> bool {
+    let valid = |strata: &[[f64; 2]]| {
+        strata.len() == 4
+            && strata.iter().all(|[p50, p95]| {
+                p50.is_finite()
+                    && p95.is_finite()
+                    && *p50 > 0.0
+                    && *p95 > 0.0
+                    && *p50 < 0.99
+                    && *p95 < 0.99
+            })
+    };
+    valid(retained) && valid(fast)
+}
+
 fn output_fragment_traces(
     tile_for_warp: fn(usize) -> Option<WarpTile>,
 ) -> std::collections::BTreeMap<(usize, usize), Vec<[usize; 12]>> {
@@ -1759,6 +1792,20 @@ fn nt_k0_alpha_one_beta_zero_oracle_overwrites_every_old_c_word_with_positive_ze
 }
 
 #[test]
+fn shared_rna_retention_requires_four_positive_finite_winning_strata_per_comparator() {
+    let wins = [[0.9, 0.95]; 4];
+    assert!(retain_shared_rna_shortscreen(&wins, &wins));
+    assert!(!retain_shared_rna_shortscreen(&wins[..3], &wins));
+    assert!(!retain_shared_rna_shortscreen(&wins, &wins[..3]));
+    assert!(!retain_shared_rna_shortscreen(&[[0.9, 0.95]; 5], &wins));
+    for invalid in [0.0, -0.1, f64::NAN, f64::INFINITY, 0.99] {
+        let mut strata = wins;
+        strata[0][0] = invalid;
+        assert!(!retain_shared_rna_shortscreen(&strata, &wins));
+    }
+}
+
+#[test]
 fn tn_compact_four_warp_s2_binds_distinct_symbol_resource_gate_and_evidence_labels() {
     let variant = CandidateVariant::TnCompactFourWarpS2Prism;
     assert_eq!(variant.name(), "tn_compact_four_warp_s2_prism");
@@ -2079,6 +2126,35 @@ fn compact_a_ldmatrix_adapter_accepts_only_the_frozen_compact_parent() {
         candidate.matches("gemm_bi_tf32_mma_m16n8k8(").count(),
         parent.matches("gemm_bi_tf32_mma_m16n8k8(").count()
     );
+}
+
+#[test]
+fn compact_shared_rna_adapter_accepts_only_the_frozen_compact_parent() {
+    let parent = compact_eight_warp_s2_candidate_source().unwrap();
+    assert_eq!(
+        triad_tf32_nt_shared_rna_source::fnv1a64(parent.as_bytes()),
+        triad_tf32_nt_shared_rna_source::EXPECTED_PARENT_FNV64
+    );
+    let candidate = triad_tf32_nt_shared_rna_source::candidate_source(&parent).unwrap();
+    assert_eq!(
+        candidate
+            .matches(triad_tf32_nt_shared_rna_source::SYMBOL)
+            .count(),
+        2
+    );
+    assert!(candidate.contains(": \"memory\");"));
+    assert!(candidate.contains("gemm_bi_tf32_nt_test_shared_rna_stage<Stages>"));
+    assert!(candidate.contains("gemm_bi_tf32_nt_test_shared_rna_compute_stage"));
+}
+
+#[test]
+fn compact_shared_rna_binds_only_d768_in_with_retained_compact_resources() {
+    let variant = CandidateVariant::CompactSharedRnaD768In;
+    assert_eq!(variant.target_dims(), (2_048, 768, 3_072));
+    assert_eq!(variant.grid_dim(), (192, 1, 1));
+    assert_eq!(variant.threads(), 256);
+    assert_eq!(variant.shared_bytes(), 49_152);
+    assert_eq!(variant.required_occupancy(), 2);
 }
 
 #[test]
@@ -3630,9 +3706,8 @@ mod cuda_suite {
                 grid,
             )
         } else {
-            let finalist = variant == CandidateVariant::CompactALdmatrixD768In
-                && actual_auto
-                && dims == variant.target_dims();
+            let finalist =
+                variant.is_nt_d768_in_shortscreen() && actual_auto && dims == variant.target_dims();
             (
                 (dims.2, dims.2, dims.1),
                 ResolvedGemmOp::Nt,
@@ -4057,8 +4132,13 @@ mod cuda_suite {
                 .join(",")
         );
         let (m, k, n) = candidate.variant.target_dims();
+        let schema = if candidate.variant == CandidateVariant::CompactSharedRnaD768In {
+            "MambaBiTf32NtSharedStageRnaFastScreenV1"
+        } else {
+            "MambaBiTf32NtCompactALdmatrixFastScreenV1"
+        };
         println!(
-            "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixFastScreenV1\",\"op\":\"NT\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"logical_gemms_per_observation\":{NT_FAST_GEMMS_PER_OBSERVATION},\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            "{{\"schema\":\"{schema}\",\"op\":\"NT\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"logical_gemms_per_observation\":{NT_FAST_GEMMS_PER_OBSERVATION},\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
             candidate.variant.name(),
             candidate.variant.symbol(),
             fast.symbol,
@@ -4069,6 +4149,89 @@ mod cuda_suite {
             arms[2],
             arms[3],
             json_f64s(&fast_samples),
+            json_f64s(&candidate_samples),
+            json_f64s(&ratios),
+        );
+        Ok((p50, p95))
+    }
+
+    fn screen_nt_retained(
+        candidate: &mut Candidate,
+        retained: &mut Candidate,
+        path: Path,
+        order: Order,
+        expected: &[u32],
+    ) -> Result<(f64, f64), String> {
+        for _ in 0..TN_WARMUPS {
+            measure_nt_candidate_observation(retained, path, expected)?;
+            measure_nt_candidate_observation(candidate, path, expected)?;
+        }
+        let arms = match order {
+            Order::Abba => [
+                "retained_a_ldmatrix",
+                "candidate",
+                "candidate",
+                "retained_a_ldmatrix",
+            ],
+            Order::Baab => [
+                "candidate",
+                "retained_a_ldmatrix",
+                "retained_a_ldmatrix",
+                "candidate",
+            ],
+        };
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        let mut retained_samples = Vec::with_capacity(WINDOWS);
+        let mut candidate_samples = Vec::with_capacity(WINDOWS);
+        let mut observations = Vec::with_capacity(WINDOWS);
+        for _ in 0..WINDOWS {
+            let raw = match order {
+                Order::Abba => [
+                    measure_nt_candidate_observation(retained, path, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_candidate_observation(retained, path, expected)?,
+                ],
+                Order::Baab => [
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_candidate_observation(retained, path, expected)?,
+                    measure_nt_candidate_observation(retained, path, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                ],
+            };
+            let (retained_us, candidate_us) = match order {
+                Order::Abba => ((raw[0] + raw[3]) * 0.5, (raw[1] + raw[2]) * 0.5),
+                Order::Baab => ((raw[1] + raw[2]) * 0.5, (raw[0] + raw[3]) * 0.5),
+            };
+            retained_samples.push(retained_us);
+            candidate_samples.push(candidate_us);
+            ratios.push(candidate_us / retained_us);
+            observations.push(raw);
+        }
+        let p50 = percentile(&ratios, 0.50);
+        let p95 = percentile(&ratios, 0.95);
+        let observations = format!(
+            "[{}]",
+            observations
+                .iter()
+                .map(|raw| format!("[{:.9},{:.9},{:.9},{:.9}]", raw[0], raw[1], raw[2], raw[3]))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (m, k, n) = candidate.variant.target_dims();
+        println!(
+            "{{\"schema\":\"MambaBiTf32NtSharedStageRnaRetainedScreenV1\",\"op\":\"NT\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"retained_variant\":\"{}\",\"retained_symbol\":\"{}\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"logical_gemms_per_observation\":{NT_FAST_GEMMS_PER_OBSERVATION},\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_retained_a_ldmatrix\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"retained_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            candidate.variant.name(),
+            candidate.variant.symbol(),
+            retained.variant.name(),
+            retained.variant.symbol(),
+            path.name(),
+            order.name(),
+            arms[0],
+            arms[1],
+            arms[2],
+            arms[3],
+            json_f64s(&retained_samples),
             json_f64s(&candidate_samples),
             json_f64s(&ratios),
         );
@@ -4779,24 +4942,23 @@ mod cuda_suite {
         presize_physical_qualification_suite(&tail_ctx, &[tail_request]).unwrap();
         let mut tail_reference = qualify_physical_launch(&tail_ctx, tail_request).unwrap();
         validate_reference(variant, TAIL, false, &tail_reference).unwrap();
-        let (mut tail_candidate, tail_source_sha) =
-            if variant == CandidateVariant::CompactALdmatrixD768In {
-                (
-                    Candidate::new_reusing(
-                        &device,
-                        variant,
-                        TAIL,
-                        &tail_words,
-                        1.0,
-                        candidate.function.clone(),
-                        None,
-                    )
-                    .unwrap(),
-                    source_sha.clone(),
+        let (mut tail_candidate, tail_source_sha) = if variant.is_nt_d768_in_shortscreen() {
+            (
+                Candidate::new_reusing(
+                    &device,
+                    variant,
+                    TAIL,
+                    &tail_words,
+                    1.0,
+                    candidate.function.clone(),
+                    None,
                 )
-            } else {
-                Candidate::new(&device, variant, TAIL, &tail_words, 1.0).unwrap()
-            };
+                .unwrap(),
+                source_sha.clone(),
+            )
+        } else {
+            Candidate::new(&device, variant, TAIL, &tail_words, 1.0).unwrap()
+        };
         assert_eq!(tail_source_sha, source_sha);
         check_bits(
             &mut tail_reference,
@@ -4809,7 +4971,7 @@ mod cuda_suite {
         drop(tail_reference);
         drop(tail_candidate);
 
-        if variant == CandidateVariant::CompactALdmatrixD768In {
+        if variant.is_nt_d768_in_shortscreen() {
             let exceptional_words = exceptional_nt_words(variant, TAIL).unwrap();
             let exceptional_ctx = configure(&device).unwrap();
             let exceptional_request = request(variant, TAIL, false, 1.0);
@@ -4852,17 +5014,49 @@ mod cuda_suite {
             assert!(k0_golden.iter().all(|word| *word == 0));
         }
 
-        let mut fast = (variant == CandidateVariant::CompactALdmatrixD768In)
+        let mut fast = variant
+            .is_nt_d768_in_shortscreen()
             .then(|| FastNt::new(&device, target, &target_words).unwrap());
         let fast_golden = fast.as_mut().map(|fast| check_fast_nt_bits(fast).unwrap());
+        let mut retained = (variant == CandidateVariant::CompactSharedRnaD768In).then(|| {
+            let (mut retained, retained_source_sha) = Candidate::new(
+                &device,
+                CandidateVariant::CompactALdmatrixD768In,
+                target,
+                &target_words,
+                1.0,
+            )
+            .unwrap();
+            validate_resources(&retained, &retained_source_sha).unwrap();
+            for path in [Path::Eager, Path::Graph] {
+                for _ in 0..2 {
+                    measure_nt_candidate_observation(&mut retained, path, &golden).unwrap();
+                }
+            }
+            retained
+        });
 
         upload_reference(&mut actual_auto, &auto_ctx, &target_words).unwrap();
         candidate.reset().unwrap();
         let timed_pre = quiet.require_cohort(&format!("{cohort}timed")).unwrap();
         let mut strata = Vec::new();
-        for path in [Path::Eager, Path::Graph] {
-            for order in [Order::Abba, Order::Baab] {
-                strata.push(screen(&mut actual_auto, &auto_ctx, &candidate, path, order).unwrap());
+        if variant != CandidateVariant::CompactSharedRnaD768In {
+            for path in [Path::Eager, Path::Graph] {
+                for order in [Order::Abba, Order::Baab] {
+                    strata.push(
+                        screen(&mut actual_auto, &auto_ctx, &candidate, path, order).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut retained_strata = Vec::new();
+        if let Some(retained) = &mut retained {
+            for path in [Path::Eager, Path::Graph] {
+                for order in [Order::Abba, Order::Baab] {
+                    retained_strata.push(
+                        screen_nt_retained(&mut candidate, retained, path, order, &golden).unwrap(),
+                    );
+                }
             }
         }
         let mut fast_strata = Vec::new();
@@ -4888,16 +5082,60 @@ mod cuda_suite {
         candidate.launch(Path::Graph).unwrap();
         candidate.ctx.stream.synchronize().unwrap();
         assert_eq!(candidate.output_bits().unwrap(), golden);
+        if let Some(retained) = &mut retained {
+            retained.reset().unwrap();
+            retained.launch(Path::Graph).unwrap();
+            retained.ctx.stream.synchronize().unwrap();
+            assert_eq!(retained.output_bits().unwrap(), golden);
+        }
         let post = quiet.verify_post_cohort(&format!("{cohort}post")).unwrap();
-        let retain = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99)
-            && fast_strata
+        let retain = if variant == CandidateVariant::CompactSharedRnaD768In {
+            let retained_pairs = retained_strata
                 .iter()
-                .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+                .map(|(p50, p95)| [*p50, *p95])
+                .collect::<Vec<_>>();
+            let fast_pairs = fast_strata
+                .iter()
+                .map(|(p50, p95)| [*p50, *p95])
+                .collect::<Vec<_>>();
+            retain_shared_rna_shortscreen(&retained_pairs, &fast_pairs)
+        } else {
+            strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99)
+                && fast_strata
+                    .iter()
+                    .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99)
+        };
         let strata = strata
             .into_iter()
             .map(|(p50, p95)| [p50, p95])
             .collect::<Vec<_>>();
         let (m, k, n) = target;
+        if variant == CandidateVariant::CompactSharedRnaD768In {
+            let retained_strata = retained_strata
+                .into_iter()
+                .map(|(p50, p95)| [p50, p95])
+                .collect::<Vec<_>>();
+            let fast_strata = fast_strata
+                .into_iter()
+                .map(|(p50, p95)| [p50, p95])
+                .collect::<Vec<_>>();
+            println!(
+                "{{\"schema\":\"MambaBiTf32NtSharedStageRnaDecisionV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{SM89_FINALIST_SYMBOL}\",\"actual_auto_role\":\"identity_and_exact_bits_only\",\"retained_variant\":\"{}\",\"retained_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"candidate_grid\":[192,1,1],\"candidate_block\":[256,1,1],\"dynamic_shared_bytes\":49152,\"required_occupancy\":2,\"shape\":[{m},{k},{n}],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"candidate_over_retained_a_ldmatrix\":{},\"candidate_over_fast\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+                variant.name(),
+                variant.symbol(),
+                CandidateVariant::CompactALdmatrixD768In.name(),
+                CandidateVariant::CompactALdmatrixD768In.symbol(),
+                fast.as_ref().unwrap().symbol,
+                json_pairs(&retained_strata),
+                json_pairs(&fast_strata),
+                if retain {
+                    "advance_to_full_qualification"
+                } else {
+                    "stop_no_retry"
+                }
+            );
+            return;
+        }
         if variant == CandidateVariant::CompactALdmatrixD768In {
             let fast_strata = fast_strata
                 .into_iter()
@@ -4972,6 +5210,12 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact A-only ldmatrix NT d768-in discovery"]
     fn ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7() {
         run(CandidateVariant::CompactALdmatrixD768In);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; shared-stage RNA NT d768-in discovery"]
+    fn ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7() {
+        run(CandidateVariant::CompactSharedRnaD768In);
     }
 
     #[test]
