@@ -28,6 +28,10 @@
   Keep experiments out of production; preserve all existing WIP and SM120 routes.
 - After collecting finalists, integrate together and run one combined
   correctness/dispatcher/CUDA12.8+13.0+13.2 confirmation batch.
+  User clarified: reaching the end of a small discovery batch is NOT the
+  trigger. First assemble the replacement shortlist across the whole Triad
+  performance matrix; do not start full gates/integration merely because a
+  few cells won. Keep unresolved Fast gaps explicit.
 - Report NEW measured speed wins separately from wiring/validation progress.
   Do not present the old three F32 NN cases or old N96 result as new wins.
 - Keep coordination short: no repeated large source snapshots, review loops,
