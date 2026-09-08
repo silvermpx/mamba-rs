@@ -2,10 +2,41 @@ pub const M16N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m16n16_f64fold_v1";
 pub const M16N16_T128_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m16n16_t128_f64fold_v1";
 pub const M8N32_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n32_f64fold_v1";
 pub const M8N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n16_f64fold_v1";
+pub const OUT_M16N16_SYMBOL: &str = "gemm_bi_tn_ada_d128out_direct_m16n16_f64fold_v1";
+pub const OUT_M8N16_SYMBOL: &str = "gemm_bi_tn_ada_d128out_direct_m8n16_f64fold_v1";
 
 const ORIGINAL_NAMESPACE: &str = "namespace GemmBiTnUnderfillDirect {";
 const ADAPTED_NAMESPACE: &str = "namespace GemmBiTnAdaD128Direct {";
 const USING_BOUNDARY: &str = "using M32N32 = Kernel<32, 32, 128, 0, false, false>;";
+
+pub fn compose_out_source(original: &str) -> Result<String, String> {
+    let mut source = compose_wave_source(original)?;
+    for (from, to) in [
+        ("constexpr int KOut = 128;", "constexpr int KOut = 256;"),
+        ("constexpr int N = 512;", "constexpr int N = 128;"),
+        (
+            "M16N16::RowTiles * M16N16::ColumnTiles == 256",
+            "M16N16::RowTiles * M16N16::ColumnTiles == 128",
+        ),
+        (
+            "M8N32::RowTiles * M8N32::ColumnTiles == 256",
+            "M8N32::RowTiles * M8N32::ColumnTiles == 128",
+        ),
+        (
+            "M8N16::RowTiles * M8N16::ColumnTiles == 512",
+            "M8N16::RowTiles * M8N16::ColumnTiles == 256",
+        ),
+        (M16N16_SYMBOL, OUT_M16N16_SYMBOL),
+        (M8N16_SYMBOL, OUT_M8N16_SYMBOL),
+        (
+            M8N32_SYMBOL,
+            "gemm_bi_tn_ada_d128out_direct_m8n32_f64fold_v1",
+        ),
+    ] {
+        replace_once(&mut source, from, to, "d128-out specialization")?;
+    }
+    Ok(source)
+}
 
 pub fn compose_warp_source(original: &str) -> Result<String, String> {
     let mut source = compose_source(original)?;
@@ -160,6 +191,42 @@ mod tests {
     use super::*;
 
     const ORIGINAL: &str = include_str!("../gemm_bi_scalar_tn_underfill_direct_experiment.cu");
+
+    #[test]
+    fn out_projection_changes_geometry_but_not_splitm64_arithmetic() {
+        let source = compose_out_source(ORIGINAL).unwrap();
+        assert!(source.contains("constexpr int MRed = 1024;"));
+        assert!(source.contains("constexpr int KOut = 256;"));
+        assert!(source.contains("constexpr int N = 128;"));
+        assert!(source.contains("static_assert(Chunks == 64"));
+        assert!(source.contains("M16N16::RowTiles * M16N16::ColumnTiles == 128"));
+        assert!(source.contains("M8N16::RowTiles * M8N16::ColumnTiles == 256"));
+        assert!(source.contains(OUT_M16N16_SYMBOL));
+        assert!(source.contains(OUT_M8N16_SYMBOL));
+        assert!(!source.contains(M16N16_SYMBOL));
+        assert!(!source.contains(M8N16_SYMBOL));
+        assert_eq!(source.matches("partial[owned] = __fmaf_rn(").count(), 1);
+        assert_eq!(
+            source
+                .matches("sums[owned] = __dadd_rn(sums[owned], value);")
+                .count(),
+            1
+        );
+        for (tm, tn, threads) in [(16, 16, 64), (8, 16, 64)] {
+            assert_eq!((256 / tm) * (128 / tn), if tm == 16 { 128 } else { 256 });
+            let per_thread = tm * tn / threads;
+            let column_groups = tn / per_thread;
+            let mut owners = vec![0; tm * tn];
+            for thread in 0..threads {
+                for owned in 0..per_thread {
+                    owners[(thread / column_groups) * tn
+                        + (thread % column_groups) * per_thread
+                        + owned] += 1;
+                }
+            }
+            assert!(owners.iter().all(|count| *count == 1));
+        }
+    }
 
     #[test]
     fn more_warps_preserves_tile_reuse_and_doubles_compute_threads() {

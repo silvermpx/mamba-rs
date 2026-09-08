@@ -30,6 +30,8 @@ use sha2::{Digest as _, Sha256};
 use std::mem::size_of;
 
 mod common;
+#[path = "support/triad_half_nt_s3_source.rs"]
+mod triad_half_nt_s3_source;
 #[path = "support/triad_half_tile_screen.rs"]
 mod triad_half_tile_screen;
 #[path = "support/triad_half_tn_microtile_source.rs"]
@@ -967,13 +969,20 @@ struct AdaHalfFixture {
 
 impl AdaHalfFixture {
     fn new(t: &Ctx, dtype: WeightDtype, dims: (usize, usize, usize)) -> Self {
+        Self::new_with_guard(t, dtype, dims, 8)
+    }
+
+    fn new_with_guard(
+        t: &Ctx,
+        dtype: WeightDtype,
+        dims: (usize, usize, usize),
+        aligned_guard_offset: usize,
+    ) -> Self {
         let (m, k, n) = dims;
         let a_values = ada_half_values(m * k, dtype, 0xa89a_2001);
         let b_values = ada_half_values(k * n, dtype, 0xb89a_2002);
         let output_seed = ada_half_values(m * n, dtype, 0xc89a_2003);
-        // Eight half elements keep every logical base 16-byte aligned while
-        // leaving an independently checked prefix guard before each view.
-        let aligned_guard_offset = 8;
+        assert_eq!(aligned_guard_offset % 8, 0);
         let a = TypedSubview::new(t, &a_values, m, k, k, aligned_guard_offset, dtype);
         let b = TypedSubview::new(t, &b_values, k, n, n, aligned_guard_offset, dtype);
         let candidate = TypedSubview::new(t, &output_seed, m, n, n, aligned_guard_offset, dtype);
@@ -1390,7 +1399,11 @@ fn run_ada_half_nn_d768_in_screen(candidate: AdaHalfArm, cohort: &str) -> Result
     Ok(())
 }
 
-fn enqueue_ada_half_nn_fast(t: &Ctx, fixture: &AdaHalfFixture) -> Result<(), String> {
+fn enqueue_ada_half_nn_fast_with_algo(
+    t: &Ctx,
+    fixture: &AdaHalfFixture,
+    algo: cudarc::cublas::sys::cublasGemmAlgo_t,
+) -> Result<(), String> {
     use cudarc::cublas::{result, sys};
     let (m, k, n) = fixture.dims;
     let alpha = 1.0f32;
@@ -1415,14 +1428,34 @@ fn enqueue_ada_half_nn_fast(t: &Ctx, fixture: &AdaHalfFixture) -> Result<(), Str
             fixture.dtype.cuda_data_type(),
             n as i32,
             sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            algo,
         )
     }
     .map_err(|error| format!("Ada homogeneous-half Fast NN GEMM: {error:?}"))
 }
 
+fn enqueue_ada_half_nn_fast(t: &Ctx, fixture: &AdaHalfFixture) -> Result<(), String> {
+    enqueue_ada_half_nn_fast_with_algo(
+        t,
+        fixture,
+        cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+    )
+}
+
 fn capture_ada_half_nn_fast(t: &Ctx, fixture: &AdaHalfFixture) -> Result<CudaGraph, String> {
     unsafe { capture_into_graph(&t.ctx.stream, || enqueue_ada_half_nn_fast(t, fixture)) }
+}
+
+fn capture_ada_half_nn_fast_with_algo(
+    t: &Ctx,
+    fixture: &AdaHalfFixture,
+    algo: cudarc::cublas::sys::cublasGemmAlgo_t,
+) -> Result<CudaGraph, String> {
+    unsafe {
+        capture_into_graph(&t.ctx.stream, || {
+            enqueue_ada_half_nn_fast_with_algo(t, fixture, algo)
+        })
+    }
 }
 
 fn observe_ada_half_nn_fast(
@@ -1679,6 +1712,164 @@ fn run_ada_half_nn_s3_shape_fast_batch() -> Result<(), String> {
 #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; Fixed S3 NN shape/Fast discovery"]
 fn ada_half_nn_fixed_s3_shape_fast_batch_discovery_once7() -> Result<(), String> {
     run_ada_half_nn_s3_shape_fast_batch()
+}
+
+fn observe_ada_half_nn_graph_window(
+    t: &Ctx,
+    fixture: &AdaHalfFixture,
+    graph: &CudaGraph,
+    candidate: bool,
+    expected: Option<&[u16]>,
+) -> Result<(f64, Vec<u16>), String> {
+    const GEMMS: usize = 5;
+    if candidate {
+        fixture.reset_and_validate_inputs(t, AdaHalfArm::FixedSm89Tc128S3)?;
+    } else {
+        fixture.reset_fast(t)?;
+    }
+    let start = t
+        .ctx
+        .stream
+        .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("NN denominator diagnostic start: {error:?}"))?;
+    for _ in 0..GEMMS {
+        graph
+            .launch()
+            .map_err(|error| format!("NN denominator diagnostic graph: {error:?}"))?;
+    }
+    let end = t
+        .ctx
+        .stream
+        .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("NN denominator diagnostic end: {error:?}"))?;
+    let elapsed_us = f64::from(
+        start
+            .elapsed_ms(&end)
+            .map_err(|error| format!("NN denominator diagnostic timing: {error:?}"))?,
+    ) * 1_000.0
+        / GEMMS as f64;
+    if !elapsed_us.is_finite() || elapsed_us <= 0.0 {
+        return Err(format!("invalid NN denominator diagnostic {elapsed_us}"));
+    }
+    let bits = if candidate {
+        fixture.output(AdaHalfArm::FixedSm89Tc128S3).logical_bits(t)
+    } else {
+        fixture.fast.logical_bits(t)
+    };
+    if let Some(expected) = expected
+        && bits != expected
+    {
+        return Err("NN denominator diagnostic output was not repeatable".into());
+    }
+    fixture.validate_inputs(t)?;
+    Ok((elapsed_us, bits))
+}
+
+fn run_ada_half_nn_fast_denominator_diagnostic() -> Result<(), String> {
+    use cudarc::cublas::sys::cublasGemmAlgo_t;
+    assert!(
+        !cfg!(debug_assertions),
+        "NN denominator diagnostic requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-nn-fast-diagnostic/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "NN denominator diagnostic requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let _cohort = quiet.require_cohort("half-nn-fast-diagnostic/cohort")?;
+    for guard_offset in [8usize, 128] {
+        let fixture =
+            AdaHalfFixture::new_with_guard(&t, WeightDtype::F16, (2_048, 1_536, 768), guard_offset);
+        let candidate_graph = capture_ada_half(&t, &fixture, AdaHalfArm::FixedSm89Tc128S3)?;
+        validate_single_node_graph(&candidate_graph, "diagnostic Fixed S3")?;
+        for (algo_name, algo) in [
+            ("default", cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT),
+            (
+                "default_tensor_op",
+                cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            ),
+        ] {
+            fixture.reset_fast(&t)?;
+            enqueue_ada_half_nn_fast_with_algo(&t, &fixture, algo)?;
+            t.ctx
+                .stream
+                .synchronize()
+                .map_err(|error| format!("NN denominator diagnostic warmup: {error:?}"))?;
+            let fast_graph = capture_ada_half_nn_fast_with_algo(&t, &fixture, algo)?;
+            validate_nonempty_graph(&fast_graph, algo_name)?;
+            let candidate_bits =
+                observe_ada_half_nn_graph_window(&t, &fixture, &candidate_graph, true, None)?.1;
+            let fast_bits =
+                observe_ada_half_nn_graph_window(&t, &fixture, &fast_graph, false, None)?.1;
+            let fast_is_finite = fast_bits
+                .iter()
+                .all(|&word| f16::from_bits(word).to_f32().is_finite());
+            let fast_is_nonzero = fast_bits
+                .iter()
+                .any(|&word| f16::from_bits(word).to_f32() != 0.0);
+            if !fast_is_finite || !fast_is_nonzero {
+                return Err("NN denominator Fast output is non-finite or all-zero".into());
+            }
+            let mut candidate_us = [0.0; 3];
+            let mut fast_us = [0.0; 3];
+            for sample in 0..3 {
+                let candidate_first = sample % 2 == 0;
+                for run_candidate in [candidate_first, !candidate_first] {
+                    let value = observe_ada_half_nn_graph_window(
+                        &t,
+                        &fixture,
+                        if run_candidate {
+                            &candidate_graph
+                        } else {
+                            &fast_graph
+                        },
+                        run_candidate,
+                        Some(if run_candidate {
+                            &candidate_bits
+                        } else {
+                            &fast_bits
+                        }),
+                    )?
+                    .0;
+                    if run_candidate {
+                        candidate_us[sample] = value;
+                    } else {
+                        fast_us[sample] = value;
+                    }
+                }
+            }
+            let ratios = [
+                candidate_us[0] / fast_us[0],
+                candidate_us[1] / fast_us[1],
+                candidate_us[2] / fast_us[2],
+            ];
+            println!(
+                "{{\"schema\":\"MambaBiHalfNnFastDenominatorDiagnosticV1\",\"dtype\":\"F16\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"guard_half_elements\":{guard_offset},\"pointer_mod_256\":{{\"a\":{},\"b\":{},\"candidate\":{},\"fast\":{}}},\"cublas_algo\":\"{algo_name}\",\"path\":\"graph\",\"gemms_per_sample\":5,\"samples\":3,\"candidate_us\":{:?},\"fast_us\":{:?},\"candidate_over_fast\":{:?},\"diagnostic_only\":true,\"promotion\":false}}",
+                fixture.a.ptr() % 256,
+                fixture.b.ptr() % 256,
+                fixture.candidate.ptr() % 256,
+                fixture.fast.ptr() % 256,
+                candidate_us,
+                fast_us,
+                ratios,
+            );
+        }
+    }
+    drop(t);
+    quiet
+        .verify_post_cohort("half-nn-fast-diagnostic/post")
+        .map(|_| ())
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; NN Fast denominator diagnostic"]
+fn ada_half_nn_d768_out_fast_denominator_diagnostic() -> Result<(), String> {
+    run_ada_half_nn_fast_denominator_diagnostic()
 }
 
 #[test]
@@ -2520,7 +2711,7 @@ fn launch_scalar_tn_slim(
         .map_err(|error| format!("scalar TN slim synchronize: {error:?}"))
 }
 
-fn launch_tc_nt(
+fn enqueue_tc_nt(
     t: &Ctx,
     schedule: BackwardSchedule,
     dtype: WeightDtype,
@@ -2553,11 +2744,587 @@ fn launch_tc_nt(
     launch.arg(&m);
     launch.arg(&n);
     launch.arg(&k);
-    unsafe { launch.launch(cfg) }.map_err(|error| format!("{schedule:?} NT launch: {error:?}"))?;
+    unsafe { launch.launch(cfg) }
+        .map(|_| ())
+        .map_err(|error| format!("{schedule:?} NT launch: {error:?}"))
+}
+
+fn launch_tc_nt(
+    t: &Ctx,
+    schedule: BackwardSchedule,
+    dtype: WeightDtype,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    enqueue_tc_nt(t, schedule, dtype, c, a, b, dims)?;
     t.ctx
         .stream
         .synchronize()
         .map_err(|error| format!("{schedule:?} NT synchronize: {error:?}"))
+}
+
+const ADA_HALF_NT_D768_OUT: (usize, usize, usize) = (2_048, 1_536, 768);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdaHalfNtArm {
+    Candidate,
+    CurrentTc64,
+    Fast,
+}
+
+impl AdaHalfNtArm {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Candidate => "tc64_bk32_s3",
+            Self::CurrentTc64 => "forced_tc64",
+            Self::Fast => "native_half_fast",
+        }
+    }
+}
+
+struct AdaHalfNtS3Candidate {
+    bf16: CudaFunction,
+    f16: CudaFunction,
+    source_sha256: String,
+}
+
+impl AdaHalfNtS3Candidate {
+    fn function(&self, dtype: WeightDtype) -> &CudaFunction {
+        match dtype {
+            WeightDtype::Bf16 => &self.bf16,
+            WeightDtype::F16 => &self.f16,
+            WeightDtype::F32 => panic!("NT S3 candidate requires a half dtype"),
+        }
+    }
+}
+
+fn compile_ada_half_nt_s3_candidate(t: &Ctx) -> Result<AdaHalfNtS3Candidate, String> {
+    let transformed = triad_half_nt_s3_source::candidate_source(include_str!(
+        "../kernels/gemm_bi_triad/sm80.cu"
+    ))?;
+    let source = [
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        &transformed,
+    ]
+    .iter()
+    .map(|part| {
+        part.lines()
+            .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+        source,
+        cudarc::nvrtc::CompileOptions {
+            arch: Some("compute_89"),
+            options: vec![
+                "--fmad=true".into(),
+                "--extra-device-vectorization".into(),
+                "-DNDEBUG".into(),
+                "-DGEMM_BI_GROUP_M=16".into(),
+                "-DMAMBA_RS_STATE_CAP=256".into(),
+                "--frandom-seed=1295072049".into(),
+            ],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("compile half NT BK32/S3 candidate: {error:?}"))?;
+    let module = t
+        .ctx
+        .stream
+        .context()
+        .load_module(ptx)
+        .map_err(|error| format!("load half NT BK32/S3 module: {error:?}"))?;
+    let load = |suffix| {
+        let symbol = format!("{}{suffix}", triad_half_nt_s3_source::SYMBOL_PREFIX);
+        module
+            .load_function(&symbol)
+            .map_err(|error| format!("load {symbol}: {error:?}"))
+    };
+    Ok(AdaHalfNtS3Candidate {
+        bf16: load("bf16")?,
+        f16: load("f16")?,
+        source_sha256,
+    })
+}
+
+struct AdaHalfNtS3Fixture {
+    a: TypedSubview,
+    b: TypedSubview,
+    outputs: [TypedSubview; 3],
+    a_values: Vec<f32>,
+    b_values: Vec<f32>,
+    output_seed: Vec<f32>,
+    a_bits: Vec<u16>,
+    b_bits: Vec<u16>,
+    dtype: WeightDtype,
+}
+
+impl AdaHalfNtS3Fixture {
+    fn new(t: &Ctx, dtype: WeightDtype) -> Self {
+        let (m, k, n) = ADA_HALF_NT_D768_OUT;
+        let a_values = ada_half_values(m * n, dtype, 0xa89a_8201);
+        let b_values = ada_half_values(k * n, dtype, 0xb89a_8202);
+        let output_seed = ada_half_values(m * k, dtype, 0xc89a_8203);
+        let a = TypedSubview::new(t, &a_values, m, n, n, 8, dtype);
+        let b = TypedSubview::new(t, &b_values, k, n, n, 8, dtype);
+        let make_output = || TypedSubview::new(t, &output_seed, m, k, k, 8, dtype);
+        let outputs = [make_output(), make_output(), make_output()];
+        let a_bits = a.logical_bits(t);
+        let b_bits = b.logical_bits(t);
+        Self {
+            a,
+            b,
+            outputs,
+            a_values,
+            b_values,
+            output_seed,
+            a_bits,
+            b_bits,
+            dtype,
+        }
+    }
+
+    fn output(&self, arm: AdaHalfNtArm) -> &TypedSubview {
+        &self.outputs[arm as usize]
+    }
+
+    fn reset(&self, t: &Ctx, arm: AdaHalfNtArm) -> Result<(), String> {
+        self.a.upload_logical(t, &self.a_values);
+        self.b.upload_logical(t, &self.b_values);
+        self.output(arm).upload_logical(t, &self.output_seed);
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("half NT reset: {error:?}"))?;
+        self.validate_inputs(t)
+    }
+
+    fn validate_inputs(&self, t: &Ctx) -> Result<(), String> {
+        if self.a.logical_bits(t) != self.a_bits || self.b.logical_bits(t) != self.b_bits {
+            return Err("half NT input words or guards changed".into());
+        }
+        Ok(())
+    }
+}
+
+fn enqueue_ada_half_nt_s3_arm(
+    t: &Ctx,
+    fixture: &AdaHalfNtS3Fixture,
+    candidate: &AdaHalfNtS3Candidate,
+    arm: AdaHalfNtArm,
+) -> Result<(), String> {
+    let (m, k, n) = ADA_HALF_NT_D768_OUT;
+    match arm {
+        AdaHalfNtArm::Candidate => {
+            let output = fixture.output(arm).ptr();
+            let a = fixture.a.ptr();
+            let b = fixture.b.ptr();
+            let alpha = 1.0f32;
+            let (m, n, k) = (m as i32, n as i32, k as i32);
+            let mut launch = t
+                .ctx
+                .stream
+                .launch_builder(candidate.function(fixture.dtype));
+            launch
+                .arg(&output)
+                .arg(&a)
+                .arg(&b)
+                .arg(&alpha)
+                .arg(&m)
+                .arg(&n)
+                .arg(&k);
+            unsafe {
+                launch.launch(cudarc::driver::LaunchConfig {
+                    grid_dim: (32 * 24, 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+            }
+            .map(|_| ())
+            .map_err(|error| format!("half NT BK32/S3 launch: {error:?}"))
+        }
+        AdaHalfNtArm::CurrentTc64 => enqueue_tc_nt(
+            t,
+            BackwardSchedule::Tile64,
+            fixture.dtype,
+            fixture.output(arm).ptr(),
+            fixture.a.ptr(),
+            fixture.b.ptr(),
+            ADA_HALF_NT_D768_OUT,
+        ),
+        AdaHalfNtArm::Fast => {
+            use cudarc::cublas::{result, sys as blas_sys};
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            unsafe {
+                result::gemm_ex(
+                    *t.ctx.blas.handle(),
+                    blas_sys::cublasOperation_t::CUBLAS_OP_T,
+                    blas_sys::cublasOperation_t::CUBLAS_OP_N,
+                    k as i32,
+                    m as i32,
+                    n as i32,
+                    (&alpha as *const f32).cast(),
+                    fixture.b.ptr() as *const _,
+                    fixture.dtype.cuda_data_type(),
+                    n as i32,
+                    fixture.a.ptr() as *const _,
+                    fixture.dtype.cuda_data_type(),
+                    n as i32,
+                    (&beta as *const f32).cast(),
+                    fixture.output(arm).ptr() as *mut _,
+                    fixture.dtype.cuda_data_type(),
+                    k as i32,
+                    blas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    blas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                )
+            }
+            .map_err(|error| format!("native-half Fast NT GEMM: {error:?}"))
+        }
+    }
+}
+
+fn gate_ada_half_nt_s3_resources(
+    candidate: &AdaHalfNtS3Candidate,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let function = candidate.function(dtype);
+    let registers = function
+        .num_regs()
+        .map_err(|error| format!("NT S3 registers: {error:?}"))?;
+    let local = function
+        .local_size_bytes()
+        .map_err(|error| format!("NT S3 local: {error:?}"))?;
+    let static_shared = function
+        .shared_size_bytes()
+        .map_err(|error| format!("NT S3 static: {error:?}"))?;
+    let max_threads = function
+        .max_threads_per_block()
+        .map_err(|error| format!("NT S3 max threads: {error:?}"))?;
+    let occupancy = function
+        .occupancy_max_active_blocks_per_multiprocessor(128, 0, None)
+        .map_err(|error| format!("NT S3 occupancy: {error:?}"))?;
+    println!(
+        "{{\"schema\":\"MambaBiHalfNtS3ResourceV1\",\"dtype\":\"{dtype:?}\",\"source_sha256\":\"{}\",\"threads\":128,\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":3}}",
+        candidate.source_sha256,
+    );
+    if registers <= 0 || local != 0 || static_shared != 30_720 || max_threads < 128 || occupancy < 3
+    {
+        return Err(format!(
+            "half NT S3 resource gate failed: regs={registers} local={local} static={static_shared}/30720 max_threads={max_threads}/128 occupancy={occupancy}/3"
+        ));
+    }
+    Ok(())
+}
+
+fn capture_ada_half_nt_s3_arm(
+    t: &Ctx,
+    fixture: &AdaHalfNtS3Fixture,
+    candidate: &AdaHalfNtS3Candidate,
+    arm: AdaHalfNtArm,
+) -> Result<CudaGraph, String> {
+    unsafe {
+        capture_into_graph(&t.ctx.stream, || {
+            enqueue_ada_half_nt_s3_arm(t, fixture, candidate, arm)
+        })
+    }
+}
+
+fn observe_ada_half_nt_s3(
+    t: &Ctx,
+    fixture: &AdaHalfNtS3Fixture,
+    candidate: &AdaHalfNtS3Candidate,
+    graphs: &[CudaGraph; 3],
+    arm: AdaHalfNtArm,
+    path: AdaHalfPath,
+    gemms: usize,
+    expected: Option<&[u16]>,
+) -> Result<(f64, Vec<u16>), String> {
+    fixture.reset(t, arm)?;
+    let start = t
+        .ctx
+        .stream
+        .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("half NT timing start: {error:?}"))?;
+    for _ in 0..gemms {
+        match path {
+            AdaHalfPath::Eager => enqueue_ada_half_nt_s3_arm(t, fixture, candidate, arm)?,
+            AdaHalfPath::Graph => graphs[arm as usize]
+                .launch()
+                .map_err(|error| format!("half NT graph launch: {error:?}"))?,
+        }
+    }
+    let end = t
+        .ctx
+        .stream
+        .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("half NT timing end: {error:?}"))?;
+    let elapsed_us = f64::from(
+        start
+            .elapsed_ms(&end)
+            .map_err(|error| format!("half NT timing: {error:?}"))?,
+    ) * 1_000.0
+        / gemms as f64;
+    if !elapsed_us.is_finite() || elapsed_us <= 0.0 {
+        return Err(format!("invalid half NT timing {elapsed_us}"));
+    }
+    let bits = fixture.output(arm).logical_bits(t);
+    if let Some(expected) = expected
+        && bits != expected
+    {
+        let mismatch = bits
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected)
+            .unwrap_or(bits.len());
+        return Err(format!(
+            "half NT {} {} differs at word {mismatch}",
+            arm.name(),
+            path.name()
+        ));
+    }
+    fixture.validate_inputs(t)?;
+    Ok((elapsed_us, bits))
+}
+
+fn screen_ada_half_nt_s3_fast(
+    t: &Ctx,
+    fixture: &AdaHalfNtS3Fixture,
+    candidate: &AdaHalfNtS3Candidate,
+    graphs: &[CudaGraph; 3],
+    candidate_bits: &[u16],
+    fast_bits: &[u16],
+    path: AdaHalfPath,
+    order: BracketOrder,
+) -> Result<[f64; 2], String> {
+    const GEMMS: usize = 20;
+    for _ in 0..ADA_HALF_WARMUPS {
+        observe_ada_half_nt_s3(
+            t,
+            fixture,
+            candidate,
+            graphs,
+            AdaHalfNtArm::Candidate,
+            path,
+            GEMMS,
+            Some(candidate_bits),
+        )?;
+        observe_ada_half_nt_s3(
+            t,
+            fixture,
+            candidate,
+            graphs,
+            AdaHalfNtArm::Fast,
+            path,
+            GEMMS,
+            Some(fast_bits),
+        )?;
+    }
+    let arms = match order {
+        BracketOrder::Abba => [
+            AdaHalfNtArm::Candidate,
+            AdaHalfNtArm::Fast,
+            AdaHalfNtArm::Fast,
+            AdaHalfNtArm::Candidate,
+        ],
+        BracketOrder::Baab => [
+            AdaHalfNtArm::Fast,
+            AdaHalfNtArm::Candidate,
+            AdaHalfNtArm::Candidate,
+            AdaHalfNtArm::Fast,
+        ],
+    };
+    let mut raw_windows = Vec::with_capacity(ADA_HALF_WINDOWS);
+    let mut ratios = Vec::with_capacity(ADA_HALF_WINDOWS);
+    for _ in 0..ADA_HALF_WINDOWS {
+        let mut raw = [0.0; 4];
+        for (index, arm) in arms.into_iter().enumerate() {
+            let expected = if arm == AdaHalfNtArm::Candidate {
+                candidate_bits
+            } else {
+                fast_bits
+            };
+            raw[index] = observe_ada_half_nt_s3(
+                t,
+                fixture,
+                candidate,
+                graphs,
+                arm,
+                path,
+                GEMMS,
+                Some(expected),
+            )?
+            .0;
+        }
+        ratios.push(candidate_over_reference(raw, order));
+        raw_windows.push(raw);
+    }
+    let p50 = ada_percentile(&ratios, 0.5).ok_or("invalid half NT S3/Fast p50")?;
+    let p95 = ada_percentile(&ratios, 0.95).ok_or("invalid half NT S3/Fast p95")?;
+    let order = match order {
+        BracketOrder::Abba => "ABBA",
+        BracketOrder::Baab => "BAAB",
+    };
+    let raw = raw_windows
+        .iter()
+        .map(|row| format!("[{:.9},{:.9},{:.9},{:.9}]", row[0], row[1], row[2], row[3]))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "{{\"schema\":\"MambaBiHalfNtS3FastScreenV1\",\"dtype\":\"{:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"tc64_bk32_s3\",\"comparator\":\"native_half_fast\",\"path\":\"{}\",\"order\":\"{order}\",\"windows\":{ADA_HALF_WINDOWS},\"logical_gemms_per_observation\":{GEMMS},\"raw_observations_us\":[{raw}],\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
+        fixture.dtype,
+        path.name(),
+    );
+    Ok([p50, p95])
+}
+
+fn run_ada_half_nt_s3_d768_out_batch() -> Result<(), String> {
+    assert!(!cfg!(debug_assertions), "half NT S3 requires --release");
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-nt-s3/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half NT S3 requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_nt_s3_candidate(&t)?;
+    let _cohort = quiet.require_cohort("half-nt-s3/cohort")?;
+    for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
+        gate_ada_half_nt_s3_resources(&candidate, dtype)?;
+        let fixture = AdaHalfNtS3Fixture::new(&t, dtype);
+        for arm in [
+            AdaHalfNtArm::Candidate,
+            AdaHalfNtArm::CurrentTc64,
+            AdaHalfNtArm::Fast,
+        ] {
+            fixture.reset(&t, arm)?;
+            enqueue_ada_half_nt_s3_arm(&t, &fixture, &candidate, arm)?;
+            t.ctx
+                .stream
+                .synchronize()
+                .map_err(|error| format!("half NT graph warmup: {error:?}"))?;
+        }
+        let graphs = [
+            capture_ada_half_nt_s3_arm(&t, &fixture, &candidate, AdaHalfNtArm::Candidate)?,
+            capture_ada_half_nt_s3_arm(&t, &fixture, &candidate, AdaHalfNtArm::CurrentTc64)?,
+            capture_ada_half_nt_s3_arm(&t, &fixture, &candidate, AdaHalfNtArm::Fast)?,
+        ];
+        validate_single_node_graph(&graphs[0], "half NT S3 candidate")?;
+        validate_single_node_graph(&graphs[1], "half NT forced TC64")?;
+        validate_nonempty_graph(&graphs[2], "half NT native Fast")?;
+
+        let current_bits = observe_ada_half_nt_s3(
+            &t,
+            &fixture,
+            &candidate,
+            &graphs,
+            AdaHalfNtArm::CurrentTc64,
+            AdaHalfPath::Eager,
+            1,
+            None,
+        )?
+        .1;
+        for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+            for repeat in 0..2 {
+                for arm in [AdaHalfNtArm::CurrentTc64, AdaHalfNtArm::Candidate] {
+                    observe_ada_half_nt_s3(
+                        &t,
+                        &fixture,
+                        &candidate,
+                        &graphs,
+                        arm,
+                        path,
+                        1,
+                        Some(&current_bits),
+                    )?;
+                    println!(
+                        "{{\"schema\":\"MambaBiHalfNtS3BitsV1\",\"dtype\":\"{dtype:?}\",\"arm\":\"{}\",\"path\":\"{}\",\"repeat\":{repeat},\"words\":{}}}",
+                        arm.name(),
+                        path.name(),
+                        current_bits.len(),
+                    );
+                }
+            }
+        }
+        let fast_bits = observe_ada_half_nt_s3(
+            &t,
+            &fixture,
+            &candidate,
+            &graphs,
+            AdaHalfNtArm::Fast,
+            AdaHalfPath::Eager,
+            1,
+            None,
+        )?
+        .1;
+        let fast_value = |word| match dtype {
+            WeightDtype::F16 => f16::from_bits(word).to_f32(),
+            WeightDtype::Bf16 => bf16::from_bits(word).to_f32(),
+            WeightDtype::F32 => unreachable!(),
+        };
+        if !fast_bits.iter().all(|&word| fast_value(word).is_finite())
+            || !fast_bits.iter().any(|&word| fast_value(word) != 0.0)
+        {
+            return Err(format!("{dtype:?} half NT Fast is non-finite or all-zero"));
+        }
+        for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+            for _ in 0..2 {
+                observe_ada_half_nt_s3(
+                    &t,
+                    &fixture,
+                    &candidate,
+                    &graphs,
+                    AdaHalfNtArm::Fast,
+                    path,
+                    1,
+                    Some(&fast_bits),
+                )?;
+            }
+        }
+        let mut strata = Vec::with_capacity(4);
+        for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+            for order in [BracketOrder::Abba, BracketOrder::Baab] {
+                strata.push(screen_ada_half_nt_s3_fast(
+                    &t,
+                    &fixture,
+                    &candidate,
+                    &graphs,
+                    &current_bits,
+                    &fast_bits,
+                    path,
+                    order,
+                )?);
+            }
+        }
+        let retain = retain_decision(&strata);
+        println!(
+            "{{\"schema\":\"MambaBiHalfNtS3FastDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            strata,
+            if retain { "advance" } else { "stop_no_retry" },
+        );
+    }
+    drop(t);
+    quiet.verify_post_cohort("half-nt-s3/post").map(|_| ())
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half NT BK32/S3 discovery"]
+fn ada_half_nt_d768_out_bk32_s3_vs_current_and_fast_discovery_once7() -> Result<(), String> {
+    run_ada_half_nt_s3_d768_out_batch()
 }
 
 #[test]

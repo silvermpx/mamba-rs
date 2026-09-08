@@ -20,13 +20,15 @@ Lower is better; eager and CUDA Graph are independently paired.
 | F16 Prism | 0.535–0.540 | 0.649–0.651 | Provisional advance |
 | BF16 Prism | 0.536–0.540 | 0.643–0.649 | Provisional advance |
 
-**Baseline discrepancy remains open.** For F16 d768-out, graph medians
+**Baseline discrepancy identified: pointer alignment.** For F16 d768-out, graph medians
 were candidate 51.056/51.312 us versus Fast 91.040/91.456 us. Historical
 Fast eager was about47 us and the historical custom route about55 us.
 Those are different cohorts, but the discrepancy is large enough to block
 a broad champion claim. A separate one-cell diagnostic varies guard alignment,
 cuBLAS DEFAULT vs DEFAULT_TENSOR_OP, and uses five-call graph windows.
-The raw four `advance` decisions below must not be treated as final admissions.
+The [alignment diagnostic](../ada-triad-half-nn-fast-diag-20260908/README.md)
+finds an18–20% aligned F16 d768-out advantage, not the earlier44–56% figure.
+The raw four `advance` decisions must not be treated as final admissions.
 
 ## Contract and evidence
 

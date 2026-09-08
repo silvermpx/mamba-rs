@@ -16,6 +16,13 @@
 - Keep candidate arithmetic and the relevant existing bit contract unchanged.
   Compare against the real selected route and explicit cuBLAS Fast. Fix only
   harness defects that would invalidate the immediate comparison.
+- Preserve256-byte base alignment in timed guarded allocations:128 half words
+  or64 F32 words, and check actual pointer alignment. A16-byte-offset half NN
+  guard doubled cuBLAS time in the 2026-09-08 diagnostic. Misalignment belongs
+  in correctness probes; do not use that cohort as the sole production baseline.
+- cuBLAS graphs may contain multiple/opaque/non-kernel nodes. Require nonempty
+  capture, check vendor eager/graph output and time the entire graph; do not
+  impose our candidate node count or kernel-parameter ABI on vendor internals.
 - Test a small batch of distinct, source/profile-grounded hypotheses. Preserve
   losers and their results without repeatedly rerunning the same losing case.
   Keep experiments out of production; preserve all existing WIP and SM120 routes.

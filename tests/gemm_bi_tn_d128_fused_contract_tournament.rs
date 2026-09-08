@@ -245,6 +245,7 @@ mod cuda_tournament {
         _module: Arc<CudaModule>,
         primary: Kernel,
         sensitivity: Kernel,
+        dims: (usize, usize, usize),
     }
 
     struct GuardedBuffer {
@@ -407,6 +408,7 @@ mod cuda_tournament {
             _module: module,
             primary,
             sensitivity,
+            dims: (M, K, N),
         })
     }
 
@@ -450,9 +452,9 @@ mod cuda_tournament {
         };
         let a = fixture.a.ptr(&runtime.ctx.stream);
         let b = fixture.b.ptr(&runtime.ctx.stream);
-        let m = M as i32;
-        let k = K as i32;
-        let n = N as i32;
+        let m = runtime.dims.0 as i32;
+        let k = runtime.dims.1 as i32;
+        let n = runtime.dims.2 as i32;
         let mut builder = runtime.ctx.stream.launch_builder(&kernel.function);
         builder.arg(&destination);
         builder.arg(&a);
@@ -467,14 +469,15 @@ mod cuda_tournament {
     }
 
     fn launch_production(runtime: &Runtime, fixture: &Fixture) -> Result<(), String> {
+        let (m, k, n) = runtime.dims;
         gpu_gemm_bi_backward_dw_grad(
             &runtime.ctx,
-            &GradSlice::from_raw(fixture.production_output.cached_ptr(), K * N),
+            &GradSlice::from_raw(fixture.production_output.cached_ptr(), k * n),
             &fixture.production_b,
             &fixture.production_a,
-            M,
-            K,
-            N,
+            m,
+            k,
+            n,
         )
     }
 
@@ -618,20 +621,21 @@ mod cuda_tournament {
     }
 
     fn production_identity(runtime: &Runtime) -> Result<(), String> {
+        let (m, k, n) = runtime.dims;
         let request = PhysicalQualificationRequest::contiguous(
             ResolvedGemmOp::Tn,
-            (M, K, N),
+            (m, k, n),
             PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
         );
         let qualified = qualify_physical_launch(&runtime.ctx, request)?;
         let nodes = qualified.evidence().nodes();
         if nodes.len() != 2
             || nodes[0].symbol != "gemm_bi_tn_splitm_partial_aligned"
-            || nodes[0].launch.grid_dim != (4, 1, 64)
+            || nodes[0].launch.grid_dim != ((k.div_ceil(128) * n.div_ceil(128)) as u32, 1, 64)
             || nodes[0].launch.block_dim != (256, 1, 1)
             || nodes[0].launch.shared_mem_bytes != 0
             || nodes[1].symbol != "gemm_bi_splitm_reduce"
-            || nodes[1].launch.grid_dim != (256, 1, 1)
+            || nodes[1].launch.grid_dim != ((k * n).div_ceil(256) as u32, 1, 1)
             || nodes[1].launch.block_dim != (256, 1, 1)
             || nodes[1].launch.shared_mem_bytes != 0
             || nodes[0].launch.arguments_digest == [0; 32]
@@ -744,6 +748,7 @@ mod cuda_tournament {
         Base,
         MoreWaves,
         MoreWarps,
+        D128Out,
     }
 
     fn ada_direct_runtime(variant: AdaDirectVariant) -> Result<Runtime, String> {
@@ -767,6 +772,7 @@ mod cuda_tournament {
             AdaDirectVariant::Base => source::compose_source(original)?,
             AdaDirectVariant::MoreWaves => source::compose_wave_source(original)?,
             AdaDirectVariant::MoreWarps => source::compose_warp_source(original)?,
+            AdaDirectVariant::D128Out => source::compose_out_source(original)?,
         };
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(
             cuda,
@@ -822,6 +828,10 @@ mod cuda_tournament {
             })
         };
         let (primary, sensitivity) = match variant {
+            AdaDirectVariant::D128Out => (
+                load(source::OUT_M8N16_SYMBOL, 3072, 256, 64)?,
+                load(source::OUT_M16N16_SYMBOL, 4096, 128, 64)?,
+            ),
             AdaDirectVariant::MoreWaves => (
                 load(source::M8N16_SYMBOL, 3072, 512, 64)?,
                 load(source::M16N16_SYMBOL, 4096, 256, 64)?,
@@ -841,13 +851,19 @@ mod cuda_tournament {
             _module: module,
             primary,
             sensitivity,
+            dims: if variant == AdaDirectVariant::D128Out {
+                (1024, 256, 128)
+            } else {
+                (M, K, N)
+            },
         })
     }
 
     fn ada_finite_fixture(runtime: &Runtime) -> Result<Fixture, String> {
-        let a = values(M * K, 0xa128_5101);
-        let b = values(M * N, 0xb128_5102);
-        let initial = values(K * N, 0xc128_5103);
+        let (m, k, n) = runtime.dims;
+        let a = values(m * k, 0xa128_5101);
+        let b = values(m * n, 0xb128_5102);
+        let initial = values(k * n, 0xc128_5103);
         // Normative bit oracle is the real public SplitM64 route below.
         Ok(Fixture {
             a: GuardedBuffer::new(&runtime.ctx.stream, a.clone())?,
@@ -868,26 +884,27 @@ mod cuda_tournament {
         use std::ffi::c_void;
         // dW^T = dY^T * X: row-major [K,N] becomes column-major [N,K].
         let one = 1.0_f32;
+        let (m, k, n) = runtime.dims;
         let dtype = mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32.cuda_data_type();
         unsafe {
             result::gemm_ex(
                 *runtime.ctx.blas.handle(),
                 sys::cublasOperation_t::CUBLAS_OP_N,
                 sys::cublasOperation_t::CUBLAS_OP_T,
-                N as i32,
-                K as i32,
-                M as i32,
+                n as i32,
+                k as i32,
+                m as i32,
                 (&one as *const f32).cast::<c_void>(),
                 fixture.production_b.cached_ptr() as *const c_void,
                 dtype,
-                N as i32,
+                n as i32,
                 fixture.production_a.cached_ptr() as *const c_void,
                 dtype,
-                K as i32,
+                k as i32,
                 (&one as *const f32).cast::<c_void>(),
                 fixture.production_output.cached_ptr() as *mut c_void,
                 dtype,
-                N as i32,
+                n as i32,
                 sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
                 sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
             )
@@ -1006,8 +1023,17 @@ mod cuda_tournament {
         ada_direct_fold_screen(AdaDirectVariant::MoreWarps)
     }
 
+    #[test]
+    #[ignore = "quiet Ada13.2 only; reuse direct fold on d128-out, two tiles vs AUTO/Fast"]
+    fn ada_d128_out_direct_fold_two_arm_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::D128Out)
+    }
+
     fn ada_direct_fold_screen(variant: AdaDirectVariant) -> Result<(), String> {
-        let more_waves = variant != AdaDirectVariant::Base;
+        let more_waves = matches!(
+            variant,
+            AdaDirectVariant::MoreWaves | AdaDirectVariant::MoreWarps
+        );
         assert!(!cfg!(debug_assertions), "use release");
         let quiet = super::common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("ada-direct-tn/pre")?;
@@ -1144,7 +1170,7 @@ mod cuda_tournament {
                         strata.push(pair);
                         println!(
                             "{}",
-                            serde_json::json!({"schema":"AdaTnDirectScreenV1","shape":[M,K,N],
+                            serde_json::json!({"schema":"AdaTnDirectScreenV1","shape":runtime.dims,
                         "candidate":candidate.symbol,"comparator":if fast{"cublas_fast_tf32"}else{reference_name},
                         "path":if graph_path{"graph"}else{"eager"},"order":if candidate_first{"ABBA"}else{"BAAB"},
                         "candidate_first":candidate_first,"windows":7,"warmup_brackets":4,"raw_observations_us":raw,
@@ -1155,7 +1181,7 @@ mod cuda_tournament {
                 }
                 println!(
                     "{}",
-                    serde_json::json!({"schema":"AdaTnDirectDecisionV1","candidate":candidate.symbol,
+                    serde_json::json!({"schema":"AdaTnDirectDecisionV1","shape":runtime.dims,"candidate":candidate.symbol,
                     "comparator":if fast{"cublas_fast_tf32"}else{reference_name},"strata":strata,
                     "retain":strata.iter().flatten().all(|x|*x<0.99),"promotion":false})
                 );

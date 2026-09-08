@@ -9,6 +9,20 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest checkpoint2026-09-08 after c09af9eb: NEW exact F32 TN d128-out direct
+M8N16 candidate is39–42% below actualAUTO, still2.15–2.21x Fast; see
+`perf/ada-triad-f32-tn-d128-out-direct-20260908/README.md`. No rerun: wrapper97
+was stale record counts, exact GPU test passed. Native source tests13PASS.
+Half NN7's four apparent Fast wins are provisional: guard offset16 slowed
+cuBLAS; aligned F16 d768-out diagnostic still shows18–20% advantage. See
+`perf/ada-triad-half-nn-fast-diag-20260908/README.md`; use256-aligned timing
+buffers henceforth. Half NT BK32/S3 passes bits/resources but loses Fast;
+`perf/ada-triad-half-nt-s3-20260908/README.md`. Do not rerun unchanged losers.
+Current short pipeline: TF32 TN A-prepack (vendor graph validation repaired,
+first valid timing pending), existing half TN Rect128x64 on three large shapes,
+and test-only half TN TC64/BK32/S4 helper. Fixed/SM120 remain unchanged.
+Older "no result yet" statements below are historical, not current status.
+
 Latest 2026-09-08, commit df8948ff: short discovery FIRST. This overrides the
 older next-step instructions below: do not restart once21/all-CUDA/full gates
 or repeat the old three NN wins. Batch new performance finalists on Ada13.2,
