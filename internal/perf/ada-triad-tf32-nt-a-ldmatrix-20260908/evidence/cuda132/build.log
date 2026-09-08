@@ -1,0 +1,36 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error[E0596]: cannot borrow `output` as mutable, as it is not declared as mutable
+    --> tests/gemm_bi_tf32_nt_compact_xor.rs:3231:13
+     |
+3231 |             output.reset(&ctx)?;
+     |             ^^^^^^ cannot borrow as mutable
+     |
+help: consider changing this to be mutable
+     |
+3224 |             let mut output = GuardedBuffer::new(&ctx, words.0.clone())?;
+     |                 +++
+
+error[E0596]: cannot borrow `a` as mutable, as it is not declared as mutable
+    --> tests/gemm_bi_tf32_nt_compact_xor.rs:3232:13
+     |
+3232 |             a.reset(&ctx)?;
+     |             ^ cannot borrow as mutable
+     |
+help: consider changing this to be mutable
+     |
+3225 |             let mut a = GuardedBuffer::new(&ctx, words.1.clone())?;
+     |                 +++
+
+error[E0596]: cannot borrow `b` as mutable, as it is not declared as mutable
+    --> tests/gemm_bi_tf32_nt_compact_xor.rs:3233:13
+     |
+3233 |             b.reset(&ctx)?;
+     |             ^ cannot borrow as mutable
+     |
+help: consider changing this to be mutable
+     |
+3226 |             let mut b = GuardedBuffer::new(&ctx, words.2.clone())?;
+     |                 +++
+
+For more information about this error, try `rustc --explain E0596`.
+error: could not compile `mamba-rs` (test "gemm_bi_tf32_nt_compact_xor") due to 3 previous errors

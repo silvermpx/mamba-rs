@@ -32,9 +32,13 @@ showing zero excessive shared wavefronts, and the first research shortlist.
 Discovery still precedes joint integration/full-toolkit gates. Half-NT
 M64N128/S3 F16out now beats retainedS3 by4.5%, but Fastgraph p95 fails;
 see `perf/ada-triad-half-nt-m64n128-s3-20260908/report.md`. BF16 sibling pending.
-Other pending work: TF32 A-only ldmatrix (repair unsupported
-qualification K0 harness, no timing verdict yet); then half-NNin N64 reuse and
-TF32 once-per-stage RNA conversion. Fixed inference/SM120 unchanged. Older
+TF32 A-only ldmatrix now PASSES repaired K0/target/tail/exception bits and cuts
+actualAUTO11.3–11.4% (~226→200us), but candidate/Fast time remains1.69–1.71;
+no Fast victory. Main66ed/helperc853, report
+`perf/ada-triad-tf32-nt-a-ldmatrix-20260908/report.md`. Retain this new baseline
+for the next shared-stage RNA comparison. Half-NNin N64 reuse and BF16 NTout
+M64N128 sibling are queued; TF32 once-per-stage RNA preparation is parallel.
+Fixed inference/SM120 unchanged. Older
 progress paragraphs below are historical; do not rerun their completed probes.
 
 Direct TF32 TN N96 d768-in passed bits/resources but is NOT a Fast win:

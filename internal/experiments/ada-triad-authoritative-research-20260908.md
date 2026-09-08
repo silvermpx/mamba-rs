@@ -56,6 +56,19 @@ library backends, not our custom kernels; predicted runtimes are not measurement
 API interpretation follows NVIDIA's [Python API](https://docs.nvidia.com/cuda/nvidia-matmul-heuristics/api_python.html)
 and [backend properties](https://docs.nvidia.com/cuda/nvidia-matmul-heuristics/api.html).
 
+Additional advisory query: [TF32 TN Prism JSON](../perf/ada-nvmmh-shortlist-20260908/query-tf32-tn-prism.json),
+SFS/TN_ROW standard(384,1928,4621), same explicit GPU and no-SplitK/SliceK/cluster
+constraints. Only four legal CUTLASS configurations returned: three M128N64
+grids93 and one M64N64 grid186, against142 Ada SMs. The latter improves grid
+coverage but its predicted runtime is worse; this is a tradeoff to investigate,
+not proof of a win. Check existing evidence before testing that topology again.
+
+Completed A-only ldmatrix screen: [TF32 NT report](../perf/ada-triad-tf32-nt-a-ldmatrix-20260908/report.md).
+ActualAUTO time falls11.3–11.4%, target/tail/exception/K0 bits pass, occupancy2.
+Candidate/Fast time remains1.69–1.71. Retain this as the
+new baseline for shared-stage RNA; a gain versus old AUTO alone is not enough
+to call the next candidate a new best.
+
 ## Contract and search protocol
 
 Selected next TF32 structural hypothesis: convert each shared-stage word to

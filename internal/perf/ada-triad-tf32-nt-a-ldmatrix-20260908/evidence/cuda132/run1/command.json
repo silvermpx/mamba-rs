@@ -1,0 +1,27 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-fa0042152294a197",
+    "cuda_suite::ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "d10cc246ecff93c813a35a40f1eb7dc489e0e2c84e1fb61edf2dfdc72601af6a",
+  "cache_stable": true,
+  "counts": {
+    "MambaBiTf32NtCompactALdmatrixDecisionV1": 0,
+    "MambaBiTf32NtCompactALdmatrixFastScreenV1": 0,
+    "MambaBiTf32NtDiscoveryResourceV1": 1,
+    "MambaBiTf32NtDiscoveryScreenV1": 0
+  },
+  "drain": "2026-09-08T13:13:22Z",
+  "elapsed_s": 66.0787558555603,
+  "executed_exactly_one": false,
+  "exit": 101,
+  "helper_sha256": "c853f8b824d9a1717f1594dd063457cc0b6ba2713f57884adaa58e6e795d3cfa",
+  "pre": "2026-09-08T13:12:16Z",
+  "release": "2026-09-08T13:13:17Z",
+  "source_sha256": "6e6ac37ff3b744ab012d1ce6b4dd6758ad7c3b0cd19b137c7649a4160bece83d",
+  "started_utc": "2026-09-08T13:12:16Z",
+  "test_log_sha256": "583449e470f07901255778074ed804bd8327ee97560840eb5f022a051d009113"
+}

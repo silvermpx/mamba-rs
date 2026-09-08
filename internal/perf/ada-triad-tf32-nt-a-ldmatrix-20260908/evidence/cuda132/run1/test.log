@@ -1,0 +1,18 @@
+
+running 1 test
+GPU quiet gate tf32-nt-compact-a-ldmatrix-d768-in/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=43C pstate=P5; quiet_samples=5
+{"schema":"MambaBiTf32NtDiscoveryResourceV1","op":"NT","variant":"compact_a_ldmatrix_d768_in","source_sha256":"b66739ed9d6433d157b3a96ca9bad6448d5b0e24e141ff0bde095e5161ead5f8","symbol":"gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2","registers":98,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":2,"required_occupancy":2}
+test cuda_suite::ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7 has been running for over 60 seconds
+
+thread 'cuda_suite::ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7' (3135923) panicked at tests/gemm_bi_tf32_nt_compact_xor.rs:4786:74:
+called `Result::unwrap()` on an `Err` value: "physical qualification requires positive M and N"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda_suite::ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    cuda_suite::ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 108 filtered out; finished in 60.87s
+
