@@ -11,6 +11,16 @@ qualification batch later. Older per-candidate full-gate instructions below are
 historical and do not override this method. Do not spend the next session
 reconfirming the same completed kernels instead of finding replacements.
 
+Latest 2026-09-09: the exact-F32 TN d768-in fused-finalize N32 candidate is a
+valid stop. All raw/final exact-bit, graph, guard and resource gates pass
+(raw/fused 105/101 regs, local0, shared24576, occupancy4), but it loses the
+retained N64 fused pipeline by8.8–9.1% in all four paired eager/graph strata.
+Do not retry it unchanged and do not wire it into production. Evidence:
+`internal/perf/ada-triad-f32-tn-fused-n32-20260909/report.md`. The run used the
+user-authorized idle-resident gate: five consecutive <=1% compute/memory
+samples and explicit VRAM headroom before timing; no external process was
+stopped. This is sufficient to stop the consistent loss, not a release gate.
+
 Written for the next engineer (Codex) taking the branch. Everything below was
 measured or verified in this tree; where a number is quoted, the evidence
 directory that holds it is named. Read this file, then
