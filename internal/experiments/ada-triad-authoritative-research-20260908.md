@@ -119,6 +119,12 @@ conversion, new buffer, MMA-order change or old-AUTO-only speed comparison.
 Use the [PTX ldmatrix mapping](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)
 and native coordinate/16B-row proofs before the retainedA-only/Fast shortscreen.
 
+That A+B load experiment is now complete and is a valid loser. Exact-bit,
+guard and resource gates pass (106regs/local0/occupancy2), but it is2.0–2.1%
+slower than retained A-only in every eager/graph ordering cohort and1.72–1.75x
+cuBLAS Fast. See the [A+B report](../perf/ada-triad-tf32-nt-compact-ab-ldmatrix-20260908/report.md).
+Stop this unchanged candidate without retry; retain A-only.
+
 If that fails, consider interleaving target-specific copy slices with K8 MMA
 issues using the existing Fixed-N96 schedule, while retaining compact32/S2
 storage. Do not combine both mechanisms in the first experiment.

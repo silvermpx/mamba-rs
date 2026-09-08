@@ -1896,6 +1896,16 @@ cross-toolkit/cross-architecture equality are distinct guarantees. Claim only
 the numerical contract and configuration coverage demonstrated by tests;
 deterministic GEMMs alone do not prove full RL-training reproducibility.
 
+## Ada TF32 NT A+B ldmatrix closure (2026-09-08)
+
+The isolated d768-in A+B ldmatrix candidate passes exact bits, guards and the
+resource gate (106regs, local0, occupancy2), but loses the retained A-only
+candidate by2.0–2.1% in all paired eager/graph once7 cohorts. It remains
+1.72–1.75x slower than native cuBLAS Fast. This is a decisive valid loss:
+do not retry or integrate it. Retain A-only (~200us,11.3–11.4% faster than
+actual AUTO). Full evidence and frozen identities are in
+`internal/perf/ada-triad-tf32-nt-compact-ab-ldmatrix-20260908/report.md`.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
