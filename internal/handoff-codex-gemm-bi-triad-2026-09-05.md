@@ -9,6 +9,17 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest discovery checkpoint: half TN M64N128/BK64/S2 compact passes all six
+bit/resource cells but loses current and Fast everywhere; do not resweep it.
+Measured typed ee3d984a/helper a307af83; raw and paired ranges in
+`perf/ada-triad-half-tn-m64n128-20260908/README.md`. Next: loaded NN Pipeline/
+Swizzle on F16 d768-in, then direct NT adaptation of the Fixed S3 pipeline.
+TF32 N96 tail diagnostic found candidate/current identical but public AUTO
+selects exact ScalarFmaV1 on the unqualified (129,36,100) tail. Repair that
+cross-family test expectation; keep strict candidate/current/AUTO bits on
+the timed target cells. Then continue new TN transpose-to-RNA-N96 discovery.
+No full gates/integration until the whole-Triad replacement shortlist.
+
 Latest checkpoint after 7f5d2e29: NEW aligned S3 BF16 NN d768-in beats Fast
 by21–23% (62–63us vs79–81us), exact current bits PASS. This supersedes N64
 near-parity and brings aligned S3 NN finalists to FIVE cells; forcedTC128
