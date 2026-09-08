@@ -44,6 +44,8 @@ This table is not exhaustive closure of60 operation/dtype/shape cells. The old
 [whole-matrix snapshot](ada-triad-state-20260907/report.md) remains historical;
 do not merge its independent quantiles with these paired screens to invent
 an average speedup or claim that the remaining cells are finished.
+The current strict Y/N/U inventory is maintained in the
+[60-cell coverage audit](ada-triad-60-cell-coverage-20260908.md).
 
 ## Integration and cleanup boundary
 
