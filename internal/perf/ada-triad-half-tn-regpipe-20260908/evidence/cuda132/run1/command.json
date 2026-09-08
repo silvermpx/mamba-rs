@@ -1,0 +1,55 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_typed_parity-94f76dadc2c09cc4",
+    "ada_half_tn_tc64_bk64_s2_regpipe_d768_in_vs_current_and_fast_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "e39aaed5985a6589b623110ccf3b9c470b7d5bc55c20aae93271a7bd186ef021",
+  "cache_stable": true,
+  "drain": {
+    "apps": "",
+    "apps_exit": 0,
+    "apps_stderr": "",
+    "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+    "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n",
+    "gpu_exit": 0,
+    "gpu_stderr": "",
+    "identity_no_apps": true,
+    "phase": "DRAIN",
+    "quiet": true,
+    "utc": "2026-09-08T11:54:37Z"
+  },
+  "exact_one": true,
+  "exit": 0,
+  "helper_sha256": "f3e66016fc6d9f2e584ac79486f09261c3be207790aad01f784ffcf3a63fddee",
+  "pre": {
+    "apps": "",
+    "apps_exit": 0,
+    "apps_stderr": "",
+    "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+    "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n",
+    "gpu_exit": 0,
+    "gpu_stderr": "",
+    "identity_no_apps": true,
+    "phase": "PRE",
+    "quiet": true,
+    "utc": "2026-09-08T11:53:33Z"
+  },
+  "release": {
+    "apps": "",
+    "apps_exit": 0,
+    "apps_stderr": "",
+    "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+    "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 10 %, 1 %\n",
+    "gpu_exit": 0,
+    "gpu_stderr": "",
+    "identity_no_apps": true,
+    "phase": "RELEASE",
+    "quiet": false,
+    "utc": "2026-09-08T11:54:31Z"
+  },
+  "source_sha256": "8096311fb5d83dee96911403749569a3f641658a24d24fbea170477cea1c5580",
+  "test_log_sha256": "4a3e04732f6190e48a291944cea2e2d5ffd80728191e2ae628c52a6cd98182d8"
+}

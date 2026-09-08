@@ -9,6 +9,13 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Half TN d768-in register pipeline passed both dtype bit/resource screens,
+125regs/occ3; still1–2% slower than Fast in graph. It beats forcedTC64 but
+does NOT prove an incremental win over the earlier compact candidate.
+Stop/no unchanged retry. Typed8096311f/helperf3e66016, raw4a3e0473;
+`perf/ada-triad-half-tn-regpipe-20260908/report.md`. Next queued: new NT sibling
+coverage, smallTF32 TN register pipeline, NT direct epilogue versus retainedS3.
+
 NEW TF32 TN d768-in raw-A-transpose + RNA-N96:29–30% below actualAUTO,
 target/tail/exception/K0/scratch-word bits PASS. Entire2node pipeline timed,
 not just GEMM. Fast still loses: graph1.344–1.345x. Preserve AUTO improvement,
