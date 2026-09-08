@@ -5626,9 +5626,10 @@ fn capture_ada_half_nt_s3_arm(
 fn verify_ada_half_nt_m64n128_negative_alpha_tail(
     t: &Ctx,
     candidate: &AdaHalfNtS3Candidate,
+    dtype: WeightDtype,
 ) -> Result<(), String> {
     const ALPHA: f32 = -0.75;
-    let fixture = AdaHalfNtS3Fixture::new_with_guard(t, WeightDtype::F16, AdaHalfNtCell::Tail, 128);
+    let fixture = AdaHalfNtS3Fixture::new_with_guard(t, dtype, AdaHalfNtCell::Tail, 128);
     let arms = [
         AdaHalfNtArm::CurrentTc64,
         AdaHalfNtArm::Candidate,
@@ -5659,14 +5660,14 @@ fn verify_ada_half_nt_m64n128_negative_alpha_tail(
         match arm {
             AdaHalfNtArm::Candidate => validate_ada_half_nt_fixed_s3_graph(
                 &graph,
-                WeightDtype::F16,
+                dtype,
                 triad_half_nt_m64n128_s3_source::SYMBOL_PREFIX,
                 AdaHalfNtCell::Tail.fixed_s3_m64n128_grid(),
                 73_728,
             )?,
             AdaHalfNtArm::RetainedS3 => validate_ada_half_nt_fixed_s3_graph(
                 &graph,
-                WeightDtype::F16,
+                dtype,
                 triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
                 AdaHalfNtCell::Tail.fixed_s3_grid(),
                 98_304,
@@ -5693,7 +5694,7 @@ fn verify_ada_half_nt_m64n128_negative_alpha_tail(
         }
     }
     println!(
-        "{{\"schema\":\"MambaBiHalfNtFixedS3M64N128TailBitsV1\",\"dtype\":\"F16\",\"shape\":[67,131,69],\"alpha\":-0.75,\"arms\":[\"forced_tc64\",\"fixed_s3_m64n128\",\"retained_fixed_s3_bxor\"],\"eager_graph_exact\":true,\"words\":{}}}",
+        "{{\"schema\":\"MambaBiHalfNtFixedS3M64N128TailBitsV1\",\"dtype\":\"{dtype:?}\",\"shape\":[67,131,69],\"alpha\":-0.75,\"arms\":[\"forced_tc64\",\"fixed_s3_m64n128\",\"retained_fixed_s3_bxor\"],\"eager_graph_exact\":true,\"words\":{}}}",
         eager_bits[0].len()
     );
     Ok(())
@@ -5853,12 +5854,22 @@ fn screen_ada_half_nt_s3_pair(
     Ok([p50, p95])
 }
 
-fn run_ada_half_nt_cells_batch(
+fn run_ada_half_nt_cells_batch_for_dtypes(
     kind: AdaHalfNtCandidateKind,
     guard_offset: usize,
     comparators: &[AdaHalfNtArm],
     cells: &[AdaHalfNtCell],
+    dtypes: &[WeightDtype],
 ) -> Result<(), String> {
+    if dtypes.is_empty()
+        || dtypes.iter().any(|dtype| matches!(dtype, WeightDtype::F32))
+        || dtypes
+            .iter()
+            .enumerate()
+            .any(|(index, dtype)| dtypes[..index].contains(dtype))
+    {
+        return Err("half NT dtype selection must contain unique half dtypes".into());
+    }
     assert!(
         !cfg!(debug_assertions),
         "half NT candidate requires --release"
@@ -5880,14 +5891,11 @@ fn run_ada_half_nt_cells_batch(
     };
     let _cohort = quiet.require_cohort("half-nt-candidate/cohort")?;
     if kind == AdaHalfNtCandidateKind::FixedS3M64N128 {
-        verify_ada_half_nt_m64n128_negative_alpha_tail(&t, &candidate)?;
+        for &dtype in dtypes {
+            verify_ada_half_nt_m64n128_negative_alpha_tail(&t, &candidate, dtype)?;
+        }
     }
     for (cell_index, &cell) in cells.iter().enumerate() {
-        let dtypes: &[WeightDtype] = if kind == AdaHalfNtCandidateKind::FixedS3M64N128 {
-            &[WeightDtype::F16]
-        } else {
-            &[WeightDtype::F16, WeightDtype::Bf16]
-        };
         for &dtype in dtypes {
             if cell_index == 0 {
                 gate_ada_half_nt_s3_resources(&candidate, dtype)?;
@@ -6119,6 +6127,20 @@ fn run_ada_half_nt_cells_batch(
         .map(|_| ())
 }
 
+fn run_ada_half_nt_cells_batch(
+    kind: AdaHalfNtCandidateKind,
+    guard_offset: usize,
+    comparators: &[AdaHalfNtArm],
+    cells: &[AdaHalfNtCell],
+) -> Result<(), String> {
+    let dtypes: &[WeightDtype] = if kind == AdaHalfNtCandidateKind::FixedS3M64N128 {
+        &[WeightDtype::F16]
+    } else {
+        &[WeightDtype::F16, WeightDtype::Bf16]
+    };
+    run_ada_half_nt_cells_batch_for_dtypes(kind, guard_offset, comparators, cells, dtypes)
+}
+
 fn run_ada_half_nt_d768_out_batch(
     kind: AdaHalfNtCandidateKind,
     guard_offset: usize,
@@ -6195,6 +6217,18 @@ fn ada_half_nt_fixed_s3_m64n128_f16_d768_out_bare_discovery_once7() -> Result<()
         AdaHalfNtCandidateKind::FixedS3M64N128,
         128,
         &[AdaHalfNtArm::RetainedS3, AdaHalfNtArm::Fast],
+    )
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; BF16 half NT M64N128 Fixed S3 discovery"]
+fn ada_half_nt_fixed_s3_m64n128_bf16_d768_out_bare_discovery_once7() -> Result<(), String> {
+    run_ada_half_nt_cells_batch_for_dtypes(
+        AdaHalfNtCandidateKind::FixedS3M64N128,
+        128,
+        &[AdaHalfNtArm::RetainedS3, AdaHalfNtArm::Fast],
+        &[AdaHalfNtCell::D768Out],
+        &[WeightDtype::Bf16],
     )
 }
 

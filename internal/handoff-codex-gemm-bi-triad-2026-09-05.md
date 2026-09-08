@@ -31,13 +31,18 @@ Commit4504cef1 records half-TN float2 graph parity (not strict Fast win), NCU
 showing zero excessive shared wavefronts, and the first research shortlist.
 Discovery still precedes joint integration/full-toolkit gates. Half-NT
 M64N128/S3 F16out now beats retainedS3 by4.5%, but Fastgraph p95 fails;
-see `perf/ada-triad-half-nt-m64n128-s3-20260908/report.md`. BF16 sibling pending.
+see `perf/ada-triad-half-nt-m64n128-s3-20260908/report.md`. BF16 sibling also
+PASSES and gains4.5–4.6% over retainedS3, but Fastgraph p95 still fails:
+`perf/ada-triad-half-nt-m64n128-s3-bf16-20260908/report.md`, main027f/helpera97c.
 TF32 A-only ldmatrix now PASSES repaired K0/target/tail/exception bits and cuts
 actualAUTO11.3–11.4% (~226→200us), but candidate/Fast time remains1.69–1.71;
 no Fast victory. Main66ed/helperc853, report
 `perf/ada-triad-tf32-nt-a-ldmatrix-20260908/report.md`. Retain this new baseline
-for the next shared-stage RNA comparison. Half-NNin N64 reuse and BF16 NTout
-M64N128 sibling are queued; TF32 once-per-stage RNA preparation is parallel.
+for the next shared-stage RNA comparison. Half-NNin M128N64/S2 is a valid
+2.5–3.4% loss versus retainedS3; stop, report
+`perf/ada-triad-half-nn-m128n64-s2-20260908/report.md`, mainf5d3/helper1220.
+Next source-guided candidates: TF32 once-per-stage RNA and half-TNin
+M64N128/BK64/S2 FOUR-warp regpipe/vec2 (not the losing eight-warp version).
 Fixed inference/SM120 unchanged. Older
 progress paragraphs below are historical; do not rerun their completed probes.
 

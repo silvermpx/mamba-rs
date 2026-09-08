@@ -16,11 +16,12 @@ of old wins for new candidate search.
 
 | Priority / cell | Concrete mechanism | Expected benefit / risk | First evidence |
 | --- | --- | --- | --- |
-| Half NT d768-out | M64N128/BK64/S3, eight compute warps | Grid192→384; accumulators64→32/thread; shared98,304→73,728B. Better final-wave filling is an inference, not a guarantee. Still one CTA/SM; B tile requests double. | F16 bits + retainedS3/Fast eager/graph once7; inspect L2 only if this loses ambiguously. |
+| Half NT d768-out | M64N128/BK64/S3, eight compute warps | Grid192→384; accumulators64→32/thread; shared98,304→73,728B. | Measured BOTH F16/BF16:4.5–4.6% retained-best win, Fast graph p95 still fails. Stop unchanged screen. |
 | TF32 NT d768-in | A-only ldmatrix.x4 on retained compact8/S2 | Reduce scalar shared-load instructions without extra fragment buffers. Keep B loads, RNA rounding and K8 MMA chain unchanged. Occupancy must remain at least2. | All-lane native mapping proof, target/tail/exception/K0 bits, actual AUTO/Fast once7. |
 | Exact F32 NT d768-in / Prism | Existing transpose32x16 + existing production Fixed CopyPlan | Reuse the faster NN inner body; pay and time the entire transpose. Prism has a partial K32 slab, so its gain is not assumed from d768-out. | New isolated sibling test, generic exact/public AUTO bits, full2-node graph timing against AUTO/Fast. |
-| F16 NN d768-in, next | Existing Fixed M128N64/BK64/S2 body | Existing49,152B/two-CTA body, finer grid; extra A tile traffic. | One new wrapper/cell, not a new arithmetic kernel. |
-| Half TN d768-in, investigate next | M128N128/BK32/S3 | NVIDIA heuristic suggests49,152B mainloop, unlike the losing BK64/S3 at98,304B. Potential two-CTA residency, subject to registers and epilogue memory. | Source feasibility and occupancy calculation before implementing. |
+| F16 NN d768-in | Existing Fixed M128N64/BK64/S2 body | Existing49,152B/two-CTA body, finer grid; extra A tile traffic. | Measured valid2.5–3.4% retainedS3 loss. Stop; keep S3. |
+| Half TN d768-in, rejected before build | M128N128/BK32/S3, four warps | Heuristic49,152B mainloop is valid, but ownership requires128 accumulators/thread (not64), and grid144 cannot fill two CTAs on142 SMs. | Source/resource analysis rejects this four-warp geometry; no speed claim. |
+| Half TN d768-in, next | M64N128/BK64/S2 FOUR-warp compact regpipe/vec2 |64 accumulators/thread,49,152B shared,grid288. Two old N64 tiles stage16,384 half words versus12,288 for one N128 tile (25% less). Risk: nominal resident warps12→8 and more registers. | Exact coverage/order, local0/occupancy>=2, then F16 retainedvec2/Fast once7. Distinct from already-losing eight-warp M64N128. |
 
 NVIDIA explains tile-reuse versus parallelism and partially filled final waves
 in its [matrix performance guide](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html).
