@@ -1,0 +1,17 @@
+{
+  "artifacts": {
+    "/root/evidence-ada-triad-f32-tn-fused-groupm12-20260908/attempt1/once7.log": "4484b2e08bc30ba98b3a671a610330e7a2ba1506c09b2439b44675149967170c",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/gemm_bi_scalar_tn_copyplan_fused_finalize_groupm12_d768_in_discovery.rs": "481c64853b8db7020bd032bc9b15574974c736e19b238db517f7c4ea818330d8",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_f32_tn_copyplan_fused_finalize_groupm12_source.rs": "af9da62de7f16f76d49c941804fcedf3529969acc237b248e360496dde07e3f6",
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_scalar_tn_copyplan_fused_finalize_groupm12_d768_in_discovery-c4b5f662c1d45135": "e0bcdf41f2383e428cecf6a6d4b16c41b047f928d1fbeb2a21bdf544d618414f"
+  },
+  "composed_group_m12_fused_source_sha256": "5ab9db5d5ff7aad84019dcccc167b9fa5c7e08091978a27bf2fc953f91790822",
+  "composed_group_m12_raw_source_sha256": "56b3699183ef141f1d0b5c776a033583728d304528d80949278cc13d3c1e8ba3",
+  "compute_capability": "8.9",
+  "cuda_feature": "13020",
+  "gpu_uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+  "schema": "MambaBiF32TnFusedGroupM12EvidenceV1",
+  "sms": 142,
+  "toolkit": "13.2",
+  "utc": "2026-09-08T18:32:33Z"
+}

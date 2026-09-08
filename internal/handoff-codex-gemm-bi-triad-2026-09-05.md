@@ -1973,6 +1973,16 @@ exact-F32 TN d768-in shortlist leader; next screen is `GROUP_M=12`, then the
 64x32 occupancy4 geometry if the resource thresholds are met.  Production
 dispatcher integration waits until this focused shortlist is complete.
 
+The `GROUP_M=12` screen is complete and is a valid exact loss.  Both compute
+nodes used G12, all raw/final/exceptional/tail/K0/graph/guard gates passed, and
+resources stayed identical to G8, but candidate/G8 p50 was
+`1.00155-1.00201` with worst p95 `1.00338`.  Fast was intentionally not run
+after the retained gate failed.  Stop without retry and keep G8.  Frozen
+evidence is in
+`internal/perf/ada-triad-f32-tn-fused-groupm12-20260908/`.  Next exact-F32 TN
+screen is64x32x32/S2, gated before timing on <=128regs, <=25KiB shared,
+occupancy4 and local0.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
