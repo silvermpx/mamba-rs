@@ -11,6 +11,30 @@ qualification batch later. Older per-candidate full-gate instructions below are
 historical and do not override this method. Do not spend the next session
 reconfirming the same completed kernels instead of finding replacements.
 
+MANDATORY GPU preflight, reaffirmed by the user on 2026-09-09: immediately
+before every GPU launch, sample compute utilization, memory utilization and
+free VRAM. Launch only when utilization is idle and the candidate's explicit
+free-memory floor is met. With user models resident, require five consecutive
+samples at no more than 1% compute and memory utilization. Never stop or unload
+the user's processes; if the gate fails, defer the GPU run.
+
+Latest 2026-09-09 exact-F32 TN d768-in retained-best: the test-only N64
+dual-chunk fused candidate removes the intermediate partial0 global round trip
+and one launch while preserving the two fixed 1024-row accumulations and FP64
+finalize order. All exact target/tail/exception/nonunit/K0, graph, guard, SASS
+and resource gates pass (163 regs, local0, shared32768, occupancy3). It beats
+the retained N64 GROUP_M8 fused pipeline by4.0–4.4% in every paired stratum,
+but remains2.30–2.33x slower than cuBLAS Fast. Preserve it for joint
+integration; production/dispatcher are unchanged. Evidence:
+`internal/perf/ada-triad-f32-tn-dual-chunk-20260909/report.md`.
+
+Latest 2026-09-09 TF32 NN no-barrier stop: removing the final CTA barrier from
+the Prism N96 direct-epilogue candidate is exact and resource-neutral, but
+improves only0.0–0.4% and has p95 at1.00002–1.00005. It fails the strict
+retained gate, so Fast was not screened. Keep the prior direct-epilogue
+retained-best and do not retry the no-barrier variant unchanged. Evidence:
+`internal/perf/ada-triad-tf32-nn-n96-direct-epilogue-nobarrier-20260909/report.md`.
+
 Latest 2026-09-09: the exact-F32 TN d768-in fused-finalize N32 candidate is a
 valid stop. All raw/final exact-bit, graph, guard and resource gates pass
 (raw/fused 105/101 regs, local0, shared24576, occupancy4), but it loses the
