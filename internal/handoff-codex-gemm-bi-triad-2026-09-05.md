@@ -1961,6 +1961,18 @@ CopyPlan. Frozen evidence:
 retained CopyPlan chunk0 plus a chunk1 body with the identical ordered FP64
 finalize, to remove partial1 traffic and the standalone reducer.
 
+That fused-finalize candidate is now a new retained-best winner on d768-in.
+It is exact across both raw planes, exceptional/NaN payloads, tails, non-unit
+alpha, K0, eager/graph,20-op accumulation and guards.  Candidate/previous
+retained p50 is `.93356-.93661`, worst p95 `.93782`: a `6.2-6.6%` latency
+reduction in every paired once7 stratum.  It uses129 registers,32KiB shared,
+local0 and occupancy3.  Candidate/Fast remains`2.42657-2.43007x` at p50, so
+this is not a Fast win.  Frozen evidence is in
+`internal/perf/ada-triad-f32-tn-fused-finalize-20260908/`.  Keep it as the
+exact-F32 TN d768-in shortlist leader; next screen is `GROUP_M=12`, then the
+64x32 occupancy4 geometry if the resource thresholds are met.  Production
+dispatcher integration waits until this focused shortlist is complete.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
