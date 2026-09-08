@@ -14,7 +14,7 @@ not change U into Y/N.
 | Precision / op | i128 | o128 | i768 | o768 | P |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | exact F32 NN | U | U | N* | N* | N* |
-| exact F32 TN | N | N | U | U | U |
+| exact F32 TN | N | N | N | U | U |
 | exact F32 NT | U | U | N | U | N |
 | TF32 NN | U | U | N | N | N |
 | TF32 TN | N | N | N | N | N |
@@ -26,7 +26,7 @@ not change U into Y/N.
 | BF16 TN | N | N | N | N | N |
 | BF16 NT | U | U | **Y** | N | **Y** |
 
-Totals: **9 Y**, **31 N**, **20 U**. The three exact-F32 NN `N*` rows have
+Totals: **9 Y**, **32 N**, **19 U**. The three exact-F32 NN `N*` rows have
 valid paired no-win evidence but their candidate timing is provisional because
 the original wrapper retained an exclusive Fixed holder; rerun the repaired
 holder-lifetime wrapper before any admission claim.
@@ -36,9 +36,11 @@ o768/P) to N. BF16 o768 gains1.6–1.8% over retained compact but remains slower
 than Fast; the other three stop. TF32 NT o768/P now have A-only retained-best
 improvements of9.4–10.0% over actual AUTO, but remain N because Fast is still
 1.40–1.89x ahead. TF32 NN N96 B-ldmatrix is a valid exact loss on o768/P and
-does not change their existing N status. The exact-F32 TN i768 full-K CopyPlan
-probe does not change U because it failed actual-AUTO bits before timing: AUTO
-uses two1024-sample SplitM partials plus FP64 reduction.
+does not change their existing N status. Exact-F32 TN i768 is now N: a new
+two1024-sample CopyPlan pipeline preserves the AUTO SplitM+FP64-reducer bits
+and improves actual AUTO by14.5-15.4%, but cuBLAS Fast remains2.58-2.60x ahead.
+The earlier full-K CopyPlan probe remains rejected because it changed the
+selected arithmetic tree and failed exact bits before timing.
 
 ## Highest-value next work
 

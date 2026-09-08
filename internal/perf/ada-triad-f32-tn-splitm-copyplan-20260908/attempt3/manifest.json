@@ -1,0 +1,15 @@
+{
+  "artifacts": {
+    "/root/evidence-ada-triad-f32-tn-splitm-copyplan-20260908/attempt3/once7.log": "26cef0f690b03a971173364f1c0c44000add0437cdfe9223120813c2e141b0f9",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/gemm_bi_scalar_tn_copyplan_d768_in_discovery.rs": "14d5082eecf33d1bea9b605477fbdf0b3f190744de71372064f6e81eeadaf0bb",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_f32_tn_copyplan_raw_store_source.rs": "0ceade475a0fce4ec2fe5a25e0defe7ea950aa3c9fed09c93230eb863fb44c0d",
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_scalar_tn_copyplan_d768_in_discovery-60ff73c0b23dbbf5": "162ddb353554cf3cc2c7ce3d2e644fef00e560c0d33a98caf93ada5b8aee8125"
+  },
+  "compute_capability": "8.9",
+  "cuda_feature": "13020",
+  "gpu_uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+  "schema": "MambaBiF32TnSplitMCopyPlanEvidenceV1",
+  "sms": 142,
+  "toolkit": "13.2",
+  "utc": "2026-09-08T16:30:13Z"
+}

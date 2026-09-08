@@ -1,0 +1,20 @@
+{
+  "bits_rows": 4,
+  "cache_stable": true,
+  "decision_rows": 0,
+  "drain_quiet": true,
+  "executed_one": false,
+  "exit": 101,
+  "final_decisions": 0,
+  "hashes": {
+    "bin": "e0f0cd3f2e2aa1b2815d07dccea2e6d88e43f7e72069f9c88d354f2bafb4d6b6",
+    "helper": "0ceade475a0fce4ec2fe5a25e0defe7ea950aa3c9fed09c93230eb863fb44c0d",
+    "main": "3b5b19b1ca55fd9e3b641571f10ac7dbcc468ef43be54b984f9139f9047da297"
+  },
+  "pre_quiet": true,
+  "raw_rows": 8,
+  "release_identity": true,
+  "screen_rows": 0,
+  "test": "splitm_cuda_suite::ada_f32_tn_splitm_copyplan_d768_in_discovery_once7",
+  "test_log_sha256": "78817cab7d3d02617d89abd14b22bcf336b9dc10e893f1d1e7fb86c26dac1cbd"
+}
