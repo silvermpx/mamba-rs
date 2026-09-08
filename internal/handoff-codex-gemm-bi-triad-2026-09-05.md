@@ -9,6 +9,13 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+NEW TF32 TN d768-in raw-A-transpose + RNA-N96:29–30% below actualAUTO,
+target/tail/exception/K0/scratch-word bits PASS. Entire2node pipeline timed,
+not just GEMM. Fast still loses: graph1.344–1.345x. Preserve AUTO improvement,
+not a Fast win. Measured mainc009c10f/helperf969041b, raw3cd94f88; root56brackets
+replayed. See `perf/ada-triad-tf32-tn-transpose-n96-20260908/report.md`.
+Frozen measured source is separate from new small-TN register-pipeline edits.
+
 NEW half NT d768-out Fixed-S3 B-XOR improves forcedTC64 by26% for F16/BF16,
 41–42us versus56–57us, all target bits/guards pass. Not a Fast win: F16 eager
 near parity but graph2% slower; BF16 remains3–6% slower. Keep both candidates.
