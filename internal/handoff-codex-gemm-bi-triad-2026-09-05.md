@@ -9,6 +9,65 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-08T00:08Z: F32 CopyPlan reuse advances all3NN cells on Ada13.2:
+candidate/generic exact p50 ranges .7373-.7405 / .5598-.5670 / .6709-.6811.
+Strict alpha bit+1/beta bit+0/no-bias only; tail and K0/null A/B, repeat/graph,
+guards/immutability allpass. Nontrivialalpha/beta earlierfailed beforetiming;
+do not claim universalepilogue compatibility. Source6729c227/binary7bd0f02e.
+StandardM64 NN wins onlyd768out but is superseded in discovery by CopyPlan;
+do not integrate the weaker candidate merelybecause it also beatsgeneric.
+NTd768out transpose16+M64 wholepipeline advances vs actualpublicAUTO:
+p50 .8625-.8715 (~12.8-13.7%less time), eightbitrecords/resourcesPASS.
+Initialtargetgate andpreparedcache errors fixedwithoutbypassingAUTO; exact
+fixture nowwarms beforecapture. Sourcea1f20ca1/binary1c2ce6c3, frozenrawkept.
+Half TC64 STOPs F16/BF16 (~45-50%slowerthanforcedTC128), bits/resourcespass;
+no retry. Nextshortscreens: NTinnerFixedCopyPlan and existingFixedhalfS3reuse.
+All newresultsremain discovery, not Fast comparisons orAUTOadmissions.
+Root independentlyreplays196brackets/784observations forscalarNN/NT/CopyPlan.
+Summary/evidence/cleanup boundaries:
+`internal/perf/ada-triad-broad-screen-20260908/README.md`.
+PreserveFixed/SM120/globalepoch45. PreferexistingFixedholder/artifactreuse
+overduplicatingCUDA source; newTriadphysicalidentity musttruthfullynameFixed.
+TF32TN denseintegration willchangeexistingAdaoptionalmoduleidentity; batch
+requalNT3+TN1alltoolkits together, nofifthmodule or staleNTcohortliteral.
+
+Latest2026-09-07T23:45Z: broad Ada Triad discovery, not another Fixed retune.
+TF32 TN dense-stage batch is committed30df4596. All3 resource/bits gates pass;
+only d768-in advances (candidate/actualAUTO p50 .9501-.9618; worst p95 .9771).
+d768-out graph is slower and Prism is slower; both STOP, no retries. Candidate
+M128N64/S3 is still test-only; no CUDA12.8/13.0 admission or Fast win inferred.
+Evidence: `internal/perf/ada-triad-tn-dense-batch-20260908/report.md`.
+
+Existing scalar M64 NN CUDA13.2 discovery: d768-in STOP (~18% slower than
+generic exact); d768-out advances (p50 .9390-.9536, p95 .9608-.9715).
+Initial Prism test incorrectly chose the specialized backward-NT inner-GEMM
+symbol, whose column stores require a full tile, for forward N1928. The guard
+caught it before timing. This is a harness-selection error, not a production
+dispatcher regression. Repair6a7354d8 runs ONLY Prism with the standard safe
+NN symbol: bits/resource pass, speed STOP (~5.4-5.7% slower). Preserve the failed
+batch rawc6ebbdb0 and repaired rawc3064318; do not rerun valid d768 observations.
+Root independently replayed all84 brackets/336 observations. Comparator is
+honestly `generic_exact`, not newly qualified public AUTO or cuBLAS Fast.
+Evidence: `internal/perf/ada-scalar-nn-m64-screen-20260908/`.
+
+Next source freezes: NT d768-out064b9c6e (existing full transpose16+M64 pipeline
+versus actual AUTO, independent review ACCEPT), and NN6473d602 (existing Fixed
+exact-F32 CopyPlan source reused unchanged, no-bias3cell screen; static32768,
+dynamic0,128threads). Both have GPU GO after independent review, sole executor
+Avicenna. A test-only resource i32/usize compile error in3db54a83 was repaired
+in6473d602 before GPU use. No arithmetic contract or production route changed.
+
+Half-NN F16 d768-in NCU now captured: TC128 has162regs, one resident CTA,
+low ready-warp count, and zero excessive shared wavefronts. SASS already
+interleaves fragment loads with MMA; do NOT spend a new candidate on merely
+explicit fragment ping-pong or claim XOR is a demonstrated bank fix. Next
+bounded half screen is the already-built TC64 versus TC128, both BF16/F16,
+with unchanged BK64 association. Carver owns additive typed-parity harness;
+root owns NN CopyPlan harness, Beauvoir read-only TF32 route inventory.
+Evidence: `internal/perf/ada-triad-half-nn-ncu-20260908/evidence/attempt1/`.
+Keep all experiments test-only until qualified; batch finalists for all3 CUDA
+toolkits and Fast comparison. Preserve RTX5090 routes and unrelated SM120 WIP.
+
 Latest2026-09-07T22:31Z: the distinct TN compact-four-compute-warp S2
 ablation also STOPs. Focused bits, finite K0, guards and repeats pass;
 resource156regs/0local/0static/49152dynamic/256threads/occupancy1. Paired

@@ -1,0 +1,14 @@
+
+running 1 test
+GPU quiet gate scalar-nn-fixed-copyplan-ada/pre-context: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=56MiB sm_clock=1800MHz temperature=38C pstate=P5; quiet_samples=5
+{"schema":"MambaBiScalarNnM64AdaDiscoveryResourceV1","symbol":"gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1","registers":135,"local_bytes":0,"static_shared_bytes":32768,"dynamic_shared_bytes":0,"max_dynamic_shared_bytes":16384,"max_threads":128,"occupancy":3,"required_occupancy":1}
+Error: "ada_tail_alpha_beta gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1 differs from generic exact at 3 on eager repeat 0"
+test cuda_qualification::ada_exact_nn_fixed_copyplan_three_cell_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    cuda_qualification::ada_exact_nn_fixed_copyplan_three_cell_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 32 filtered out; finished in 10.19s
+
