@@ -2,6 +2,8 @@ const BM: usize = 128;
 const BN: usize = 64;
 const BK: usize = 32;
 const STAGES: usize = 3;
+// Retain guards without degrading either GEMM's production allocation alignment.
+const DISCOVERY_GUARD_WORDS: usize = 64;
 const CANDIDATE_SYMBOL: &str = "gemm_bi_nt_test_compact_xor_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PADDED_STRIDE: usize = 36;
 const PADDED_COPY_PLAN_SYMBOL: &str =
@@ -31,6 +33,8 @@ const PADDED_DENSE_PRISM_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense
 mod triad_tn_compact_source;
 #[path = "support/triad_tn_dense_source.rs"]
 mod triad_tn_dense_source;
+#[path = "support/triad_tn_prepack_a_source.rs"]
+mod triad_tn_prepack_a_source;
 const PADDED_DENSE_D768_OUT_GUARD_CUDA: &str = r#"__device__ __forceinline__ bool gemm_bi_tf32_nt_test_padded_dense_d768_out_target(
     const Sm80Tf32KernelParams& params) {
     return params.m == 2048 && params.k == 1536 && params.n == 768
@@ -54,6 +58,8 @@ enum CandidateVariant {
     TnDenseS3D768In,
     TnDenseS3D768Out,
     TnDenseS3Prism,
+    TnPrepackAD768In,
+    TnPrepackAPrism,
 }
 
 impl CandidateVariant {
@@ -74,6 +80,8 @@ impl CandidateVariant {
             Self::TnDenseS3D768In => "tn_dense_s3_d768_in",
             Self::TnDenseS3D768Out => "tn_dense_s3_d768_out",
             Self::TnDenseS3Prism => "tn_dense_s3_prism",
+            Self::TnPrepackAD768In => "tn_prepack_a_d768_in",
+            Self::TnPrepackAPrism => "tn_prepack_a_prism",
         }
     }
 
@@ -95,6 +103,9 @@ impl CandidateVariant {
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
                 triad_tn_dense_source::SYMBOL
             }
+            Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
+                triad_tn_prepack_a_source::GEMM_SYMBOL
+            }
         }
     }
 
@@ -112,6 +123,7 @@ impl CandidateVariant {
             | Self::CompactEightWarpS2Prism => 49_152,
             Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism => 49_152,
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => 79_872,
+            Self::TnPrepackAD768In | Self::TnPrepackAPrism => 79_872,
         }
     }
 
@@ -128,7 +140,7 @@ impl CandidateVariant {
 
     const fn target_dims(self) -> (usize, usize, usize) {
         match self {
-            Self::TnDenseS3D768In => (2_048, 768, 3_072),
+            Self::TnDenseS3D768In | Self::TnPrepackAD768In => (2_048, 768, 3_072),
             Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out | Self::TnDenseS3D768Out => {
                 (2_048, 1_536, 768)
             }
@@ -137,6 +149,7 @@ impl CandidateVariant {
             | Self::TnCompactEightWarpS2Prism
             | Self::TnCompactFourWarpS2Prism
             | Self::TnDenseS3Prism => (4_621, 384, 1_928),
+            Self::TnPrepackAPrism => (4_621, 384, 1_928),
             _ => (2_048, 768, 3_072),
         }
     }
@@ -163,6 +176,9 @@ impl CandidateVariant {
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
                 triad_tn_dense_source::candidate_source(PRODUCTION_CUDA)
             }
+            Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
+                triad_tn_prepack_a_source::candidate_source(PRODUCTION_CUDA)
+            }
         }
     }
 
@@ -174,7 +190,13 @@ impl CandidateVariant {
                 | Self::TnDenseS3D768In
                 | Self::TnDenseS3D768Out
                 | Self::TnDenseS3Prism
+                | Self::TnPrepackAD768In
+                | Self::TnPrepackAPrism
         )
+    }
+
+    const fn is_prepack_a(self) -> bool {
+        matches!(self, Self::TnPrepackAD768In | Self::TnPrepackAPrism)
     }
 
     const fn op_name(self) -> &'static str {
@@ -188,6 +210,9 @@ impl CandidateVariant {
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
                 "MambaBiTf32TnDenseDiscoveryScreenV1"
             }
+            Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
+                "MambaBiTf32TnPrepackADiscoveryScreenV1"
+            }
             _ => panic!("TN screen schema requested for NT candidate"),
         }
     }
@@ -198,6 +223,9 @@ impl CandidateVariant {
             Self::TnCompactFourWarpS2Prism => "MambaBiTf32TnCompact4DiscoveryDecisionV1",
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
                 "MambaBiTf32TnDenseDiscoveryDecisionV1"
+            }
+            Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
+                "MambaBiTf32TnPrepackADiscoveryDecisionV1"
             }
             _ => panic!("TN decision schema requested for NT candidate"),
         }
@@ -210,6 +238,8 @@ impl CandidateVariant {
             Self::TnDenseS3D768In => "tf32-tn-dense-s3-d768-in/",
             Self::TnDenseS3D768Out => "tf32-tn-dense-s3-d768-out/",
             Self::TnDenseS3Prism => "tf32-tn-dense-s3-prism/",
+            Self::TnPrepackAD768In => "tf32-tn-prepack-a-d768-in/",
+            Self::TnPrepackAPrism => "tf32-tn-prepack-a-prism/",
             _ => panic!("TN cohort requested for NT candidate"),
         }
     }
@@ -227,7 +257,7 @@ impl CandidateVariant {
     const fn tn_auto_identity(self) -> (&'static str, (u32, u32, u32), (u32, u32, u32), u32) {
         let dims = self.target_dims();
         match self {
-            Self::TnDenseS3D768In | Self::TnDenseS3D768Out => (
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnPrepackAD768In => (
                 TN_AUTO_NARROW_SYMBOL,
                 ((dims.1.div_ceil(64) * dims.2.div_ceil(64)) as u32, 1, 1),
                 (128, 1, 1),
@@ -1569,6 +1599,7 @@ fn tn_dense_s3_batch_binds_three_cells_one_symbol_and_computed_grids() {
             format!("tf32-{}/", name.replace('_', "-"))
         );
     }
+
     assert_eq!(
         CandidateVariant::TnDenseS3D768In.tn_auto_identity(),
         (TN_AUTO_NARROW_SYMBOL, (576, 1, 1), (128, 1, 1), 36_864)
@@ -1581,6 +1612,54 @@ fn tn_dense_s3_batch_binds_three_cells_one_symbol_and_computed_grids() {
         CandidateVariant::TnDenseS3Prism.tn_auto_identity(),
         (TN_AUTO_WIDE_SYMBOL, (93, 1, 1), (256, 1, 1), 79_872)
     );
+}
+
+#[test]
+fn tn_prepack_a_batch_binds_two_cells_and_two_node_pipeline() {
+    assert_eq!(
+        CandidateVariant::TnPrepackAD768In.tn_auto_identity(),
+        (TN_AUTO_NARROW_SYMBOL, (576, 1, 1), (128, 1, 1), 36_864)
+    );
+    assert_eq!(
+        CandidateVariant::TnPrepackAPrism.tn_auto_identity(),
+        (TN_AUTO_WIDE_SYMBOL, (93, 1, 1), (256, 1, 1), 79_872)
+    );
+    for (variant, dims, grid) in [
+        (CandidateVariant::TnPrepackAD768In, (2_048, 768, 3_072), 288),
+        (CandidateVariant::TnPrepackAPrism, (4_621, 384, 1_928), 93),
+    ] {
+        assert!(variant.is_tn());
+        assert!(variant.is_prepack_a());
+        assert_eq!(variant.target_dims(), dims);
+        assert_eq!(variant.grid_dim(), (grid, 1, 1));
+        assert_eq!(variant.symbol(), triad_tn_prepack_a_source::GEMM_SYMBOL);
+        assert_eq!(variant.shared_bytes(), 79_872);
+        let source = variant.source().unwrap();
+        assert!(source.contains(triad_tn_prepack_a_source::PACK_SYMBOL));
+        assert!(source.contains(triad_tn_prepack_a_source::GEMM_SYMBOL));
+    }
+}
+
+fn require_nonempty_fast_graph(count: usize) -> Result<(), String> {
+    if count == 0 {
+        Err(format!("TN Fast graph has {count} nodes"))
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn vendor_fast_graph_accepts_multikernel_gemm_but_not_empty_capture() {
+    assert!(require_nonempty_fast_graph(0).is_err());
+    assert!(require_nonempty_fast_graph(1).is_ok());
+    assert!(require_nonempty_fast_graph(2).is_ok());
+    assert!(require_nonempty_fast_graph(4).is_ok());
+}
+
+#[test]
+fn timing_guard_preserves_gpu_allocation_alignment() {
+    assert_ne!(DISCOVERY_GUARD_WORDS, 0);
+    assert_eq!(DISCOVERY_GUARD_WORDS * size_of::<f32>() % 256, 0);
 }
 
 #[test]
@@ -1905,7 +1984,7 @@ fn transformed_source_binds_only_distinct_nt_symbols_and_compact_slots() {
 
 #[cfg(feature = "cuda")]
 mod cuda_suite {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, c_void};
 
     use common::gpu_quiet::QuietGpu;
     use cudarc::driver::{CudaFunction, CudaGraph, DeviceRepr, LaunchConfig, PushKernelArg, sys};
@@ -1931,7 +2010,7 @@ mod cuda_suite {
     const TN_AUTO_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3";
     const AUTO_SHARED_BYTES: u32 = 82_944;
     const TN_AUTO_SHARED_BYTES: u32 = 79_872;
-    const GUARD: usize = 32;
+    const GUARD: usize = super::DISCOVERY_GUARD_WORDS;
     const GUARD_BITS: u32 = 0x7fc1_4e54;
     const WINDOWS: usize = 7;
     const WARMUPS: usize = 64;
@@ -1984,9 +2063,9 @@ mod cuda_suite {
 
         fn pointer(&self, ctx: &GpuCtx) -> Result<u64, String> {
             let pointer = self.buffer.raw_ptr_at(&ctx.stream, GUARD);
-            if pointer == 0 || !pointer.is_multiple_of(16) {
+            if pointer == 0 || !pointer.is_multiple_of(256) {
                 return Err(format!(
-                    "guarded candidate pointer is not 16-byte aligned: {pointer:#x}"
+                    "guarded discovery pointer is not 256-byte aligned: {pointer:#x}"
                 ));
             }
             Ok(pointer)
@@ -2018,11 +2097,25 @@ mod cuda_suite {
         variant: CandidateVariant,
         graph: CudaGraph,
         function: CudaFunction,
+        pack_function: Option<CudaFunction>,
+        output: GuardedBuffer,
+        a: GuardedBuffer,
+        packed_a: Option<GuardedBuffer>,
+        b: GuardedBuffer,
+        config: LaunchConfig,
+        pack_config: Option<LaunchConfig>,
+        pack_count: u64,
+        params: Params,
+        ctx: GpuCtx,
+    }
+
+    struct FastTn {
+        graph: CudaGraph,
         output: GuardedBuffer,
         a: GuardedBuffer,
         b: GuardedBuffer,
-        config: LaunchConfig,
-        params: Params,
+        dims: (usize, usize, usize),
+        symbol: String,
         ctx: GpuCtx,
     }
 
@@ -2113,7 +2206,7 @@ mod cuda_suite {
     fn compile_candidate(
         ctx: &GpuCtx,
         variant: CandidateVariant,
-    ) -> Result<(CudaFunction, String), String> {
+    ) -> Result<(CudaFunction, Option<CudaFunction>, String), String> {
         let source = compose_source(variant)?;
         let source_sha = format!("{:x}", Sha256::digest(source.as_bytes()));
         let options = cudarc::nvrtc::CompileOptions {
@@ -2139,13 +2232,39 @@ mod cuda_suite {
         let function = module
             .load_function(variant.symbol())
             .map_err(|error| format!("load {} NT symbol: {error:?}", variant.name()))?;
+        let pack_function = if variant.is_prepack_a() {
+            Some(
+                module
+                    .load_function(triad_tn_prepack_a_source::PACK_SYMBOL)
+                    .map_err(|error| format!("load {} A-pack symbol: {error:?}", variant.name()))?,
+            )
+        } else {
+            None
+        };
         function
             .set_attribute(
                 sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 variant.shared_bytes() as i32,
             )
             .map_err(|error| format!("set {} NT dynamic shared: {error:?}", variant.name()))?;
-        Ok((function, source_sha))
+        Ok((function, pack_function, source_sha))
+    }
+
+    fn launch_pack_a(
+        ctx: &GpuCtx,
+        function: &CudaFunction,
+        input: &GuardedBuffer,
+        output: &GuardedBuffer,
+        config: LaunchConfig,
+        count: u64,
+    ) -> Result<(), String> {
+        let input = input.pointer(ctx)?;
+        let output = output.pointer(ctx)?;
+        let mut builder = ctx.stream.launch_builder(function);
+        builder.arg(&input).arg(&output).arg(&count);
+        unsafe { builder.launch(config) }
+            .map(|_| ())
+            .map_err(|error| format!("launch TN A-prepack: {error:?}"))
     }
 
     fn launch_candidate(
@@ -2181,6 +2300,23 @@ mod cuda_suite {
             words: &(Vec<u32>, Vec<u32>, Vec<u32>),
             alpha: f32,
         ) -> Result<(Self, String), String> {
+            let compile_ctx = GpuCtx::new(device)?;
+            let (function, pack_function, source_sha) = compile_candidate(&compile_ctx, variant)?;
+            let candidate =
+                Self::new_reusing(device, variant, dims, words, alpha, function, pack_function)?;
+            Ok((candidate, source_sha))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn new_reusing(
+            device: &GpuDevice,
+            variant: CandidateVariant,
+            dims: (usize, usize, usize),
+            words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+            alpha: f32,
+            function: CudaFunction,
+            pack_function: Option<CudaFunction>,
+        ) -> Result<Self, String> {
             if size_of::<Params>() != 32 || align_of::<Params>() != 4 {
                 return Err(format!(
                     "{} {} parameter ABI changed: size={} align={}",
@@ -2191,9 +2327,12 @@ mod cuda_suite {
                 ));
             }
             let ctx = GpuCtx::new(device)?;
-            let (function, source_sha) = compile_candidate(&ctx, variant)?;
             let output = GuardedBuffer::new(&ctx, words.0.clone())?;
             let a = GuardedBuffer::new(&ctx, words.1.clone())?;
+            let packed_a = variant
+                .is_prepack_a()
+                .then(|| GuardedBuffer::new(&ctx, vec![0xdead_beef; words.1.len()]))
+                .transpose()?;
             let b = GuardedBuffer::new(&ctx, words.2.clone())?;
             let (rows, columns) = if variant.is_tn() {
                 (dims.1, dims.2)
@@ -2224,46 +2363,79 @@ mod cuda_suite {
                 ldb: i32::try_from(ldb).map_err(|_| "ldb exceeds i32")?,
                 ldc: i32::try_from(ldc).map_err(|_| "ldc exceeds i32")?,
             };
+            let pack_count =
+                u64::try_from(words.1.len()).map_err(|_| "A-pack length exceeds u64")?;
+            let pack_count_u32 =
+                u32::try_from(pack_count.max(1)).map_err(|_| "A-pack length exceeds u32")?;
+            let pack_config = variant.is_prepack_a().then_some(LaunchConfig {
+                grid_dim: (pack_count_u32.div_ceil(256), 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            });
             let graph = unsafe {
                 capture_into_graph(&ctx.stream, || {
-                    launch_candidate(&ctx, &function, &output, &a, &b, config, params, variant)
+                    let gemm_a = if let (Some(pack), Some(packed), Some(pack_config)) =
+                        (&pack_function, &packed_a, pack_config)
+                    {
+                        launch_pack_a(&ctx, pack, &a, packed, pack_config, pack_count)?;
+                        packed
+                    } else {
+                        &a
+                    };
+                    launch_candidate(
+                        &ctx, &function, &output, gemm_a, &b, config, params, variant,
+                    )
                 })
             }?;
-            validate_candidate_graph(&graph, config, variant)?;
-            Ok((
-                Self {
-                    variant,
-                    graph,
-                    function,
-                    output,
-                    a,
-                    b,
-                    config,
-                    params,
-                    ctx,
-                },
-                source_sha,
-            ))
+            validate_candidate_graph(&graph, config, pack_config, variant)?;
+            Ok(Self {
+                variant,
+                graph,
+                function,
+                pack_function,
+                output,
+                a,
+                packed_a,
+                b,
+                config,
+                pack_config,
+                pack_count,
+                params,
+                ctx,
+            })
         }
 
         fn reset(&mut self) -> Result<(), String> {
             self.output.reset(&self.ctx)?;
             self.a.reset(&self.ctx)?;
+            if let Some(packed_a) = &mut self.packed_a {
+                packed_a.reset(&self.ctx)?;
+            }
             self.b.reset(&self.ctx)
         }
 
         fn launch(&self, path: Path) -> Result<(), String> {
             match path {
-                Path::Eager => launch_candidate(
-                    &self.ctx,
-                    &self.function,
-                    &self.output,
-                    &self.a,
-                    &self.b,
-                    self.config,
-                    self.params,
-                    self.variant,
-                ),
+                Path::Eager => {
+                    let gemm_a = if let (Some(pack), Some(packed), Some(config)) =
+                        (&self.pack_function, &self.packed_a, self.pack_config)
+                    {
+                        launch_pack_a(&self.ctx, pack, &self.a, packed, config, self.pack_count)?;
+                        packed
+                    } else {
+                        &self.a
+                    };
+                    launch_candidate(
+                        &self.ctx,
+                        &self.function,
+                        &self.output,
+                        gemm_a,
+                        &self.b,
+                        self.config,
+                        self.params,
+                        self.variant,
+                    )
+                }
                 Path::Graph => self
                     .graph
                     .launch()
@@ -2275,6 +2447,9 @@ mod cuda_suite {
             let bits = self.output.snapshot(&self.ctx, false)?;
             self.a.snapshot(&self.ctx, true)?;
             self.b.snapshot(&self.ctx, true)?;
+            if let Some(packed_a) = &self.packed_a {
+                packed_a.snapshot(&self.ctx, false)?;
+            }
             Ok(bits)
         }
 
@@ -2302,9 +2477,134 @@ mod cuda_suite {
         }
     }
 
+    fn launch_fast_tn(
+        ctx: &GpuCtx,
+        output: &GuardedBuffer,
+        a: &GuardedBuffer,
+        b: &GuardedBuffer,
+        dims: (usize, usize, usize),
+    ) -> Result<(), String> {
+        use cudarc::cublas::{result, sys as blas_sys};
+        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        let (m, k, n) = dims;
+        let alpha = 1.0_f32;
+        let beta = 1.0_f32;
+        let output = output.pointer(ctx)?;
+        let a = a.pointer(ctx)?;
+        let b = b.pointer(ctx)?;
+        let dtype = WeightDtype::F32.cuda_data_type();
+        unsafe {
+            result::gemm_ex(
+                *ctx.blas.handle(),
+                blas_sys::cublasOperation_t::CUBLAS_OP_N,
+                blas_sys::cublasOperation_t::CUBLAS_OP_T,
+                i32::try_from(n).map_err(|_| "Fast N exceeds i32")?,
+                i32::try_from(k).map_err(|_| "Fast K exceeds i32")?,
+                i32::try_from(m).map_err(|_| "Fast M exceeds i32")?,
+                (&alpha as *const f32).cast::<c_void>(),
+                b as *const c_void,
+                dtype,
+                i32::try_from(n).map_err(|_| "Fast ldb exceeds i32")?,
+                a as *const c_void,
+                dtype,
+                i32::try_from(k).map_err(|_| "Fast lda exceeds i32")?,
+                (&beta as *const f32).cast::<c_void>(),
+                output as *mut c_void,
+                dtype,
+                i32::try_from(n).map_err(|_| "Fast ldc exceeds i32")?,
+                blas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                blas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+        }
+        .map_err(|error| format!("explicit TN Fast TF32 launch: {error:?}"))
+    }
+
+    impl FastTn {
+        fn new(
+            device: &GpuDevice,
+            dims: (usize, usize, usize),
+            words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+        ) -> Result<Self, String> {
+            let ctx = GpuCtx::new(device)?;
+            let output = GuardedBuffer::new(&ctx, words.0.clone())?;
+            let a = GuardedBuffer::new(&ctx, words.1.clone())?;
+            let b = GuardedBuffer::new(&ctx, words.2.clone())?;
+            let graph = unsafe {
+                capture_into_graph(&ctx.stream, || launch_fast_tn(&ctx, &output, &a, &b, dims))
+            }?;
+            let symbol = validate_fast_graph(&graph)?;
+            Ok(Self {
+                graph,
+                output,
+                a,
+                b,
+                dims,
+                symbol,
+                ctx,
+            })
+        }
+
+        fn reset(&mut self) -> Result<(), String> {
+            self.output.reset(&self.ctx)?;
+            self.a.reset(&self.ctx)?;
+            self.b.reset(&self.ctx)
+        }
+
+        fn launch(&self, path: Path) -> Result<(), String> {
+            match path {
+                Path::Eager => launch_fast_tn(&self.ctx, &self.output, &self.a, &self.b, self.dims),
+                Path::Graph => self
+                    .graph
+                    .launch()
+                    .map_err(|error| format!("launch TN Fast graph: {error:?}")),
+            }
+        }
+
+        fn output_bits(&self) -> Result<Vec<u32>, String> {
+            let bits = self.output.snapshot(&self.ctx, false)?;
+            self.a.snapshot(&self.ctx, true)?;
+            self.b.snapshot(&self.ctx, true)?;
+            Ok(bits)
+        }
+
+        fn measure(&self, path: Path) -> Result<f64, String> {
+            let start = self
+                .ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|error| format!("record Fast start: {error:?}"))?;
+            self.launch(path)?;
+            let end = self
+                .ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|error| format!("record Fast end: {error:?}"))?;
+            let us = f64::from(
+                start
+                    .elapsed_ms(&end)
+                    .map_err(|error| format!("measure Fast: {error:?}"))?,
+            ) * 1_000.0;
+            positive(us, "Fast")
+        }
+    }
+
+    fn validate_fast_graph(graph: &CudaGraph) -> Result<String, String> {
+        let mut count = 0usize;
+        cuda_ok(
+            unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
+            "count TN Fast graph nodes",
+        )?;
+        super::require_nonempty_fast_graph(count)?;
+        // cuBLAS may capture non-kernel or opaque internal nodes. Its identity
+        // here is the explicit gemm_ex call and its own eager/graph bits, not
+        // our kernel-node ABI. The entire captured operation remains timed.
+        Ok(format!("cublas_gemm_ex_graph[node_count={count}]"))
+    }
+
     fn validate_candidate_graph(
         graph: &CudaGraph,
         expected: LaunchConfig,
+        expected_pack: Option<LaunchConfig>,
         variant: CandidateVariant,
     ) -> Result<(), String> {
         let mut count = 0usize;
@@ -2312,44 +2612,83 @@ mod cuda_suite {
             unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
             "count candidate graph nodes",
         )?;
-        if count != 1 {
+        let expected_count = if expected_pack.is_some() { 2 } else { 1 };
+        if count != expected_count {
             return Err(format!("{} NT graph has {count} nodes", variant.name()));
         }
-        let mut node = std::ptr::null_mut();
+        let mut nodes = vec![std::ptr::null_mut(); count];
         cuda_ok(
-            unsafe { sys::cuGraphGetNodes(graph.cu_graph(), &mut node, &mut count) },
-            "read candidate graph node",
+            unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut count) },
+            "read candidate graph nodes",
         )?;
-        let mut params = unsafe { std::mem::zeroed() };
-        cuda_ok(
-            unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) },
-            "read candidate graph params",
-        )?;
-        let mut name = std::ptr::null();
-        cuda_ok(
-            unsafe { sys::cuFuncGetName(&mut name, params.func) },
-            "read candidate graph symbol",
-        )?;
-        if name.is_null() {
+        let mut gemm_params = None;
+        let mut saw_pack = false;
+        for node in nodes {
+            let mut params = unsafe { std::mem::zeroed() };
+            cuda_ok(
+                unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) },
+                "read candidate graph params",
+            )?;
+            let mut name = std::ptr::null();
+            cuda_ok(
+                unsafe { sys::cuFuncGetName(&mut name, params.func) },
+                "read candidate graph symbol",
+            )?;
+            if name.is_null() {
+                return Err(format!(
+                    "{} graph returned a null symbol name",
+                    variant.name()
+                ));
+            }
+            let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+            if name == variant.symbol() {
+                if (params.gridDimX, params.gridDimY, params.gridDimZ) != expected.grid_dim
+                    || (params.blockDimX, params.blockDimY, params.blockDimZ) != expected.block_dim
+                    || params.sharedMemBytes != expected.shared_mem_bytes
+                {
+                    return Err(format!("{} GEMM graph geometry changed", variant.name()));
+                }
+                gemm_params = Some(params);
+            } else if name == triad_tn_prepack_a_source::PACK_SYMBOL {
+                let pack = expected_pack.ok_or("unexpected A-pack graph node")?;
+                if (params.gridDimX, params.gridDimY, params.gridDimZ) != pack.grid_dim
+                    || (params.blockDimX, params.blockDimY, params.blockDimZ) != pack.block_dim
+                    || params.sharedMemBytes != 0
+                {
+                    return Err(format!("{} A-pack graph geometry changed", variant.name()));
+                }
+                for (index, expected) in [(0, 8), (8, 8), (16, 8)].into_iter().enumerate() {
+                    let mut offset = 0;
+                    let mut size = 0;
+                    cuda_ok(
+                        unsafe {
+                            sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size)
+                        },
+                        &format!("read {} A-pack ABI parameter {index}", variant.name()),
+                    )?;
+                    if (offset, size) != expected {
+                        return Err(format!(
+                            "{} A-pack ABI parameter {index} changed: {:?}",
+                            variant.name(),
+                            (offset, size)
+                        ));
+                    }
+                }
+                saw_pack = true;
+            } else {
+                return Err(format!(
+                    "{} graph has unexpected symbol {name}",
+                    variant.name()
+                ));
+            }
+        }
+        if saw_pack != expected_pack.is_some() {
             return Err(format!(
-                "{} NT graph returned a null symbol name",
+                "{} graph A-pack membership changed",
                 variant.name()
             ));
         }
-        let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
-        if name != variant.symbol()
-            || (params.gridDimX, params.gridDimY, params.gridDimZ) != expected.grid_dim
-            || (params.blockDimX, params.blockDimY, params.blockDimZ) != expected.block_dim
-            || params.sharedMemBytes != expected.shared_mem_bytes
-        {
-            return Err(format!(
-                "{} NT graph identity changed: symbol={name} grid={:?} block={:?} shared={}",
-                variant.name(),
-                (params.gridDimX, params.gridDimY, params.gridDimZ),
-                (params.blockDimX, params.blockDimY, params.blockDimZ),
-                params.sharedMemBytes
-            ));
-        }
+        let params = gemm_params.ok_or_else(|| format!("{} graph lacks GEMM", variant.name()))?;
         for (index, expected) in [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
             .into_iter()
             .enumerate()
@@ -2416,6 +2755,27 @@ mod cuda_suite {
                 None,
             )
             .map_err(|error| format!("candidate occupancy: {error:?}"))?;
+        if let Some(pack) = &candidate.pack_function {
+            let pack_local = pack
+                .local_size_bytes()
+                .map_err(|error| format!("A-pack local bytes: {error:?}"))?;
+            let pack_static = pack
+                .shared_size_bytes()
+                .map_err(|error| format!("A-pack static shared: {error:?}"))?;
+            let pack_threads = pack
+                .max_threads_per_block()
+                .map_err(|error| format!("A-pack max threads: {error:?}"))?;
+            println!(
+                "{{\"schema\":\"MambaBiTf32TnPrepackAResourceV1\",\"symbol\":\"{}\",\"local_bytes\":{pack_local},\"static_shared_bytes\":{pack_static},\"max_threads\":{pack_threads}}}",
+                triad_tn_prepack_a_source::PACK_SYMBOL
+            );
+            if pack_local != 0 || pack_static != 0 || pack_threads < 256 {
+                return Err(format!(
+                    "{} A-pack resource gate failed: local={pack_local} static={pack_static} max_threads={pack_threads}",
+                    variant.name()
+                ));
+            }
+        }
         let required_occupancy = variant.required_occupancy();
         let schema = if variant.is_tn() {
             "MambaBiTf32TnDiscoveryResourceV1"
@@ -2901,25 +3261,202 @@ mod cuda_suite {
         );
         let (m, k, n) = candidate.variant.target_dims();
         let schema = candidate.variant.tn_screen_schema();
+        if candidate.variant.is_prepack_a() {
+            println!(
+                "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"pack_symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"candidate_timed_nodes\":[\"pack_a\",\"gemm\"],\"reseed_scope\":\"C+A+B+packed_A_scratch\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_pipeline_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+                candidate.variant.name(),
+                candidate.variant.symbol(),
+                triad_tn_prepack_a_source::PACK_SYMBOL,
+                candidate.variant.shared_bytes(),
+                path.name(),
+                order.name(),
+                arms[0],
+                arms[1],
+                arms[2],
+                arms[3],
+                json_f64s(&auto_samples),
+                json_f64s(&candidate_samples),
+                json_f64s(&ratios)
+            );
+        } else {
+            println!(
+                "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+                candidate.variant.name(),
+                candidate.variant.symbol(),
+                candidate.variant.shared_bytes(),
+                path.name(),
+                order.name(),
+                arms[0],
+                arms[1],
+                arms[2],
+                arms[3],
+                json_f64s(&auto_samples),
+                json_f64s(&candidate_samples),
+                json_f64s(&ratios)
+            );
+        }
+        Ok((p50, p95))
+    }
+
+    fn valid_finite_nonzero(bits: &[u32]) -> bool {
+        !bits.is_empty()
+            && bits.iter().all(|word| f32::from_bits(*word).is_finite())
+            && bits.iter().any(|word| (*word & 0x7fff_ffff) != 0)
+    }
+
+    fn check_fast_tn_bits(fast: &mut FastTn) -> Result<Vec<u32>, String> {
+        let mut expected = None;
+        for path in [Path::Eager, Path::Graph] {
+            for repeat in 0..2 {
+                fast.reset()?;
+                fast.launch(path)?;
+                fast.ctx
+                    .stream
+                    .synchronize()
+                    .map_err(|error| format!("synchronize TN Fast correctness: {error:?}"))?;
+                let actual = fast.output_bits()?;
+                if !valid_finite_nonzero(&actual) {
+                    return Err(format!(
+                        "TN Fast {} repeat {repeat} produced invalid bits",
+                        path.name()
+                    ));
+                }
+                if expected
+                    .as_ref()
+                    .is_some_and(|expected| expected != &actual)
+                {
+                    return Err(format!(
+                        "TN Fast {} repeat {repeat} changed its own bits",
+                        path.name()
+                    ));
+                }
+                expected.get_or_insert(actual);
+            }
+        }
+        Ok(expected.unwrap())
+    }
+
+    fn measure_tn_fast_observation(
+        fast: &mut FastTn,
+        path: Path,
+        expected: &[u32],
+    ) -> Result<f64, String> {
+        fast.reset()?;
+        let us = fast.measure(path)?;
+        if fast.output_bits()? != expected {
+            return Err(format!(
+                "TN Fast output changed after {} timing observation",
+                path.name()
+            ));
+        }
+        Ok(us)
+    }
+
+    fn screen_tn_fast(
+        candidate: &mut Candidate,
+        fast: &mut FastTn,
+        path: Path,
+        order: Order,
+        candidate_expected: &[u32],
+        fast_expected: &[u32],
+    ) -> Result<(f64, f64), String> {
+        for _ in 0..TN_WARMUPS {
+            measure_tn_fast_observation(fast, path, fast_expected)?;
+            measure_tn_candidate_observation(candidate, path, candidate_expected)?;
+        }
+        let arms = match order {
+            Order::Abba => ["Fast", "candidate", "candidate", "Fast"],
+            Order::Baab => ["candidate", "Fast", "Fast", "candidate"],
+        };
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        let mut fast_samples = Vec::with_capacity(WINDOWS);
+        let mut candidate_samples = Vec::with_capacity(WINDOWS);
+        let mut observations = Vec::with_capacity(WINDOWS);
+        for _ in 0..WINDOWS {
+            let raw = match order {
+                Order::Abba => [
+                    measure_tn_fast_observation(fast, path, fast_expected)?,
+                    measure_tn_candidate_observation(candidate, path, candidate_expected)?,
+                    measure_tn_candidate_observation(candidate, path, candidate_expected)?,
+                    measure_tn_fast_observation(fast, path, fast_expected)?,
+                ],
+                Order::Baab => [
+                    measure_tn_candidate_observation(candidate, path, candidate_expected)?,
+                    measure_tn_fast_observation(fast, path, fast_expected)?,
+                    measure_tn_fast_observation(fast, path, fast_expected)?,
+                    measure_tn_candidate_observation(candidate, path, candidate_expected)?,
+                ],
+            };
+            let (fast_us, candidate_us) = match order {
+                Order::Abba => ((raw[0] + raw[3]) * 0.5, (raw[1] + raw[2]) * 0.5),
+                Order::Baab => ((raw[1] + raw[2]) * 0.5, (raw[0] + raw[3]) * 0.5),
+            };
+            fast_samples.push(fast_us);
+            candidate_samples.push(candidate_us);
+            ratios.push(candidate_us / fast_us);
+            observations.push(raw);
+        }
+        let p50 = percentile(&ratios, 0.50);
+        let p95 = percentile(&ratios, 0.95);
+        let observations = format!(
+            "[{}]",
+            observations
+                .iter()
+                .map(|raw| format!("[{:.9},{:.9},{:.9},{:.9}]", raw[0], raw[1], raw[2], raw[3]))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (m, k, n) = candidate.variant.target_dims();
         println!(
-            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            "{{\"schema\":\"MambaBiTf32TnPrepackAFastScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"pack_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"candidate_timed_nodes\":[\"pack_a\",\"gemm\"],\"reseed_scope\":\"C+A+B+packed_A_scratch\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_pipeline_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
             candidate.variant.name(),
             candidate.variant.symbol(),
-            candidate.variant.shared_bytes(),
+            triad_tn_prepack_a_source::PACK_SYMBOL,
+            fast.symbol,
             path.name(),
             order.name(),
             arms[0],
             arms[1],
             arms[2],
             arms[3],
-            json_f64s(&auto_samples),
+            json_f64s(&fast_samples),
             json_f64s(&candidate_samples),
-            json_f64s(&ratios)
+            json_f64s(&ratios),
         );
         Ok((p50, p95))
     }
 
+    fn exceptional_tn_words(
+        variant: CandidateVariant,
+        dims: (usize, usize, usize),
+    ) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), String> {
+        let mut words = fixture_words(variant, dims)?;
+        let cases = [
+            0x0000_0000,
+            0x8000_0000,
+            0x0000_0001,
+            0x8000_0001,
+            0x3f80_1000,
+            0xbf80_1000,
+            0x7f7f_ffff,
+            0xff7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc1_2345,
+            0x7fa1_2345,
+        ];
+        if words.1.len() < cases.len() {
+            return Err("exceptional TN fixture is too small".into());
+        }
+        words.1[..cases.len()].copy_from_slice(&cases);
+        Ok(words)
+    }
+
     fn run_tn(variant: CandidateVariant) {
+        run_tn_in_context(variant, false);
+    }
+
+    fn run_tn_in_context(variant: CandidateVariant, existing_own_context: bool) {
         assert!(variant.is_tn());
         assert!(
             !cfg!(debug_assertions),
@@ -2928,7 +3465,12 @@ mod cuda_suite {
         );
         let quiet = QuietGpu::for_cuda_ordinal(0).unwrap();
         let cohort = variant.tn_cohort();
-        let pre = quiet.require_pre_context(&format!("{cohort}pre")).unwrap();
+        let pre = if existing_own_context {
+            quiet.require_cohort(&format!("{cohort}pre-existing-context"))
+        } else {
+            quiet.require_pre_context(&format!("{cohort}pre"))
+        }
+        .unwrap();
         let device = GpuDevice::new(0).unwrap();
         assert_eq!(device.compute_capability, (8, 9));
 
@@ -2945,6 +3487,8 @@ mod cuda_suite {
         assert!(compiler.nvrtc_library_known);
         let (mut candidate, source_sha) =
             Candidate::new(&device, variant, target, &target_words, 1.0).unwrap();
+        let reusable_function = candidate.function.clone();
+        let reusable_pack_function = candidate.pack_function.clone();
         validate_resources(&candidate, &source_sha).unwrap();
         let golden = check_bits(
             &mut actual_auto,
@@ -2954,6 +3498,12 @@ mod cuda_suite {
             "TN target alpha1",
         )
         .unwrap();
+        let mut fast = variant
+            .is_prepack_a()
+            .then(|| FastTn::new(&device, target, &target_words))
+            .transpose()
+            .unwrap();
+        let fast_golden = fast.as_mut().map(check_fast_tn_bits).transpose().unwrap();
 
         for (dims, alpha, label) in [
             (TAIL, 1.0, "TN tail alpha1"),
@@ -2965,16 +3515,58 @@ mod cuda_suite {
             presize_physical_qualification_suite(&ctx, &[request]).unwrap();
             let mut reference = qualify_physical_launch(&ctx, request).unwrap();
             validate_reference(variant, dims, false, &reference).unwrap();
-            let (mut probe, probe_source_sha) =
-                Candidate::new(&device, variant, dims, &words, alpha).unwrap();
-            assert_eq!(probe_source_sha, source_sha);
+            let mut probe = Candidate::new_reusing(
+                &device,
+                variant,
+                dims,
+                &words,
+                alpha,
+                reusable_function.clone(),
+                reusable_pack_function.clone(),
+            )
+            .unwrap();
             check_bits(&mut reference, &ctx, &mut probe, &words, label).unwrap();
         }
 
+        if variant.is_prepack_a() {
+            let dims = TAIL;
+            let words = exceptional_tn_words(variant, dims).unwrap();
+            let ctx = configure(&device).unwrap();
+            let request = request(variant, dims, false, 1.0);
+            presize_physical_qualification_suite(&ctx, &[request]).unwrap();
+            let mut reference = qualify_physical_launch(&ctx, request).unwrap();
+            validate_reference(variant, dims, false, &reference).unwrap();
+            let mut probe = Candidate::new_reusing(
+                &device,
+                variant,
+                dims,
+                &words,
+                1.0,
+                reusable_function.clone(),
+                reusable_pack_function.clone(),
+            )
+            .unwrap();
+            check_bits(
+                &mut reference,
+                &ctx,
+                &mut probe,
+                &words,
+                "TN exceptional padded tail",
+            )
+            .unwrap();
+        }
+
         let k0_words = fixture_words(variant, TN_K0).unwrap();
-        let (mut k0_candidate, k0_source_sha) =
-            Candidate::new(&device, variant, TN_K0, &k0_words, 1.0).unwrap();
-        assert_eq!(k0_source_sha, source_sha);
+        let mut k0_candidate = Candidate::new_reusing(
+            &device,
+            variant,
+            TN_K0,
+            &k0_words,
+            1.0,
+            reusable_function,
+            reusable_pack_function,
+        )
+        .unwrap();
         check_tn_k0_bits(&mut k0_candidate, &k0_words).unwrap();
 
         let timed_pre = quiet.require_cohort(&format!("{cohort}timed")).unwrap();
@@ -2995,9 +3587,29 @@ mod cuda_suite {
                 );
             }
         }
+        let mut fast_strata = Vec::new();
+        if let (Some(fast), Some(fast_golden)) = (&mut fast, &fast_golden) {
+            for path in [Path::Eager, Path::Graph] {
+                for order in [Order::Abba, Order::Baab] {
+                    fast_strata.push(
+                        screen_tn_fast(&mut candidate, fast, path, order, &golden, fast_golden)
+                            .unwrap(),
+                    );
+                }
+            }
+        }
         let post = quiet.verify_post_cohort(&format!("{cohort}post")).unwrap();
-        let retain = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+        let retain_auto = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+        let retain_fast = !variant.is_prepack_a()
+            || fast_strata
+                .iter()
+                .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+        let retain = retain_auto && retain_fast;
         let strata = strata
+            .into_iter()
+            .map(|(p50, p95)| [p50, p95])
+            .collect::<Vec<_>>();
+        let fast_strata = fast_strata
             .into_iter()
             .map(|(p50, p95)| [p50, p95])
             .collect::<Vec<_>>();
@@ -3006,27 +3618,53 @@ mod cuda_suite {
         let candidate_grid = variant.grid_dim();
         let (actual_auto_symbol, actual_auto_grid, actual_auto_block, actual_auto_shared_bytes) =
             variant.tn_auto_identity();
-        println!(
-            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{actual_auto_symbol}\",\"candidate_grid\":[{},{},{}],\"actual_auto_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"actual_auto_block\":[{},{},{}],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{actual_auto_shared_bytes},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
-            variant.name(),
-            variant.symbol(),
-            candidate_grid.0,
-            candidate_grid.1,
-            candidate_grid.2,
-            actual_auto_grid.0,
-            actual_auto_grid.1,
-            actual_auto_grid.2,
-            actual_auto_block.0,
-            actual_auto_block.1,
-            actual_auto_block.2,
-            variant.shared_bytes(),
-            json_pairs(&strata),
-            if retain {
-                "advance_to_full_qualification"
-            } else {
-                "stop_no_retry"
-            }
-        );
+        if variant.is_prepack_a() {
+            println!(
+                "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"pack_symbol\":\"{}\",\"actual_auto_symbol\":\"{actual_auto_symbol}\",\"candidate_grid\":[{},{},{}],\"actual_auto_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"actual_auto_block\":[{},{},{}],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{actual_auto_shared_bytes},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"candidate_timed_nodes\":[\"pack_a\",\"gemm\"],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"actual_auto_strata\":{},\"fast_tf32_strata\":{},\"retain_against_actual_auto\":{retain_auto},\"retain_against_fast\":{retain_fast},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+                variant.name(),
+                variant.symbol(),
+                triad_tn_prepack_a_source::PACK_SYMBOL,
+                candidate_grid.0,
+                candidate_grid.1,
+                candidate_grid.2,
+                actual_auto_grid.0,
+                actual_auto_grid.1,
+                actual_auto_grid.2,
+                actual_auto_block.0,
+                actual_auto_block.1,
+                actual_auto_block.2,
+                variant.shared_bytes(),
+                json_pairs(&strata),
+                json_pairs(&fast_strata),
+                if retain {
+                    "advance_to_full_qualification"
+                } else {
+                    "stop_no_retry"
+                }
+            );
+        } else {
+            println!(
+                "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{actual_auto_symbol}\",\"candidate_grid\":[{},{},{}],\"actual_auto_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"actual_auto_block\":[{},{},{}],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{actual_auto_shared_bytes},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+                variant.name(),
+                variant.symbol(),
+                candidate_grid.0,
+                candidate_grid.1,
+                candidate_grid.2,
+                actual_auto_grid.0,
+                actual_auto_grid.1,
+                actual_auto_grid.2,
+                actual_auto_block.0,
+                actual_auto_block.1,
+                actual_auto_block.2,
+                variant.shared_bytes(),
+                json_pairs(&strata),
+                if retain {
+                    "advance_to_full_qualification"
+                } else {
+                    "stop_no_retry"
+                }
+            );
+        }
     }
 
     fn run(variant: CandidateVariant) {
@@ -3218,5 +3856,18 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN dense S3 prism discovery"]
     fn ada_tf32_tn_dense_s3_prism_discovery_once7() {
         run(CandidateVariant::TnDenseS3Prism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; whole-pipeline TN A-prepack two-cell discovery"]
+    fn ada_tf32_tn_prepack_a_two_cell_discovery_once7() {
+        run_tn_in_context(CandidateVariant::TnPrepackAD768In, false);
+        run_tn_in_context(CandidateVariant::TnPrepackAPrism, true);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; unmeasured Prism sibling only"]
+    fn ada_tf32_tn_prepack_a_prism_discovery_once7() {
+        run(CandidateVariant::TnPrepackAPrism);
     }
 }

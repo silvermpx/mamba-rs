@@ -1,0 +1,18 @@
+
+running 1 test
+GPU quiet gate tf32-tn-prepack-a-d768-in/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=52MiB sm_clock=1800MHz temperature=41C pstate=P5; quiet_samples=5
+{"schema":"MambaBiTf32TnPrepackAResourceV1","symbol":"gemm_bi_tn_test_prepack_a_rna_tf32_v1","local_bytes":0,"static_shared_bytes":0,"max_threads":1024}
+{"schema":"MambaBiTf32TnDiscoveryResourceV1","op":"TN","variant":"tn_prepack_a_d768_in","source_sha256":"3203c51d8f665ca85b33f13d39220efa747ef8c84360133ce6a1ee398fa081cb","symbol":"gemm_bi_tn_test_prepack_a_sm80_mma_tf32_v1_m128n64_bk32_s3","registers":144,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":79872,"max_dynamic_shared_bytes":79872,"max_threads":256,"occupancy":1,"required_occupancy":1}
+
+thread 'cuda_suite::ada_tf32_tn_prepack_a_two_cell_discovery_once7' (2439643) panicked at tests/gemm_bi_tf32_nt_compact_xor.rs:3491:14:
+called `Result::unwrap()` on an `Err` value: "TN Fast graph has 2 nodes"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda_suite::ada_tf32_tn_prepack_a_two_cell_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    cuda_suite::ada_tf32_tn_prepack_a_two_cell_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 69 filtered out; finished in 45.74s
+

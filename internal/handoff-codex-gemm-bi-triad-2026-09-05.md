@@ -9,7 +9,18 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
-Latest checkpoint2026-09-08 after c09af9eb: NEW exact F32 TN d128-out direct
+Latest checkpoint2026-09-08 after2a42d272: four NEW aligned half NN S3
+finalists, d768-out/Prism ×F16/BF16, are20–23% below cuBLAS Fast in independently
+paired eager+graph once7. Allbits/guards PASS; forcedTC128 reference, NOT public
+AUTO admission. See `perf/ada-triad-half-nn-s3-aligned-20260908/README.md`.
+Measured typed667510c2 is retained independently of next S4/N64 working edits.
+Half TN Rect128x64 all6cells and TF32 TN A-prepack bothcells are valid losers;
+new reports record them, no reruns. Current GPU queue: exactF32 TN d128 in/out
+one-chunk fold pipeline, then half TN BK32/S4 sixcells, then half NN N64 reuse.
+Discovery first remains in force; batch finalists before one integration gate.
+Fixed inference and SM120 remain unchanged. Older checkpoints below are history.
+
+Previous checkpoint after c09af9eb: NEW exact F32 TN d128-out direct
 M8N16 candidate is39–42% below actualAUTO, still2.15–2.21x Fast; see
 `perf/ada-triad-f32-tn-d128-out-direct-20260908/README.md`. No rerun: wrapper97
 was stale record counts, exact GPU test passed. Native source tests13PASS.
