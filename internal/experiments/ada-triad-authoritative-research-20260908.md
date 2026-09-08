@@ -157,6 +157,13 @@ its [report](../perf/ada-triad-half-tn-regpipe-vec2-20260908/report.md) and the
 [NCU diagnostic](../perf/ada-triad-half-tn-regpipe-20260908/ncu-diagnostic.md)
 separate measured outcomes from the hypotheses above.
 
+The same unchanged regpipe+vec2 body is now screened on d768-out and Prism for
+F16/BF16. Only BF16 d768-out advances: candidate/retained p50.98166–.98412,
+worst p95.98758. It is not a Fast win (p501.06798–1.11093). F16 out misses
+one retained p95 at.99124; both Prism dtypes lose. See the
+[sibling report](../perf/ada-triad-half-tn-regpipe-vec2-siblings-20260908/report.md).
+Stop the three losers; retain the BF16-out result for joint integration.
+
 Completed first F32 reuse screen: [NT sibling report](../perf/ada-f32-nt-copyplan-siblings-20260908/report.md).
 Actual AUTO time falls56.7–56.8% on d768-in and12.8–13.0% on Prism, with target,
 tail, exceptional and K0 bits preserved. Fast gaps remain2.36x/3.92x. These

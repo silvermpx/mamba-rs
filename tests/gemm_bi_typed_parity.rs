@@ -62,6 +62,8 @@ mod triad_half_tn_m64n128_source;
 mod triad_half_tn_microtile_source;
 #[path = "support/triad_half_tn_regpipe_source.rs"]
 mod triad_half_tn_regpipe_source;
+#[path = "support/triad_half_tn_regpipe_vec2_sibling_plan.rs"]
+mod triad_half_tn_regpipe_vec2_sibling_plan;
 #[path = "support/triad_half_tn_s4_source.rs"]
 mod triad_half_tn_s4_source;
 #[path = "support/triad_half_tn_vec2_epilogue_source.rs"]
@@ -5075,6 +5077,318 @@ fn ada_half_tn_tc64_bk64_s2_regpipe_vec2_d768_in_vs_current_and_fast_discovery_o
     drop(t);
     quiet
         .verify_post_cohort("half-tn-regpipe-vec2/post")
+        .map(|_| ())
+}
+
+fn screen_ada_half_tn_regpipe_vec2_sibling_cell(
+    t: &Ctx,
+    candidate: &AdaHalfTnCandidate,
+    retained: &AdaHalfTnCandidate,
+    cell: &str,
+    dims: (usize, usize, usize),
+    expected_grid: u32,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let mut fixture = AdaHalfTnFixture::new_with_guards(t, dtype, dims, 128, 64);
+    let pointer_mod_256 = [
+        fixture.a.ptr() % 256,
+        fixture.b.ptr() % 256,
+        fixture.candidate.ptr() % 256,
+        fixture.current.ptr() % 256,
+        fixture.fast.ptr() % 256,
+    ];
+    if pointer_mod_256 != [0; 5] {
+        return Err(format!(
+            "half TN regpipe vec2 sibling fixture is not 256-byte aligned: {pointer_mod_256:?}"
+        ));
+    }
+    for arm in [
+        AdaHalfTnArm::Candidate,
+        AdaHalfTnArm::CurrentTc64,
+        AdaHalfTnArm::Fast,
+    ] {
+        fixture.reset(t, arm)?;
+        enqueue_ada_half_tn_arm(t, &fixture, candidate, arm)?;
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("half TN regpipe vec2 sibling graph warmup: {error:?}"))?;
+    }
+    fixture.reset(t, AdaHalfTnArm::Candidate)?;
+    enqueue_ada_half_tn_candidate(t, &fixture, retained)?;
+    t.ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("half TN compact retained graph warmup: {error:?}"))?;
+    let graphs = [
+        capture_ada_half_tn_arm(t, &fixture, candidate, AdaHalfTnArm::Candidate)?,
+        capture_ada_half_tn_arm(t, &fixture, candidate, AdaHalfTnArm::CurrentTc64)?,
+        capture_ada_half_tn_arm(t, &fixture, candidate, AdaHalfTnArm::Fast)?,
+    ];
+    let retained_graph = capture_ada_half_tn_arm(t, &fixture, retained, AdaHalfTnArm::Candidate)?;
+    validate_ada_half_tn_candidate_graph(&graphs[0], &fixture, candidate, expected_grid)?;
+    validate_ada_half_tn_candidate_graph(&retained_graph, &fixture, retained, expected_grid)?;
+    validate_single_node_graph(&graphs[1], "current_tc64")?;
+    validate_nonempty_graph(&graphs[2], "native_half_fast")?;
+
+    let expected = observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::CurrentTc64,
+        AdaHalfPath::Eager,
+        1,
+        None,
+    )?
+    .1;
+    for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+        for repeat in 0..2 {
+            observe_ada_half_tn(
+                t,
+                &mut fixture,
+                candidate,
+                &graphs,
+                AdaHalfTnArm::CurrentTc64,
+                path,
+                1,
+                Some(&expected),
+            )?;
+            observe_ada_half_tn_candidate_only(
+                t,
+                &mut fixture,
+                candidate,
+                &graphs[0],
+                path,
+                1,
+                Some(&expected),
+            )?;
+            observe_ada_half_tn_candidate_only(
+                t,
+                &mut fixture,
+                retained,
+                &retained_graph,
+                path,
+                1,
+                Some(&expected),
+            )?;
+            println!(
+                "{{\"schema\":\"MambaBiHalfTnRegpipeVec2SiblingBitsV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"path\":\"{}\",\"repeat\":{repeat},\"arms\":[\"current_tc64\",\"{}\",\"{}\"],\"words\":{}}}",
+                path.name(),
+                candidate.name(),
+                retained.name(),
+                expected.len(),
+            );
+        }
+    }
+    let fast_bits = observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::Fast,
+        AdaHalfPath::Eager,
+        1,
+        None,
+    )?
+    .1;
+    if !fast_bits
+        .iter()
+        .all(|&word| f32::from_bits(word).is_finite())
+        || !fast_bits.iter().any(|&word| f32::from_bits(word) != 0.0)
+    {
+        return Err(format!(
+            "half TN regpipe vec2 sibling {dtype:?} {cell} Fast output is non-finite or all-zero"
+        ));
+    }
+    for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+        observe_ada_half_tn(
+            t,
+            &mut fixture,
+            candidate,
+            &graphs,
+            AdaHalfTnArm::Fast,
+            path,
+            1,
+            Some(&fast_bits),
+        )?;
+    }
+
+    let candidate_timing_bits = observe_ada_half_tn_candidate_only(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs[0],
+        AdaHalfPath::Eager,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        None,
+    )?
+    .1;
+    observe_ada_half_tn_candidate_only(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs[0],
+        AdaHalfPath::Graph,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        Some(&candidate_timing_bits),
+    )?;
+    for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+        observe_ada_half_tn_candidate_only(
+            t,
+            &mut fixture,
+            retained,
+            &retained_graph,
+            path,
+            ADA_HALF_TN_OBSERVATION_GEMMS,
+            Some(&candidate_timing_bits),
+        )?;
+    }
+    let current_timing_bits = observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::CurrentTc64,
+        AdaHalfPath::Eager,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        Some(&candidate_timing_bits),
+    )?
+    .1;
+    observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::CurrentTc64,
+        AdaHalfPath::Graph,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        Some(&current_timing_bits),
+    )?;
+    let fast_timing_bits = observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::Fast,
+        AdaHalfPath::Eager,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        None,
+    )?
+    .1;
+    observe_ada_half_tn(
+        t,
+        &mut fixture,
+        candidate,
+        &graphs,
+        AdaHalfTnArm::Fast,
+        AdaHalfPath::Graph,
+        ADA_HALF_TN_OBSERVATION_GEMMS,
+        Some(&fast_timing_bits),
+    )?;
+
+    let mut retained_strata = Vec::with_capacity(4);
+    let mut fast_strata = Vec::with_capacity(4);
+    for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+        for order in [BracketOrder::Abba, BracketOrder::Baab] {
+            retained_strata.push(screen_ada_half_tn_candidates(
+                t,
+                &mut fixture,
+                candidate,
+                &graphs[0],
+                retained,
+                &retained_graph,
+                &candidate_timing_bits,
+                path,
+                order,
+            )?);
+            fast_strata.push(screen_ada_half_tn_pair(
+                t,
+                &mut fixture,
+                candidate,
+                &graphs,
+                AdaHalfTnArm::Fast,
+                &candidate_timing_bits,
+                &fast_timing_bits,
+                path,
+                order,
+            )?);
+        }
+    }
+    let retained_best = retain_decision(&retained_strata);
+    let fast_win = retain_decision(&fast_strata);
+    let decision = if retained_best {
+        if fast_win {
+            "advance_fast_winner"
+        } else {
+            "advance_retained_best"
+        }
+    } else {
+        "stop_no_retry"
+    };
+    println!(
+        "{{\"schema\":\"MambaBiHalfTnRegpipeVec2SiblingDecisionV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"shape\":[{},{},{}],\"expected_grid\":{expected_grid},\"pointer_mod_256\":{:?},\"retained_comparator\":\"{}\",\"retained_strata\":{:?},\"fast_comparator\":\"native_half_fast\",\"fast_strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"retained_best_improvement\":{retained_best},\"fast_win\":{fast_win},\"decision\":\"{decision}\",\"promotion\":false}}",
+        candidate.name(),
+        dims.0,
+        dims.1,
+        dims.2,
+        pointer_mod_256,
+        retained.name(),
+        retained_strata,
+        fast_strata,
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half TN regpipe vec2 out/Prism siblings"]
+fn ada_half_tn_regpipe_vec2_d768_out_and_prism_vs_compact_and_fast_discovery_once7()
+-> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half TN regpipe vec2 sibling discovery requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-tn-regpipe-vec2-siblings/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half TN regpipe vec2 sibling discovery requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_tn_regpipe_vec2_candidate(&t)?;
+    let retained = compile_ada_half_tn_compact_candidate(&t)?;
+    for dtype in triad_half_tn_regpipe_vec2_sibling_plan::dtypes() {
+        let dtype = match dtype {
+            triad_half_tn_regpipe_vec2_sibling_plan::HalfDtype::F16 => WeightDtype::F16,
+            triad_half_tn_regpipe_vec2_sibling_plan::HalfDtype::Bf16 => WeightDtype::Bf16,
+        };
+        gate_ada_half_tn_resources(&candidate, dtype)?;
+        gate_ada_half_tn_resources(&retained, dtype)?;
+    }
+    let _cohort = quiet.require_cohort("half-tn-regpipe-vec2-siblings/cohort")?;
+    for (cell, dims, expected_grid) in triad_half_tn_regpipe_vec2_sibling_plan::cases() {
+        for dtype in triad_half_tn_regpipe_vec2_sibling_plan::dtypes() {
+            let dtype = match dtype {
+                triad_half_tn_regpipe_vec2_sibling_plan::HalfDtype::F16 => WeightDtype::F16,
+                triad_half_tn_regpipe_vec2_sibling_plan::HalfDtype::Bf16 => WeightDtype::Bf16,
+            };
+            screen_ada_half_tn_regpipe_vec2_sibling_cell(
+                &t,
+                &candidate,
+                &retained,
+                cell,
+                dims,
+                expected_grid,
+                dtype,
+            )?;
+        }
+    }
+    drop(t);
+    quiet
+        .verify_post_cohort("half-tn-regpipe-vec2-siblings/post")
         .map(|_| ())
 }
 

@@ -1,0 +1,5 @@
+e5947b69e05cfe2b80e0ecd324748aa676b014df2da20fc08f8c873ea2303b15  /root/mamba-ada-exact-toolkit-auto-20260907/tests/gemm_bi_typed_parity.rs
+f2df60014f7287996511dbe149c6a600e5749f128a42f2437239e8acec4fe7be  /root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_half_tn_regpipe_vec2_sibling_plan.rs
+e0589f179020be2e1841095a831097f7c1dabf21bd7a2bf42d5358328acae9b2  /root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_half_tn_vec2_epilogue_source.rs
+f3e66016fc6d9f2e584ac79486f09261c3be207790aad01f784ffcf3a63fddee  /root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_half_tn_regpipe_source.rs
+a8edb14a581ed7ed5f50cb52f5849c55a4184383bfbc5b34e3ed98ef104a1b36  /root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_half_tn_compact_source.rs

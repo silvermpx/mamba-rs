@@ -1906,6 +1906,15 @@ do not retry or integrate it. Retain A-only (~200us,11.3–11.4% faster than
 actual AUTO). Full evidence and frozen identities are in
 `internal/perf/ada-triad-tf32-nt-compact-ab-ldmatrix-20260908/report.md`.
 
+## Ada half TN regpipe+vec2 sibling screen (2026-09-08)
+
+The repaired four-cell CUDA13.2 screen adds one retained-best result: BF16
+d768-out is1.6–1.8% faster than compact BK64/S2 with every paired p50+p95
+below.99. It is still1.068–1.111x cuBLAS Fast at p50. F16 d768-out misses one
+retained p95 (.99124); F16/BF16 Prism also fail the strict retained gate.
+Stop those three without retry. No half-TN Fast win is claimed. Full evidence:
+`internal/perf/ada-triad-half-tn-regpipe-vec2-siblings-20260908/report.md`.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
