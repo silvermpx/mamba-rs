@@ -1924,6 +1924,27 @@ one full-length F32 chain. Preserve the failed source/evidence, but the next
 candidate must reproduce two1024-sample raw partials and reuse the exact reducer.
 See `internal/perf/ada-triad-f32-tn-copyplan-d768-in-20260908/report.md`.
 
+## Ada exact-F32 TN SplitM CopyPlan retained winner (2026-09-08)
+
+The corrected d768-in candidate preserves AUTO's two1024-row raw partials and
+unchanged FP64 reducer while replacing each partial body with the production
+exact-F32 CopyPlan. It passes raw-partial and final target/tail/exceptional/
+non-unit/K0 bits in eager and graph paths. Candidate/AUTO p50 is
+`.84635-.85354`, worst p95 `.85527`: retain a14.5-15.4% latency reduction.
+Candidate/Fast remains`2.581-2.596x`, so this is not a Fast win. Frozen source,
+binary and authoritative attempt3 evidence are in
+`internal/perf/ada-triad-f32-tn-splitm-copyplan-20260908/`; commit `3285af45`.
+The first K0 attempt used the wrong non-unit alpha for a public API that fixes
+alpha=beta=1, and is preserved as a harness failure rather than a kernel loss.
+
+The next exact-F32 TN screens are d768-out `m_chunk=512,chunks=4` and Prism
+`m_chunk=784,chunks=6`. Prism requires a padded transpose stride4624 to enter
+the CopyPlan async path, and its raw-partial gate must run before timing because
+BK32 adds padded zero-FMAs relative to AUTO's BK16 body. The longer-term
+source-backed order is direct-TN staging, fused final chunk+FP64 finalize,
+GROUP_M=12, then a 64x32 tile; see
+`internal/perf/ada-triad-f32-tn-exact-research-20260908.md`.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
