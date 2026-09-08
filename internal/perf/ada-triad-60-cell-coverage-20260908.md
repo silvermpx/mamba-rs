@@ -33,9 +33,12 @@ holder-lifetime wrapper before any admission claim.
 
 The latest half-TN sibling screen converts four former U cells (F16/BF16 x
 o768/P) to N. BF16 o768 gains1.6–1.8% over retained compact but remains slower
-than Fast; the other three stop. The exact-F32 TN i768 full-K CopyPlan probe
-does not change U because it failed actual-AUTO bits before timing: AUTO uses
-two1024-sample SplitM partials plus FP64 reduction.
+than Fast; the other three stop. TF32 NT o768/P now have A-only retained-best
+improvements of9.4–10.0% over actual AUTO, but remain N because Fast is still
+1.40–1.89x ahead. TF32 NN N96 B-ldmatrix is a valid exact loss on o768/P and
+does not change their existing N status. The exact-F32 TN i768 full-K CopyPlan
+probe does not change U because it failed actual-AUTO bits before timing: AUTO
+uses two1024-sample SplitM partials plus FP64 reduction.
 
 ## Highest-value next work
 
@@ -44,8 +47,8 @@ two1024-sample SplitM partials plus FP64 reduction.
 2. Resolve exact-F32 blind spots: NN i128/o128, NT i128/o128 and paired Fast for
    NT o768. For TN i768/o768/P, preserve each selected SplitM partition and its
    FP64 reducer; a full-length F32 chain is a different bit contract.
-3. Screen source-backed TF32 candidates: NN N96 B-ldmatrix on o768/P and
-   A-only ldmatrix NT siblings on o768/P; small shapes need separate profiling.
+3. Integrate the three TF32 NT A-only retained-best cells. Do not retry the
+   measured NN N96 B-ldmatrix loss; small TF32 shapes still need profiling.
 4. After the discovery shortlist is frozen, perform one combined dispatcher
    integration and CUDA12.8/13.0/13.2 qualification batch. CUDA13.2 source
    availability alone is not cross-toolkit or cross-architecture proof.

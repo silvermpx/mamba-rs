@@ -66,6 +66,8 @@ enum CandidateVariant {
     PaddedDenseCopy,
     CompactEightWarpS2,
     CompactALdmatrixD768In,
+    CompactALdmatrixD768Out,
+    CompactALdmatrixPrism,
     CompactAbLdmatrixD768In,
     CompactSharedRnaD768In,
     CompactEightWarpS2D768Out,
@@ -98,6 +100,8 @@ impl CandidateVariant {
             Self::PaddedDenseCopy => "padded_dense_copy",
             Self::CompactEightWarpS2 => "compact_eight_warp_s2",
             Self::CompactALdmatrixD768In => "compact_a_ldmatrix_d768_in",
+            Self::CompactALdmatrixD768Out => "compact_a_ldmatrix_d768_out",
+            Self::CompactALdmatrixPrism => "compact_a_ldmatrix_prism",
             Self::CompactAbLdmatrixD768In => "compact_ab_ldmatrix_d768_in",
             Self::CompactSharedRnaD768In => "compact_shared_stage_rna_d768_in",
             Self::CompactEightWarpS2D768Out => "compact_eight_warp_s2_d768_out",
@@ -129,7 +133,9 @@ impl CandidateVariant {
             Self::PaddedEightWarp => PADDED_EIGHT_WARP_SYMBOL,
             Self::PaddedDenseCopy => PADDED_DENSE_COPY_SYMBOL,
             Self::CompactEightWarpS2 => COMPACT_EIGHT_WARP_S2_SYMBOL,
-            Self::CompactALdmatrixD768In => triad_tf32_nt_compact_a_ldmatrix_source::SYMBOL,
+            Self::CompactALdmatrixD768In
+            | Self::CompactALdmatrixD768Out
+            | Self::CompactALdmatrixPrism => triad_tf32_nt_compact_a_ldmatrix_source::SYMBOL,
             Self::CompactAbLdmatrixD768In => triad_tf32_nt_compact_ab_ldmatrix_source::SYMBOL,
             Self::CompactSharedRnaD768In => triad_tf32_nt_shared_rna_source::SYMBOL,
             Self::CompactEightWarpS2D768Out | Self::CompactEightWarpS2Prism => {
@@ -167,6 +173,8 @@ impl CandidateVariant {
             | Self::PaddedDensePrism => 82_944,
             Self::CompactEightWarpS2
             | Self::CompactALdmatrixD768In
+            | Self::CompactALdmatrixD768Out
+            | Self::CompactALdmatrixPrism
             | Self::CompactAbLdmatrixD768In
             | Self::CompactSharedRnaD768In
             | Self::CompactEightWarpS2D768Out
@@ -187,6 +195,8 @@ impl CandidateVariant {
         match self {
             Self::CompactEightWarpS2
             | Self::CompactALdmatrixD768In
+            | Self::CompactALdmatrixD768Out
+            | Self::CompactALdmatrixPrism
             | Self::CompactAbLdmatrixD768In
             | Self::CompactSharedRnaD768In
             | Self::CompactEightWarpS2D768Out
@@ -205,10 +215,12 @@ impl CandidateVariant {
             | Self::TnTransposeN96D768In
             | Self::TnDirectN96D768In => (2_048, 768, 3_072),
             Self::CompactEightWarpS2D768Out
+            | Self::CompactALdmatrixD768Out
             | Self::PaddedDenseD768Out
             | Self::TnDenseS3D768Out
             | Self::TnTransposeN96D768Out => (2_048, 1_536, 768),
             Self::CompactEightWarpS2Prism
+            | Self::CompactALdmatrixPrism
             | Self::PaddedDensePrism
             | Self::TnCompactEightWarpS2Prism
             | Self::TnCompactFourWarpS2Prism
@@ -230,7 +242,9 @@ impl CandidateVariant {
             Self::PaddedEightWarp => padded_eight_warp_candidate_source(),
             Self::PaddedDenseCopy => padded_dense_copy_candidate_source(),
             Self::CompactEightWarpS2 => compact_eight_warp_s2_candidate_source(),
-            Self::CompactALdmatrixD768In => {
+            Self::CompactALdmatrixD768In
+            | Self::CompactALdmatrixD768Out
+            | Self::CompactALdmatrixPrism => {
                 let parent = compact_eight_warp_s2_candidate_source()?;
                 triad_tf32_nt_compact_a_ldmatrix_source::candidate_source(&parent)
             }
@@ -306,9 +320,28 @@ impl CandidateVariant {
         matches!(
             self,
             Self::CompactALdmatrixD768In
+                | Self::CompactALdmatrixD768Out
+                | Self::CompactALdmatrixPrism
                 | Self::CompactAbLdmatrixD768In
                 | Self::CompactSharedRnaD768In
         )
+    }
+
+    const fn is_compact_a_ldmatrix(self) -> bool {
+        matches!(
+            self,
+            Self::CompactALdmatrixD768In
+                | Self::CompactALdmatrixD768Out
+                | Self::CompactALdmatrixPrism
+        )
+    }
+
+    const fn expected_registers(self) -> Option<i32> {
+        if self.is_compact_a_ldmatrix() {
+            Some(98)
+        } else {
+            None
+        }
     }
 
     const fn compares_retained_a_ldmatrix(self) -> bool {
@@ -2220,6 +2253,39 @@ fn compact_a_ldmatrix_binds_only_d768_in_with_retained_compact_resources() {
 }
 
 #[test]
+fn compact_a_ldmatrix_sibling_screen_binds_exact_targets_and_m128n64_geometry() {
+    for (variant, name, dims, grid) in [
+        (
+            CandidateVariant::CompactALdmatrixD768Out,
+            "compact_a_ldmatrix_d768_out",
+            (2_048, 1_536, 768),
+            (384, 1, 1),
+        ),
+        (
+            CandidateVariant::CompactALdmatrixPrism,
+            "compact_a_ldmatrix_prism",
+            (4_621, 384, 1_928),
+            (222, 1, 1),
+        ),
+    ] {
+        assert_eq!(variant.name(), name);
+        assert_eq!(
+            variant.symbol(),
+            triad_tf32_nt_compact_a_ldmatrix_source::SYMBOL
+        );
+        assert_eq!(variant.target_dims(), dims);
+        assert_eq!(variant.grid_dim(), grid);
+        assert_eq!(variant.candidate_tile(), (128, 64));
+        assert_eq!(variant.threads(), 256);
+        assert_eq!(variant.shared_bytes(), 49_152);
+        assert_eq!(variant.required_occupancy(), 2);
+        assert_eq!(variant.expected_registers(), Some(98));
+        assert!(variant.is_nt_d768_in_shortscreen());
+        assert!(!variant.compares_retained_a_ldmatrix());
+    }
+}
+
+#[test]
 fn compact_ab_ldmatrix_binds_only_d768_in_with_retained_compact_resources() {
     let variant = CandidateVariant::CompactAbLdmatrixD768In;
     assert_eq!(variant.name(), "compact_ab_ldmatrix_d768_in");
@@ -3674,6 +3740,9 @@ mod cuda_suite {
             variant.shared_bytes()
         );
         if registers <= 0
+            || variant
+                .expected_registers()
+                .is_some_and(|expected| registers != expected)
             || local != 0
             || static_shared != 0
             || max_threads < variant.threads() as i32
@@ -3822,6 +3891,14 @@ mod cuda_suite {
         launch.upload_exact_unbiased_f32_words(ctx, &words.0, &words.1, &words.2)
     }
 
+    fn word_sha256(words: &[u32]) -> String {
+        let mut digest = Sha256::new();
+        for word in words {
+            digest.update(word.to_le_bytes());
+        }
+        format!("{:x}", digest.finalize())
+    }
+
     fn check_bits(
         reference: &mut QualifiedPhysicalLaunch<'_>,
         reference_ctx: &GpuCtx,
@@ -3881,7 +3958,26 @@ mod cuda_suite {
                 }
             }
         }
-        Ok(expected.unwrap())
+        let expected = expected.unwrap();
+        if candidate.variant.is_compact_a_ldmatrix() {
+            let reference_role = if label == "target" {
+                "public_auto_wired_compact8"
+            } else {
+                "forced_contract_reference"
+            };
+            println!(
+                "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixExactBitsV1\",\"variant\":\"{}\",\"label\":\"{label}\",\"shape\":[{},{},{}],\"reference_role\":\"{reference_role}\",\"candidate_symbol\":\"{}\",\"eager_repeats\":2,\"graph_repeats\":2,\"output_words\":{},\"output_sha256_le_words\":\"{}\",\"inputs_unchanged\":true,\"guard_bytes_per_side\":{}}}",
+                candidate.variant.name(),
+                candidate.params.m,
+                candidate.params.k,
+                candidate.params.n,
+                candidate.variant.symbol(),
+                expected.len(),
+                word_sha256(&expected),
+                GUARD * size_of::<u32>(),
+            );
+        }
+        Ok(expected)
     }
 
     fn check_tn_k0_bits(
@@ -3955,6 +4051,18 @@ mod cuda_suite {
             "NT_K0_DIRECT_ORACLE_PASS op=NT alpha=1 beta=0 eager_repeats=2 graph_repeats=2 outputs={}",
             expected.len()
         );
+        if candidate.variant.is_compact_a_ldmatrix() {
+            println!(
+                "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixK0BitsV1\",\"variant\":\"{}\",\"shape\":[{},{},{}],\"oracle\":\"alpha1_beta0_zero\",\"eager_repeats\":2,\"graph_repeats\":2,\"output_words\":{},\"output_sha256_le_words\":\"{}\",\"inputs_unchanged\":true,\"guard_bytes_per_side\":{}}}",
+                candidate.variant.name(),
+                candidate.params.m,
+                candidate.params.k,
+                candidate.params.n,
+                expected.len(),
+                word_sha256(&expected),
+                GUARD * size_of::<u32>(),
+            );
+        }
         Ok(expected)
     }
 
@@ -4214,6 +4322,119 @@ mod cuda_suite {
             arms[2],
             arms[3],
             json_f64s(&fast_samples),
+            json_f64s(&candidate_samples),
+            json_f64s(&ratios),
+        );
+        Ok((p50, p95))
+    }
+
+    fn measure_nt_auto_observation(
+        reference: &mut QualifiedPhysicalLaunch<'_>,
+        reference_ctx: &GpuCtx,
+        path: Path,
+        words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+        expected: &[u32],
+    ) -> Result<f64, String> {
+        upload_reference(reference, reference_ctx, words)?;
+        let us = measure_reference(
+            reference,
+            reference_ctx,
+            path,
+            NT_FAST_GEMMS_PER_OBSERVATION,
+        )?;
+        if reference.f32_output_bits(reference_ctx)? != expected {
+            return Err(format!(
+                "NT public AUTO output changed after {} timing observation",
+                path.name()
+            ));
+        }
+        if reference.f32_operand_bits(reference_ctx)? != (words.1.clone(), words.2.clone()) {
+            return Err(format!(
+                "NT public AUTO input changed after {} timing observation",
+                path.name()
+            ));
+        }
+        reference.validate_red_zones(reference_ctx)?;
+        Ok(us)
+    }
+
+    fn screen_nt_auto(
+        reference: &mut QualifiedPhysicalLaunch<'_>,
+        reference_ctx: &GpuCtx,
+        candidate: &mut Candidate,
+        path: Path,
+        order: Order,
+        words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+        expected: &[u32],
+    ) -> Result<(f64, f64), String> {
+        for _ in 0..TN_WARMUPS {
+            measure_nt_auto_observation(reference, reference_ctx, path, words, expected)?;
+            measure_nt_candidate_observation(candidate, path, expected)?;
+        }
+        let arms = match order {
+            Order::Abba => [
+                "public_auto_compact8",
+                "candidate",
+                "candidate",
+                "public_auto_compact8",
+            ],
+            Order::Baab => [
+                "candidate",
+                "public_auto_compact8",
+                "public_auto_compact8",
+                "candidate",
+            ],
+        };
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        let mut auto_samples = Vec::with_capacity(WINDOWS);
+        let mut candidate_samples = Vec::with_capacity(WINDOWS);
+        let mut observations = Vec::with_capacity(WINDOWS);
+        for _ in 0..WINDOWS {
+            let raw = match order {
+                Order::Abba => [
+                    measure_nt_auto_observation(reference, reference_ctx, path, words, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_auto_observation(reference, reference_ctx, path, words, expected)?,
+                ],
+                Order::Baab => [
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                    measure_nt_auto_observation(reference, reference_ctx, path, words, expected)?,
+                    measure_nt_auto_observation(reference, reference_ctx, path, words, expected)?,
+                    measure_nt_candidate_observation(candidate, path, expected)?,
+                ],
+            };
+            let (auto_us, candidate_us) = match order {
+                Order::Abba => ((raw[0] + raw[3]) * 0.5, (raw[1] + raw[2]) * 0.5),
+                Order::Baab => ((raw[1] + raw[2]) * 0.5, (raw[0] + raw[3]) * 0.5),
+            };
+            auto_samples.push(auto_us);
+            candidate_samples.push(candidate_us);
+            ratios.push(candidate_us / auto_us);
+            observations.push(raw);
+        }
+        let p50 = percentile(&ratios, 0.50);
+        let p95 = percentile(&ratios, 0.95);
+        let observations = format!(
+            "[{}]",
+            observations
+                .iter()
+                .map(|raw| format!("[{:.9},{:.9},{:.9},{:.9}]", raw[0], raw[1], raw[2], raw[3]))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (m, k, n) = candidate.variant.target_dims();
+        println!(
+            "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixRetainedScreenV1\",\"op\":\"NT\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"retained_route\":\"public_auto_wired_compact8\",\"retained_symbol\":\"{SM89_FINALIST_SYMBOL}\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"logical_gemms_per_observation\":{NT_FAST_GEMMS_PER_OBSERVATION},\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_public_auto_compact8\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"retained_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            candidate.variant.name(),
+            candidate.variant.symbol(),
+            path.name(),
+            order.name(),
+            arms[0],
+            arms[1],
+            arms[2],
+            arms[3],
+            json_f64s(&auto_samples),
             json_f64s(&candidate_samples),
             json_f64s(&ratios),
         );
@@ -4998,6 +5219,24 @@ mod cuda_suite {
         assert_eq!(compiler.nvrtc_version, (13, 2));
         assert_eq!(compiler.target.as_str(), "sm_89");
         assert!(compiler.nvrtc_library_known);
+        if variant.is_compact_a_ldmatrix() {
+            let node = &actual_auto.evidence().nodes()[0];
+            println!(
+                "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixActualAutoIdentityV1\",\"variant\":\"{}\",\"shape\":[{},{},{}],\"route\":\"public_auto_wired_compact8\",\"symbol\":\"{}\",\"module\":\"TriadSm89Finalist\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"dynamic_shared_bytes\":{},\"eager_graph_equal\":true,\"execution_dtype\":\"F32\"}}",
+                variant.name(),
+                target.0,
+                target.1,
+                target.2,
+                node.symbol,
+                node.launch.grid_dim.0,
+                node.launch.grid_dim.1,
+                node.launch.grid_dim.2,
+                node.launch.block_dim.0,
+                node.launch.block_dim.1,
+                node.launch.block_dim.2,
+                node.launch.shared_mem_bytes,
+            );
+        }
         let (mut candidate, source_sha) =
             Candidate::new(&device, variant, target, &target_words, 1.0).unwrap();
         validate_resources(&candidate, &source_sha).unwrap();
@@ -5117,9 +5356,20 @@ mod cuda_suite {
         if !variant.compares_retained_a_ldmatrix() {
             for path in [Path::Eager, Path::Graph] {
                 for order in [Order::Abba, Order::Baab] {
-                    strata.push(
-                        screen(&mut actual_auto, &auto_ctx, &candidate, path, order).unwrap(),
-                    );
+                    strata.push(if variant.is_compact_a_ldmatrix() {
+                        screen_nt_auto(
+                            &mut actual_auto,
+                            &auto_ctx,
+                            &mut candidate,
+                            path,
+                            order,
+                            &target_words,
+                            &golden,
+                        )
+                        .unwrap()
+                    } else {
+                        screen(&mut actual_auto, &auto_ctx, &candidate, path, order).unwrap()
+                    });
                 }
             }
         }
@@ -5163,6 +5413,10 @@ mod cuda_suite {
             assert_eq!(retained.output_bits().unwrap(), golden);
         }
         let post = quiet.verify_post_cohort(&format!("{cohort}post")).unwrap();
+        let actual_auto_win = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+        let fast_win = fast_strata
+            .iter()
+            .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
         let retain = if variant.compares_retained_a_ldmatrix() {
             let retained_pairs = retained_strata
                 .iter()
@@ -5173,11 +5427,10 @@ mod cuda_suite {
                 .map(|(p50, p95)| [*p50, *p95])
                 .collect::<Vec<_>>();
             retain_shared_rna_shortscreen(&retained_pairs, &fast_pairs)
+        } else if variant.is_compact_a_ldmatrix() {
+            actual_auto_win
         } else {
-            strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99)
-                && fast_strata
-                    .iter()
-                    .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99)
+            actual_auto_win && fast_win
         };
         let strata = strata
             .into_iter()
@@ -5217,16 +5470,20 @@ mod cuda_suite {
             );
             return;
         }
-        if variant == CandidateVariant::CompactALdmatrixD768In {
+        if variant.is_compact_a_ldmatrix() {
             let fast_strata = fast_strata
                 .into_iter()
                 .map(|(p50, p95)| [p50, p95])
                 .collect::<Vec<_>>();
+            let candidate_grid = variant.grid_dim();
             println!(
-                "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixDecisionV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{SM89_FINALIST_SYMBOL}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"candidate_grid\":[192,1,1],\"candidate_block\":[256,1,1],\"dynamic_shared_bytes\":49152,\"required_occupancy\":2,\"shape\":[{m},{k},{n}],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"candidate_over_actual_auto\":{},\"candidate_over_fast\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+                "{{\"schema\":\"MambaBiTf32NtCompactALdmatrixDecisionV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{SM89_FINALIST_SYMBOL}\",\"actual_auto_role\":\"identity_exact_bits_and_retained_comparator\",\"retained_route\":\"public_auto_wired_compact8\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"candidate_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"dynamic_shared_bytes\":49152,\"required_occupancy\":2,\"shape\":[{m},{k},{n}],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"candidate_over_public_auto_compact8\":{},\"candidate_over_fast\":{},\"retain_against_actual_auto\":{actual_auto_win},\"fast_win\":{fast_win},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
                 variant.name(),
                 variant.symbol(),
                 fast.as_ref().unwrap().symbol,
+                candidate_grid.0,
+                candidate_grid.1,
+                candidate_grid.2,
                 json_pairs(&strata),
                 json_pairs(&fast_strata),
                 if retain {
@@ -5291,6 +5548,18 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact A-only ldmatrix NT d768-in discovery"]
     fn ada_tf32_nt_compact_a_ldmatrix_d768_in_discovery_once7() {
         run(CandidateVariant::CompactALdmatrixD768In);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact A-only ldmatrix NT d768-out discovery"]
+    fn ada_tf32_nt_compact_a_ldmatrix_d768_out_discovery_once7() {
+        run(CandidateVariant::CompactALdmatrixD768Out);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact A-only ldmatrix NT Prism discovery"]
+    fn ada_tf32_nt_compact_a_ldmatrix_prism_discovery_once7() {
+        run(CandidateVariant::CompactALdmatrixPrism);
     }
 
     #[test]

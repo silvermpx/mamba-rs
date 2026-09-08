@@ -32,7 +32,7 @@ unpaired timing ratios, marginal parity, and merely faster-than-AUTO results.
 | Half NT d768-out | NEW M64N128/S3 beats retained B-XOR S3 by4.5–4.6% for BOTH F16/BF16. Fast graph worst p95 F16 1.0105/BF16 1.0217; neither a strict Fast winner. | [M64N128 F16](ada-triad-half-nt-m64n128-s3-20260908/report.md), [BF16](ada-triad-half-nt-m64n128-s3-bf16-20260908/report.md), [retained out](ada-triad-half-nt-fixed-s3-bxor-20260908/report.md) |
 | Half TN | d768-in regpipe+vec2 reaches Fast graph parity but has no strict Fast win. NEW BF16 d768-out beats retained compact1.6–1.8% robustly; F16 out and both Prism siblings fail the strict retained gate. No half-TN Fast win yet. | [Compact](ada-triad-half-tn-compact-20260908/README.md), [d768-in vec2](ada-triad-half-tn-regpipe-vec2-20260908/report.md), [siblings](ada-triad-half-tn-regpipe-vec2-siblings-20260908/report.md), [S3 loss](ada-triad-half-tn-fixed-s3-20260908/report.md) |
 | TF32 NN d768-out / Prism | N96 reduces AUTO time; near Fast parity, not a strict win. N96 d768-in loses and is excluded. | [N96](ada-triad-nn-addhalf-n96-screen-20260908/README.md) |
-| TF32 NT d768-in | Keep A-only ldmatrix: it cuts actual AUTO time11.3–11.4%, ~226→200us, exact bits. Shared-RNA loses35.4–35.5%; A+B ldmatrix loses A-only2.0–2.1%. Fast remains1.69–1.71x ahead. Stop both losers. | [A-only](ada-triad-tf32-nt-a-ldmatrix-20260908/report.md), [shared RNA](ada-triad-tf32-nt-shared-rna-20260908/report.md), [A+B](ada-triad-tf32-nt-compact-ab-ldmatrix-20260908/report.md) |
+| TF32 NT large shapes | Keep A-only ldmatrix for all three: it cuts actual AUTO time11.3–11.4% on d768-in,9.4–9.7% on d768-out and9.9–10.0% on Prism, exact bits. Fast remains ahead by1.40–1.89x on the new siblings. Shared-RNA and A+B ldmatrix lose the d768-in A-only baseline and stop. | [d768-in](ada-triad-tf32-nt-a-ldmatrix-20260908/report.md), [out/Prism](ada-triad-tf32-nt-a-ldmatrix-siblings-20260908/report.md), [shared RNA](ada-triad-tf32-nt-shared-rna-20260908/report.md), [A+B](ada-triad-tf32-nt-compact-ab-ldmatrix-20260908/report.md) |
 | TF32 TN large shapes | Whole raw-transpose+N96 reduces actual AUTO time29–30% in,40% out,15–17% Prism. Graph/Fast respectively1.34,1.20,2.00; no Fast win. | [In](ada-triad-tf32-tn-transpose-n96-20260908/report.md), [out/Prism](ada-triad-tf32-tn-transpose-n96-siblings-20260908/report.md) |
 | TF32 TN direct-N96 d768-in | Direct staging removes transpose but still loses Fast graph35–37%. Not paired against retained transpose+N96; no new-best claim. | [Direct probe](ada-triad-tf32-tn-direct-n96-20260908/report.md) |
 | Exact F32 TN d128-in/out | Direct fixed-order fold substantially improves AUTO; still roughly2–3x Fast. | [In](ada-triad-f32-tn-d128-direct-20260908/README.md), [out](ada-triad-f32-tn-d128-out-direct-20260908/README.md) |
@@ -57,6 +57,9 @@ The current strict Y/N/U inventory is maintained in the
   if it were the measured one.
 - Valid losing experiments stay in the separate evidence/test area for now.
   No Ada loss authorizes removing a route used on another shape or GPU.
+- The TF32 NN N96 B-ldmatrix probe is a valid exact loser on d768-out/Prism
+  (8.9–9.9% slower than retained); keep scalar B loads and do not retry it.
+  See [the frozen loss](ada-triad-tf32-nn-n96-b-ldmatrix-20260908/report.md).
 - Neither source availability nor a CUDA13.2 win proves all-architecture or
   CUDA12.8/13.0 performance. The final batch must verify those supported
   toolkits, preserve fallbacks and reject foreign device-specific identities.
