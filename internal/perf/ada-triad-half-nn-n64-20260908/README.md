@@ -1,5 +1,9 @@
 # Half NN N64: BF16 d768-in reaches near Fast parity
 
+Superseded for BF16 d768-in by the later aligned S3 screen (.775–.786/Fast).
+Prefer S3; see [new result](../ada-triad-half-nn-s3-bf16in-20260908/README.md).
+The measurements below remain historical evidence, not the current finalist.
+
 Ada/CUDA13.2,2026-09-08. Fixed N64 body reused with isolated exact-shape
 Triad wrappers, preserving MMA order/packed RNE epilogue. No production edits.
 

@@ -1,0 +1,56 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-8d8246563b7b569a",
+    "cuda_suite::ada_tf32_tn_prism_single_barrier_s3_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-8d8246563b7b569a",
+  "binary_sha256": "391048e1edfde14b7c3a08e0e1c87ecc87e244b8c4f31712ddd34ebb047ca219",
+  "build_args": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda",
+    "--test",
+    "gemm_bi_tf32_nt_compact_xor",
+    "--no-run"
+  ],
+  "build_exit": 0,
+  "cache_after": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_before": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_stable": true,
+  "complete_success": true,
+  "drain_quiet": true,
+  "drain_utc": "2026-09-08T10:15:02Z",
+  "executed_exactly_one_test": true,
+  "exit": 0,
+  "pre_utc": "2026-09-08T10:13:20Z",
+  "release_quiet": false,
+  "release_utc": "2026-09-08T10:14:57Z",
+  "schema": "MambaBiTf32TnSingleBarrierRunReceiptV1",
+  "schema_counts": {
+    "auto_screen": 4,
+    "decision": 1,
+    "fast_screen": 4,
+    "resource": 1
+  },
+  "sources": {
+    "tests/gemm_bi_tf32_nt_compact_xor.rs": "2587c6b634505710835c3822d642b2e53fa24c8e58ce975cc7f2df81b7cf4570",
+    "tests/support/triad_tn_single_barrier_source.rs": "0c6e772d1d58c51011f94ea93a0fbad3986409b05462ba860e8b48d8167b574a"
+  },
+  "test": "cuda_suite::ada_tf32_tn_prism_single_barrier_s3_discovery_once7",
+  "test_log_sha256": "bd936573d8c8cae5bc81dfaade9926071382655e62813f3b50f2ae2fc0cadbff"
+}

@@ -35,6 +35,8 @@ mod triad_tn_compact_source;
 mod triad_tn_dense_source;
 #[path = "support/triad_tn_prepack_a_source.rs"]
 mod triad_tn_prepack_a_source;
+#[path = "support/triad_tn_single_barrier_source.rs"]
+mod triad_tn_single_barrier_source;
 const PADDED_DENSE_D768_OUT_GUARD_CUDA: &str = r#"__device__ __forceinline__ bool gemm_bi_tf32_nt_test_padded_dense_d768_out_target(
     const Sm80Tf32KernelParams& params) {
     return params.m == 2048 && params.k == 1536 && params.n == 768
@@ -60,6 +62,7 @@ enum CandidateVariant {
     TnDenseS3Prism,
     TnPrepackAD768In,
     TnPrepackAPrism,
+    TnSingleBarrierPrism,
 }
 
 impl CandidateVariant {
@@ -82,6 +85,7 @@ impl CandidateVariant {
             Self::TnDenseS3Prism => "tn_dense_s3_prism",
             Self::TnPrepackAD768In => "tn_prepack_a_d768_in",
             Self::TnPrepackAPrism => "tn_prepack_a_prism",
+            Self::TnSingleBarrierPrism => "tn_single_barrier_prism",
         }
     }
 
@@ -106,6 +110,7 @@ impl CandidateVariant {
             Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
                 triad_tn_prepack_a_source::GEMM_SYMBOL
             }
+            Self::TnSingleBarrierPrism => triad_tn_single_barrier_source::SYMBOL,
         }
     }
 
@@ -124,6 +129,7 @@ impl CandidateVariant {
             Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism => 49_152,
             Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => 79_872,
             Self::TnPrepackAD768In | Self::TnPrepackAPrism => 79_872,
+            Self::TnSingleBarrierPrism => 79_872,
         }
     }
 
@@ -148,7 +154,8 @@ impl CandidateVariant {
             | Self::PaddedDensePrism
             | Self::TnCompactEightWarpS2Prism
             | Self::TnCompactFourWarpS2Prism
-            | Self::TnDenseS3Prism => (4_621, 384, 1_928),
+            | Self::TnDenseS3Prism
+            | Self::TnSingleBarrierPrism => (4_621, 384, 1_928),
             Self::TnPrepackAPrism => (4_621, 384, 1_928),
             _ => (2_048, 768, 3_072),
         }
@@ -179,6 +186,9 @@ impl CandidateVariant {
             Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
                 triad_tn_prepack_a_source::candidate_source(PRODUCTION_CUDA)
             }
+            Self::TnSingleBarrierPrism => {
+                triad_tn_single_barrier_source::candidate_source(PRODUCTION_CUDA)
+            }
         }
     }
 
@@ -192,11 +202,16 @@ impl CandidateVariant {
                 | Self::TnDenseS3Prism
                 | Self::TnPrepackAD768In
                 | Self::TnPrepackAPrism
+                | Self::TnSingleBarrierPrism
         )
     }
 
     const fn is_prepack_a(self) -> bool {
         matches!(self, Self::TnPrepackAD768In | Self::TnPrepackAPrism)
+    }
+
+    const fn compares_fast_tn(self) -> bool {
+        self.is_prepack_a() || matches!(self, Self::TnSingleBarrierPrism)
     }
 
     const fn op_name(self) -> &'static str {
@@ -213,6 +228,7 @@ impl CandidateVariant {
             Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
                 "MambaBiTf32TnPrepackADiscoveryScreenV1"
             }
+            Self::TnSingleBarrierPrism => "MambaBiTf32TnSingleBarrierDiscoveryScreenV1",
             _ => panic!("TN screen schema requested for NT candidate"),
         }
     }
@@ -227,6 +243,7 @@ impl CandidateVariant {
             Self::TnPrepackAD768In | Self::TnPrepackAPrism => {
                 "MambaBiTf32TnPrepackADiscoveryDecisionV1"
             }
+            Self::TnSingleBarrierPrism => "MambaBiTf32TnSingleBarrierDiscoveryDecisionV1",
             _ => panic!("TN decision schema requested for NT candidate"),
         }
     }
@@ -240,6 +257,7 @@ impl CandidateVariant {
             Self::TnDenseS3Prism => "tf32-tn-dense-s3-prism/",
             Self::TnPrepackAD768In => "tf32-tn-prepack-a-d768-in/",
             Self::TnPrepackAPrism => "tf32-tn-prepack-a-prism/",
+            Self::TnSingleBarrierPrism => "tf32-tn-single-barrier-prism/",
             _ => panic!("TN cohort requested for NT candidate"),
         }
     }
@@ -1638,6 +1656,42 @@ fn tn_prepack_a_batch_binds_two_cells_and_two_node_pipeline() {
         assert!(source.contains(triad_tn_prepack_a_source::PACK_SYMBOL));
         assert!(source.contains(triad_tn_prepack_a_source::GEMM_SYMBOL));
     }
+}
+
+#[test]
+fn tn_single_barrier_prism_binds_target_schedule_and_fast_comparator() {
+    let variant = CandidateVariant::TnSingleBarrierPrism;
+    assert_eq!(variant.name(), "tn_single_barrier_prism");
+    assert_eq!(variant.symbol(), triad_tn_single_barrier_source::SYMBOL);
+    assert_eq!(variant.target_dims(), (4_621, 384, 1_928));
+    assert_eq!(variant.grid_dim(), (93, 1, 1));
+    assert_eq!(variant.shared_bytes(), 79_872);
+    assert_eq!(variant.required_occupancy(), 1);
+    assert!(variant.is_tn());
+    assert!(!variant.is_prepack_a());
+    assert!(variant.compares_fast_tn());
+    assert!(CandidateVariant::TnPrepackAPrism.compares_fast_tn());
+    assert!(!CandidateVariant::TnDenseS3Prism.compares_fast_tn());
+    assert_eq!(
+        variant.tn_auto_identity(),
+        (TN_AUTO_WIDE_SYMBOL, (93, 1, 1), (256, 1, 1), 79_872)
+    );
+    assert_eq!(
+        variant.tn_screen_schema(),
+        "MambaBiTf32TnSingleBarrierDiscoveryScreenV1"
+    );
+    assert_eq!(
+        variant.tn_decision_schema(),
+        "MambaBiTf32TnSingleBarrierDiscoveryDecisionV1"
+    );
+    assert_eq!(variant.tn_cohort(), "tf32-tn-single-barrier-prism/");
+    let source = variant.source().unwrap();
+    assert_eq!(
+        source
+            .matches(triad_tn_single_barrier_source::SYMBOL)
+            .count(),
+        2
+    );
 }
 
 fn require_nonempty_fast_graph(count: usize) -> Result<(), String> {
@@ -3407,22 +3461,40 @@ mod cuda_suite {
                 .join(",")
         );
         let (m, k, n) = candidate.variant.target_dims();
-        println!(
-            "{{\"schema\":\"MambaBiTf32TnPrepackAFastScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"pack_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"candidate_timed_nodes\":[\"pack_a\",\"gemm\"],\"reseed_scope\":\"C+A+B+packed_A_scratch\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_pipeline_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
-            candidate.variant.name(),
-            candidate.variant.symbol(),
-            triad_tn_prepack_a_source::PACK_SYMBOL,
-            fast.symbol,
-            path.name(),
-            order.name(),
-            arms[0],
-            arms[1],
-            arms[2],
-            arms[3],
-            json_f64s(&fast_samples),
-            json_f64s(&candidate_samples),
-            json_f64s(&ratios),
-        );
+        if candidate.variant.is_prepack_a() {
+            println!(
+                "{{\"schema\":\"MambaBiTf32TnPrepackAFastScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"pack_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"candidate_timed_nodes\":[\"pack_a\",\"gemm\"],\"reseed_scope\":\"C+A+B+packed_A_scratch\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_pipeline_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+                candidate.variant.name(),
+                candidate.variant.symbol(),
+                triad_tn_prepack_a_source::PACK_SYMBOL,
+                fast.symbol,
+                path.name(),
+                order.name(),
+                arms[0],
+                arms[1],
+                arms[2],
+                arms[3],
+                json_f64s(&fast_samples),
+                json_f64s(&candidate_samples),
+                json_f64s(&ratios),
+            );
+        } else {
+            println!(
+                "{{\"schema\":\"MambaBiTf32TnSingleBarrierFastScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"candidate_symbol\":\"{}\",\"fast_symbol\":\"{}\",\"fast_compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"candidate_timed_nodes\":[\"gemm\"],\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"fast_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+                candidate.variant.name(),
+                candidate.variant.symbol(),
+                fast.symbol,
+                path.name(),
+                order.name(),
+                arms[0],
+                arms[1],
+                arms[2],
+                arms[3],
+                json_f64s(&fast_samples),
+                json_f64s(&candidate_samples),
+                json_f64s(&ratios),
+            );
+        }
         Ok((p50, p95))
     }
 
@@ -3499,7 +3571,7 @@ mod cuda_suite {
         )
         .unwrap();
         let mut fast = variant
-            .is_prepack_a()
+            .compares_fast_tn()
             .then(|| FastTn::new(&device, target, &target_words))
             .transpose()
             .unwrap();
@@ -3528,7 +3600,7 @@ mod cuda_suite {
             check_bits(&mut reference, &ctx, &mut probe, &words, label).unwrap();
         }
 
-        if variant.is_prepack_a() {
+        if variant.compares_fast_tn() {
             let dims = TAIL;
             let words = exceptional_tn_words(variant, dims).unwrap();
             let ctx = configure(&device).unwrap();
@@ -3600,7 +3672,7 @@ mod cuda_suite {
         }
         let post = quiet.verify_post_cohort(&format!("{cohort}post")).unwrap();
         let retain_auto = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
-        let retain_fast = !variant.is_prepack_a()
+        let retain_fast = !variant.compares_fast_tn()
             || fast_strata
                 .iter()
                 .all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
@@ -3624,6 +3696,30 @@ mod cuda_suite {
                 variant.name(),
                 variant.symbol(),
                 triad_tn_prepack_a_source::PACK_SYMBOL,
+                candidate_grid.0,
+                candidate_grid.1,
+                candidate_grid.2,
+                actual_auto_grid.0,
+                actual_auto_grid.1,
+                actual_auto_grid.2,
+                actual_auto_block.0,
+                actual_auto_block.1,
+                actual_auto_block.2,
+                variant.shared_bytes(),
+                json_pairs(&strata),
+                json_pairs(&fast_strata),
+                if retain {
+                    "advance_to_full_qualification"
+                } else {
+                    "stop_no_retry"
+                }
+            );
+        } else if variant.compares_fast_tn() {
+            println!(
+                "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{actual_auto_symbol}\",\"fast_symbol\":\"{}\",\"candidate_grid\":[{},{},{}],\"actual_auto_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"actual_auto_block\":[{},{},{}],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{actual_auto_shared_bytes},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"candidate_timed_nodes\":[\"gemm\"],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"actual_auto_strata\":{},\"fast_tf32_strata\":{},\"retain_against_actual_auto\":{retain_auto},\"retain_against_fast\":{retain_fast},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+                variant.name(),
+                variant.symbol(),
+                fast.as_ref().unwrap().symbol.as_str(),
                 candidate_grid.0,
                 candidate_grid.1,
                 candidate_grid.2,
@@ -3869,5 +3965,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; unmeasured Prism sibling only"]
     fn ada_tf32_tn_prepack_a_prism_discovery_once7() {
         run(CandidateVariant::TnPrepackAPrism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN prism single-barrier S3 discovery"]
+    fn ada_tf32_tn_prism_single_barrier_s3_discovery_once7() {
+        run(CandidateVariant::TnSingleBarrierPrism);
     }
 }

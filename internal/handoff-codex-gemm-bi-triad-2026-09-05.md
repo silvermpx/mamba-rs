@@ -9,6 +9,20 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest checkpoint after 7f5d2e29: NEW aligned S3 BF16 NN d768-in beats Fast
+by21–23% (62–63us vs79–81us), exact current bits PASS. This supersedes N64
+near-parity and brings aligned S3 NN finalists to FIVE cells; forcedTC128
+reference, not dispatcher admission. Measured typed e77e1961 is archived
+independently of the next edits. See `perf/ada-triad-half-nn-s3-bf16in-20260908/README.md`.
+Half NT compact TWO cells and half TN compact SIX cells are valid Fast losses;
+TN d768-in is near parity but graph remains1–2% slower. TF32 TN Prism single
+barrier improves actualAUTO1.5–3.4% but remains1.86–2.32x Fast; STOP/no retry.
+Raw evidence and source hashes are in the corresponding short reports.
+Next discovery: loaded NT128 d768-out xhalf, aligned S3 F16 NN d768-in,
+and existing TF32 NN N96 on unmeasured large shapes. WHOLE-Triad shortlist
+before joint integration/full gates; do not trigger gates after a small batch.
+Fixed inference and SM120 routes remain untouched. Below is historical context.
+
 Latest checkpoint2026-09-08 after2a42d272: four NEW aligned half NN S3
 finalists, d768-out/Prism ×F16/BF16, are20–23% below cuBLAS Fast in independently
 paired eager+graph once7. Allbits/guards PASS; forcedTC128 reference, NOT public

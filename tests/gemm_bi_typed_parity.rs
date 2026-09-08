@@ -32,10 +32,14 @@ use std::mem::size_of;
 mod common;
 #[path = "support/triad_half_nn_n64_source.rs"]
 mod triad_half_nn_n64_source;
+#[path = "support/triad_half_nt_compact_source.rs"]
+mod triad_half_nt_compact_source;
 #[path = "support/triad_half_nt_s3_source.rs"]
 mod triad_half_nt_s3_source;
 #[path = "support/triad_half_tile_screen.rs"]
 mod triad_half_tile_screen;
+#[path = "support/triad_half_tn_compact_source.rs"]
+mod triad_half_tn_compact_source;
 #[path = "support/triad_half_tn_microtile_source.rs"]
 mod triad_half_tn_microtile_source;
 #[path = "support/triad_half_tn_s4_source.rs"]
@@ -2311,13 +2315,16 @@ fn screen_ada_half_nn_aligned_pair(
     Ok([p50, p95])
 }
 
-fn run_ada_half_nn_s3_aligned_confirmation() -> Result<(), String> {
+fn run_ada_half_nn_s3_aligned_cells(
+    cells: &[(&str, (usize, usize, usize), WeightDtype)],
+    quiet_label: &str,
+) -> Result<(), String> {
     assert!(
         !cfg!(debug_assertions),
         "aligned NN S3 confirmation requires --release"
     );
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
-    let _pre = quiet.require_pre_context("half-nn-s3-aligned/pre-context")?;
+    let _pre = quiet.require_pre_context(&format!("{quiet_label}/pre-context"))?;
     let t = Ctx::new_ada()?;
     let compiler = t.ctx.kernels.compiler_identity();
     if compiler.nvrtc_version != (13, 2) {
@@ -2326,142 +2333,152 @@ fn run_ada_half_nn_s3_aligned_confirmation() -> Result<(), String> {
             compiler.nvrtc_version
         ));
     }
-    let _cohort = quiet.require_cohort("half-nn-s3-aligned/cohort")?;
-    for (cell, dims) in [
-        ("d768_out_proj", (2_048, 1_536, 768)),
-        ("prism_in_proj", (4_621, 384, 1_928)),
-    ] {
-        for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
-            ada_half_resource_gate(&t, AdaHalfArm::FixedSm89Tc128S3, dtype)?;
-            ada_half_resource_gate(&t, AdaHalfArm::PortableTc128, dtype)?;
-            let fixture = AdaHalfFixture::new_with_guard(&t, dtype, dims, 128);
-            let candidate_graph = capture_ada_half(&t, &fixture, AdaHalfArm::FixedSm89Tc128S3)?;
-            let current_graph = capture_ada_half(&t, &fixture, AdaHalfArm::PortableTc128)?;
-            fixture.reset_fast(&t)?;
-            enqueue_ada_half_nn_fast(&t, &fixture)?;
-            t.ctx
-                .stream
-                .synchronize()
-                .map_err(|error| format!("aligned NN Fast warmup: {error:?}"))?;
-            let fast_graph = capture_ada_half_nn_fast(&t, &fixture)?;
-            validate_single_node_graph(&candidate_graph, "aligned Fixed S3")?;
-            validate_single_node_graph(&current_graph, "aligned forced TC128")?;
-            validate_nonempty_graph(&fast_graph, "aligned native-half Fast")?;
+    let _cohort = quiet.require_cohort(&format!("{quiet_label}/cohort"))?;
+    for &(cell, dims, dtype) in cells {
+        ada_half_resource_gate(&t, AdaHalfArm::FixedSm89Tc128S3, dtype)?;
+        ada_half_resource_gate(&t, AdaHalfArm::PortableTc128, dtype)?;
+        let fixture = AdaHalfFixture::new_with_guard(&t, dtype, dims, 128);
+        let candidate_graph = capture_ada_half(&t, &fixture, AdaHalfArm::FixedSm89Tc128S3)?;
+        let current_graph = capture_ada_half(&t, &fixture, AdaHalfArm::PortableTc128)?;
+        fixture.reset_fast(&t)?;
+        enqueue_ada_half_nn_fast(&t, &fixture)?;
+        t.ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("aligned NN Fast warmup: {error:?}"))?;
+        let fast_graph = capture_ada_half_nn_fast(&t, &fixture)?;
+        validate_single_node_graph(&candidate_graph, "aligned Fixed S3")?;
+        validate_single_node_graph(&current_graph, "aligned forced TC128")?;
+        validate_nonempty_graph(&fast_graph, "aligned native-half Fast")?;
 
-            let current_bits = observe_ada_half_many(
-                &t,
-                &fixture,
-                AdaHalfArm::PortableTc128,
-                &current_graph,
-                AdaHalfPath::Eager,
-                20,
-                None,
-            )?
-            .1;
+        let current_bits = observe_ada_half_many(
+            &t,
+            &fixture,
+            AdaHalfArm::PortableTc128,
+            &current_graph,
+            AdaHalfPath::Eager,
+            20,
+            None,
+        )?
+        .1;
+        for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
+            for arm in [AdaHalfArm::PortableTc128, AdaHalfArm::FixedSm89Tc128S3] {
+                observe_ada_half_many(
+                    &t,
+                    &fixture,
+                    arm,
+                    if arm == AdaHalfArm::PortableTc128 {
+                        &current_graph
+                    } else {
+                        &candidate_graph
+                    },
+                    path,
+                    20,
+                    Some(&current_bits),
+                )?;
+            }
+        }
+        let fast_bits =
+            observe_ada_half_nn_fast_many(&t, &fixture, &fast_graph, AdaHalfPath::Eager, 20, None)?
+                .1;
+        let fast_value = |word| match dtype {
+            WeightDtype::F16 => f16::from_bits(word).to_f32(),
+            WeightDtype::Bf16 => bf16::from_bits(word).to_f32(),
+            WeightDtype::F32 => unreachable!(),
+        };
+        if !fast_bits.iter().all(|&word| fast_value(word).is_finite())
+            || !fast_bits.iter().any(|&word| fast_value(word) != 0.0)
+        {
+            return Err(format!("aligned {dtype:?} {cell} Fast is invalid"));
+        }
+        observe_ada_half_nn_fast_many(
+            &t,
+            &fixture,
+            &fast_graph,
+            AdaHalfPath::Graph,
+            20,
+            Some(&fast_bits),
+        )?;
+
+        let mut decisions = Vec::with_capacity(2);
+        for comparator in [
+            AdaHalfNnAlignedComparator::ForcedTc128,
+            AdaHalfNnAlignedComparator::Fast,
+        ] {
+            let comparator_bits = match comparator {
+                AdaHalfNnAlignedComparator::ForcedTc128 => &current_bits,
+                AdaHalfNnAlignedComparator::Fast => &fast_bits,
+            };
+            let mut strata = Vec::with_capacity(4);
             for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
-                for arm in [AdaHalfArm::PortableTc128, AdaHalfArm::FixedSm89Tc128S3] {
-                    observe_ada_half_many(
+                for order in [BracketOrder::Abba, BracketOrder::Baab] {
+                    strata.push(screen_ada_half_nn_aligned_pair(
                         &t,
                         &fixture,
-                        arm,
-                        if arm == AdaHalfArm::PortableTc128 {
-                            &current_graph
-                        } else {
-                            &candidate_graph
-                        },
+                        &candidate_graph,
+                        AdaHalfNnAlignedCandidate::FixedS3,
+                        &current_graph,
+                        &fast_graph,
+                        &current_bits,
+                        comparator_bits,
+                        comparator,
+                        cell,
                         path,
-                        20,
-                        Some(&current_bits),
-                    )?;
+                        order,
+                    )?);
                 }
             }
-            let fast_bits = observe_ada_half_nn_fast_many(
-                &t,
-                &fixture,
-                &fast_graph,
-                AdaHalfPath::Eager,
-                20,
-                None,
-            )?
-            .1;
-            let fast_value = |word| match dtype {
-                WeightDtype::F16 => f16::from_bits(word).to_f32(),
-                WeightDtype::Bf16 => bf16::from_bits(word).to_f32(),
-                WeightDtype::F32 => unreachable!(),
-            };
-            if !fast_bits.iter().all(|&word| fast_value(word).is_finite())
-                || !fast_bits.iter().any(|&word| fast_value(word) != 0.0)
-            {
-                return Err(format!("aligned {dtype:?} {cell} Fast is invalid"));
-            }
-            observe_ada_half_nn_fast_many(
-                &t,
-                &fixture,
-                &fast_graph,
-                AdaHalfPath::Graph,
-                20,
-                Some(&fast_bits),
-            )?;
-
-            let mut decisions = Vec::with_capacity(2);
-            for comparator in [
-                AdaHalfNnAlignedComparator::ForcedTc128,
-                AdaHalfNnAlignedComparator::Fast,
-            ] {
-                let comparator_bits = match comparator {
-                    AdaHalfNnAlignedComparator::ForcedTc128 => &current_bits,
-                    AdaHalfNnAlignedComparator::Fast => &fast_bits,
-                };
-                let mut strata = Vec::with_capacity(4);
-                for path in [AdaHalfPath::Eager, AdaHalfPath::Graph] {
-                    for order in [BracketOrder::Abba, BracketOrder::Baab] {
-                        strata.push(screen_ada_half_nn_aligned_pair(
-                            &t,
-                            &fixture,
-                            &candidate_graph,
-                            AdaHalfNnAlignedCandidate::FixedS3,
-                            &current_graph,
-                            &fast_graph,
-                            &current_bits,
-                            comparator_bits,
-                            comparator,
-                            cell,
-                            path,
-                            order,
-                        )?);
-                    }
-                }
-                decisions.push((comparator.name(), retain_decision(&strata), strata));
-            }
-            println!(
-                "{{\"schema\":\"MambaBiHalfNnS3AlignedDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"shape\":[{},{},{}],\"guard_half_elements\":128,\"pointer_mod_256\":{{\"a\":{},\"b\":{},\"candidate\":{},\"current\":{},\"fast\":{}}},\"comparators\":[{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}},{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}}],\"promotion\":false}}",
-                dims.0,
-                dims.1,
-                dims.2,
-                fixture.a.ptr() % 256,
-                fixture.b.ptr() % 256,
-                fixture.candidate.ptr() % 256,
-                fixture.reference.ptr() % 256,
-                fixture.fast.ptr() % 256,
-                decisions[0].0,
-                decisions[0].1,
-                decisions[0].2,
-                decisions[1].0,
-                decisions[1].1,
-                decisions[1].2,
-            );
+            decisions.push((comparator.name(), retain_decision(&strata), strata));
         }
+        println!(
+            "{{\"schema\":\"MambaBiHalfNnS3AlignedDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"{cell}\",\"shape\":[{},{},{}],\"guard_half_elements\":128,\"pointer_mod_256\":{{\"a\":{},\"b\":{},\"candidate\":{},\"current\":{},\"fast\":{}}},\"comparators\":[{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}},{{\"name\":\"{}\",\"retain\":{},\"strata\":{:?}}}],\"promotion\":false}}",
+            dims.0,
+            dims.1,
+            dims.2,
+            fixture.a.ptr() % 256,
+            fixture.b.ptr() % 256,
+            fixture.candidate.ptr() % 256,
+            fixture.reference.ptr() % 256,
+            fixture.fast.ptr() % 256,
+            decisions[0].0,
+            decisions[0].1,
+            decisions[0].2,
+            decisions[1].0,
+            decisions[1].1,
+            decisions[1].2,
+        );
     }
     drop(t);
     quiet
-        .verify_post_cohort("half-nn-s3-aligned/post")
+        .verify_post_cohort(&format!("{quiet_label}/post"))
         .map(|_| ())
+}
+
+fn run_ada_half_nn_s3_aligned_confirmation() -> Result<(), String> {
+    run_ada_half_nn_s3_aligned_cells(
+        &[
+            ("d768_out_proj", (2_048, 1_536, 768), WeightDtype::F16),
+            ("d768_out_proj", (2_048, 1_536, 768), WeightDtype::Bf16),
+            ("prism_in_proj", (4_621, 384, 1_928), WeightDtype::F16),
+            ("prism_in_proj", (4_621, 384, 1_928), WeightDtype::Bf16),
+        ],
+        "half-nn-s3-aligned",
+    )
 }
 
 #[test]
 #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; aligned Fixed S3 NN confirmation"]
 fn ada_half_nn_fixed_s3_aligned_four_cell_confirmation_once7() -> Result<(), String> {
     run_ada_half_nn_s3_aligned_confirmation()
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; aligned BF16 Fixed S3 NN d768-in"]
+fn ada_half_nn_fixed_s3_aligned_bf16_d768_in_confirmation_once7() -> Result<(), String> {
+    run_ada_half_nn_s3_aligned_cells(
+        &[("d768_in_proj", (2_048, 768, 3_072), WeightDtype::Bf16)],
+        "half-nn-s3-aligned-bf16-d768-in",
+    )
 }
 
 fn run_ada_half_nn_n64_batch() -> Result<(), String> {
@@ -2719,6 +2736,7 @@ enum AdaHalfTnCandidateKind {
     Microtile(triad_half_tn_microtile_source::Microtile),
     Rect128x64,
     Tc64Bk32S4,
+    Tc64Bk64S2Compact,
 }
 
 impl AdaHalfTnCandidate {
@@ -2732,31 +2750,42 @@ impl AdaHalfTnCandidate {
             ) => "m16n32_bk32_s3",
             AdaHalfTnCandidateKind::Rect128x64 => "loaded_rect128x64_bk32_s3",
             AdaHalfTnCandidateKind::Tc64Bk32S4 => "tc64_bk32_s4",
+            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => "tc64_bk64_s2_compact_xor",
         }
     }
 
-    fn symbol(&self, dtype: WeightDtype) -> &'static str {
+    fn symbol(&self, dtype: WeightDtype) -> String {
         use triad_half_tn_microtile_source::Microtile;
         match (self.kind, dtype) {
             (AdaHalfTnCandidateKind::Microtile(Microtile::M32N32), WeightDtype::Bf16) => {
-                "gemm_bi_tn_test_m32n32_sm80_mma_half_v1_bf16"
+                "gemm_bi_tn_test_m32n32_sm80_mma_half_v1_bf16".into()
             }
             (AdaHalfTnCandidateKind::Microtile(Microtile::M32N32), WeightDtype::F16) => {
-                "gemm_bi_tn_test_m32n32_sm80_mma_half_v1_f16"
+                "gemm_bi_tn_test_m32n32_sm80_mma_half_v1_f16".into()
             }
             (AdaHalfTnCandidateKind::Microtile(Microtile::M16N32), WeightDtype::Bf16) => {
-                "gemm_bi_tn_test_m16n32_sm80_mma_half_v1_bf16"
+                "gemm_bi_tn_test_m16n32_sm80_mma_half_v1_bf16".into()
             }
             (AdaHalfTnCandidateKind::Microtile(Microtile::M16N32), WeightDtype::F16) => {
-                "gemm_bi_tn_test_m16n32_sm80_mma_half_v1_f16"
+                "gemm_bi_tn_test_m16n32_sm80_mma_half_v1_f16".into()
             }
-            (AdaHalfTnCandidateKind::Rect128x64, WeightDtype::Bf16) => "gemm_bi_tn_tc128x64_bf16",
-            (AdaHalfTnCandidateKind::Rect128x64, WeightDtype::F16) => "gemm_bi_tn_tc128x64_f16",
+            (AdaHalfTnCandidateKind::Rect128x64, WeightDtype::Bf16) => {
+                "gemm_bi_tn_tc128x64_bf16".into()
+            }
+            (AdaHalfTnCandidateKind::Rect128x64, WeightDtype::F16) => {
+                "gemm_bi_tn_tc128x64_f16".into()
+            }
             (AdaHalfTnCandidateKind::Tc64Bk32S4, WeightDtype::Bf16) => {
-                triad_half_tn_s4_source::BF16_SYMBOL
+                triad_half_tn_s4_source::BF16_SYMBOL.into()
             }
             (AdaHalfTnCandidateKind::Tc64Bk32S4, WeightDtype::F16) => {
-                triad_half_tn_s4_source::F16_SYMBOL
+                triad_half_tn_s4_source::F16_SYMBOL.into()
+            }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2Compact, WeightDtype::Bf16) => {
+                format!("{}bf16", triad_half_tn_compact_source::SYMBOL_PREFIX)
+            }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2Compact, WeightDtype::F16) => {
+                format!("{}f16", triad_half_tn_compact_source::SYMBOL_PREFIX)
             }
             (_, WeightDtype::F32) => panic!("TN microtile requires a half dtype"),
         }
@@ -2780,6 +2809,7 @@ impl AdaHalfTnCandidate {
             ) => (16, 32, 64, 12_288),
             AdaHalfTnCandidateKind::Rect128x64 => (128, 64, 256, 39_936),
             AdaHalfTnCandidateKind::Tc64Bk32S4 => (64, 64, 128, 36_864),
+            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => (64, 64, 128, 32_768),
         }
     }
 
@@ -2788,6 +2818,14 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::Microtile(_) => "Microtile",
             AdaHalfTnCandidateKind::Rect128x64 => "Rect128x64",
             AdaHalfTnCandidateKind::Tc64Bk32S4 => "Tc64Bk32S4",
+            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => "Tc64Bk64S2Compact",
+        }
+    }
+
+    const fn required_occupancy(&self) -> u32 {
+        match self.kind {
+            AdaHalfTnCandidateKind::Tc64Bk64S2Compact => 3,
+            _ => 1,
         }
     }
 }
@@ -2881,9 +2919,13 @@ fn loaded_ada_half_tn_rect_candidate(t: &Ctx) -> AdaHalfTnCandidate {
     }
 }
 
-fn compile_ada_half_tn_s4_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
-    let transformed =
-        triad_half_tn_s4_source::compose_source(include_str!("../kernels/gemm_bi_triad/sm80.cu"))?;
+fn compile_ada_half_tn_isolated_candidate(
+    t: &Ctx,
+    kind: AdaHalfTnCandidateKind,
+    transformed: String,
+    bf16_symbol: &str,
+    f16_symbol: &str,
+) -> Result<AdaHalfTnCandidate, String> {
     let source = [
         include_str!("../kernels/_typed_prelude.cuh"),
         include_str!("../kernels/gemm_bi_triad/contract.cuh"),
@@ -2918,23 +2960,50 @@ fn compile_ada_half_tn_s4_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, Strin
             ..Default::default()
         },
     )
-    .map_err(|error| format!("compile half TN TC64/BK32/S4: {error:?}"))?;
+    .map_err(|error| format!("compile half TN isolated candidate: {error:?}"))?;
     let module = t
         .ctx
         .stream
         .context()
         .load_module(ptx)
-        .map_err(|error| format!("load half TN TC64/BK32/S4 module: {error:?}"))?;
+        .map_err(|error| format!("load half TN isolated candidate module: {error:?}"))?;
     Ok(AdaHalfTnCandidate {
-        kind: AdaHalfTnCandidateKind::Tc64Bk32S4,
+        kind,
         bf16: module
-            .load_function(triad_half_tn_s4_source::BF16_SYMBOL)
-            .map_err(|error| format!("load half TN S4 BF16: {error:?}"))?,
+            .load_function(bf16_symbol)
+            .map_err(|error| format!("load half TN isolated BF16: {error:?}"))?,
         f16: module
-            .load_function(triad_half_tn_s4_source::F16_SYMBOL)
-            .map_err(|error| format!("load half TN S4 F16: {error:?}"))?,
+            .load_function(f16_symbol)
+            .map_err(|error| format!("load half TN isolated F16: {error:?}"))?,
         source_sha256,
     })
+}
+
+fn compile_ada_half_tn_s4_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
+    let transformed =
+        triad_half_tn_s4_source::compose_source(include_str!("../kernels/gemm_bi_triad/sm80.cu"))?;
+    compile_ada_half_tn_isolated_candidate(
+        t,
+        AdaHalfTnCandidateKind::Tc64Bk32S4,
+        transformed,
+        triad_half_tn_s4_source::BF16_SYMBOL,
+        triad_half_tn_s4_source::F16_SYMBOL,
+    )
+}
+
+fn compile_ada_half_tn_compact_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
+    let transformed = triad_half_tn_compact_source::candidate_source(include_str!(
+        "../kernels/gemm_bi_triad/sm80.cu"
+    ))?;
+    let bf16_symbol = format!("{}bf16", triad_half_tn_compact_source::SYMBOL_PREFIX);
+    let f16_symbol = format!("{}f16", triad_half_tn_compact_source::SYMBOL_PREFIX);
+    compile_ada_half_tn_isolated_candidate(
+        t,
+        AdaHalfTnCandidateKind::Tc64Bk64S2Compact,
+        transformed,
+        &bf16_symbol,
+        &f16_symbol,
+    )
 }
 
 struct AdaHalfTnFixture {
@@ -3151,15 +3220,16 @@ fn gate_ada_half_tn_resources(
     let occupancy = function
         .occupancy_max_active_blocks_per_multiprocessor(threads, 0, None)
         .map_err(|error| format!("half TN occupancy: {error:?}"))?;
+    let required_occupancy = candidate.required_occupancy();
     let schema = candidate.schema_name();
     let source_key = match candidate.kind {
-        AdaHalfTnCandidateKind::Microtile(_) | AdaHalfTnCandidateKind::Tc64Bk32S4 => {
-            "source_sha256"
-        }
+        AdaHalfTnCandidateKind::Microtile(_)
+        | AdaHalfTnCandidateKind::Tc64Bk32S4
+        | AdaHalfTnCandidateKind::Tc64Bk64S2Compact => "source_sha256",
         AdaHalfTnCandidateKind::Rect128x64 => "source_fragment_sha256",
     };
     println!(
-        "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy}}}",
+        "{{\"schema\":\"MambaBiHalfTn{schema}ResourceV1\",\"candidate\":\"{}\",\"dtype\":\"{dtype:?}\",\"symbol\":\"{}\",\"{source_key}\":\"{}\",\"threads\":{threads},\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
         candidate.name(),
         candidate.symbol(dtype),
         candidate.source_sha256,
@@ -3168,10 +3238,10 @@ fn gate_ada_half_tn_resources(
         || local != 0
         || static_shared != expected_static
         || max_threads < threads as i32
-        || occupancy < 1
+        || occupancy < required_occupancy
     {
         return Err(format!(
-            "half TN {} resource gate failed: regs={registers} local={local} static={static_shared}/{expected_static} max_threads={max_threads}/{threads} occupancy={occupancy}",
+            "half TN {} resource gate failed: regs={registers} local={local} static={static_shared}/{expected_static} max_threads={max_threads}/{threads} occupancy={occupancy}/{required_occupancy}",
             candidate.name()
         ));
     }
@@ -3838,6 +3908,46 @@ fn ada_half_tn_tc64_bk32_s4_three_cell_vs_current_and_fast_discovery_once7() -> 
     run_ada_half_tn_tc64_bk32_s4_batch()
 }
 
+fn run_ada_half_tn_tc64_bk64_s2_compact_batch() -> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half TN compact BK64/S2 discovery requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-tn-compact-bk64-s2/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half TN compact BK64/S2 requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_tn_compact_candidate(&t)?;
+    let _cohort = quiet.require_cohort("half-tn-compact-bk64-s2/cohort")?;
+    run_ada_half_tn_candidate_cells(
+        &t,
+        &[candidate],
+        &[
+            ("d768_in_proj", (2_048, 768, 3_072)),
+            ("d768_out_proj", (2_048, 1_536, 768)),
+            ("prism_in_proj", (4_621, 384, 1_928)),
+        ],
+        true,
+    )?;
+    drop(t);
+    quiet
+        .verify_post_cohort("half-tn-compact-bk64-s2/post")
+        .map(|_| ())
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half TN compact BK64/S2 discovery"]
+fn ada_half_tn_tc64_bk64_s2_compact_three_cell_vs_current_and_fast_discovery_once7()
+-> Result<(), String> {
+    run_ada_half_tn_tc64_bk64_s2_compact_batch()
+}
+
 fn launch_scalar_tn_slim(
     t: &Ctx,
     c: u64,
@@ -3937,16 +4047,67 @@ enum AdaHalfNtArm {
 }
 
 impl AdaHalfNtArm {
-    const fn name(self) -> &'static str {
+    const fn name(self, candidate: AdaHalfNtCandidateKind) -> &'static str {
         match self {
-            Self::Candidate => "tc64_bk32_s3",
+            Self::Candidate => candidate.name(),
             Self::CurrentTc64 => "forced_tc64",
             Self::Fast => "native_half_fast",
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdaHalfNtCandidateKind {
+    Bk32S3,
+    CompactBk64S2,
+}
+
+impl AdaHalfNtCandidateKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Bk32S3 => "tc64_bk32_s3",
+            Self::CompactBk64S2 => "tc64_bk64_s2_compact_xor",
+        }
+    }
+
+    const fn resource_schema(self) -> &'static str {
+        match self {
+            Self::Bk32S3 => "MambaBiHalfNtS3ResourceV1",
+            Self::CompactBk64S2 => "MambaBiHalfNtCompactResourceV1",
+        }
+    }
+
+    const fn bits_schema(self) -> &'static str {
+        match self {
+            Self::Bk32S3 => "MambaBiHalfNtS3BitsV1",
+            Self::CompactBk64S2 => "MambaBiHalfNtCompactBitsV1",
+        }
+    }
+
+    const fn screen_schema(self) -> &'static str {
+        match self {
+            Self::Bk32S3 => "MambaBiHalfNtS3FastScreenV1",
+            Self::CompactBk64S2 => "MambaBiHalfNtCompactFastScreenV1",
+        }
+    }
+
+    const fn decision_schema(self) -> &'static str {
+        match self {
+            Self::Bk32S3 => "MambaBiHalfNtS3FastDecisionV1",
+            Self::CompactBk64S2 => "MambaBiHalfNtCompactFastDecisionV1",
+        }
+    }
+
+    const fn static_shared_bytes(self) -> i32 {
+        match self {
+            Self::Bk32S3 => 30_720,
+            Self::CompactBk64S2 => 32_768,
+        }
+    }
+}
+
 struct AdaHalfNtS3Candidate {
+    kind: AdaHalfNtCandidateKind,
     bf16: CudaFunction,
     f16: CudaFunction,
     source_sha256: String,
@@ -3962,10 +4123,21 @@ impl AdaHalfNtS3Candidate {
     }
 }
 
-fn compile_ada_half_nt_s3_candidate(t: &Ctx) -> Result<AdaHalfNtS3Candidate, String> {
-    let transformed = triad_half_nt_s3_source::candidate_source(include_str!(
-        "../kernels/gemm_bi_triad/sm80.cu"
-    ))?;
+fn compile_ada_half_nt_candidate(
+    t: &Ctx,
+    kind: AdaHalfNtCandidateKind,
+) -> Result<AdaHalfNtS3Candidate, String> {
+    let production = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+    let (transformed, symbol_prefix) = match kind {
+        AdaHalfNtCandidateKind::Bk32S3 => (
+            triad_half_nt_s3_source::candidate_source(production)?,
+            triad_half_nt_s3_source::SYMBOL_PREFIX,
+        ),
+        AdaHalfNtCandidateKind::CompactBk64S2 => (
+            triad_half_nt_compact_source::candidate_source(production)?,
+            triad_half_nt_compact_source::SYMBOL_PREFIX,
+        ),
+    };
     let source = [
         include_str!("../kernels/_typed_prelude.cuh"),
         include_str!("../kernels/gemm_bi_triad/contract.cuh"),
@@ -4000,20 +4172,21 @@ fn compile_ada_half_nt_s3_candidate(t: &Ctx) -> Result<AdaHalfNtS3Candidate, Str
             ..Default::default()
         },
     )
-    .map_err(|error| format!("compile half NT BK32/S3 candidate: {error:?}"))?;
+    .map_err(|error| format!("compile half NT {} candidate: {error:?}", kind.name()))?;
     let module = t
         .ctx
         .stream
         .context()
         .load_module(ptx)
-        .map_err(|error| format!("load half NT BK32/S3 module: {error:?}"))?;
+        .map_err(|error| format!("load half NT {} module: {error:?}", kind.name()))?;
     let load = |suffix| {
-        let symbol = format!("{}{suffix}", triad_half_nt_s3_source::SYMBOL_PREFIX);
+        let symbol = format!("{symbol_prefix}{suffix}");
         module
             .load_function(&symbol)
             .map_err(|error| format!("load {symbol}: {error:?}"))
     };
     Ok(AdaHalfNtS3Candidate {
+        kind,
         bf16: load("bf16")?,
         f16: load("f16")?,
         source_sha256,
@@ -4034,13 +4207,17 @@ struct AdaHalfNtS3Fixture {
 
 impl AdaHalfNtS3Fixture {
     fn new(t: &Ctx, dtype: WeightDtype) -> Self {
+        Self::new_with_guard(t, dtype, 8)
+    }
+
+    fn new_with_guard(t: &Ctx, dtype: WeightDtype, guard_offset: usize) -> Self {
         let (m, k, n) = ADA_HALF_NT_D768_OUT;
         let a_values = ada_half_values(m * n, dtype, 0xa89a_8201);
         let b_values = ada_half_values(k * n, dtype, 0xb89a_8202);
         let output_seed = ada_half_values(m * k, dtype, 0xc89a_8203);
-        let a = TypedSubview::new(t, &a_values, m, n, n, 8, dtype);
-        let b = TypedSubview::new(t, &b_values, k, n, n, 8, dtype);
-        let make_output = || TypedSubview::new(t, &output_seed, m, k, k, 8, dtype);
+        let a = TypedSubview::new(t, &a_values, m, n, n, guard_offset, dtype);
+        let b = TypedSubview::new(t, &b_values, k, n, n, guard_offset, dtype);
+        let make_output = || TypedSubview::new(t, &output_seed, m, k, k, guard_offset, dtype);
         let outputs = [make_output(), make_output(), make_output()];
         let a_bits = a.logical_bits(t);
         let b_bits = b.logical_bits(t);
@@ -4114,7 +4291,7 @@ fn enqueue_ada_half_nt_s3_arm(
                 })
             }
             .map(|_| ())
-            .map_err(|error| format!("half NT BK32/S3 launch: {error:?}"))
+            .map_err(|error| format!("half NT {} launch: {error:?}", candidate.kind.name()))
         }
         AdaHalfNtArm::CurrentTc64 => enqueue_tc_nt(
             t,
@@ -4177,14 +4354,22 @@ fn gate_ada_half_nt_s3_resources(
     let occupancy = function
         .occupancy_max_active_blocks_per_multiprocessor(128, 0, None)
         .map_err(|error| format!("NT S3 occupancy: {error:?}"))?;
+    let schema = candidate.kind.resource_schema();
+    let expected_static = candidate.kind.static_shared_bytes();
     println!(
-        "{{\"schema\":\"MambaBiHalfNtS3ResourceV1\",\"dtype\":\"{dtype:?}\",\"source_sha256\":\"{}\",\"threads\":128,\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":3}}",
+        "{{\"schema\":\"{schema}\",\"dtype\":\"{dtype:?}\",\"candidate\":\"{}\",\"source_sha256\":\"{}\",\"threads\":128,\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":0,\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":3}}",
+        candidate.kind.name(),
         candidate.source_sha256,
     );
-    if registers <= 0 || local != 0 || static_shared != 30_720 || max_threads < 128 || occupancy < 3
+    if registers <= 0
+        || local != 0
+        || static_shared != expected_static
+        || max_threads < 128
+        || occupancy < 3
     {
         return Err(format!(
-            "half NT S3 resource gate failed: regs={registers} local={local} static={static_shared}/30720 max_threads={max_threads}/128 occupancy={occupancy}/3"
+            "half NT {} resource gate failed: regs={registers} local={local} static={static_shared}/{expected_static} max_threads={max_threads}/128 occupancy={occupancy}/3",
+            candidate.kind.name(),
         ));
     }
     Ok(())
@@ -4252,7 +4437,7 @@ fn observe_ada_half_nt_s3(
             .unwrap_or(bits.len());
         return Err(format!(
             "half NT {} {} differs at word {mismatch}",
-            arm.name(),
+            arm.name(candidate.kind),
             path.name()
         ));
     }
@@ -4343,31 +4528,39 @@ fn screen_ada_half_nt_s3_fast(
         .map(|row| format!("[{:.9},{:.9},{:.9},{:.9}]", row[0], row[1], row[2], row[3]))
         .collect::<Vec<_>>()
         .join(",");
+    let schema = candidate.kind.screen_schema();
     println!(
-        "{{\"schema\":\"MambaBiHalfNtS3FastScreenV1\",\"dtype\":\"{:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"tc64_bk32_s3\",\"comparator\":\"native_half_fast\",\"path\":\"{}\",\"order\":\"{order}\",\"windows\":{ADA_HALF_WINDOWS},\"logical_gemms_per_observation\":{GEMMS},\"raw_observations_us\":[{raw}],\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
+        "{{\"schema\":\"{schema}\",\"dtype\":\"{:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"{}\",\"comparator\":\"native_half_fast\",\"path\":\"{}\",\"order\":\"{order}\",\"windows\":{ADA_HALF_WINDOWS},\"logical_gemms_per_observation\":{GEMMS},\"raw_observations_us\":[{raw}],\"ratio_direction\":\"candidate_over_fast\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
         fixture.dtype,
+        candidate.kind.name(),
         path.name(),
     );
     Ok([p50, p95])
 }
 
-fn run_ada_half_nt_s3_d768_out_batch() -> Result<(), String> {
-    assert!(!cfg!(debug_assertions), "half NT S3 requires --release");
+fn run_ada_half_nt_d768_out_batch(
+    kind: AdaHalfNtCandidateKind,
+    guard_offset: usize,
+) -> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half NT candidate requires --release"
+    );
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
-    let _pre = quiet.require_pre_context("half-nt-s3/pre-context")?;
+    let _pre = quiet.require_pre_context("half-nt-candidate/pre-context")?;
     let t = Ctx::new_ada()?;
     let compiler = t.ctx.kernels.compiler_identity();
     if compiler.nvrtc_version != (13, 2) {
         return Err(format!(
-            "half NT S3 requires CUDA13.2, found {:?}",
+            "half NT candidate requires CUDA13.2, found {:?}",
             compiler.nvrtc_version
         ));
     }
-    let candidate = compile_ada_half_nt_s3_candidate(&t)?;
-    let _cohort = quiet.require_cohort("half-nt-s3/cohort")?;
+    let candidate = compile_ada_half_nt_candidate(&t, kind)?;
+    let _cohort = quiet.require_cohort("half-nt-candidate/cohort")?;
     for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
         gate_ada_half_nt_s3_resources(&candidate, dtype)?;
-        let fixture = AdaHalfNtS3Fixture::new(&t, dtype);
+        let fixture = AdaHalfNtS3Fixture::new_with_guard(&t, dtype, guard_offset);
         for arm in [
             AdaHalfNtArm::Candidate,
             AdaHalfNtArm::CurrentTc64,
@@ -4385,7 +4578,7 @@ fn run_ada_half_nt_s3_d768_out_batch() -> Result<(), String> {
             capture_ada_half_nt_s3_arm(&t, &fixture, &candidate, AdaHalfNtArm::CurrentTc64)?,
             capture_ada_half_nt_s3_arm(&t, &fixture, &candidate, AdaHalfNtArm::Fast)?,
         ];
-        validate_single_node_graph(&graphs[0], "half NT S3 candidate")?;
+        validate_single_node_graph(&graphs[0], candidate.kind.name())?;
         validate_single_node_graph(&graphs[1], "half NT forced TC64")?;
         validate_nonempty_graph(&graphs[2], "half NT native Fast")?;
 
@@ -4414,8 +4607,10 @@ fn run_ada_half_nt_s3_d768_out_batch() -> Result<(), String> {
                         Some(&current_bits),
                     )?;
                     println!(
-                        "{{\"schema\":\"MambaBiHalfNtS3BitsV1\",\"dtype\":\"{dtype:?}\",\"arm\":\"{}\",\"path\":\"{}\",\"repeat\":{repeat},\"words\":{}}}",
-                        arm.name(),
+                        "{{\"schema\":\"{}\",\"dtype\":\"{dtype:?}\",\"candidate\":\"{}\",\"arm\":\"{}\",\"path\":\"{}\",\"repeat\":{repeat},\"words\":{}}}",
+                        candidate.kind.bits_schema(),
+                        candidate.kind.name(),
+                        arm.name(candidate.kind),
                         path.name(),
                         current_bits.len(),
                     );
@@ -4474,19 +4669,30 @@ fn run_ada_half_nt_s3_d768_out_batch() -> Result<(), String> {
         }
         let retain = retain_decision(&strata);
         println!(
-            "{{\"schema\":\"MambaBiHalfNtS3FastDecisionV1\",\"dtype\":\"{dtype:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            "{{\"schema\":\"{}\",\"dtype\":\"{dtype:?}\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"{}\",\"strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            candidate.kind.decision_schema(),
+            candidate.kind.name(),
             strata,
             if retain { "advance" } else { "stop_no_retry" },
         );
     }
     drop(t);
-    quiet.verify_post_cohort("half-nt-s3/post").map(|_| ())
+    quiet
+        .verify_post_cohort("half-nt-candidate/post")
+        .map(|_| ())
 }
 
 #[test]
 #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half NT BK32/S3 discovery"]
 fn ada_half_nt_d768_out_bk32_s3_vs_current_and_fast_discovery_once7() -> Result<(), String> {
-    run_ada_half_nt_s3_d768_out_batch()
+    run_ada_half_nt_d768_out_batch(AdaHalfNtCandidateKind::Bk32S3, 8)
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half NT compact BK64/S2 discovery"]
+fn ada_half_nt_d768_out_compact_bk64_s2_vs_current_and_fast_discovery_once7() -> Result<(), String>
+{
+    run_ada_half_nt_d768_out_batch(AdaHalfNtCandidateKind::CompactBk64S2, 128)
 }
 
 #[test]
