@@ -46,9 +46,12 @@ with target-only launchbounds256/minBlocks2 restores125regs/local0/occ2 and
 passes focused bits, but loses retainedA-ldmatrix35.4–35.5% in paired timing.
 ValidSTOP, no unchanged retry; keep A-ldmatrix. See
 `perf/ada-triad-tf32-nt-shared-rna-20260908/report.md`.
-Parallel candidate: half-TNin M64N128/BK64/S2 FOUR-warp regpipe/vec2
-(not the losing eight-warp version). F32TN three-node CopyPlan feasibility is
-in the research journal; it has not been implemented or measured.
+Half-TNin M64N128/BK64/S2 FOUR-warp regpipe/vec2 also passes bits/resources
+but loses retainedvec2 by19.2–19.6%,200regs/occ2; STOP/noBF16/no retry.
+Main6c7e/helperef9e, `perf/ada-triad-half-tn-m64n128-regpipe-20260908/report.md`.
+Next TF32 candidate retains A-x4 and replaces only B scalar loads with x2;
+all-lane mapping is source-proven, implementation pending, no timing claim.
+F32TN three-node CopyPlan feasibility is in the research journal; unimplemented.
 Fixed inference/SM120 unchanged. Older
 progress paragraphs below are historical; do not rerun their completed probes.
 

@@ -21,7 +21,7 @@ of old wins for new candidate search.
 | Exact F32 NT d768-in / Prism | Existing transpose32x16 + existing production Fixed CopyPlan | Reuse the faster NN inner body; pay and time the entire transpose. Prism has a partial K32 slab, so its gain is not assumed from d768-out. | New isolated sibling test, generic exact/public AUTO bits, full2-node graph timing against AUTO/Fast. |
 | F16 NN d768-in | Existing Fixed M128N64/BK64/S2 body | Existing49,152B/two-CTA body, finer grid; extra A tile traffic. | Measured valid2.5–3.4% retainedS3 loss. Stop; keep S3. |
 | Half TN d768-in, rejected before build | M128N128/BK32/S3, four warps | Heuristic49,152B mainloop is valid, but ownership requires128 accumulators/thread (not64), and grid144 cannot fill two CTAs on142 SMs. | Source/resource analysis rejects this four-warp geometry; no speed claim. |
-| Half TN d768-in, next | M64N128/BK64/S2 FOUR-warp compact regpipe/vec2 |64 accumulators/thread,49,152B shared,grid288. Two old N64 tiles stage16,384 half words versus12,288 for one N128 tile (25% less). Risk: nominal resident warps12→8 and more registers. | Exact coverage/order, local0/occupancy>=2, then F16 retainedvec2/Fast once7. Distinct from already-losing eight-warp M64N128. |
+| Half TN d768-in, stop | M64N128/BK64/S2 FOUR-warp compact regpipe/vec2 |64 accumulators/thread,49,152B shared,grid288;25% less source-level staging for equal output work. | Measured200regs/occ2/local0, target bits PASS, but19.2–19.6% retainedvec2 loss. NoBF16/no retry. [Report](../perf/ada-triad-half-tn-m64n128-regpipe-20260908/report.md). |
 
 NVIDIA explains tile-reuse versus parallelism and partially filled final waves
 in its [matrix performance guide](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html).
@@ -108,6 +108,16 @@ See [both attempts](../perf/ada-triad-tf32-nt-shared-rna-20260908/report.md).
 Stop the shared-stage RNA direction for this candidate; do not repeat/profile
 this decisive loss. Keep A-ldmatrix, and investigate distinct fragment-load
 instruction reduction on that retained body instead.
+
+Selected next TF32 load hypothesis: retain A-only x4, replace only B scalar
+loads with non-transposed `ldmatrix.m8n8.x2.shared.b16`, then perform the SAME
+consumer RNA conversion. The padded helper already contains this B-load
+pattern; compact XOR alignment and all-lane mapping are checked separately.
+For consumer laneL, registers map to `(col=warp_n+nAtom*8+L/4,k=k8+L%4)`
+and the same column/k+4, exactly the two old scalar words. No shared-stage
+conversion, new buffer, MMA-order change or old-AUTO-only speed comparison.
+Use the [PTX ldmatrix mapping](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)
+and native coordinate/16B-row proofs before the retainedA-only/Fast shortscreen.
 
 If that fails, consider interleaving target-specific copy slices with K8 MMA
 issues using the existing Fixed-N96 schedule, while retaining compact32/S2
