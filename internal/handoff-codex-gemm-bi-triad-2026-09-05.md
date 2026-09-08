@@ -9,6 +9,14 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Half NT direct-epilogue probe is a valid loss:14.5–15.6% slower than retained
+S3, also loses Fast; bits/resources PASS. Keep the vector S3 epilogue, do not
+repeat. Typed ada3769c/helper087678c8; see
+`perf/ada-triad-half-nt-direct-epilogue-20260908/report.md`.
+Next focused GPU queue: half TN Fixed-S3 d768-in typed15cb1a3d/helper9147da28;
+direct TF32 TN N96 d768-in main36126907/helpera153aeb2. Direct-only tail uses
+(129,68,36) so raw-A stride satisfies16B copies; old variants unchanged.
+
 TF32 TN transpose+N96 now screened on all3 large shapes: NEW d768-out40%
 and Prism15–17% actualAUTO improvements; focused bits/guards/scratch PASS.
 Still NOT Fast wins (graph1.20x/2.00x). Main e5f1a811/helperf969041b,

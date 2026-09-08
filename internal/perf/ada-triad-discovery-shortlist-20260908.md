@@ -29,7 +29,7 @@ unpaired timing ratios, marginal parity, and merely faster-than-AUTO results.
 | Scope | Keep / remaining issue | Evidence |
 | --- | --- | --- |
 | F16 NN d768-in | S3 beats TC128; Fast still2–4% ahead. Pipeline/Swizzle are weaker. | [S3](ada-triad-half-nt128-f16in-20260908/README.md), [loaded losses](ada-triad-half-nn-loaded2-20260908/README.md) |
-| Half NT d768-out | B-XOR S3 is26% below TC64; graph Fast remains2–6% ahead. Direct epilogue probe pending. | [NT out](ada-triad-half-nt-fixed-s3-bxor-20260908/report.md) |
+| Half NT d768-out | B-XOR S3 is26% below TC64; graph Fast remains2–6% ahead. Direct epilogue loses retained S3 by14.5–15.6%; keep vector epilogue. | [NT out](ada-triad-half-nt-fixed-s3-bxor-20260908/report.md), [epilogue loss](ada-triad-half-nt-direct-epilogue-20260908/report.md) |
 | Half TN d768-in | Compact and regpipe remain1–2% above Fast in graph. Regpipe is not paired against compact; no incremental winner claimed. | [Compact](ada-triad-half-tn-compact-20260908/README.md), [regpipe](ada-triad-half-tn-regpipe-20260908/report.md) |
 | TF32 NN d768-out / Prism | N96 reduces AUTO time; near Fast parity, not a strict win. N96 d768-in loses and is excluded. | [N96](ada-triad-nn-addhalf-n96-screen-20260908/README.md) |
 | TF32 TN large shapes | Whole raw-transpose+N96 reduces actual AUTO time29–30% in,40% out,15–17% Prism. Graph/Fast respectively1.34,1.20,2.00; no Fast win. | [In](ada-triad-tf32-tn-transpose-n96-20260908/report.md), [out/Prism](ada-triad-tf32-tn-transpose-n96-siblings-20260908/report.md) |
