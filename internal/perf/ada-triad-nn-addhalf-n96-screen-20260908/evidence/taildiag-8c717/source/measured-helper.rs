@@ -155,53 +155,6 @@ pub fn compare_bits(left: &[u32], right: &[u32]) -> (usize, Option<usize>) {
     (count, first)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExactBitScope {
-    ForcedAddHalfFamily,
-    TimedPublicAutoTarget,
-}
-
-pub fn exact_bits_match(
-    scope: ExactBitScope,
-    candidate: &[u32],
-    current_wide: &[u32],
-    actual_auto: &[u32],
-) -> bool {
-    candidate == current_wide
-        && match scope {
-            ExactBitScope::ForcedAddHalfFamily => true,
-            ExactBitScope::TimedPublicAutoTarget => candidate == actual_auto,
-        }
-}
-
-pub fn expected_nn_auto_grid(
-    shape: (usize, usize, usize),
-    tile: (usize, usize),
-    zero_reduction: bool,
-) -> Result<(u32, u32, u32), String> {
-    if tile.0 == 0 || tile.1 == 0 {
-        return Err("NN AUTO tile dimensions must be nonzero".into());
-    }
-    let blocks = if zero_reduction {
-        shape
-            .0
-            .checked_mul(shape.2)
-            .ok_or_else(|| "NN zero-reduction output extent overflows usize".to_owned())?
-            .div_ceil(256)
-    } else {
-        shape
-            .0
-            .div_ceil(tile.0)
-            .checked_mul(shape.2.div_ceil(tile.1))
-            .ok_or_else(|| "NN tiled grid extent overflows usize".to_owned())?
-    };
-    Ok((
-        u32::try_from(blocks).map_err(|_| "NN AUTO grid exceeds u32".to_owned())?,
-        1,
-        1,
-    ))
-}
-
 pub fn validate_public_auto_harness(source: &str) -> Result<(), String> {
     let public_auto = "TriadArm::ActualAuto => {\n                let auto_a";
     let public_entrypoint = "gpu_gemm_bi_forward_raw(";
@@ -216,7 +169,7 @@ pub fn validate_public_auto_harness(source: &str) -> Result<(), String> {
         || source.matches(public_entrypoint).count() != 1
         || source.contains(typed_entrypoint)
         || source.matches(qualified_identity).count() != 1
-        || source.matches(graph_contract).count() != 3
+        || source.matches(graph_contract).count() != 2
         || new_entries.iter().any(|entry| !source.contains(entry))
     {
         return Err("Triad NN N96 public AUTO entrypoint or graph contract changed".into());
@@ -234,8 +187,8 @@ pub fn validate_focused_pair_diagnostics(source: &str) -> Result<(), String> {
         .ok_or_else(|| "missing focused check_pair terminator".to_owned())?;
     let body = &source[start..end];
     let rejection = body
-        .find("ExactBitScope::ForcedAddHalfFamily")
-        .ok_or_else(|| "missing focused add-half-family exact-bit scope".to_owned())?;
+        .find("if candidate != expected || actual_auto != expected")
+        .ok_or_else(|| "missing focused exact-bit rejection".to_owned())?;
     for required in [
         "report_pairwise_bits(\"candidate/current\"",
         "report_pairwise_bits(\"candidate/actual_auto\"",
@@ -250,13 +203,6 @@ pub fn validate_focused_pair_diagnostics(source: &str) -> Result<(), String> {
                 "focused diagnostic {required} occurs after exact-bit rejection"
             ));
         }
-    }
-    if source
-        .matches("ExactBitScope::TimedPublicAutoTarget")
-        .count()
-        != 2
-    {
-        return Err("timed target triplet exact-bit scope changed".into());
     }
     Ok(())
 }
@@ -351,49 +297,6 @@ mod tests {
         assert_eq!(compare_bits(&[1, 2, 3, 4], &[1, 9, 3, 8]), (2, Some(1)));
         assert_eq!(compare_bits(&[1, 2], &[1, 2]), (0, None));
         assert_eq!(compare_bits(&[1, 2, 3], &[1]), (2, Some(1)));
-    }
-
-    #[test]
-    fn focused_fallback_and_timed_target_have_distinct_exact_bit_scopes() {
-        let forced = [1, 2, 3];
-        let scalar_fallback = [1, 9, 3];
-        assert!(exact_bits_match(
-            ExactBitScope::ForcedAddHalfFamily,
-            &forced,
-            &forced,
-            &scalar_fallback,
-        ));
-        assert!(!exact_bits_match(
-            ExactBitScope::ForcedAddHalfFamily,
-            &[1, 8, 3],
-            &forced,
-            &scalar_fallback,
-        ));
-        assert!(!exact_bits_match(
-            ExactBitScope::TimedPublicAutoTarget,
-            &forced,
-            &forced,
-            &scalar_fallback,
-        ));
-        assert!(exact_bits_match(
-            ExactBitScope::TimedPublicAutoTarget,
-            &forced,
-            &forced,
-            &forced,
-        ));
-    }
-
-    #[test]
-    fn zero_reduction_uses_linear_output_grid_without_relaxing_tiled_targets() {
-        assert_eq!(
-            expected_nn_auto_grid((129, 0, 100), (1, 1), true),
-            Ok((51, 1, 1))
-        );
-        assert_eq!(
-            expected_nn_auto_grid((129, 36, 100), (64, 32), false),
-            Ok((12, 1, 1))
-        );
-        assert!(expected_nn_auto_grid((129, 0, 100), (0, 1), true).is_err());
     }
 
     #[test]

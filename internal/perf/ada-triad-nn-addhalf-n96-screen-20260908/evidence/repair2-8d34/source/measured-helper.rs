@@ -174,34 +174,6 @@ pub fn exact_bits_match(
         }
 }
 
-pub fn expected_nn_auto_grid(
-    shape: (usize, usize, usize),
-    tile: (usize, usize),
-    zero_reduction: bool,
-) -> Result<(u32, u32, u32), String> {
-    if tile.0 == 0 || tile.1 == 0 {
-        return Err("NN AUTO tile dimensions must be nonzero".into());
-    }
-    let blocks = if zero_reduction {
-        shape
-            .0
-            .checked_mul(shape.2)
-            .ok_or_else(|| "NN zero-reduction output extent overflows usize".to_owned())?
-            .div_ceil(256)
-    } else {
-        shape
-            .0
-            .div_ceil(tile.0)
-            .checked_mul(shape.2.div_ceil(tile.1))
-            .ok_or_else(|| "NN tiled grid extent overflows usize".to_owned())?
-    };
-    Ok((
-        u32::try_from(blocks).map_err(|_| "NN AUTO grid exceeds u32".to_owned())?,
-        1,
-        1,
-    ))
-}
-
 pub fn validate_public_auto_harness(source: &str) -> Result<(), String> {
     let public_auto = "TriadArm::ActualAuto => {\n                let auto_a";
     let public_entrypoint = "gpu_gemm_bi_forward_raw(";
@@ -381,19 +353,6 @@ mod tests {
             &forced,
             &forced,
         ));
-    }
-
-    #[test]
-    fn zero_reduction_uses_linear_output_grid_without_relaxing_tiled_targets() {
-        assert_eq!(
-            expected_nn_auto_grid((129, 0, 100), (1, 1), true),
-            Ok((51, 1, 1))
-        );
-        assert_eq!(
-            expected_nn_auto_grid((129, 36, 100), (64, 32), false),
-            Ok((12, 1, 1))
-        );
-        assert!(expected_nn_auto_grid((129, 0, 100), (0, 1), true).is_err());
     }
 
     #[test]

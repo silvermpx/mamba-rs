@@ -1,5 +1,48 @@
 # New TF32 Triad NN N96 discovery, Ada, 2026-09-08
 
+## Latest: two previously unmeasured shapes, aligned timing
+
+Final main `460a2c1f7451b33f20d77d05feb1bb89a6398e73de35c9ae93822e4c43d52fda`,
+helper `086c0520ead684eb0aab86a83d2660beb65d00a6066ffa696600301768a88104`.
+Logical pointers are 256B aligned (64 F32 guard words). Once7, 20 GEMMs per
+observation, paired eager/graph x ABBA/BAAB; actual AUTO is qualified per cell.
+
+| Cell | Candidate/AUTO p50 | Candidate/Fast p50 | Result |
+| --- | ---: | ---: | --- |
+| d768-in | 1.0567–1.0589 | 1.2780–1.2829 | Valid loss; stop |
+| Prism | .9832–.9846 | .9939–1.0140 | Small AUTO improvement, not a Fast win |
+
+Prism AUTO p95 is .9838–.9873, below .99 in every stratum. Fast eager p95
+reaches1.0142 and graph p50 is1.0133–1.0140: near parity, not a champion.
+Both targets pass exact candidate/current-wide/public-AUTO bits, guards and
+eager/graph repeats. Resources unchanged:256 threads/124 registers/local0/
+static0/dynamic86016/occupancy1. Root replayed all112 brackets/448 observations
+and quantiles; cache stable and no competing compute apps in PRE/release/drain.
+
+Exact tests under `triad_nn_add_half_screen::`:
+
+- `triad_nn_d768_in_add_half_n96_fast_gap_once7`: complete valid samples and
+  STOP decision; exits101 at the expected retain assertion, not a bit failure.
+- `triad_nn_prism_add_half_n96_fast_gap_once7`: one test PASS, retain against AUTO.
+
+[d768-in raw](evidence/zero-grid-460a/d768-in-once7/test.log), SHA256
+`e1056d935e556b140159ae9b4468f679d6eb1173206bf74e1a0814d27531ab5b`.
+[Prism raw](evidence/zero-grid-460a/prism-once7/test.log), SHA256
+`d488da2789a3dce4bdbcddee87a8148c53e921fe82ac53636c45eed1fb0ed7a5`.
+Binary `4bde257394b262ea2250ad3f714855f9ca469591c0ad712a82d5a23a37d1731b`.
+Measured sources are archived with the evidence; no production/toolkit admission.
+
+Pre-timing harness failures are preserved, not kernel timing losses:
+`two-cell-final-cuda132` / `taildiag-8c717` compared forced AddHalf TF32 with
+the exact-F32 fallback on tail(129,36,100). Candidate/current match, while
+`gemm_bi_nn_narrow` differs at354 words. Repair separates forced-family equality
+from fallback self-repeat; timed targets still require strict three-way equality.
+`repair2-8d34` then passed tail/exception and all K0 bits but rejected the
+legitimate linear zero-reduction grid51. Final repair pins its exact symbol,
+numeric contract, block256 and ceil(M*N/256), leaving nonzero targets unchanged.
+No unchanged valid measurement was rerun. The d768-out records below are older
+and use their original 32-F32 guard/one-GEMM timing scope, not this aligned cohort.
+
 ## Follow-up: explicit cuBLAS Fast, short discovery only
 
 The new CUDA13.2 once7 comparison uses literal `cublasGemmEx`,

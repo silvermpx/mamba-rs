@@ -46,6 +46,12 @@
   bare, while TF32 compact names are nested under cuda_suite::. Do not reuse
   one harness's module prefix for another; a wrapper-only name repair does
   not require rebuilding the unchanged binary.
+- Keep arithmetic-oracle scope explicit on small probes: forced TF32 and a
+  public exact-F32 fallback need not share bits. Preserve forced-family equality
+  and fallback self-repeat separately; timed replacement targets still require
+  candidate/current/actual-AUTO equality. Zero-reduction kernels use a linear
+  output grid, not necessarily ceil(M/tileM)*ceil(N/tileN); pin their actual
+  symbol, numeric contract and launch geometry instead of assuming GEMM tiling.
 
 ## CUDA execution lanes
 

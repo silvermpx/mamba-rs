@@ -9,6 +9,14 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+New TF32 NN Prism N96 shortlist entry:1.5–1.7% lower actualAUTO time with
+strict target bits and all paired p95<.99. Near Fast parity, NOT Fast win;
+graph remains1.3–1.4% slower. N96 d768-in losesAUTO5.7–5.9% and is stopped.
+Final main460a2c1f/helper086c0520; source, raw samples and the tail/K0 harness
+repairs are recorded in `perf/ada-triad-nn-addhalf-n96-screen-20260908/README.md`.
+Continue new halfNT-S3 / halfTN-register-pipeline / TF32TN-transpose-N96,
+not another old N96 sweep. Whole-Triad discovery boundary still applies.
+
 Latest follow-up: loaded Fixed Pipeline/Swizzle on aligned F16 NN d768-in
 both pass target bits but lose retained S3 (30–31% /8% slower) and Fast.
 Keep S3; see `perf/ada-triad-half-nn-loaded2-20260908/README.md`, measured

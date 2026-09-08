@@ -1,0 +1,2 @@
+4fcbd0125f83626dc3c89d8cbd101a84f494c44dc60819d79f492ab96b18a3dd  /root/evidence-ada-exact-toolkit-auto-20260907/n96-taildiag-8c717-cuda132/d768-in-diagnostic/test.log
+b1ac361c5229b314e1b39526b1fa407b8ff34d1482ec3fec2730e22d03903a4c  /root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_n96_discovery-77fa7e0a95565ad1

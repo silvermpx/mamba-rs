@@ -1086,9 +1086,7 @@ mod triad_nn_add_half_screen {
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
         qualify_physical_launch, PhysicalQualificationRequest, PhysicalQualificationRoute,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-        ModuleKind, ResolvedGemmOp, ResolvedNumericContract,
-    };
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
     use triad_nn_n96_source::BracketOrder;
 
     const ENV: &str = "MAMBA_TRIAD_NN_N96_DISCOVERY";
@@ -1849,25 +1847,18 @@ mod triad_nn_add_half_screen {
         let (tile_m, tile_n) = node
             .tile
             .ok_or_else(|| format!("Triad NN AUTO node is not tiled: {node:?}"))?;
-        let zero_reduction = case.shape.k == 0;
-        let expected_grid = triad_nn_n96_source::expected_nn_auto_grid(
-            (case.shape.m, case.shape.k, case.shape.n),
-            (tile_m as usize, tile_n as usize),
-            zero_reduction,
-        )?;
-        let zero_reduction_identity = !zero_reduction
-            || (symbol == "gemm_bi_nn_zero_reduction_v1"
-                && node.module_kind == ModuleKind::TriadScalar
-                && node.numeric_contract
-                    == Some(ResolvedNumericContract::ZeroReductionEpilogueF32V1)
-                && node.tile == Some((1, 1))
-                && node.launch.block_dim == (256, 1, 1)
-                && node.launch.shared_mem_bytes == 0);
+        let expected_grid = (
+            u32::try_from(case.shape.m.div_ceil(tile_m as usize))
+                .map_err(|_| "Triad NN AUTO grid M exceeds u32")?
+                * u32::try_from(case.shape.n.div_ceil(tile_n as usize))
+                    .map_err(|_| "Triad NN AUTO grid N exceeds u32")?,
+            1,
+            1,
+        );
         if node.symbol != symbol
             || node.logical_op != ResolvedGemmOp::Nn
             || node.shape != (case.shape.m, case.shape.k, case.shape.n)
             || node.launch.grid_dim != expected_grid
-            || !zero_reduction_identity
         {
             return Err(format!(
                 "Triad NN AUTO node does not match the requested cell: {node:?}"
