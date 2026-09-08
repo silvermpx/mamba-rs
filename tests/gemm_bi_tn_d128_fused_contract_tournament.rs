@@ -8,6 +8,44 @@ const N: usize = 512;
 const CHUNK: usize = 16;
 const CHUNKS: usize = 64;
 
+#[cfg(feature = "cuda")]
+mod common;
+#[path = "support/triad_tn_d128_direct_source.rs"]
+mod triad_tn_d128_direct_source;
+
+fn short_pair_quantiles(raw: &[[f64; 4]], candidate_first: bool) -> Result<[f64; 2], String> {
+    if raw.len() != 7 || raw.iter().flatten().any(|x| !x.is_finite() || *x <= 0.0) {
+        return Err("short screen requires seven valid four-observation brackets".into());
+    }
+    let mut ratios: Vec<_> = raw
+        .iter()
+        .map(|v| {
+            let outside = v[0] + v[3];
+            let inside = v[1] + v[2];
+            if candidate_first {
+                outside / inside
+            } else {
+                inside / outside
+            }
+        })
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    Ok([ratios[3], ratios[6]])
+}
+
+#[test]
+fn short_pair_rejects_invalid_times_and_respects_arm_order() {
+    let abba = [[4.0, 10.0, 10.0, 6.0]; 7];
+    assert_eq!(short_pair_quantiles(&abba, true).unwrap(), [0.5, 0.5]);
+    assert_eq!(short_pair_quantiles(&abba, false).unwrap(), [2.0, 2.0]);
+    assert!(short_pair_quantiles(&abba[..6], true).is_err());
+    let mut invalid = abba;
+    invalid[4][2] = f64::NAN;
+    assert!(short_pair_quantiles(&invalid, true).is_err());
+    invalid[4][2] = 0.0;
+    assert!(short_pair_quantiles(&invalid, true).is_err());
+}
+
 fn parameters(symbol: &str) -> &str {
     let (_, signature) = SOURCE
         .split_once(&format!("void {symbol}("))
@@ -698,5 +736,371 @@ mod cuda_tournament {
         let runtime = runtime()?;
         let mut fixture = fixture(&runtime)?;
         benchmark(&runtime, &mut fixture)
+    }
+
+    // Bounded Ada discovery. The existing SM120 tournament is unchanged.
+    fn ada_direct_runtime() -> Result<Runtime, String> {
+        use super::triad_tn_d128_direct_source as source;
+        let device = GpuDevice::new(0)?;
+        if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+            return Err("Ada direct TN discovery requires CC8.9/142 SMs".into());
+        }
+        let ctx = GpuCtx::new(&device)?;
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_bi_tensor_cores(false);
+        ctx.set_fast_gemm(false);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        let compiler = ctx.kernels.triad_scalar_compiler_identity();
+        if compiler.nvrtc_version != (13, 2) || compiler.target.as_str() != "sm_89" {
+            return Err(format!("unexpected Ada compiler {compiler:?}"));
+        }
+        let cuda = source::compose_source(include_str!(
+            "gemm_bi_scalar_tn_underfill_direct_experiment.cu"
+        ))?;
+        let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+            cuda,
+            cudarc::nvrtc::CompileOptions {
+                arch: Some("sm_89"),
+                options: vec![
+                    "--fmad=true".into(),
+                    "--extra-device-vectorization".into(),
+                    "-DNDEBUG".into(),
+                ],
+                include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("Ada TN direct compile: {e:?}"))?;
+        let module = device
+            .context()
+            .load_module(ptx)
+            .map_err(|e| format!("Ada TN module: {e:?}"))?;
+        let load = |symbol, dynamic| -> Result<Kernel, String> {
+            let function = module
+                .load_function(symbol)
+                .map_err(|e| format!("load {symbol}: {e:?}"))?;
+            let registers = function.num_regs().map_err(|e| format!("regs: {e:?}"))?;
+            let local = function
+                .local_size_bytes()
+                .map_err(|e| format!("local: {e:?}"))?;
+            let shared = function
+                .shared_size_bytes()
+                .map_err(|e| format!("shared: {e:?}"))?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(64, dynamic, None)
+                .map_err(|e| format!("occupancy: {e:?}"))?;
+            println!(
+                "{}",
+                serde_json::json!({"schema":"AdaTnDirectResourceV1", "symbol":symbol,
+                "registers":registers,"local_bytes":local,"static_shared":shared,"dynamic_shared":dynamic,
+                "threads":64,"grid":[256,1,1],"occupancy":occupancy})
+            );
+            if local != 0 || shared != 0 || occupancy == 0 {
+                return Err(format!("unviable Ada direct resources for {symbol}"));
+            }
+            Ok(Kernel {
+                function,
+                config: LaunchConfig {
+                    grid_dim: (256, 1, 1),
+                    block_dim: (64, 1, 1),
+                    shared_mem_bytes: u32::try_from(dynamic)
+                        .map_err(|_| "dynamic shared size exceeds u32")?,
+                },
+                symbol,
+                static_shared: 0,
+            })
+        };
+        let primary = load(source::M16N16_SYMBOL, 4096)?;
+        let sensitivity = load(source::M8N32_SYMBOL, 5120)?;
+        Ok(Runtime {
+            _device: device,
+            ctx,
+            _module: module,
+            primary,
+            sensitivity,
+        })
+    }
+
+    fn ada_finite_fixture(runtime: &Runtime) -> Result<Fixture, String> {
+        let a = values(M * K, 0xa128_5101);
+        let b = values(M * N, 0xb128_5102);
+        let initial = values(K * N, 0xc128_5103);
+        // Normative bit oracle is the real public SplitM64 route below.
+        Ok(Fixture {
+            a: GuardedBuffer::new(&runtime.ctx.stream, a.clone())?,
+            b: GuardedBuffer::new(&runtime.ctx.stream, b.clone())?,
+            production_a: GpuBuffer::from_cpu(&runtime.ctx.stream, &a)?,
+            production_b: GpuBuffer::from_cpu(&runtime.ctx.stream, &b)?,
+            production_output: GpuBuffer::from_cpu(&runtime.ctx.stream, &initial)?,
+            production_initial: initial.clone(),
+            primary_output: GuardedBuffer::new(&runtime.ctx.stream, initial.clone())?,
+            sensitivity_output: GuardedBuffer::new(&runtime.ctx.stream, initial)?,
+            oracle: Vec::new(),
+            alpha: 1.0,
+        })
+    }
+
+    fn ada_fast_tn(runtime: &Runtime, fixture: &Fixture) -> Result<(), String> {
+        use cudarc::cublas::{result, sys};
+        use std::ffi::c_void;
+        // dW^T = dY^T * X: row-major [K,N] becomes column-major [N,K].
+        let one = 1.0_f32;
+        let dtype = mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32.cuda_data_type();
+        unsafe {
+            result::gemm_ex(
+                *runtime.ctx.blas.handle(),
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                sys::cublasOperation_t::CUBLAS_OP_T,
+                N as i32,
+                K as i32,
+                M as i32,
+                (&one as *const f32).cast::<c_void>(),
+                fixture.production_b.cached_ptr() as *const c_void,
+                dtype,
+                N as i32,
+                fixture.production_a.cached_ptr() as *const c_void,
+                dtype,
+                K as i32,
+                (&one as *const f32).cast::<c_void>(),
+                fixture.production_output.cached_ptr() as *mut c_void,
+                dtype,
+                N as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+        }
+        .map_err(|e| format!("explicit TN Fast: {e:?}"))
+    }
+
+    fn ada_observe(
+        runtime: &Runtime,
+        fixture: &mut Fixture,
+        arm: Arm,
+        fast: bool,
+        graph: &CudaGraph,
+        graph_path: bool,
+        expected: Option<&[u32]>,
+    ) -> Result<(f64, Vec<u32>), String> {
+        reset_output(runtime, fixture, arm)?;
+        let flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
+        let start = runtime
+            .ctx
+            .stream
+            .record_event(flags)
+            .map_err(|e| format!("start: {e:?}"))?;
+        if graph_path {
+            graph.launch().map_err(|e| format!("graph: {e:?}"))?;
+        } else if fast {
+            ada_fast_tn(runtime, fixture)?;
+        } else if matches!(arm, Arm::Production) {
+            launch_production(runtime, fixture)?;
+        } else {
+            launch_candidate(runtime, fixture, arm)?;
+        }
+        let end = runtime
+            .ctx
+            .stream
+            .record_event(flags)
+            .map_err(|e| format!("end: {e:?}"))?;
+        let us = f64::from(
+            start
+                .elapsed_ms(&end)
+                .map_err(|e| format!("elapsed: {e:?}"))?,
+        ) * 1000.0;
+        let actual = output_bits(runtime, fixture, arm)?;
+        if !us.is_finite() || us <= 0.0 || expected.is_some_and(|want| want != actual) {
+            return Err(format!(
+                "Ada TN {arm:?} fast={fast} invalid timing or changed bits"
+            ));
+        }
+        fixture.a.unchanged(&runtime.ctx.stream, "direct A")?;
+        fixture.b.unchanged(&runtime.ctx.stream, "direct B")?;
+        for (buffer, source) in [
+            (&fixture.production_a, &fixture.a),
+            (&fixture.production_b, &fixture.b),
+        ] {
+            let actual = buffer.to_cpu(&runtime.ctx.stream)?;
+            if actual
+                .iter()
+                .zip(&source.expected[source.offset..source.offset + source.len])
+                .any(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                return Err("public TN input mutated".into());
+            }
+        }
+        Ok((us, actual))
+    }
+
+    fn ada_candidate_graph(graph: &CudaGraph, kernel: &Kernel) -> Result<(), String> {
+        use cudarc::driver::sys;
+        use std::ffi::CStr;
+        let mut count = 0;
+        let mut node = std::ptr::null_mut();
+        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        unsafe {
+            if sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count)
+                != sys::CUresult::CUDA_SUCCESS
+                || count != 1
+            {
+                return Err("direct TN graph must have one node".into());
+            }
+            if sys::cuGraphGetNodes(graph.cu_graph(), &mut node, &mut count)
+                != sys::CUresult::CUDA_SUCCESS
+                || sys::cuGraphKernelNodeGetParams_v2(node, &mut params)
+                    != sys::CUresult::CUDA_SUCCESS
+            {
+                return Err("query direct TN graph".into());
+            }
+            let mut name = std::ptr::null();
+            if sys::cuFuncGetName(&mut name, params.func) != sys::CUresult::CUDA_SUCCESS
+                || name.is_null()
+                || CStr::from_ptr(name).to_bytes() != kernel.symbol.as_bytes()
+                || (params.gridDimX, params.gridDimY, params.gridDimZ) != kernel.config.grid_dim
+                || (params.blockDimX, params.blockDimY, params.blockDimZ) != kernel.config.block_dim
+                || params.sharedMemBytes != kernel.config.shared_mem_bytes
+            {
+                return Err("wrong direct TN graph".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "quiet Ada13.2 only; two new direct-fold TN candidates, short once7"]
+    fn ada_d128_direct_fold_two_arm_once7() -> Result<(), String> {
+        assert!(!cfg!(debug_assertions), "use release");
+        let quiet = super::common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
+        quiet.require_pre_context("ada-direct-tn/pre")?;
+        let runtime = ada_direct_runtime()?;
+        production_identity(&runtime)?; // Isolated holder is dropped on return.
+        let mut fixture = ada_finite_fixture(&runtime)?;
+        let auto_graph = capture(&runtime, &fixture, Arm::Production)?;
+        let (_, exact) = ada_observe(
+            &runtime,
+            &mut fixture,
+            Arm::Production,
+            false,
+            &auto_graph,
+            false,
+            None,
+        )?;
+        ada_fast_tn(&runtime, &fixture)?;
+        let fast_graph =
+            unsafe { capture_into_graph(&runtime.ctx.stream, || ada_fast_tn(&runtime, &fixture)) }?;
+        let (_, fast_bits) = ada_observe(
+            &runtime,
+            &mut fixture,
+            Arm::Production,
+            true,
+            &fast_graph,
+            false,
+            None,
+        )?;
+        if fast_bits.iter().any(|x| !f32::from_bits(*x).is_finite())
+            || fast_bits.iter().all(|x| *x == 0)
+        {
+            return Err("invalid Fast initial output".into());
+        }
+        for graph_path in [false, true] {
+            for _ in 0..2 {
+                ada_observe(
+                    &runtime,
+                    &mut fixture,
+                    Arm::Production,
+                    false,
+                    &auto_graph,
+                    graph_path,
+                    Some(&exact),
+                )?;
+                ada_observe(
+                    &runtime,
+                    &mut fixture,
+                    Arm::Production,
+                    true,
+                    &fast_graph,
+                    graph_path,
+                    Some(&fast_bits),
+                )?;
+            }
+        }
+        quiet.require_cohort("ada-direct-tn/timed")?;
+        for arm in [Arm::M8N32, Arm::M16N32] {
+            // Existing arm slots are reused, but real symbol/config are emitted.
+            let candidate = kernel(&runtime, arm);
+            let graph = capture(&runtime, &fixture, arm)?;
+            ada_candidate_graph(&graph, candidate)?;
+            for graph_path in [false, true] {
+                for _ in 0..2 {
+                    ada_observe(
+                        &runtime,
+                        &mut fixture,
+                        arm,
+                        false,
+                        &graph,
+                        graph_path,
+                        Some(&exact),
+                    )?;
+                }
+            }
+            for fast in [false, true] {
+                let mut strata = Vec::new();
+                for graph_path in [false, true] {
+                    for candidate_first in [true, false] {
+                        let sequence = if candidate_first {
+                            [true, false, false, true]
+                        } else {
+                            [false, true, true, false]
+                        };
+                        let mut raw = Vec::new();
+                        for bracket in 0..11 {
+                            // Four warmup brackets, seven measured.
+                            let mut times = [0.0; 4];
+                            for (slot, is_candidate) in sequence.into_iter().enumerate() {
+                                let (a, f, g, bits) = if is_candidate {
+                                    (arm, false, &graph, &exact)
+                                } else if fast {
+                                    (Arm::Production, true, &fast_graph, &fast_bits)
+                                } else {
+                                    (Arm::Production, false, &auto_graph, &exact)
+                                };
+                                times[slot] = ada_observe(
+                                    &runtime,
+                                    &mut fixture,
+                                    a,
+                                    f,
+                                    g,
+                                    graph_path,
+                                    Some(bits),
+                                )?
+                                .0;
+                            }
+                            if bracket >= 4 {
+                                raw.push(times);
+                            }
+                        }
+                        let pair = super::short_pair_quantiles(&raw, candidate_first)?;
+                        strata.push(pair);
+                        println!(
+                            "{}",
+                            serde_json::json!({"schema":"AdaTnDirectScreenV1","shape":[M,K,N],
+                        "candidate":candidate.symbol,"comparator":if fast{"cublas_fast_tf32"}else{"actual_auto"},
+                        "path":if graph_path{"graph"}else{"eager"},"order":if candidate_first{"ABBA"}else{"BAAB"},
+                        "candidate_first":candidate_first,"windows":7,"warmup_brackets":4,"raw_observations_us":raw,
+                        "ratio_p50":pair[0],"ratio_p95":pair[1],"ratio_direction":"candidate_over_reference",
+                        "reseed":"same_nonzero_C_before_event","bit_oracle":if fast{"Fast self bits"}else{"public SplitM64"}})
+                        );
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"schema":"AdaTnDirectDecisionV1","candidate":candidate.symbol,
+                    "comparator":if fast{"cublas_fast_tf32"}else{"actual_auto"},"strata":strata,
+                    "retain":strata.iter().flatten().all(|x|*x<0.99),"promotion":false})
+                );
+            }
+        }
+        quiet.verify_post_cohort("ada-direct-tn/post")?;
+        Ok(()) // Valid speed losses are recorded; they do not discard later arms.
     }
 }

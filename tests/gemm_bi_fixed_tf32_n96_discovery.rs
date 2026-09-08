@@ -1,25 +1,25 @@
 #![cfg(feature = "cuda")]
 
 use std::collections::BTreeSet;
-use std::ffi::CStr;
+use std::ffi::{c_void, CStr};
 use std::sync::Arc;
 
 use cudarc::driver::{
-    CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg, sys,
+    sys, CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg,
 };
 use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
+    gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw, TypedPtr,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+    fixed_forward, fixed_forward_with_tile, FixedFwdOperands, FixedShape, FixedTile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    NUMERIC_ABI_REVISION, SCHEDULE_REVISION, TUNING_TABLE_REVISION, digest_hex,
+    digest_hex, NUMERIC_ABI_REVISION, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -1076,7 +1076,7 @@ fn run_timing() -> Result<(), String> {
 mod triad_nn_add_half_screen {
     use super::*;
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
+        qualify_physical_launch, PhysicalQualificationRequest, PhysicalQualificationRoute,
     };
     use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
     use triad_nn_n96_source::BracketOrder;
@@ -1118,6 +1118,7 @@ mod triad_nn_add_half_screen {
         Candidate,
         CurrentWide,
         ActualAuto,
+        FastTf32,
     }
 
     impl TriadArm {
@@ -1126,6 +1127,7 @@ mod triad_nn_add_half_screen {
                 Self::Candidate => "add_half_n96",
                 Self::CurrentWide => "current_add_half_wide",
                 Self::ActualAuto => "actual_triad_auto",
+                Self::FastTf32 => "cublas_fast_tf32",
             }
         }
     }
@@ -1138,6 +1140,7 @@ mod triad_nn_add_half_screen {
                 .auto_output
                 .as_ref()
                 .expect("Triad NN AUTO output fixture"),
+            TriadArm::FastTf32 => &fixture.fast,
         }
     }
 
@@ -1149,6 +1152,7 @@ mod triad_nn_add_half_screen {
                 .auto_output
                 .as_mut()
                 .expect("Triad NN AUTO output fixture"),
+            TriadArm::FastTf32 => &mut fixture.fast,
         }
     }
 
@@ -1318,17 +1322,34 @@ mod triad_nn_add_half_screen {
         Ok(())
     }
 
-    fn configure(runtime: &Runtime, arm: TriadArm) {
+    fn configure(runtime: &Runtime, arm: TriadArm) -> Result<(), String> {
         runtime
             .ctx
             .set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-        runtime.ctx.set_batch_invariant(true);
-        runtime.ctx.set_fast_gemm(false);
-        runtime.ctx.set_bi_tensor_cores(true);
-        runtime.ctx.set_bi_gemm_family(match arm {
-            TriadArm::CurrentWide => BiGemmFamily::Fixed,
-            TriadArm::Candidate | TriadArm::ActualAuto => BiGemmFamily::Triad,
-        });
+        match arm {
+            TriadArm::Candidate | TriadArm::ActualAuto => {
+                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+                runtime.ctx.set_batch_invariant(true);
+                runtime.ctx.set_fast_gemm(false);
+                runtime.ctx.set_bi_tensor_cores(true);
+            }
+            TriadArm::CurrentWide => {
+                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+                runtime.ctx.set_batch_invariant(true);
+                runtime.ctx.set_fast_gemm(false);
+                runtime.ctx.set_bi_tensor_cores(true);
+            }
+            TriadArm::FastTf32 => {
+                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+                runtime.ctx.set_batch_invariant(false);
+                runtime.ctx.set_fast_gemm(true);
+                runtime.ctx.set_bi_tensor_cores(false);
+                if !runtime.ctx.fast_gemm() || !runtime.ctx.tf32() {
+                    return Err("cuBLAS Fast TF32 comparator state is disabled".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn launch(
@@ -1337,7 +1358,7 @@ mod triad_nn_add_half_screen {
         case: Case,
         arm: TriadArm,
     ) -> Result<(), String> {
-        configure(runtime, arm);
+        configure(runtime, arm)?;
         match arm {
             TriadArm::Candidate => {
                 let operands = operands(runtime, fixture, case, arm);
@@ -1390,6 +1411,39 @@ mod triad_nn_add_half_screen {
                     (case.shape.m, case.shape.k, case.shape.n),
                 )
             }
+            TriadArm::FastTf32 => {
+                let operands = operands(runtime, fixture, case, arm);
+                let m = i32::try_from(case.shape.m).map_err(|_| "Fast M exceeds i32")?;
+                let k = i32::try_from(case.shape.k).map_err(|_| "Fast K exceeds i32")?;
+                let n = i32::try_from(case.shape.n).map_err(|_| "Fast N exceeds i32")?;
+                let alpha = 1.0_f32;
+                let beta = 0.0_f32;
+                unsafe {
+                    cudarc::cublas::result::gemm_ex(
+                        *runtime.ctx.blas.handle(),
+                        cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+                        cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+                        n,
+                        m,
+                        k,
+                        (&alpha as *const f32).cast::<c_void>(),
+                        operands.w.ptr as *const c_void,
+                        WeightDtype::F32.cuda_data_type(),
+                        n,
+                        operands.x.ptr as *const c_void,
+                        WeightDtype::F32.cuda_data_type(),
+                        k,
+                        (&beta as *const f32).cast::<c_void>(),
+                        operands.c.ptr as *mut c_void,
+                        WeightDtype::F32.cuda_data_type(),
+                        n,
+                        cudarc::cublas::sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                        cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|error| format!("cuBLAS Fast TF32 launch failed: {error:?}"))?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1434,7 +1488,7 @@ mod triad_nn_add_half_screen {
         case: Case,
         arm: TriadArm,
     ) -> Result<CudaGraph, String> {
-        if arm == TriadArm::ActualAuto {
+        if matches!(arm, TriadArm::ActualAuto | TriadArm::FastTf32) {
             run_eager(runtime, fixture, case, arm)?;
         }
         unsafe { capture_into_graph(&runtime.ctx.stream, || launch(runtime, fixture, case, arm)) }
@@ -1614,7 +1668,7 @@ mod triad_nn_add_half_screen {
         );
     }
 
-    fn report_actual_auto_identity(runtime: &Runtime) -> Result<(), String> {
+    fn report_actual_auto_identity(runtime: &Runtime) -> Result<&'static str, String> {
         let request = PhysicalQualificationRequest::contiguous(
             ResolvedGemmOp::Nn,
             (TARGET.shape.m, TARGET.shape.k, TARGET.shape.n),
@@ -1622,6 +1676,19 @@ mod triad_nn_add_half_screen {
         );
         let qualified = qualify_physical_launch(&runtime.ctx, request)?;
         let evidence = qualified.evidence();
+        let symbol = evidence
+            .single_launch_symbol()
+            .ok_or_else(|| format!("Triad NN AUTO is not one physical launch: {evidence:?}"))?;
+        if !evidence.eager_graph_equal() || evidence.launch_count() != 1 {
+            return Err(format!(
+                "Triad NN AUTO physical evidence changed: {evidence:?}"
+            ));
+        }
+        if symbol != CURRENT_WIDE_SYMBOL {
+            return Err(format!(
+                "CUDA13.2 Triad NN AUTO selected {symbol}, expected {CURRENT_WIDE_SYMBOL}"
+            ));
+        }
         println!(
             "TRIAD_NN_N96_AUTO_IDENTITY symbol={:?} tile={:?} module={:?} execution_dtype={:?} launch_count={} eager_graph_equal={} route_identity={:?} nodes={:?}",
             evidence.single_launch_symbol(),
@@ -1633,7 +1700,66 @@ mod triad_nn_add_half_screen {
             evidence.route_identity(),
             evidence.nodes(),
         );
-        Ok(())
+        Ok(symbol)
+    }
+
+    fn assert_external_graph(
+        graph: &CudaGraph,
+        expected_symbol: Option<&str>,
+        schema: &str,
+    ) -> Result<String, String> {
+        let mut count = 0usize;
+        if unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) }
+            != sys::CUresult::CUDA_SUCCESS
+            || count != 1
+        {
+            return Err(format!("{schema} graph node count {count}, expected one"));
+        }
+        let mut nodes = vec![std::ptr::null_mut(); count];
+        if unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut count) }
+            != sys::CUresult::CUDA_SUCCESS
+        {
+            return Err(format!("query {schema} graph nodes failed"));
+        }
+        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        if unsafe { sys::cuGraphKernelNodeGetParams_v2(nodes[0], &mut params) }
+            != sys::CUresult::CUDA_SUCCESS
+        {
+            return Err(format!("query {schema} graph parameters failed"));
+        }
+        let mut name = std::ptr::null();
+        if unsafe { sys::cuFuncGetName(&mut name, params.func) } != sys::CUresult::CUDA_SUCCESS
+            || name.is_null()
+        {
+            return Err(format!("query {schema} graph symbol failed"));
+        }
+        let symbol = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|error| format!("{schema} symbol UTF-8: {error}"))?;
+        if expected_symbol.is_some_and(|expected| symbol != expected) {
+            return Err(format!(
+                "unexpected {schema} symbol {symbol}, expected {expected_symbol:?}"
+            ));
+        }
+        println!(
+            "{{\"schema\":\"{schema}\",\"symbol\":\"{symbol}\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"shared_bytes\":{}}}",
+            params.gridDimX,
+            params.gridDimY,
+            params.gridDimZ,
+            params.blockDimX,
+            params.blockDimY,
+            params.blockDimZ,
+            params.sharedMemBytes,
+        );
+        Ok(symbol.to_owned())
+    }
+
+    fn assert_fast_graph(graph: &CudaGraph) -> Result<String, String> {
+        let symbol = assert_external_graph(graph, None, "MambaBiTriadNnN96FastGapPhysicalV1")?;
+        println!(
+            "{{\"schema\":\"MambaBiTriadNnN96FastGapBindingV1\",\"symbol\":\"{symbol}\",\"compute\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"algorithm\":\"CUBLAS_GEMM_DEFAULT\",\"alpha\":1.0,\"beta\":0.0,\"bias\":false}}"
+        );
+        Ok(symbol)
     }
 
     fn prepare_target(
@@ -1682,6 +1808,89 @@ mod triad_nn_add_half_screen {
             }
         }
         Ok((fixture, candidate_graph, auto_graph, expected))
+    }
+
+    struct FastGapTarget {
+        fixture: Fixture,
+        candidate_graph: CudaGraph,
+        auto_graph: CudaGraph,
+        fast_graph: CudaGraph,
+        exact_bits: Vec<u32>,
+        auto_bits: Vec<u32>,
+        fast_bits: Vec<u32>,
+        auto_symbol: String,
+        fast_symbol: String,
+    }
+
+    fn prepare_fast_gap_target(runtime: &Runtime) -> Result<FastGapTarget, String> {
+        let mut fixture = ordinary_fixture(runtime, TARGET)?;
+        let current = run_eager(runtime, &mut fixture, TARGET, TriadArm::CurrentWide)?;
+        let candidate = run_eager(runtime, &mut fixture, TARGET, TriadArm::Candidate)?;
+        let actual_auto = run_eager(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)?;
+        report_pairwise_bits("fast_gap_candidate/current", &candidate, &current);
+        report_pairwise_bits("fast_gap_candidate/actual_auto", &candidate, &actual_auto);
+        report_pairwise_bits("fast_gap_current/actual_auto", &current, &actual_auto);
+        let auto_symbol = report_actual_auto_identity(runtime)?;
+        let fast_bits = run_eager(runtime, &mut fixture, TARGET, TriadArm::FastTf32)?;
+        if !triad_nn_n96_source::valid_finite_nonzero_f32_bits(&fast_bits) {
+            return Err("cuBLAS Fast TF32 produced empty, non-finite, or all-zero output".into());
+        }
+        if candidate != current || candidate != actual_auto {
+            return Err("short-screen candidate/current/AUTO bits differ".into());
+        }
+
+        let candidate_graph = capture_arm(runtime, &mut fixture, TARGET, TriadArm::Candidate)?;
+        let auto_graph = capture_arm(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)?;
+        let fast_graph = capture_arm(runtime, &mut fixture, TARGET, TriadArm::FastTf32)?;
+        assert_n96_graph(
+            &candidate_graph,
+            TARGET.shape,
+            triad_nn_n96_source::TRIAD_NN_N96_SYMBOL,
+        )?;
+        assert_single_tf32_graph(&auto_graph, TARGET.shape, auto_symbol, 128, 128, 98_304)?;
+        let fast_symbol = assert_fast_graph(&fast_graph)?;
+
+        for repeat in 0..2 {
+            for (arm, graph) in [(TriadArm::Candidate, &candidate_graph)] {
+                if run_eager(runtime, &mut fixture, TARGET, arm)? != current
+                    || run_graph(runtime, &mut fixture, arm, graph)? != current
+                {
+                    return Err(format!(
+                        "short-screen {} repeat {repeat} changed exact bits",
+                        arm.name()
+                    ));
+                }
+            }
+            if run_eager(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)? != actual_auto
+                || run_graph(runtime, &mut fixture, TriadArm::ActualAuto, &auto_graph)?
+                    != actual_auto
+            {
+                return Err(format!(
+                    "short-screen actual AUTO repeat {repeat} changed exact bits"
+                ));
+            }
+            if run_eager(runtime, &mut fixture, TARGET, TriadArm::FastTf32)? != fast_bits
+                || run_graph(runtime, &mut fixture, TriadArm::FastTf32, &fast_graph)? != fast_bits
+            {
+                return Err(format!(
+                    "short-screen Fast TF32 repeat {repeat} changed its own bits"
+                ));
+            }
+        }
+        println!(
+            "{{\"schema\":\"MambaBiTriadNnN96FastGapBitsV1\",\"case\":\"ordinary_target\",\"shape\":[2048,1536,768],\"exact_arms\":[\"candidate\",\"current_wide\",\"actual_auto\"],\"actual_auto_symbol\":\"{auto_symbol}\",\"fast_contract\":\"finite_nonzero_self_consistency_only\",\"eager_repeats\":2,\"graph_repeats\":2,\"passed\":true}}"
+        );
+        Ok(FastGapTarget {
+            fixture,
+            candidate_graph,
+            auto_graph,
+            fast_graph,
+            exact_bits: current,
+            auto_bits: actual_auto,
+            fast_bits,
+            auto_symbol: auto_symbol.to_owned(),
+            fast_symbol,
+        })
     }
 
     #[derive(Clone, Copy)]
@@ -1736,6 +1945,7 @@ mod triad_nn_add_half_screen {
             return Err(format!("{} timing observation changed bits", arm.name()));
         }
         fixture.validate_inputs(runtime)?;
+        validate_auto_inputs(runtime, fixture)?;
         Ok(elapsed_us)
     }
 
@@ -1808,6 +2018,87 @@ mod triad_nn_add_half_screen {
         Ok([p50, p95])
     }
 
+    fn fast_gap_stratum(
+        runtime: &Runtime,
+        fixture: &mut Fixture,
+        candidate_graph: &CudaGraph,
+        comparator: TriadArm,
+        comparator_graph: &CudaGraph,
+        comparator_symbol: &str,
+        candidate_bits: &[u32],
+        comparator_bits: &[u32],
+        path: Path,
+        order: BracketOrder,
+    ) -> Result<[f64; 2], String> {
+        for _ in 0..WARMUPS {
+            measure_one(
+                runtime,
+                fixture,
+                TriadArm::Candidate,
+                candidate_graph,
+                path,
+                candidate_bits,
+            )?;
+            measure_one(
+                runtime,
+                fixture,
+                comparator,
+                comparator_graph,
+                path,
+                comparator_bits,
+            )?;
+        }
+        let arms = order.candidate_slots().map(|candidate| {
+            if candidate {
+                (TriadArm::Candidate, candidate_graph, candidate_bits)
+            } else {
+                (comparator, comparator_graph, comparator_bits)
+            }
+        });
+        let mut raw = Vec::with_capacity(WINDOWS);
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        for _ in 0..WINDOWS {
+            let mut observation = [0.0; 4];
+            for (index, (arm, graph, expected)) in arms.into_iter().enumerate() {
+                observation[index] = measure_one(runtime, fixture, arm, graph, path, expected)?;
+            }
+            ratios.push(triad_nn_n96_source::candidate_over_auto_ratio(
+                order,
+                observation,
+            )?);
+            raw.push(observation);
+        }
+        let p50 = percentile(&ratios, 0.5);
+        let p95 = percentile(&ratios, 0.95);
+        if !matches!(comparator, TriadArm::ActualAuto | TriadArm::FastTf32)
+            || comparator_symbol.is_empty()
+        {
+            return Err(format!(
+                "invalid short-screen comparator identity {comparator:?}/{comparator_symbol:?}"
+            ));
+        }
+        println!(
+            "{{\"schema\":\"MambaBiTriadNnN96FastGapTimingV1\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"add_half_n96\",\"comparator\":\"{}\",\"candidate_symbol\":\"{}\",\"comparator_symbol\":\"{comparator_symbol}\",\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{WARMUPS},\"logical_gemms_per_observation\":1,\"raw_observations_us\":{},\"ratio_direction\":\"candidate_over_comparator\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
+            comparator.name(),
+            triad_nn_n96_source::TRIAD_NN_N96_SYMBOL,
+            path.name(),
+            order.name(),
+            json_raw(&raw),
+        );
+        Ok([p50, p95])
+    }
+
+    fn strata_json(strata: &[[f64; 2]]) -> String {
+        format!(
+            "[{}]",
+            strata
+                .iter()
+                .map(|[p50, p95]| format!("[{p50:.9},{p95:.9}]"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
     #[test]
     #[ignore = "requires an exclusive quiet CC8.9/142-SM CUDA13.2 GPU; set MAMBA_TRIAD_NN_N96_DISCOVERY=1"]
     fn triad_nn_d768_out_add_half_n96_discovery_once7() -> Result<(), String> {
@@ -1862,6 +2153,83 @@ mod triad_nn_add_half_screen {
         );
         if !retain {
             return Err("Triad NN add-half N96 failed one or more <0.99 strata".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive quiet CC8.9/142-SM CUDA13.2 GPU; set MAMBA_TRIAD_NN_N96_DISCOVERY=1"]
+    fn triad_nn_d768_out_add_half_n96_fast_gap_once7() -> Result<(), String> {
+        assert!(
+            !cfg!(debug_assertions),
+            "Triad NN N96 Fast-gap screen requires --release"
+        );
+        let runtime = new_runtime()?;
+        let FastGapTarget {
+            mut fixture,
+            candidate_graph,
+            auto_graph,
+            fast_graph,
+            exact_bits,
+            auto_bits,
+            fast_bits,
+            auto_symbol,
+            fast_symbol,
+        } = prepare_fast_gap_target(&runtime)?;
+        let mut own_strata = Vec::with_capacity(4);
+        let mut fast_strata = Vec::with_capacity(4);
+        for path in [Path::Eager, Path::Graph] {
+            for order in [BracketOrder::Abba, BracketOrder::Baab] {
+                own_strata.push(fast_gap_stratum(
+                    &runtime,
+                    &mut fixture,
+                    &candidate_graph,
+                    TriadArm::ActualAuto,
+                    &auto_graph,
+                    &auto_symbol,
+                    &exact_bits,
+                    &auto_bits,
+                    path,
+                    order,
+                )?);
+                fast_strata.push(fast_gap_stratum(
+                    &runtime,
+                    &mut fixture,
+                    &candidate_graph,
+                    TriadArm::FastTf32,
+                    &fast_graph,
+                    &fast_symbol,
+                    &exact_bits,
+                    &fast_bits,
+                    path,
+                    order,
+                )?);
+            }
+        }
+        let valid = |strata: &[[f64; 2]]| {
+            strata.len() == 4
+                && strata
+                    .iter()
+                    .flatten()
+                    .all(|ratio| ratio.is_finite() && *ratio > 0.0)
+        };
+        let retain = valid(&own_strata) && own_strata.iter().flatten().all(|ratio| *ratio < 0.99);
+        let fast_valid = valid(&fast_strata);
+        let fast_win = fast_valid && fast_strata.iter().flatten().all(|ratio| *ratio < 0.99);
+        println!(
+            "{{\"schema\":\"MambaBiTriadNnN96FastGapDecisionV1\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"add_half_n96\",\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"actual_auto_strata\":{},\"fast_tf32_strata\":{},\"ratio_direction\":\"candidate_over_comparator\",\"retain_against_actual_auto\":{retain},\"fast_comparison_valid\":{fast_valid},\"fast_win\":{fast_win},\"fast_is_exact_golden\":false,\"promotion\":false}}",
+            strata_json(&own_strata),
+            strata_json(&fast_strata),
+        );
+        if !fast_valid {
+            return Err(
+                "Triad NN N96 Fast-gap comparison did not produce four valid strata".into(),
+            );
+        }
+        if !retain {
+            return Err(
+                "Triad NN N96 failed one or more actual-AUTO <0.99 short-screen strata".into(),
+            );
         }
         Ok(())
     }

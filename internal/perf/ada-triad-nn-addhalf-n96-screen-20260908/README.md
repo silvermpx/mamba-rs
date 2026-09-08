@@ -1,5 +1,33 @@
 # New TF32 Triad NN N96 discovery, Ada, 2026-09-08
 
+## Follow-up: explicit cuBLAS Fast, short discovery only
+
+The new CUDA13.2 once7 comparison uses literal `cublasGemmEx`,
+`CUBLAS_COMPUTE_32F_FAST_TF32`, alpha=1/beta=0, and the actual public AUTO
+entry point. Candidate/current/AUTO output words match; Fast passes its own
+finite-output and eager/graph repeat checks. This does not assert equality
+between our numeric contract and cuBLAS Fast.
+
+| Measurement | candidate/Fast p50 | candidate/Fast p95 |
+| --- | ---: | ---: |
+| Eager ABBA | 1.000000 | 1.007874 |
+| Eager BAAB | 1.007874 | 1.007874 |
+| Graph ABBA | 1.007937 | 1.015873 |
+| Graph BAAB | 1.007937 | 1.024000 |
+
+New finding: near parity with Fast, **not a Fast win**. The earlier ~18% gain
+over AUTO is not a new result. This is a candidate-screen result, not a
+production admission or cross-toolkit claim. Per the active user instruction,
+broader confirmation is deferred until the candidate batch is assembled.
+
+Source SHAs: main `ce9839a655cb96864fb314a53355bda3751a211975c70cfc1f0c87dca5e14bd8`,
+helper `d9098e555c7a0a447acbf4d5960c89ac4ce9fa72c27c0cf9ee69f7842df3645f`.
+Raw and command receipt: `evidence/fast-gap-cuda132/once7/`.
+Root independently recomputed all 56 brackets / 224 timed observations.
+One exact GPU test passed; private cache unchanged; post-run drain quiet.
+
+## Earlier discovery record
+
 This is a new test-only candidate, not the earlier scalar CopyPlan or half-S3
 reuse results and not yet a production admission or cuBLAS Fast win.
 

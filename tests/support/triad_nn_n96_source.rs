@@ -105,6 +105,12 @@ pub fn candidate_over_auto_ratio(
     Ok(candidate / auto)
 }
 
+pub fn valid_finite_nonzero_f32_bits(words: &[u32]) -> bool {
+    !words.is_empty()
+        && words.iter().all(|word| f32::from_bits(*word).is_finite())
+        && words.iter().any(|word| word & 0x7fff_ffff != 0)
+}
+
 pub fn compare_bits(left: &[u32], right: &[u32]) -> (usize, Option<usize>) {
     let first = left
         .iter()
@@ -121,7 +127,7 @@ pub fn compare_bits(left: &[u32], right: &[u32]) -> (usize, Option<usize>) {
 }
 
 pub fn validate_public_auto_harness(source: &str) -> Result<(), String> {
-    let public_auto = "TriadArm::ActualAuto => {";
+    let public_auto = "TriadArm::ActualAuto => {\n                let auto_a";
     let public_entrypoint = "gpu_gemm_bi_forward_raw(";
     let typed_entrypoint = "TriadArm::ActualAuto => gpu_gemm_typed_forward_raw(";
     let graph_contract = r#"assert_single_tf32_graph(
@@ -208,6 +214,19 @@ mod tests {
         ] {
             assert!(candidate_over_auto_ratio(BracketOrder::Abba, invalid).is_err());
         }
+    }
+
+    #[test]
+    fn fast_self_bits_must_be_finite_and_not_all_zero() {
+        assert!(valid_finite_nonzero_f32_bits(&[
+            0x0000_0000,
+            0x8000_0000,
+            0x3f80_0000,
+        ]));
+        assert!(!valid_finite_nonzero_f32_bits(&[]));
+        assert!(!valid_finite_nonzero_f32_bits(&[0x0000_0000, 0x8000_0000,]));
+        assert!(!valid_finite_nonzero_f32_bits(&[0x3f80_0000, 0x7f80_0000]));
+        assert!(!valid_finite_nonzero_f32_bits(&[0x3f80_0000, 0x7fc0_1234]));
     }
 
     #[test]
