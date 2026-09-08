@@ -1,0 +1,2 @@
+authoritative_performance=false
+stop_reason=full_target_exact_bit_mismatch_before_timing

@@ -1915,6 +1915,15 @@ retained p95 (.99124); F16/BF16 Prism also fail the strict retained gate.
 Stop those three without retry. No half-TN Fast win is claimed. Full evidence:
 `internal/perf/ada-triad-half-tn-regpipe-vec2-siblings-20260908/report.md`.
 
+## Ada exact-F32 TN CopyPlan correctness stop (2026-09-08)
+
+Do not time or integrate the full-K d768-in transpose+CopyPlan+epilogue probe.
+It differs from actual AUTO at target word0 (`d76bd726` vs `d76bd729`). AUTO is
+the deterministic two-chunk SplitM route with an FP64 reducer; the candidate is
+one full-length F32 chain. Preserve the failed source/evidence, but the next
+candidate must reproduce two1024-sample raw partials and reuse the exact reducer.
+See `internal/perf/ada-triad-f32-tn-copyplan-d768-in-20260908/report.md`.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through

@@ -145,6 +145,13 @@ do not assume payload identity from ordinary numeric correctness. Prism also
 needs a padded transpose stride4624 instead of4621. This is feasibility only,
 not an implemented/measured winner; prioritize the current short candidate queue.
 
+The first d768-in implementation disproved the full-K form before timing.
+Actual AUTO is `TnSplitM{m_chunk:1024,chunks:2}` and reduces two F32 partials
+in FP64; the one-chain CopyPlan differs by3ULP at word0. See the
+[correctness-stop report](../perf/ada-triad-f32-tn-copyplan-d768-in-20260908/report.md).
+Do not retry it. A revised candidate must reproduce both1024-sample partials
+bit-for-bit and use the unchanged production FP64 reducer before any speed test.
+
 For each next candidate: identify one limiting mechanism from source/profile;
 consult primary documentation; native mapping/resource proof; focused GPU bits;
 one paired eager/graph once7 screen. Stop unchanged valid losers. Do not infer
