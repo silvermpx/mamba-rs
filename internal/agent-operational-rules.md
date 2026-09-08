@@ -32,6 +32,12 @@
   Do not present the old three F32 NN cases or old N96 result as new wins.
 - Keep coordination short: no repeated large source snapshots, review loops,
   report rewrites or full-matrix reruns without a concrete new need.
+- Archive the next frozen test snapshot outside the shared remote source tree.
+  Install it only AFTER the preceding build and test process exit; otherwise
+  Cargo may consider an older executable newer than the newly installed source.
+  Exact-test list gates must reject stale artifacts before GPU work. For a
+  timestamp-only repair, preserve source hashes and rebuild the focused test;
+  do not rerun valid preceding measurements or regenerate broad manifests.
 
 ## CUDA execution lanes
 

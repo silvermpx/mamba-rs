@@ -15,8 +15,13 @@ paired eager+graph once7. Allbits/guards PASS; forcedTC128 reference, NOT public
 AUTO admission. See `perf/ada-triad-half-nn-s3-aligned-20260908/README.md`.
 Measured typed667510c2 is retained independently of next S4/N64 working edits.
 Half TN Rect128x64 all6cells and TF32 TN A-prepack bothcells are valid losers;
-new reports record them, no reruns. Current GPU queue: exactF32 TN d128 in/out
-one-chunk fold pipeline, then half TN BK32/S4 sixcells, then half NN N64 reuse.
+new reports record them, no reruns. Current GPU queue: compact half NT/TN
+BK64/S2 reuse (shared32KB for3CTA/SM). ExactF32 d128 fold-pipeline bothcells
+and halfTN BK32/S4 all6cells completed bits/resources but lost; keep earlier
+finalists. N64 BF16 NN d768-in is now nearFastparity (.981–.992,p95up.9946),
+no strict<.99 admission. N64 d768-out beatsFast but is weaker than retainedS3,
+NOT another champion. See `perf/ada-triad-half-nn-n64-20260908/README.md`
+and corresponding loser reports.
 Discovery first remains in force; batch finalists before one integration gate.
 Fixed inference and SM120 remain unchanged. Older checkpoints below are history.
 

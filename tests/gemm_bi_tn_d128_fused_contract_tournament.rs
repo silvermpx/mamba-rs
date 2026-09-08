@@ -749,6 +749,8 @@ mod cuda_tournament {
         MoreWaves,
         MoreWarps,
         D128Out,
+        InFoldPipeline,
+        OutFoldPipeline,
     }
 
     fn ada_direct_runtime(variant: AdaDirectVariant) -> Result<Runtime, String> {
@@ -773,6 +775,8 @@ mod cuda_tournament {
             AdaDirectVariant::MoreWaves => source::compose_wave_source(original)?,
             AdaDirectVariant::MoreWarps => source::compose_warp_source(original)?,
             AdaDirectVariant::D128Out => source::compose_out_source(original)?,
+            AdaDirectVariant::InFoldPipeline => source::compose_foldpipe_source(original)?,
+            AdaDirectVariant::OutFoldPipeline => source::compose_out_foldpipe_source(original)?,
         };
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(
             cuda,
@@ -828,6 +832,14 @@ mod cuda_tournament {
             })
         };
         let (primary, sensitivity) = match variant {
+            AdaDirectVariant::InFoldPipeline => (
+                load(source::IN_FOLDPIPE_SYMBOL, 4096, 256, 64)?,
+                load(source::M16N16_SYMBOL, 4096, 256, 64)?,
+            ),
+            AdaDirectVariant::OutFoldPipeline => (
+                load(source::OUT_FOLDPIPE_SYMBOL, 3072, 256, 64)?,
+                load(source::OUT_M8N16_SYMBOL, 3072, 256, 64)?,
+            ),
             AdaDirectVariant::D128Out => (
                 load(source::OUT_M8N16_SYMBOL, 3072, 256, 64)?,
                 load(source::OUT_M16N16_SYMBOL, 4096, 128, 64)?,
@@ -851,7 +863,10 @@ mod cuda_tournament {
             _module: module,
             primary,
             sensitivity,
-            dims: if variant == AdaDirectVariant::D128Out {
+            dims: if matches!(
+                variant,
+                AdaDirectVariant::D128Out | AdaDirectVariant::OutFoldPipeline
+            ) {
                 (1024, 256, 128)
             } else {
                 (M, K, N)
@@ -1029,16 +1044,115 @@ mod cuda_tournament {
         ada_direct_fold_screen(AdaDirectVariant::D128Out)
     }
 
+    #[test]
+    #[ignore = "quiet Ada13.2 only; delayed FP64 fold vs retained d128-in and Fast"]
+    fn ada_d128_in_fold_pipeline_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::InFoldPipeline)
+    }
+
+    #[test]
+    #[ignore = "quiet Ada13.2 only; delayed FP64 fold vs retained d128-out and Fast"]
+    fn ada_d128_out_fold_pipeline_once7() -> Result<(), String> {
+        ada_direct_fold_screen(AdaDirectVariant::OutFoldPipeline)
+    }
+
+    fn ada_fold_pipeline_corner_bits(runtime: &Runtime) -> Result<(), String> {
+        let mut fixture = ada_finite_fixture(runtime)?;
+        let (_, k, n) = runtime.dims;
+        // Separate output rows exercise payload/sign/subnormal behavior. The
+        // timing fixture remains finite and is created after this probe.
+        for (row, word) in [
+            0x0000_0000u32,
+            0x8000_0000,
+            0x0000_0001,
+            0x8000_0001,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc1_2345,
+            0x7fa1_2345,
+            0xffc5_4321,
+            0x7f7f_ffff,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fixture.a.expected[fixture.a.offset + row] = f32::from_bits(word);
+        }
+        fixture.a.expected[fixture.a.offset + 15 * k + 15] = 2.0f32.powi(25);
+        fixture.a.expected[fixture.a.offset + 16 * k + 15] = -2.0f32.powi(25);
+        fixture.b.expected[fixture.b.offset + 15 * n] = 1.0;
+        fixture.b.expected[fixture.b.offset + 16 * n] = 1.0;
+        fixture.a.reset(&runtime.ctx.stream)?;
+        fixture.b.reset(&runtime.ctx.stream)?;
+        fixture.production_a.upload(
+            &runtime.ctx.stream,
+            &fixture.a.expected[fixture.a.offset..fixture.a.offset + fixture.a.len],
+        )?;
+        fixture.production_b.upload(
+            &runtime.ctx.stream,
+            &fixture.b.expected[fixture.b.offset..fixture.b.offset + fixture.b.len],
+        )?;
+        let auto_graph = capture(runtime, &fixture, Arm::Production)?;
+        let (_, expected) = ada_observe(
+            runtime,
+            &mut fixture,
+            Arm::Production,
+            false,
+            &auto_graph,
+            false,
+            None,
+        )?;
+        for arm in [Arm::Production, Arm::M8N32, Arm::M16N32] {
+            let graph = capture(runtime, &fixture, arm)?;
+            if !matches!(arm, Arm::Production) {
+                ada_candidate_graph(&graph, kernel(runtime, arm))?;
+            }
+            for graph_path in [false, true] {
+                for _ in 0..2 {
+                    ada_observe(
+                        runtime,
+                        &mut fixture,
+                        arm,
+                        false,
+                        &graph,
+                        graph_path,
+                        Some(&expected),
+                    )?;
+                }
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema":"AdaTnFoldPipelineCornerBitsV1", "shape":runtime.dims,
+                "words":expected.len(), "eager_repeats":2, "graph_repeats":2,
+                "oracle":"actual_auto_raw_bits", "candidate":runtime.primary.symbol,
+                "retained":runtime.sensitivity.symbol,
+                "fixture":"signed_zero_subnormal_inf_nan_payload_and_chunk_boundary"
+            })
+        );
+        Ok(())
+    }
+
     fn ada_direct_fold_screen(variant: AdaDirectVariant) -> Result<(), String> {
         let more_waves = matches!(
             variant,
-            AdaDirectVariant::MoreWaves | AdaDirectVariant::MoreWarps
+            AdaDirectVariant::MoreWaves
+                | AdaDirectVariant::MoreWarps
+                | AdaDirectVariant::InFoldPipeline
+                | AdaDirectVariant::OutFoldPipeline
         );
         assert!(!cfg!(debug_assertions), "use release");
         let quiet = super::common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("ada-direct-tn/pre")?;
         let runtime = ada_direct_runtime(variant)?;
         production_identity(&runtime)?; // Isolated holder is dropped on return.
+        if matches!(
+            variant,
+            AdaDirectVariant::InFoldPipeline | AdaDirectVariant::OutFoldPipeline
+        ) {
+            ada_fold_pipeline_corner_bits(&runtime)?;
+        }
         let mut fixture = ada_finite_fixture(&runtime)?;
         let auto_graph = capture(&runtime, &fixture, Arm::Production)?;
         let (_, exact) = ada_observe(
@@ -1095,7 +1209,9 @@ mod cuda_tournament {
         } else {
             Arm::Production
         };
-        let reference_name = if more_waves {
+        let reference_name = if variant == AdaDirectVariant::OutFoldPipeline {
+            "retained_m8n16"
+        } else if more_waves {
             "retained_m16n16"
         } else {
             "actual_auto"
