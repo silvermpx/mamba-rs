@@ -18,6 +18,16 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 half-TN WS5 stop: the SM89 TC64/BK64/S2 five-warp
+producer/consumer candidate passes F16 d768-in exact eager/graph bits, guards
+and resources (92 regs, local0, static shared32800, occupancy3), with PTX proof
+of real cp.async/mbarrier/ldmatrix/MMA and no trap. It nevertheless loses the
+retained regpipe+float2 candidate by15.4–17.3% and native-half Fast by12.0–16.8%
+in all paired strata. Stop the mechanism; do not run BF16 or sibling shapes.
+The compile investigation also proved that CUDA13.2 `__mbarrier_try_wait` is
+SM90+; Ada SM89 must use `__mbarrier_test_wait`. Evidence:
+`internal/perf/ada-triad-half-tn-ws5-20260909/report.md`.
+
 Latest 2026-09-09 exact-F32 TN d768-in retained-best: the test-only N64
 dual-chunk fused candidate removes the intermediate partial0 global round trip
 and one launch while preserving the two fixed 1024-row accumulations and FP64

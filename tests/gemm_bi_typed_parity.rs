@@ -68,6 +68,8 @@ mod triad_half_tn_regpipe_vec2_sibling_plan;
 mod triad_half_tn_s4_source;
 #[path = "support/triad_half_tn_vec2_epilogue_source.rs"]
 mod triad_half_tn_vec2_epilogue_source;
+#[path = "support/triad_half_tn_warpspecialized_source.rs"]
+mod triad_half_tn_warpspecialized_source;
 
 use common::gpu_quiet::QuietGpu;
 use triad_half_tile_screen::{
@@ -1369,7 +1371,12 @@ fn validate_ada_half_tn_candidate_graph(
         (params.blockDimX, params.blockDimY, params.blockDimZ),
         params.sharedMemBytes,
     );
-    let expected_config = ((expected_grid, 1, 1), (128, 1, 1), 0);
+    let (_, _, threads, _, dynamic_shared) = candidate.geometry();
+    let expected_config = (
+        (expected_grid, 1, 1),
+        (threads, 1, 1),
+        dynamic_shared as u32,
+    );
     if actual != expected || config != expected_config {
         return Err(format!(
             "half TN candidate graph changed: symbol={actual} expected={expected} config={config:?} expected_config={expected_config:?}"
@@ -3388,6 +3395,7 @@ enum AdaHalfTnCandidateKind {
     M64N128Bk64S2Compact,
     FixedS3Bxor,
     Tc64Bk64S2RegpipeVec2,
+    Tc64Bk64S2RegpipeVec2WarpSpecialized,
     M64N128Bk64S2RegpipeVec2,
 }
 
@@ -3407,6 +3415,9 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "m64n128_bk64_s2_compact_xor",
             AdaHalfTnCandidateKind::FixedS3Bxor => "fixed_s3_bxor",
             AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => "tc64_bk64_s2_regpipe_vec2_epilogue",
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized => {
+                "tc64_bk64_s2_regpipe_vec2_warp_specialized_5warp"
+            }
             AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => {
                 "m64n128_bk64_s2_four_warp_regpipe_vec2_epilogue"
             }
@@ -3470,6 +3481,15 @@ impl AdaHalfTnCandidate {
             (AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2, WeightDtype::F16) => {
                 format!("{}f16", triad_half_tn_vec2_epilogue_source::SYMBOL_PREFIX)
             }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized, WeightDtype::Bf16) => {
+                format!(
+                    "{}bf16",
+                    triad_half_tn_warpspecialized_source::SYMBOL_PREFIX
+                )
+            }
+            (AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized, WeightDtype::F16) => {
+                format!("{}f16", triad_half_tn_warpspecialized_source::SYMBOL_PREFIX)
+            }
             (AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2, WeightDtype::Bf16) => {
                 format!(
                     "{}bf16",
@@ -3506,6 +3526,13 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => (64, 128, 256, 49_152, 0),
             AdaHalfTnCandidateKind::FixedS3Bxor => (128, 128, 256, 0, 98_304),
             AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => (64, 64, 128, 32_768, 0),
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized => (
+                64,
+                64,
+                triad_half_tn_warpspecialized_source::THREADS,
+                triad_half_tn_warpspecialized_source::EXPECTED_STATIC_SHARED,
+                0,
+            ),
             AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => (64, 128, 128, 49_152, 0),
         }
     }
@@ -3520,6 +3547,9 @@ impl AdaHalfTnCandidate {
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact => "M64N128Bk64S2Compact",
             AdaHalfTnCandidateKind::FixedS3Bxor => "FixedS3Bxor",
             AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => "Tc64Bk64S2RegpipeVec2",
+            AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized => {
+                "Tc64Bk64S2RegpipeVec2WarpSpecialized"
+            }
             AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => "M64N128Bk64S2RegpipeVec2",
         }
     }
@@ -3528,7 +3558,8 @@ impl AdaHalfTnCandidate {
         match self.kind {
             AdaHalfTnCandidateKind::Tc64Bk64S2Compact
             | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
-            | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => 3,
+            | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2
+            | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized => 3,
             AdaHalfTnCandidateKind::M64N128Bk64S2Compact
             | AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => 2,
             _ => 1,
@@ -3773,6 +3804,120 @@ fn compile_ada_half_tn_regpipe_vec2_candidate(t: &Ctx) -> Result<AdaHalfTnCandid
         &f16_symbol,
         false,
     )
+}
+
+fn compile_ada_half_tn_warpspecialized_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
+    let transformed = triad_half_tn_warpspecialized_source::candidate_source(include_str!(
+        "../kernels/gemm_bi_triad/sm80.cu"
+    ))?;
+    let bf16_symbol = format!(
+        "{}bf16",
+        triad_half_tn_warpspecialized_source::SYMBOL_PREFIX
+    );
+    let f16_symbol = format!("{}f16", triad_half_tn_warpspecialized_source::SYMBOL_PREFIX);
+    compile_ada_half_tn_isolated_candidate(
+        t,
+        AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized,
+        transformed,
+        &bf16_symbol,
+        &f16_symbol,
+        false,
+    )
+}
+
+fn compose_ada_half_tn_warpspecialized_cuda_source() -> Result<String, String> {
+    let transformed = triad_half_tn_warpspecialized_source::candidate_source(include_str!(
+        "../kernels/gemm_bi_triad/sm80.cu"
+    ))?;
+    Ok([
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        &transformed,
+    ]
+    .iter()
+    .map(|part| {
+        part.lines()
+            .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+    .collect::<Vec<_>>()
+    .join("\n"))
+}
+
+#[test]
+#[ignore = "requires CUDA13.2 NVRTC only; does not create a GPU context"]
+fn ada_half_tn_tc64_bk64_s2_regpipe_vec2_ws5_nvrtc_compile_only() -> Result<(), String> {
+    let source = compose_ada_half_tn_warpspecialized_cuda_source()?;
+    let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let evidence_dir =
+        std::env::var_os("MAMBA_WS5_COMPILE_EVIDENCE_DIR").map(std::path::PathBuf::from);
+    if let Some(directory) = &evidence_dir {
+        std::fs::create_dir_all(directory)
+            .map_err(|error| format!("create five-warp compile evidence: {error}"))?;
+        std::fs::write(directory.join("candidate.cu"), source.as_bytes())
+            .map_err(|error| format!("write five-warp CUDA source evidence: {error}"))?;
+    }
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+        &source,
+        cudarc::nvrtc::CompileOptions {
+            arch: Some("compute_89"),
+            options: vec![
+                "--fmad=true".into(),
+                "--extra-device-vectorization".into(),
+                "-DNDEBUG".into(),
+                "-DGEMM_BI_GROUP_M=16".into(),
+                "-DMAMBA_RS_STATE_CAP=256".into(),
+                "--frandom-seed=1295072049".into(),
+            ],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("compile half TN five-warp CUDA source: {error:?}"))?;
+    let ptx = ptx.to_src();
+    if let Some(directory) = &evidence_dir {
+        std::fs::write(directory.join("candidate.ptx"), ptx.as_bytes())
+            .map_err(|error| format!("write five-warp PTX evidence: {error}"))?;
+    }
+    let lowering = ptx
+        .lines()
+        .filter(|line| {
+            line.contains("async")
+                || line.contains("mbarrier")
+                || line.contains("ld.global")
+                || line.contains("st.shared")
+        })
+        .take(80)
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("half TN five-warp PTX lowering:\n{lowering}");
+    for anchor in [
+        "gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_ws5_bf16",
+        "gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_ws5_f16",
+        "cp.async.cg.shared.global",
+        "cp.async.mbarrier.arrive.shared.b64",
+        "mbarrier.test_wait.shared.b64",
+        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+        "mma.sync.aligned.m16n8k16.row.col.f32",
+    ] {
+        if !ptx.contains(anchor) {
+            return Err(format!("half TN five-warp PTX missing {anchor:?}"));
+        }
+    }
+    if ptx.contains("trap;") {
+        return Err("half TN five-warp PTX contains a trap path".into());
+    }
+    println!(
+        "{{\"schema\":\"MambaBiHalfTnWarpSpecializedCompileV1\",\"source_sha256\":\"{source_sha256}\",\"ptx_sha256\":\"{:x}\",\"ptx_bytes\":{}}}",
+        Sha256::digest(ptx.as_bytes()),
+        ptx.len(),
+    );
+    Ok(())
 }
 
 fn compile_ada_half_tn_m64n128_regpipe_vec2_candidate(
@@ -4048,6 +4193,7 @@ fn gate_ada_half_tn_resources(
         AdaHalfTnCandidateKind::M64N128Bk64S2Compact => 128,
         AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
         | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2 => 168,
+        AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized => 128,
         AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => 255,
         _ => i32::MAX,
     };
@@ -4060,6 +4206,7 @@ fn gate_ada_half_tn_resources(
         | AdaHalfTnCandidateKind::M64N128Bk64S2Compact
         | AdaHalfTnCandidateKind::FixedS3Bxor
         | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2
+        | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized
         | AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2 => "source_sha256",
         AdaHalfTnCandidateKind::Rect128x64 => "source_fragment_sha256",
     };
@@ -4415,6 +4562,7 @@ fn run_ada_half_tn_candidate_cells(
                         | AdaHalfTnCandidateKind::Tc64Bk64S2Regpipe
                         | AdaHalfTnCandidateKind::FixedS3Bxor
                         | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2
+                        | AdaHalfTnCandidateKind::Tc64Bk64S2RegpipeVec2WarpSpecialized
                         | AdaHalfTnCandidateKind::M64N128Bk64S2RegpipeVec2
                 ) && (fixture.a.ptr() % 256 != 0
                     || fixture.b.ptr() % 256 != 0
@@ -5389,6 +5537,43 @@ fn ada_half_tn_regpipe_vec2_d768_out_and_prism_vs_compact_and_fast_discovery_onc
     drop(t);
     quiet
         .verify_post_cohort("half-tn-regpipe-vec2-siblings/post")
+        .map(|_| ())
+}
+
+#[test]
+#[ignore = "requires exclusive Ada CC8.9 CUDA13.2; half TN five-warp producer/consumer discovery"]
+fn ada_half_tn_tc64_bk64_s2_regpipe_vec2_ws5_f16_d768_in_discovery_once7() -> Result<(), String> {
+    assert!(
+        !cfg!(debug_assertions),
+        "half TN five-warp producer/consumer discovery requires --release"
+    );
+    let quiet = QuietGpu::for_cuda_ordinal(0)?;
+    let _pre = quiet.require_pre_context("half-tn-regpipe-vec2-ws5/pre-context")?;
+    let t = Ctx::new_ada()?;
+    let compiler = t.ctx.kernels.compiler_identity();
+    if compiler.nvrtc_version != (13, 2) {
+        return Err(format!(
+            "half TN five-warp producer/consumer discovery requires CUDA13.2, found {:?}",
+            compiler.nvrtc_version
+        ));
+    }
+    let candidate = compile_ada_half_tn_warpspecialized_candidate(&t)?;
+    let retained = compile_ada_half_tn_regpipe_vec2_candidate(&t)?;
+    gate_ada_half_tn_resources(&candidate, WeightDtype::F16)?;
+    gate_ada_half_tn_resources(&retained, WeightDtype::F16)?;
+    let _cohort = quiet.require_cohort("half-tn-regpipe-vec2-ws5/cohort")?;
+    screen_ada_half_tn_regpipe_vec2_sibling_cell(
+        &t,
+        &candidate,
+        &retained,
+        "d768_in_proj",
+        (2_048, 768, 3_072),
+        576,
+        WeightDtype::F16,
+    )?;
+    drop(t);
+    quiet
+        .verify_post_cohort("half-tn-regpipe-vec2-ws5/post")
         .map(|_| ())
 }
 
