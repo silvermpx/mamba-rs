@@ -1952,6 +1952,15 @@ loses AUTO by34.8-36.4% and stops without integration. Frozen evidence is in
 `internal/perf/ada-triad-f32-tn-splitm-copyplan-siblings-20260908/`; the next
 Prism mechanism, if revisited, is direct/tail-safe BK16 rather than CopyPlan.
 
+The next d768-in direct-TN candidate is also complete and stops. It is fully
+exact, uses one grid.z=2 direct-partial node plus the old reducer, and lowers
+kernel registers to107, but only ties retained eager and loses retained graph
+by0.67-0.72%; candidate/Fast remains2.58-2.61x. Preserve retained transpose+
+CopyPlan. Frozen evidence:
+`internal/perf/ada-triad-f32-tn-direct-copyplan-20260908/`. Next candidate is
+retained CopyPlan chunk0 plus a chunk1 body with the identical ordered FP64
+finalize, to remove partial1 traffic and the standalone reducer.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through

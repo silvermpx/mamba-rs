@@ -1,0 +1,15 @@
+{
+  "artifacts": {
+    "/root/evidence-ada-triad-f32-tn-direct-copyplan-20260908/attempt2/once7.log": "8f738a390f6803d5c0a614394ac46e74dc69c9632eb57ffd5ac87f79692610f3",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/gemm_bi_scalar_tn_direct_d768_in_discovery.rs": "09c6f5ce609194b0b32ecfe49fc3dd561afd22b0f256199d99db62c6828e258d",
+    "/root/mamba-ada-exact-toolkit-auto-20260907/tests/support/triad_f32_tn_direct_copyplan_source.rs": "8109bb4d248e356ddc981029b721083f732d3517ee2d2b164ce0a8210754f821",
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_scalar_tn_direct_d768_in_discovery-6082fea6c322ecf3": "0d022e4a82cbef51319b28e68dee8e743008da9ada28d4c05e8f991d3eb13e60"
+  },
+  "compute_capability": "8.9",
+  "cuda_feature": "13020",
+  "gpu_uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+  "schema": "MambaBiF32TnDirectEvidenceV1",
+  "sms": 142,
+  "toolkit": "13.2",
+  "utc": "2026-09-08T17:27:56Z"
+}
