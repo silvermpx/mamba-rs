@@ -36,6 +36,8 @@ mod triad_tf32_tn_small_regpipe_source;
 mod triad_tn_compact_source;
 #[path = "support/triad_tn_dense_source.rs"]
 mod triad_tn_dense_source;
+#[path = "support/triad_tn_direct_n96_source.rs"]
+mod triad_tn_direct_n96_source;
 #[path = "support/triad_tn_prepack_a_source.rs"]
 mod triad_tn_prepack_a_source;
 #[path = "support/triad_tn_single_barrier_source.rs"]
@@ -71,6 +73,7 @@ enum CandidateVariant {
     TnTransposeN96D768In,
     TnTransposeN96D768Out,
     TnTransposeN96Prism,
+    TnDirectN96D768In,
     TnSmallRegpipeD128In,
     TnSmallRegpipeD128Out,
 }
@@ -99,6 +102,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In => "tn_transpose_rna_n96_d768_in",
             Self::TnTransposeN96D768Out => "tn_transpose_rna_n96_d768_out",
             Self::TnTransposeN96Prism => "tn_transpose_rna_n96_prism",
+            Self::TnDirectN96D768In => "tn_direct_rna_n96_d768_in",
             Self::TnSmallRegpipeD128In => "tn_small_regpipe_d128_in",
             Self::TnSmallRegpipeD128Out => "tn_small_regpipe_d128_out",
         }
@@ -129,6 +133,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In
             | Self::TnTransposeN96D768Out
             | Self::TnTransposeN96Prism => triad_tn_transpose_n96_source::GEMM_SYMBOL,
+            Self::TnDirectN96D768In => triad_tn_direct_n96_source::GEMM_SYMBOL,
             Self::TnSmallRegpipeD128In | Self::TnSmallRegpipeD128Out => {
                 triad_tf32_tn_small_regpipe_source::SYMBOL
             }
@@ -154,6 +159,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In
             | Self::TnTransposeN96D768Out
             | Self::TnTransposeN96Prism => 86_016,
+            Self::TnDirectN96D768In => 86_016,
             Self::TnSmallRegpipeD128In | Self::TnSmallRegpipeD128Out => 32_768,
         }
     }
@@ -172,9 +178,10 @@ impl CandidateVariant {
 
     const fn target_dims(self) -> (usize, usize, usize) {
         match self {
-            Self::TnDenseS3D768In | Self::TnPrepackAD768In | Self::TnTransposeN96D768In => {
-                (2_048, 768, 3_072)
-            }
+            Self::TnDenseS3D768In
+            | Self::TnPrepackAD768In
+            | Self::TnTransposeN96D768In
+            | Self::TnDirectN96D768In => (2_048, 768, 3_072),
             Self::CompactEightWarpS2D768Out
             | Self::PaddedDenseD768Out
             | Self::TnDenseS3D768Out
@@ -226,6 +233,9 @@ impl CandidateVariant {
             | Self::TnTransposeN96Prism => {
                 Err("TN transpose N96 uses the Fixed N96 source composition path".into())
             }
+            Self::TnDirectN96D768In => {
+                Err("direct TN N96 uses the Fixed N96 source composition path".into())
+            }
             Self::TnSmallRegpipeD128In | Self::TnSmallRegpipeD128Out => {
                 triad_tf32_tn_small_regpipe_source::candidate_source(PRODUCTION_CUDA)
             }
@@ -246,6 +256,7 @@ impl CandidateVariant {
                 | Self::TnTransposeN96D768In
                 | Self::TnTransposeN96D768Out
                 | Self::TnTransposeN96Prism
+                | Self::TnDirectN96D768In
                 | Self::TnSmallRegpipeD128In
                 | Self::TnSmallRegpipeD128Out
         )
@@ -260,6 +271,14 @@ impl CandidateVariant {
             self,
             Self::TnTransposeN96D768In | Self::TnTransposeN96D768Out | Self::TnTransposeN96Prism
         )
+    }
+
+    const fn is_direct_n96(self) -> bool {
+        matches!(self, Self::TnDirectN96D768In)
+    }
+
+    const fn uses_n96_geometry(self) -> bool {
+        self.is_transpose_n96() || self.is_direct_n96()
     }
 
     const fn has_a_transform(self) -> bool {
@@ -281,6 +300,7 @@ impl CandidateVariant {
             || matches!(
                 self,
                 Self::TnSingleBarrierPrism
+                    | Self::TnDirectN96D768In
                     | Self::TnSmallRegpipeD128In
                     | Self::TnSmallRegpipeD128Out
             )
@@ -294,7 +314,7 @@ impl CandidateVariant {
     }
 
     const fn candidate_tile(self) -> (usize, usize) {
-        if self.is_transpose_n96() {
+        if self.uses_n96_geometry() {
             (128, 96)
         } else if self.is_small_tn_regpipe() {
             (16, 32)
@@ -321,6 +341,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In
             | Self::TnTransposeN96D768Out
             | Self::TnTransposeN96Prism => "MambaBiTf32TnTransposeN96DiscoveryScreenV1",
+            Self::TnDirectN96D768In => "MambaBiTf32TnDirectN96DiscoveryScreenV1",
             Self::TnSmallRegpipeD128In | Self::TnSmallRegpipeD128Out => {
                 "MambaBiTf32TnSmallRegpipeDiscoveryScreenV1"
             }
@@ -342,6 +363,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In
             | Self::TnTransposeN96D768Out
             | Self::TnTransposeN96Prism => "MambaBiTf32TnTransposeN96DiscoveryDecisionV1",
+            Self::TnDirectN96D768In => "MambaBiTf32TnDirectN96DiscoveryDecisionV1",
             Self::TnSmallRegpipeD128In | Self::TnSmallRegpipeD128Out => {
                 "MambaBiTf32TnSmallRegpipeDiscoveryDecisionV1"
             }
@@ -352,6 +374,8 @@ impl CandidateVariant {
     const fn tn_fast_screen_schema(self) -> &'static str {
         if self.is_small_tn_regpipe() {
             "MambaBiTf32TnSmallRegpipeFastScreenV1"
+        } else if self.is_direct_n96() {
+            "MambaBiTf32TnDirectN96FastScreenV1"
         } else {
             "MambaBiTf32TnSingleBarrierFastScreenV1"
         }
@@ -370,6 +394,7 @@ impl CandidateVariant {
             Self::TnTransposeN96D768In => "tf32-tn-transpose-rna-n96-d768-in/",
             Self::TnTransposeN96D768Out => "tf32-tn-transpose-rna-n96-d768-out/",
             Self::TnTransposeN96Prism => "tf32-tn-transpose-rna-n96-prism/",
+            Self::TnDirectN96D768In => "tf32-tn-direct-rna-n96-d768-in/",
             Self::TnSmallRegpipeD128In => "tf32-tn-small-regpipe-d128-in/",
             Self::TnSmallRegpipeD128Out => "tf32-tn-small-regpipe-d128-out/",
             _ => panic!("TN cohort requested for NT candidate"),
@@ -398,7 +423,8 @@ impl CandidateVariant {
             | Self::TnDenseS3D768Out
             | Self::TnPrepackAD768In
             | Self::TnTransposeN96D768In
-            | Self::TnTransposeN96D768Out => (
+            | Self::TnTransposeN96D768Out
+            | Self::TnDirectN96D768In => (
                 TN_AUTO_NARROW_SYMBOL,
                 ((dims.1.div_ceil(64) * dims.2.div_ceil(64)) as u32, 1, 1),
                 (128, 1, 1),
@@ -425,6 +451,14 @@ impl CandidateVariant {
 
     const fn threads(self) -> u32 {
         if self.is_small_tn_regpipe() { 128 } else { 256 }
+    }
+
+    const fn tn_tail_dims(self) -> (usize, usize, usize) {
+        if self.is_direct_n96() {
+            (129, 68, 36)
+        } else {
+            (129, 65, 36)
+        }
     }
 }
 
@@ -1881,6 +1915,32 @@ fn tn_small_regpipe_binds_two_d128_cells_and_incumbent_physical_identity() {
 }
 
 #[test]
+fn tn_direct_n96_binds_d768_in_without_an_a_transform() {
+    let variant = CandidateVariant::TnDirectN96D768In;
+    assert!(variant.is_tn());
+    assert!(variant.is_direct_n96());
+    assert!(!variant.has_a_transform());
+    assert!(variant.compares_fast_tn());
+    assert_eq!(variant.target_dims(), (2_048, 768, 3_072));
+    assert_eq!(variant.candidate_tile(), (128, 96));
+    assert_eq!(variant.grid_dim(), (192, 1, 1));
+    assert_eq!(variant.threads(), 256);
+    assert_eq!(variant.shared_bytes(), 86_016);
+    assert_eq!(variant.required_occupancy(), 1);
+    assert_eq!(variant.tn_tail_dims(), (129, 68, 36));
+    assert!(variant.tn_tail_dims().1.is_multiple_of(4));
+    assert_eq!(
+        CandidateVariant::TnSmallRegpipeD128In.tn_tail_dims(),
+        (129, 65, 36)
+    );
+    assert_eq!(variant.symbol(), triad_tn_direct_n96_source::GEMM_SYMBOL);
+    assert_eq!(
+        variant.tn_auto_identity(),
+        (TN_AUTO_NARROW_SYMBOL, (576, 1, 1), (128, 1, 1), 36_864)
+    );
+}
+
+#[test]
 fn tn_single_barrier_prism_binds_target_schedule_and_fast_comparator() {
     let variant = CandidateVariant::TnSingleBarrierPrism;
     assert_eq!(variant.name(), "tn_single_barrier_prism");
@@ -2470,7 +2530,7 @@ mod cuda_suite {
     }
 
     fn compose_source(variant: CandidateVariant) -> Result<String, String> {
-        if variant.is_transpose_n96() {
+        if variant.uses_n96_geometry() {
             let prelude = include_str!("../kernels/_typed_prelude.cuh");
             let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
                 .lines()
@@ -2478,9 +2538,14 @@ mod cuda_suite {
                 .collect::<Vec<_>>()
                 .join("\n");
             let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
-            let n96 = triad_tn_transpose_n96_source::candidate_source(include_str!(
+            let transpose_n96 = triad_tn_transpose_n96_source::candidate_source(include_str!(
                 "../kernels/gemm_bi_fixed/tf32_rna_n96.cu"
             ))?;
+            let n96 = if variant.is_direct_n96() {
+                triad_tn_direct_n96_source::candidate_source(&transpose_n96)?
+            } else {
+                transpose_n96
+            };
             return Ok([prelude, &common, tf32, &n96].join("\n"));
         }
         let transformed = variant.source()?;
@@ -2715,7 +2780,7 @@ mod cuda_suite {
             } else {
                 (dims.2, dims.2, dims.1)
             };
-            let (param_m, param_k, param_n) = if variant.is_transpose_n96() {
+            let (param_m, param_k, param_n) = if variant.uses_n96_geometry() {
                 (dims.1, dims.0, dims.2)
             } else {
                 dims
@@ -4008,9 +4073,10 @@ mod cuda_suite {
             .unwrap();
         let fast_golden = fast.as_mut().map(check_fast_tn_bits).transpose().unwrap();
 
+        let tail = variant.tn_tail_dims();
         for (dims, alpha, label) in [
-            (TAIL, 1.0, "TN tail alpha1"),
-            (TAIL, -0.75, "TN tail alpha-0.75"),
+            (tail, 1.0, "TN tail alpha1"),
+            (tail, -0.75, "TN tail alpha-0.75"),
         ] {
             let words = fixture_words(variant, dims).unwrap();
             let ctx = configure(&device).unwrap();
@@ -4032,7 +4098,7 @@ mod cuda_suite {
         }
 
         if variant.compares_fast_tn() {
-            let dims = TAIL;
+            let dims = tail;
             let words = exceptional_tn_words(variant, dims).unwrap();
             let ctx = configure(&device).unwrap();
             let request = request(variant, dims, false, 1.0);
@@ -4445,6 +4511,12 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; whole-pipeline TN raw-transpose RNA-N96 Prism discovery"]
     fn ada_tf32_tn_prism_transpose_rna_n96_discovery_once7() {
         run(CandidateVariant::TnTransposeN96Prism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; direct-TN RNA-N96 d768-in discovery"]
+    fn ada_tf32_tn_d768_in_direct_rna_n96_discovery_once7() {
+        run(CandidateVariant::TnDirectN96D768In);
     }
 
     #[test]

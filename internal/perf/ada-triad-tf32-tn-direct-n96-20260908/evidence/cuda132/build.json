@@ -1,0 +1,18 @@
+{
+  "args": [
+    "cargo",
+    "test",
+    "--release",
+    "--test",
+    "gemm_bi_tf32_nt_compact_xor",
+    "--features",
+    "cuda,cudarc/cuda-13020",
+    "--no-run"
+  ],
+  "exit": 0,
+  "sources": {
+    "tests/gemm_bi_tf32_nt_compact_xor.rs": "36126907bdb1a9cd98e9009bed0c7e7a2adec7a026be2b4b5e33b350db069251",
+    "tests/support/triad_tn_direct_n96_source.rs": "a153aeb2e00b6ec0ced05862639a964370ce30986012bc8086ddc56d57ca2be6",
+    "tests/support/triad_tn_transpose_n96_source.rs": "f969041b0b149dcfef4da65465df6ee47397299124c6658e56b4fa3a3a77773d"
+  }
+}

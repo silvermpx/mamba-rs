@@ -9,6 +9,13 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Direct TF32 TN N96 d768-in passed bits/resources but is NOT a Fast win:
+actualAUTO27% lower; graphFast35–37% slower. Not paired with retained
+transpose+N96, hence no new-best claim. Main36126907/helpera153aeb2;
+`perf/ada-triad-tf32-tn-direct-n96-20260908/report.md`. Stop unchanged probe.
+Next: A-only ldmatrix on retained compact TF32 NT and paired-F32 epilogue on
+half TN regpipe, plus one targeted regpipe NCU diagnostic. No full gates.
+
 Half TN Fixed-S3 d768-in is a valid loss for both half types:7–8% slower than
 current TC64,24–28% above Fast. Bits/resources PASS; keep compact/regpipe.
 Measured typed15cb1a3d/helper9147da28, raw2a3a19ee; root112brackets replayed.
