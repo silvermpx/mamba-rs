@@ -1,6 +1,10 @@
 pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_transpose_rna_n96_sm89_m128n96_bk32_s3";
 pub const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_test_transpose_raw_u32_32x32_v1";
 
+pub fn transpose_source() -> &'static str {
+    TRANSPOSE_CUDA
+}
+
 pub fn padded_stride(rows: usize) -> Result<usize, String> {
     rows.checked_add(3)
         .map(|value| value & !3)
@@ -264,6 +268,14 @@ mod tests {
         assert!(source.contains("unsigned* output"));
         assert!(source.contains("output_stride"));
         assert!(!source.contains("gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3"));
+    }
+
+    #[test]
+    fn raw_transpose_source_is_available_without_the_tf32_candidate() {
+        let source = transpose_source();
+        assert_eq!(source.matches(TRANSPOSE_SYMBOL).count(), 1);
+        assert!(source.contains("const unsigned* input, unsigned* output"));
+        assert!(source.contains("output_column < params.rows"));
     }
 
     #[test]

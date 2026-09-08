@@ -1945,6 +1945,13 @@ source-backed order is direct-TN staging, fused final chunk+FP64 finalize,
 GROUP_M=12, then a 64x32 tile; see
 `internal/perf/ada-triad-f32-tn-exact-research-20260908.md`.
 
+Those sibling screens are now complete. d768-out is a new retained-best:
+candidate/AUTO p50 `.88484-.90297`, worst p95 `.90506`, exact across all raw
+partials and final gates. It remains`2.71-2.77x` Fast. Prism is also exact but
+loses AUTO by34.8-36.4% and stops without integration. Frozen evidence is in
+`internal/perf/ada-triad-f32-tn-splitm-copyplan-siblings-20260908/`; the next
+Prism mechanism, if revisited, is direct/tail-safe BK16 rather than CopyPlan.
+
 ## Ada half-swizzle production force checkpoint (2026-09-06)
 
 The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
