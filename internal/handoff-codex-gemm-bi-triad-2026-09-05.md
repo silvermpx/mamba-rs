@@ -18,7 +18,12 @@ Half NT compact TWO cells and half TN compact SIX cells are valid Fast losses;
 TN d768-in is near parity but graph remains1–2% slower. TF32 TN Prism single
 barrier improves actualAUTO1.5–3.4% but remains1.86–2.32x Fast; STOP/no retry.
 Raw evidence and source hashes are in the corresponding short reports.
-Next discovery: loaded NT128 d768-out xhalf, aligned S3 F16 NN d768-in,
+Next measured checkpoint (0ccb source): aligned S3 F16 NN d768-in reduces
+forcedTC128 time32%, but remains2–4% aboveFast. Retain the current benefit,
+not a Fast-win count. Loaded NT128 d768-out xhalf is6% slower than TC64;
+STOP on this cell only, preserve other-device routes. See
+`perf/ada-triad-half-nt128-f16in-20260908/README.md`.
+Next discovery: compact halfTN M64N128/BK64/S2 (better A reuse, same K16 bits)
 and existing TF32 NN N96 on unmeasured large shapes. WHOLE-Triad shortlist
 before joint integration/full gates; do not trigger gates after a small batch.
 Fixed inference and SM120 routes remain untouched. Below is historical context.

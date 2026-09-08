@@ -16,7 +16,7 @@ This replaces the weaker N64 BF16 d768-in finalist: prefer S3, not a new
 N64 production holder. Together with the four previously retained aligned
 S3 d768-out/Prism cells, five half NN cells now have short-screen Fast wins.
 
-Exact test `cuda_suite::ada_half_nn_fixed_s3_aligned_bf16_d768_in_confirmation_once7`
+Exact test `ada_half_nn_fixed_s3_aligned_bf16_d768_in_confirmation_once7`
 PASS; 2 resources / 8 screens / 1 decision. Once7, ABBA/BAAB, eager/graph,
 20 GEMMs per observation. Root independently replayed all 56 brackets /
 224 observations and quantiles. No full gates or cross-toolkit admission.

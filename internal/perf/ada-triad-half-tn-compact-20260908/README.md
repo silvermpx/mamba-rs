@@ -18,7 +18,7 @@ alignment, eager/graph exact current bits and Fast own-bit checks pass.
 Attempt1 was a harness compile error (u32 occupancy compared with i32), not
 a kernel loss; no GPU run. Owner fixed the type only, with the already approved
 BF16 NN singleton sharing the final build. Preserve the failed build log.
-Exact `cuda_suite::ada_half_tn_tc64_bk64_s2_compact_three_cell_vs_current_and_fast_discovery_once7`
+Exact `ada_half_tn_tc64_bk64_s2_compact_three_cell_vs_current_and_fast_discovery_once7`
 PASS in attempt2: 6 resources / 48 bits / 24 screens / 6 decisions.
 Root replayed 168 brackets / 672 observations and all quantiles. No full gates.
 

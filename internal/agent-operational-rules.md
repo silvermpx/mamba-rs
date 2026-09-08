@@ -42,6 +42,10 @@
   Exact-test list gates must reject stale artifacts before GPU work. For a
   timestamp-only repair, preserve source hashes and rebuild the focused test;
   do not rerun valid preceding measurements or regenerate broad manifests.
+- Resolve exact test names from each binary's --list: typed parity names are
+  bare, while TF32 compact names are nested under cuda_suite::. Do not reuse
+  one harness's module prefix for another; a wrapper-only name repair does
+  not require rebuilding the unchanged binary.
 
 ## CUDA execution lanes
 

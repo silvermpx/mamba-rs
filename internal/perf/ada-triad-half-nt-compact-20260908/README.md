@@ -14,7 +14,7 @@ NCU motivated lower shared-memory occupancy cost, not a bank-conflict claim.
 Candidate shared 32768 bytes permits 3 CTA/SM; this alone does not beat Fast.
 256B-aligned guarded buffers, repeat eager/graph bits and Fast own bits pass.
 
-Exact `cuda_suite::ada_half_nt_d768_out_compact_bk64_s2_vs_current_and_fast_discovery_once7`
+Exact `ada_half_nt_d768_out_compact_bk64_s2_vs_current_and_fast_discovery_once7`
 PASS: 2 resources / 16 bits / 8 screens / 2 decisions. Root replayed all
 56 brackets / 224 observations and quantiles. No broad gates.
 Measured main `c2db48361dc8ee90d511bf7dff04e1d416f5b24ab9045b6ab1e40bb37f2e665e`
