@@ -1,0 +1,18 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-fa0042152294a197",
+    "cuda_suite::ada_tf32_nt_shared_stage_rna_d768_in_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "30da4df53e1addec5fc119eda86df41c6484b0b0a16d814d8c768cd7c2e9d071",
+  "cache_stable": true,
+  "candidate_composed_source_sha256": "4b081e0c512f3b58399e9f439a6f4f5a7458d0adf807025ad92b7fbd9d7a15ef",
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for(13.2,triad-nt-padded36-two-arm1)",
+  "exit": 0,
+  "main_source_sha256": "03e6aa2506d939fd6d548e50288107485bcacb9a33fa3bacde23a225c5d1459f",
+  "new_helper_source_sha256": "2fbf7d75e102553ebfc669ee3ea477bdaa89884174ebfef9a80dd96fa025f3a9",
+  "result": "pass_stop_no_retry",
+  "test_log_sha256": "450145bf064a6a15e9edaf66662b9d6e94c2a56f8fc337758c8cfdecf099f115"
+}

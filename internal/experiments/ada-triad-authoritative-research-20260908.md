@@ -62,7 +62,12 @@ SFS/TN_ROW standard(384,1928,4621), same explicit GPU and no-SplitK/SliceK/clust
 constraints. Only four legal CUTLASS configurations returned: three M128N64
 grids93 and one M64N64 grid186, against142 Ada SMs. The latter improves grid
 coverage but its predicted runtime is worse; this is a tradeoff to investigate,
-not proof of a win. Check existing evidence before testing that topology again.
+not proof of a win. Audit found stock TF32 TN M64N64/BK32/S2 was already forced
+on Prism in `internal/perf/gemm-bi-triad-sm89-candidate-prelocal-20260827/candidate-prelocal-{ab,ba}.jsonl`:
+grid186,343.2–344.0us versus wide S3's316.5–317.2us in that old cohort. These
+are independent measurements, not a modern paired comparison with retained N96.
+Still, stock M64 is not untested and is not a priority retry. The existing
+four-warp compact candidate is separately M128N64/grid93, not stock M64.
 
 Completed A-only ldmatrix screen: [TF32 NT report](../perf/ada-triad-tf32-nt-a-ldmatrix-20260908/report.md).
 ActualAUTO time falls11.3–11.4%, target/tail/exception/K0 bits pass, occupancy2.
@@ -96,6 +101,13 @@ the same local0/occupancy2 gate. NVIDIA's
 explains the register-budget effect and possible instruction/spill costs;
 this is a distinct compiler-scheduling hypothesis, not permission to weaken
 resource gates or run a blind register-count sweep.
+
+That refinement is now measured:125regs/local0/occupancy2 and focused GPU bits
+PASS, but35.4–35.5% slower than retained A-ldmatrix (~272vs201us), Fast2.27–2.32x.
+See [both attempts](../perf/ada-triad-tf32-nt-shared-rna-20260908/report.md).
+Stop the shared-stage RNA direction for this candidate; do not repeat/profile
+this decisive loss. Keep A-ldmatrix, and investigate distinct fragment-load
+instruction reduction on that retained body instead.
 
 If that fails, consider interleaving target-specific copy slices with K8 MMA
 issues using the existing Fixed-N96 schedule, while retaining compact32/S2

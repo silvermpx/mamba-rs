@@ -1,6 +1,8 @@
 pub const SYMBOL: &str = "gemm_bi_nt_test_shared_rna_sm80_mma_tf32_v1_m128n64_bk32_s2";
 
 const PARENT_SYMBOL: &str = "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
+#[cfg(test)]
+const RETAINED_SYMBOL: &str = "gemm_bi_nt_test_retained_sm80_mma_tf32_v1_m128n64_bk32_s2";
 pub const EXPECTED_PARENT_FNV64: u64 = 0x2ded_0f1a_133e_5949;
 
 const ASYNC_MAINLOOP_MARKER: &str = concat!(
@@ -214,6 +216,13 @@ fn candidate_source_with_digest(
         2,
         "shared-stage RNA target symbol and signature",
     )?;
+    replace_exact(
+        &mut source,
+        &format!("GEMM_BI_TF32_DEFINE_KERNEL({SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)"),
+        &format!("GEMM_BI_TF32_DEFINE_KERNEL({SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 2)"),
+        1,
+        "shared-stage RNA target launch bounds",
+    )?;
     Ok(source)
 }
 
@@ -249,7 +258,7 @@ mod tests {
 
     fn synthetic_parent() -> String {
         format!(
-            "prefix\n{ASYNC_MAINLOOP_MARKER} body {{\n{WAIT_AND_PUBLISH}\nif (thread_plan.compute) {{\n{COMPUTE_CALL}\n}}\n}}\n{KERNEL_MARKER} kernel body\nGEMM_BI_TF32_DEFINE_KERNEL({PARENT_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)\nTF32_ASSERT_KERNEL_SIGNATURE({PARENT_SYMBOL});\nscalar fallback gemm_bi_tf32_compute_stage<Op, BM, BN, Stages, MAtoms, NAtoms>(storage);\n"
+            "prefix\n{ASYNC_MAINLOOP_MARKER} body {{\n{WAIT_AND_PUBLISH}\nif (thread_plan.compute) {{\n{COMPUTE_CALL}\n}}\n}}\n{KERNEL_MARKER} kernel body\nGEMM_BI_TF32_DEFINE_KERNEL({PARENT_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)\nTF32_ASSERT_KERNEL_SIGNATURE({PARENT_SYMBOL});\nGEMM_BI_TF32_DEFINE_KERNEL({RETAINED_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)\nTF32_ASSERT_KERNEL_SIGNATURE({RETAINED_SYMBOL});\nscalar fallback gemm_bi_tf32_compute_stage<Op, BM, BN, Stages, MAtoms, NAtoms>(storage);\n"
         )
     }
 
@@ -340,6 +349,15 @@ mod tests {
         let candidate = candidate_source_with_digest(&parent, fnv1a64(parent.as_bytes())).unwrap();
         assert_eq!(candidate.matches(SYMBOL).count(), 2);
         assert!(!candidate.contains(PARENT_SYMBOL));
+        assert!(candidate.contains(&format!(
+            "GEMM_BI_TF32_DEFINE_KERNEL({SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 2)"
+        )));
+        assert!(!candidate.contains(&format!(
+            "GEMM_BI_TF32_DEFINE_KERNEL({SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)"
+        )));
+        assert!(candidate.contains(&format!(
+            "GEMM_BI_TF32_DEFINE_KERNEL({RETAINED_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)"
+        )));
         assert!(candidate.contains(": \"memory\");"));
         let wait = candidate.find("cp.async.wait_group %0;").unwrap();
         let conversion = candidate
@@ -363,6 +381,15 @@ mod tests {
             parent.replacen(WAIT_AND_PUBLISH, "changed wait", 1),
             parent.replacen(COMPUTE_CALL, "changed compute", 1),
             parent.replacen(PARENT_SYMBOL, "changed target", 1),
+            parent.replacen(
+                &format!(
+                    "GEMM_BI_TF32_DEFINE_KERNEL({PARENT_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 1)"
+                ),
+                &format!(
+                    "GEMM_BI_TF32_DEFINE_KERNEL({PARENT_SYMBOL}, SgbTf32Nt, 128, 64, 2, 256, 3)"
+                ),
+                1,
+            ),
         ] {
             assert!(candidate_source_with_digest(&changed, fnv1a64(changed.as_bytes())).is_err());
         }
