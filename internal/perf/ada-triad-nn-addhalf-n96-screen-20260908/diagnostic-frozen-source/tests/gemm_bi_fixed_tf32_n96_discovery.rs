@@ -7,9 +7,7 @@ use std::sync::Arc;
 use cudarc::driver::{
     CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg, sys,
 };
-use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
-};
+use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -268,18 +266,6 @@ impl GuardedF32 {
         })
     }
 
-    fn new_active_prefix(stream: &Arc<CudaStream>, active: Vec<f32>) -> Result<Self, String> {
-        let len = active.len();
-        let mut baseline = active;
-        baseline.extend(std::iter::repeat_n(f32::from_bits(GUARD_BITS), GUARD));
-        Ok(Self {
-            buffer: GpuBuffer::from_cpu(stream, &baseline)?,
-            baseline,
-            offset: 0,
-            len,
-        })
-    }
-
     fn ptr(&self, stream: &Arc<CudaStream>) -> u64 {
         self.buffer.raw_ptr_at(stream, self.offset)
     }
@@ -325,9 +311,6 @@ struct Fixture {
     candidate: GuardedF32,
     production: GuardedF32,
     fast: GuardedF32,
-    auto_a: Option<GuardedF32>,
-    auto_b: Option<GuardedF32>,
-    auto_output: Option<GuardedF32>,
 }
 
 impl Fixture {
@@ -356,9 +339,6 @@ impl Fixture {
                 &runtime.ctx.stream,
                 vec![f32::from_bits(POISON_BITS); output_len],
             )?,
-            auto_a: None,
-            auto_b: None,
-            auto_output: None,
         })
     }
 
@@ -1134,10 +1114,7 @@ mod triad_nn_add_half_screen {
         match arm {
             TriadArm::Candidate => &fixture.candidate,
             TriadArm::CurrentWide => &fixture.production,
-            TriadArm::ActualAuto => fixture
-                .auto_output
-                .as_ref()
-                .expect("Triad NN AUTO output fixture"),
+            TriadArm::ActualAuto => &fixture.fast,
         }
     }
 
@@ -1145,10 +1122,7 @@ mod triad_nn_add_half_screen {
         match arm {
             TriadArm::Candidate => &mut fixture.candidate,
             TriadArm::CurrentWide => &mut fixture.production,
-            TriadArm::ActualAuto => fixture
-                .auto_output
-                .as_mut()
-                .expect("Triad NN AUTO output fixture"),
+            TriadArm::ActualAuto => &mut fixture.fast,
         }
     }
 
@@ -1333,14 +1307,14 @@ mod triad_nn_add_half_screen {
 
     fn launch(
         runtime: &Runtime,
-        fixture: &mut Fixture,
+        fixture: &Fixture,
         case: Case,
         arm: TriadArm,
     ) -> Result<(), String> {
         configure(runtime, arm);
+        let operands = operands(runtime, fixture, case, arm);
         match arm {
             TriadArm::Candidate => {
-                let operands = operands(runtime, fixture, case, arm);
                 let params = N96Params {
                     alpha: 1.0,
                     beta: 0.0,
@@ -1365,31 +1339,20 @@ mod triad_nn_add_half_screen {
                     .map(|_| ())
                     .map_err(|error| format!("launch Triad NN N96: {error:?}"))
             }
-            TriadArm::CurrentWide => {
-                let operands = operands(runtime, fixture, case, arm);
-                fixed_forward_with_tile(
-                    &runtime.ctx,
-                    operands,
-                    case.shape,
-                    FixedTile::Tf32M128N128S3,
-                )
-            }
-            TriadArm::ActualAuto => {
-                let auto_a = fixture.auto_a.as_ref().expect("Triad NN AUTO A fixture");
-                let auto_b = fixture.auto_b.as_ref().expect("Triad NN AUTO B fixture");
-                let auto_output = fixture
-                    .auto_output
-                    .as_mut()
-                    .expect("Triad NN AUTO output fixture");
-                gpu_gemm_bi_forward_raw(
-                    &runtime.ctx,
-                    &mut auto_output.buffer,
-                    &auto_a.buffer,
-                    auto_b.buffer.cached_ptr(),
-                    None,
-                    (case.shape.m, case.shape.k, case.shape.n),
-                )
-            }
+            TriadArm::CurrentWide => fixed_forward_with_tile(
+                &runtime.ctx,
+                operands,
+                case.shape,
+                FixedTile::Tf32M128N128S3,
+            ),
+            TriadArm::ActualAuto => gpu_gemm_typed_forward_raw(
+                &runtime.ctx,
+                operands.c,
+                operands.x,
+                operands.w,
+                None,
+                (case.shape.m, case.shape.k, case.shape.n),
+            ),
         }
     }
 
@@ -1424,7 +1387,6 @@ mod triad_nn_add_half_screen {
             return Err(format!("{} retained poison", arm.name()));
         }
         fixture.validate_inputs(runtime)?;
-        validate_auto_inputs(runtime, fixture)?;
         Ok(result)
     }
 
@@ -1455,21 +1417,7 @@ mod triad_nn_add_half_screen {
             return Err(format!("{} graph retained poison", arm.name()));
         }
         fixture.validate_inputs(runtime)?;
-        validate_auto_inputs(runtime, fixture)?;
         Ok(result)
-    }
-
-    fn validate_auto_inputs(runtime: &Runtime, fixture: &Fixture) -> Result<(), String> {
-        fixture
-            .auto_a
-            .as_ref()
-            .expect("Triad NN AUTO A fixture")
-            .unchanged(&runtime.ctx.stream, "AUTO A")?;
-        fixture
-            .auto_b
-            .as_ref()
-            .expect("Triad NN AUTO B fixture")
-            .unchanged(&runtime.ctx.stream, "AUTO B")
     }
 
     fn fixture_with_values(
@@ -1479,12 +1427,6 @@ mod triad_nn_add_half_screen {
         b_values: Vec<f32>,
     ) -> Result<Fixture, String> {
         let output_len = case.shape.m * case.shape.n;
-        let auto_a = GuardedF32::new_active_prefix(&runtime.ctx.stream, a_values.clone())?;
-        let auto_b = GuardedF32::new_active_prefix(&runtime.ctx.stream, b_values.clone())?;
-        let auto_output = GuardedF32::new_active_prefix(
-            &runtime.ctx.stream,
-            vec![f32::from_bits(POISON_BITS); output_len],
-        )?;
         Ok(Fixture {
             a: GuardedF32::new(&runtime.ctx.stream, a_values)?,
             b: GuardedF32::new(&runtime.ctx.stream, b_values)?,
@@ -1501,9 +1443,6 @@ mod triad_nn_add_half_screen {
                 &runtime.ctx.stream,
                 vec![f32::from_bits(POISON_BITS); output_len],
             )?,
-            auto_a: Some(auto_a),
-            auto_b: Some(auto_b),
-            auto_output: Some(auto_output),
         })
     }
 

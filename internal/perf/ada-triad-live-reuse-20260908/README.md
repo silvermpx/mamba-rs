@@ -4,6 +4,17 @@ Discovery, not completed AUTO promotion or a full Triad matrix. Existing Fixed
 CUDA/module bytes and RTX5090 routes are unchanged. The next integration reuses
 the loaded Fixed holder with an honest Fixed physical artifact identity.
 
+Qualification caveat discovered during integration review: the original NN
+source191a keeps its physical-qualification holder alive while running the
+other timing arms on that context. This violates the holder's documented
+exclusive-use contract. The raw observations below are preserved, not silently
+rewritten, but they are provisional screening evidence, not final admission
+proof. The repaired wrapper527d1322 first performs isolated qualified checks,
+drops the holder, then captures and times the true public F32 AUTO entry point
+on separately owned, identically seeded buffers. Its graph is checked against
+the qualified symbol/config and exact pointer/scalar ABI. Native9 tests and
+independent source review pass; integrated GPU confirmation remains pending.
+
 ## F32 NN: actual loaded CopyPlan versus public AUTO and cuBLAS Fast
 
 Three exact shapes are `(M,K,N)`: d768-in `(2048,768,3072)`, d768-out

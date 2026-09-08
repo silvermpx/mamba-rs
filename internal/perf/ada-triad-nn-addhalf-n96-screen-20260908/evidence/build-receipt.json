@@ -1,0 +1,22 @@
+{
+  "pins": {
+    "tests/gemm_bi_fixed_tf32_n96_discovery.rs": "89947d8faa37581c09a43e47bcc68550f6ffa428b8d8f24542d34362c12ff185",
+    "tests/support/triad_nn_n96_source.rs": "bcb6dc35421c668e3acc895c505ee4e1f71d192eea02f09f40426b783c438732"
+  },
+  "args": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-13020",
+    "--test",
+    "gemm_bi_fixed_tf32_n96_discovery",
+    "--no-run"
+  ],
+  "exit": 101,
+  "elapsed_s": 0.357485294342041,
+  "matches": [],
+  "env": {
+    "MAMBA_TRIAD_NN_N96_DISCOVERY": "1"
+  }
+}

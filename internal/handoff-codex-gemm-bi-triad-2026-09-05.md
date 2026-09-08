@@ -9,6 +9,30 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-08, NEW N96 result (not a recap of CopyPlan/half wins): test-only
+TF32 Triad NN M128N96/BK32/S3 AddHalf candidate advances on Ada13.2 d768-out
+`(M,K,N)=(2048,1536,768)`. Candidate/truepublicAUTO p50 .814103-.819355,
+worstp95 .831169:18.1-18.6%less median time, about65us versus79-80us.
+Target candidate/currentwide/publicAUTO allbit-identical, mismatch0; tail,
+exception,K0-null eager2/graph2pass.124regs/local0/static0/dynamic86016/occ1.
+Main700f8ff8/helper1898941b, raw8e44c91e, binary89c5514a. NOT Fastwin orAUTOyet.
+Earlier apparent mismatch was a harness bug: typed-forward invoked F32 matvec,
+while separatelyqualifiedidentitydescribed trueTriadF32forward. Do NOTinfer
+RNAconversionisneeded; preserving existingAddHalf matched the correct AUTO.
+Evidence:`internal/perf/ada-triad-nn-addhalf-n96-screen-20260908/README.md`.
+User explicitly rejected oldwins presentedasnew; report only genuinelynew
+measurements asnew. Next N96 fullmantissa/once21/Fast/3CUDA confirmation.
+
+NN3+NT1 scalar CopyPlan dispatch integration source is independentlyreviewed,
+not yet GPUconfirmed. Fiveproductionfiles useFixedbackend22/private1, NNtag37,
+NTtag38; exact3CUDAcohorts, strict3NN+1NTcells, fallbackelsewhere. NTinnergrid768.
+Assembled dispatchb4f5d584, noFixedCUDA/SM120/global45change. Avicenna soleGPU.
+Original NN191a discovery holder remainedlive during other timingarms,
+violating its exclusive-use contract: preserve rawbut treatasprovisional.
+Rootrepaired NNwrapper527d1322 dropsholderafterisolatedchecks, then truepublic
+entry withownedbuffers anddriverABIgraphchecks; native9/reviewPASS.
+Newintegratedonce21actualAUTO/generic/Fast3CUDA isnext; NTowner addsseparateproof.
+
 Latest2026-09-08T00:49Z: actual loaded Fixed CopyPlan now beats actual public
 AUTO for all3 F32 NN shapes on CUDA12.8/13.0/13.2. It does NOT beat cuBLAS
 Fast (`CUBLAS_COMPUTE_32F_FAST_TF32`): median ratios remain about1.64–2.45x.

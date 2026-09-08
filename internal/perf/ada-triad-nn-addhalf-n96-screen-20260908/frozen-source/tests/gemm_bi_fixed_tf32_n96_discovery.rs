@@ -7,9 +7,7 @@ use std::sync::Arc;
 use cudarc::driver::{
     CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg, sys,
 };
-use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
-};
+use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -268,18 +266,6 @@ impl GuardedF32 {
         })
     }
 
-    fn new_active_prefix(stream: &Arc<CudaStream>, active: Vec<f32>) -> Result<Self, String> {
-        let len = active.len();
-        let mut baseline = active;
-        baseline.extend(std::iter::repeat_n(f32::from_bits(GUARD_BITS), GUARD));
-        Ok(Self {
-            buffer: GpuBuffer::from_cpu(stream, &baseline)?,
-            baseline,
-            offset: 0,
-            len,
-        })
-    }
-
     fn ptr(&self, stream: &Arc<CudaStream>) -> u64 {
         self.buffer.raw_ptr_at(stream, self.offset)
     }
@@ -325,9 +311,6 @@ struct Fixture {
     candidate: GuardedF32,
     production: GuardedF32,
     fast: GuardedF32,
-    auto_a: Option<GuardedF32>,
-    auto_b: Option<GuardedF32>,
-    auto_output: Option<GuardedF32>,
 }
 
 impl Fixture {
@@ -356,9 +339,6 @@ impl Fixture {
                 &runtime.ctx.stream,
                 vec![f32::from_bits(POISON_BITS); output_len],
             )?,
-            auto_a: None,
-            auto_b: None,
-            auto_output: None,
         })
     }
 
@@ -1075,11 +1055,6 @@ fn run_timing() -> Result<(), String> {
 
 mod triad_nn_add_half_screen {
     use super::*;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
-    };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
-    use triad_nn_n96_source::BracketOrder;
 
     const ENV: &str = "MAMBA_TRIAD_NN_N96_DISCOVERY";
     const CURRENT_WIDE_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
@@ -1134,10 +1109,7 @@ mod triad_nn_add_half_screen {
         match arm {
             TriadArm::Candidate => &fixture.candidate,
             TriadArm::CurrentWide => &fixture.production,
-            TriadArm::ActualAuto => fixture
-                .auto_output
-                .as_ref()
-                .expect("Triad NN AUTO output fixture"),
+            TriadArm::ActualAuto => &fixture.fast,
         }
     }
 
@@ -1145,10 +1117,7 @@ mod triad_nn_add_half_screen {
         match arm {
             TriadArm::Candidate => &mut fixture.candidate,
             TriadArm::CurrentWide => &mut fixture.production,
-            TriadArm::ActualAuto => fixture
-                .auto_output
-                .as_mut()
-                .expect("Triad NN AUTO output fixture"),
+            TriadArm::ActualAuto => &mut fixture.fast,
         }
     }
 
@@ -1333,14 +1302,14 @@ mod triad_nn_add_half_screen {
 
     fn launch(
         runtime: &Runtime,
-        fixture: &mut Fixture,
+        fixture: &Fixture,
         case: Case,
         arm: TriadArm,
     ) -> Result<(), String> {
         configure(runtime, arm);
+        let operands = operands(runtime, fixture, case, arm);
         match arm {
             TriadArm::Candidate => {
-                let operands = operands(runtime, fixture, case, arm);
                 let params = N96Params {
                     alpha: 1.0,
                     beta: 0.0,
@@ -1365,31 +1334,20 @@ mod triad_nn_add_half_screen {
                     .map(|_| ())
                     .map_err(|error| format!("launch Triad NN N96: {error:?}"))
             }
-            TriadArm::CurrentWide => {
-                let operands = operands(runtime, fixture, case, arm);
-                fixed_forward_with_tile(
-                    &runtime.ctx,
-                    operands,
-                    case.shape,
-                    FixedTile::Tf32M128N128S3,
-                )
-            }
-            TriadArm::ActualAuto => {
-                let auto_a = fixture.auto_a.as_ref().expect("Triad NN AUTO A fixture");
-                let auto_b = fixture.auto_b.as_ref().expect("Triad NN AUTO B fixture");
-                let auto_output = fixture
-                    .auto_output
-                    .as_mut()
-                    .expect("Triad NN AUTO output fixture");
-                gpu_gemm_bi_forward_raw(
-                    &runtime.ctx,
-                    &mut auto_output.buffer,
-                    &auto_a.buffer,
-                    auto_b.buffer.cached_ptr(),
-                    None,
-                    (case.shape.m, case.shape.k, case.shape.n),
-                )
-            }
+            TriadArm::CurrentWide => fixed_forward_with_tile(
+                &runtime.ctx,
+                operands,
+                case.shape,
+                FixedTile::Tf32M128N128S3,
+            ),
+            TriadArm::ActualAuto => gpu_gemm_typed_forward_raw(
+                &runtime.ctx,
+                operands.c,
+                operands.x,
+                operands.w,
+                None,
+                (case.shape.m, case.shape.k, case.shape.n),
+            ),
         }
     }
 
@@ -1424,7 +1382,6 @@ mod triad_nn_add_half_screen {
             return Err(format!("{} retained poison", arm.name()));
         }
         fixture.validate_inputs(runtime)?;
-        validate_auto_inputs(runtime, fixture)?;
         Ok(result)
     }
 
@@ -1455,21 +1412,7 @@ mod triad_nn_add_half_screen {
             return Err(format!("{} graph retained poison", arm.name()));
         }
         fixture.validate_inputs(runtime)?;
-        validate_auto_inputs(runtime, fixture)?;
         Ok(result)
-    }
-
-    fn validate_auto_inputs(runtime: &Runtime, fixture: &Fixture) -> Result<(), String> {
-        fixture
-            .auto_a
-            .as_ref()
-            .expect("Triad NN AUTO A fixture")
-            .unchanged(&runtime.ctx.stream, "AUTO A")?;
-        fixture
-            .auto_b
-            .as_ref()
-            .expect("Triad NN AUTO B fixture")
-            .unchanged(&runtime.ctx.stream, "AUTO B")
     }
 
     fn fixture_with_values(
@@ -1479,12 +1422,6 @@ mod triad_nn_add_half_screen {
         b_values: Vec<f32>,
     ) -> Result<Fixture, String> {
         let output_len = case.shape.m * case.shape.n;
-        let auto_a = GuardedF32::new_active_prefix(&runtime.ctx.stream, a_values.clone())?;
-        let auto_b = GuardedF32::new_active_prefix(&runtime.ctx.stream, b_values.clone())?;
-        let auto_output = GuardedF32::new_active_prefix(
-            &runtime.ctx.stream,
-            vec![f32::from_bits(POISON_BITS); output_len],
-        )?;
         Ok(Fixture {
             a: GuardedF32::new(&runtime.ctx.stream, a_values)?,
             b: GuardedF32::new(&runtime.ctx.stream, b_values)?,
@@ -1501,9 +1438,6 @@ mod triad_nn_add_half_screen {
                 &runtime.ctx.stream,
                 vec![f32::from_bits(POISON_BITS); output_len],
             )?,
-            auto_a: Some(auto_a),
-            auto_b: Some(auto_b),
-            auto_output: Some(auto_output),
         })
     }
 
@@ -1591,66 +1525,16 @@ mod triad_nn_add_half_screen {
         Ok(expected)
     }
 
-    fn words_sha(words: &[u32]) -> String {
-        let mut digest = Sha256::new();
-        for word in words {
-            digest.update(word.to_le_bytes());
-        }
-        format!("{:x}", digest.finalize())
-    }
-
-    fn report_pairwise_bits(label: &str, left: &[u32], right: &[u32]) {
-        let (mismatch_count, first_index) = triad_nn_n96_source::compare_bits(left, right);
-        let left_word = first_index
-            .and_then(|index| left.get(index))
-            .map_or_else(|| "missing".into(), |word| format!("0x{word:08x}"));
-        let right_word = first_index
-            .and_then(|index| right.get(index))
-            .map_or_else(|| "missing".into(), |word| format!("0x{word:08x}"));
-        println!(
-            "TRIAD_NN_N96_BITS pair={label} mismatch_count={mismatch_count} first_index={first_index:?} left_word={left_word} right_word={right_word} left_sha={} right_sha={}",
-            words_sha(left),
-            words_sha(right),
-        );
-    }
-
-    fn report_actual_auto_identity(runtime: &Runtime) -> Result<(), String> {
-        let request = PhysicalQualificationRequest::contiguous(
-            ResolvedGemmOp::Nn,
-            (TARGET.shape.m, TARGET.shape.k, TARGET.shape.n),
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
-        );
-        let qualified = qualify_physical_launch(&runtime.ctx, request)?;
-        let evidence = qualified.evidence();
-        println!(
-            "TRIAD_NN_N96_AUTO_IDENTITY symbol={:?} tile={:?} module={:?} execution_dtype={:?} launch_count={} eager_graph_equal={} route_identity={:?} nodes={:?}",
-            evidence.single_launch_symbol(),
-            evidence.single_launch_tile(),
-            evidence.uniform_module_kind(),
-            evidence.uniform_execution_dtype(),
-            evidence.launch_count(),
-            evidence.eager_graph_equal(),
-            evidence.route_identity(),
-            evidence.nodes(),
-        );
-        Ok(())
-    }
-
     fn prepare_target(
         runtime: &Runtime,
     ) -> Result<(Fixture, CudaGraph, CudaGraph, Vec<u32>), String> {
         let mut fixture = ordinary_fixture(runtime, TARGET)?;
-        let current = run_eager(runtime, &mut fixture, TARGET, TriadArm::CurrentWide)?;
-        let candidate = run_eager(runtime, &mut fixture, TARGET, TriadArm::Candidate)?;
-        let actual_auto = run_eager(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)?;
-        report_pairwise_bits("candidate/current", &candidate, &current);
-        report_pairwise_bits("candidate/actual_auto", &candidate, &actual_auto);
-        report_pairwise_bits("current/actual_auto", &current, &actual_auto);
-        report_actual_auto_identity(runtime)?;
-        if candidate != current || candidate != actual_auto {
+        let expected = run_eager(runtime, &mut fixture, TARGET, TriadArm::CurrentWide)?;
+        if run_eager(runtime, &mut fixture, TARGET, TriadArm::Candidate)? != expected
+            || run_eager(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)? != expected
+        {
             return Err("target candidate/current/AUTO bits differ".into());
         }
-        let expected = current;
         let candidate_graph = capture_arm(runtime, &mut fixture, TARGET, TriadArm::Candidate)?;
         let auto_graph = capture_arm(runtime, &mut fixture, TARGET, TriadArm::ActualAuto)?;
         assert_n96_graph(
@@ -1756,7 +1640,7 @@ mod triad_nn_add_half_screen {
         auto_graph: &CudaGraph,
         expected: &[u32],
         path: Path,
-        order: BracketOrder,
+        order: AdaBracketOrder,
     ) -> Result<[f64; 2], String> {
         for _ in 0..WARMUPS {
             measure_one(
@@ -1776,13 +1660,20 @@ mod triad_nn_add_half_screen {
                 expected,
             )?;
         }
-        let arms = order.candidate_slots().map(|candidate| {
-            if candidate {
-                (TriadArm::Candidate, candidate_graph)
-            } else {
-                (TriadArm::ActualAuto, auto_graph)
-            }
-        });
+        let arms = match order {
+            AdaBracketOrder::Abba => [
+                (TriadArm::ActualAuto, auto_graph),
+                (TriadArm::Candidate, candidate_graph),
+                (TriadArm::Candidate, candidate_graph),
+                (TriadArm::ActualAuto, auto_graph),
+            ],
+            AdaBracketOrder::Baab => [
+                (TriadArm::Candidate, candidate_graph),
+                (TriadArm::ActualAuto, auto_graph),
+                (TriadArm::ActualAuto, auto_graph),
+                (TriadArm::Candidate, candidate_graph),
+            ],
+        };
         let mut raw = Vec::with_capacity(WINDOWS);
         let mut ratios = Vec::with_capacity(WINDOWS);
         for _ in 0..WINDOWS {
@@ -1790,15 +1681,25 @@ mod triad_nn_add_half_screen {
             for (index, (arm, graph)) in arms.into_iter().enumerate() {
                 observation[index] = measure_one(runtime, fixture, arm, graph, path, expected)?;
             }
-            ratios.push(triad_nn_n96_source::candidate_over_auto_ratio(
-                order,
-                observation,
-            )?);
+            let (candidate, auto) = match order {
+                AdaBracketOrder::Abba => (
+                    0.5 * (observation[1] + observation[2]),
+                    0.5 * (observation[0] + observation[3]),
+                ),
+                AdaBracketOrder::Baab => (
+                    0.5 * (observation[0] + observation[3]),
+                    0.5 * (observation[1] + observation[2]),
+                ),
+            };
+            ratios.push(candidate / auto);
             raw.push(observation);
         }
         let p50 = percentile(&ratios, 0.5);
         let p95 = percentile(&ratios, 0.95);
-        let order_name = order.name();
+        let order_name = match order {
+            AdaBracketOrder::Abba => "ABBA",
+            AdaBracketOrder::Baab => "BAAB",
+        };
         println!(
             "{{\"schema\":\"MambaBiTriadNnN96ScreenV1\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"add_half_n96\",\"comparator\":\"actual_triad_auto\",\"candidate_symbol\":\"{}\",\"comparator_symbol\":\"{CURRENT_WIDE_SYMBOL}\",\"path\":\"{}\",\"order\":\"{order_name}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{WARMUPS},\"logical_gemms_per_observation\":1,\"raw_observations_us\":{},\"ratio_direction\":\"candidate_over_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
             triad_nn_n96_source::TRIAD_NN_N96_SYMBOL,
@@ -1827,7 +1728,7 @@ mod triad_nn_add_half_screen {
         let (mut fixture, candidate_graph, auto_graph, expected) = prepare_target(&runtime)?;
         let mut strata = Vec::with_capacity(4);
         for path in [Path::Eager, Path::Graph] {
-            for order in [BracketOrder::Abba, BracketOrder::Baab] {
+            for order in [AdaBracketOrder::Abba, AdaBracketOrder::Baab] {
                 strata.push(screen_stratum(
                     &runtime,
                     &mut fixture,

@@ -1,0 +1,17 @@
+
+running 1 test
+{"schema":"MambaBiTriadNnN96ResourceV1","symbol":"gemm_bi_nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3","threads":256,"registers":124,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":86016,"occupancy":1}
+{"schema":"MambaBiTriadNnN96IdentityV1","shape":[2048,1536,768],"cc":"8.9","sm_count":142,"nvrtc":[13,2],"conversion":"add_half_ulp_tf32_v1","candidate_symbol":"gemm_bi_nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3","current_symbol":"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3","candidate_source_sha":"cd71a8555424ecf457c67a4f293ae6da531008012b480791c401b9f23f05f87b","candidate_ptx_sha":"f1b5f7f8d66740888312e3c42710a852a3d56ebab4e9627dc0e37197efee9553","fixed_artifact_sha":"8b8b10c7145075d4f2f09eefd8e2090af0f67b4662b4e77d97b807d32e16ab07","triad_sm80_artifact_sha":"c5cbde99978b9656cfbd824d9d13b35c7573554f240ef5e38e8775d013704e0c"}
+{"schema":"MambaBiTriadNnN96BitsV1","case":"tail","shape":[129,36,100],"eager_repeats":2,"graph_repeats":2,"passed":true}
+{"schema":"MambaBiTriadNnN96BitsV1","case":"exceptional","shape":[129,36,100],"eager_repeats":2,"graph_repeats":2,"passed":true}
+{"schema":"MambaBiTriadNnN96BitsV1","case":"k0_null_ab","shape":[129,0,100],"eager_repeats":2,"graph_repeats":2,"passed":true}
+Error: "target candidate/current/AUTO bits differ"
+test triad_nn_add_half_screen::triad_nn_d768_out_add_half_n96_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    triad_nn_add_half_screen::triad_nn_d768_out_add_half_n96_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 6.94s
+

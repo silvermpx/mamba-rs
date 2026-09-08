@@ -1,0 +1,64 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_n96_discovery-77fa7e0a95565ad1",
+    "triad_nn_add_half_screen::triad_nn_d768_out_add_half_n96_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "build": {
+    "args": [
+      "cargo",
+      "test",
+      "--release",
+      "--features",
+      "cuda,cudarc/cuda-13020",
+      "--test",
+      "gemm_bi_fixed_tf32_n96_discovery",
+      "--no-run"
+    ],
+    "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_n96_discovery-77fa7e0a95565ad1",
+    "binary_sha256": "6088c9e74dc6763d3fbd29d023593b0f74b1a6cd7ec53e4004287209022d575d",
+    "elapsed_s": 1.3670706748962402,
+    "exit": 0,
+    "list_exit": 0,
+    "matches": [
+      "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_n96_discovery-77fa7e0a95565ad1"
+    ],
+    "pins": {
+      "tests/gemm_bi_fixed_tf32_n96_discovery.rs": "9768d244f42f01f712d799681fbffea852a0bc7e6a021b8e3d6cbdbf0ea3a320",
+      "tests/support/triad_nn_n96_source.rs": "0bbe5044d38dca6abdc4847c2bbb71fc23fbf988a7a6cf184e6e10121b41edcb"
+    },
+    "test_present": true
+  },
+  "cache_after": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_before": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_stable": true,
+  "counts": {
+    "auto_identity": 1,
+    "bits": 3,
+    "decision": 0,
+    "identity": 1,
+    "pair": 3,
+    "resource": 1,
+    "screen": 0
+  },
+  "drain_quiet": true,
+  "drain_utc": "2026-09-08T01:04:59Z",
+  "executed_exactly_one_test": true,
+  "exit": 101,
+  "pre_utc": "2026-09-08T01:04:49Z",
+  "release_quiet": false,
+  "release_utc": "2026-09-08T01:04:54Z",
+  "schema": "MambaBiTriadNnN96DiagnosticReceiptV1"
+}
