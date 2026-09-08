@@ -9,6 +9,11 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+TF32 TN small register pipeline d128-in/out: bits/resources PASS but neither
+passes all AUTO p95 strata and both lose Fast strongly in graph. Valid STOP,
+no repeat. Main88e238cf/helperbfc9052d, see
+`perf/ada-triad-tf32-tn-small-regpipe-20260908/report.md`.
+
 FOUR NEW FAST WINS: half NT Fixed-S3 B-XOR d768-in+Prism ×F16/BF16.
 Candidate/Fast p50: in F16 .880–.893, BF16 .896–.927; Prism F16 .500–.509,
 BF16 .778–.802. All four eager/graph strata and p95 pass,32 target bits pass.
