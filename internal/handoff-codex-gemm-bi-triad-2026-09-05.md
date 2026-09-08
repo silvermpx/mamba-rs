@@ -9,6 +9,15 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+NEW half NT d768-out Fixed-S3 B-XOR improves forcedTC64 by26% for F16/BF16,
+41–42us versus56–57us, all target bits/guards pass. Not a Fast win: F16 eager
+near parity but graph2% slower; BF16 remains3–6% slower. Keep both candidates.
+Measured typed c1fd1b86/helper2c416464, raw a5403469; root replay112brackets.
+See `perf/ada-triad-half-nt-fixed-s3-bxor-20260908/report.md`.
+Next: same NT source on unmeasured d768-in/Prism; TF32 TN transpose-to-N96;
+half TN compact register pipeline; TF32 TN small register pipeline. These
+remain test-only discovery. Do not repeat d768-out or run full gates now.
+
 New TF32 NN Prism N96 shortlist entry:1.5–1.7% lower actualAUTO time with
 strict target bits and all paired p95<.99. Near Fast parity, NOT Fast win;
 graph remains1.3–1.4% slower. N96 d768-in losesAUTO5.7–5.9% and is stopped.
