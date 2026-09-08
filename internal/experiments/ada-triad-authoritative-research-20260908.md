@@ -67,3 +67,8 @@ The new half-TN float2 epilogue screen reaches graph parity, not a strict win;
 its [report](../perf/ada-triad-half-tn-regpipe-vec2-20260908/report.md) and the
 [NCU diagnostic](../perf/ada-triad-half-tn-regpipe-20260908/ncu-diagnostic.md)
 separate measured outcomes from the hypotheses above.
+
+Completed first F32 reuse screen: [NT sibling report](../perf/ada-f32-nt-copyplan-siblings-20260908/report.md).
+Actual AUTO time falls56.7–56.8% on d768-in and12.8–13.0% on Prism, with target,
+tail, exceptional and K0 bits preserved. Fast gaps remain2.36x/3.92x. These
+measurements validate reuse for these cells, not a general performance guarantee.

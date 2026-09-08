@@ -1,0 +1,28 @@
+common::evidence::tests::append_open_does_not_block_or_accept_a_fifo: test
+common::evidence::tests::bad_parent_directory_is_an_error: test
+common::evidence::tests::concurrent_threads_append_complete_rows: test
+common::evidence::tests::device_targets_are_rejected: test
+common::evidence::tests::directory_targets_are_rejected: test
+common::evidence::tests::fifo_targets_are_rejected_without_opening: test
+common::evidence::tests::full_device_is_rejected: test
+common::evidence::tests::missing_and_empty_paths_are_inert: test
+common::evidence::tests::non_unicode_paths_are_preserved: test
+common::evidence::tests::opened_handle_must_be_regular: test
+common::evidence::tests::records_append_as_exact_tsv_rows: test
+common::evidence::tests::short_writes_are_errors_and_never_retried: test
+common::evidence::tests::socket_targets_are_rejected: test
+common::gpu_quiet::tests::compute_process_parser_fails_closed: test
+common::gpu_quiet::tests::formats_cuda_uuid_for_exact_nvml_selection: test
+common::gpu_quiet::tests::live_cuda_ordinal_and_nvml_uuid_are_identical: test
+common::gpu_quiet::tests::parses_one_exact_gpu_telemetry_row: test
+common::gpu_quiet::tests::quiet_sample_rejects_utilization_memory_and_competing_processes: test
+cuda_suite::ada_f32_nt_copyplan_in_prism_discovery_once7: test
+full_mantissa::tests::corpus_is_repeatable_prefix_stable_and_seed_sensitive: test
+full_mantissa::tests::edge_prefix_preserves_signed_zero_subnormals_and_tf32_ties: test
+full_mantissa::tests::finite_random_tail_exercises_all_low_tf32_rounding_bits: test
+full_mantissa::tests::seeded_tail_retains_frozen_w4_generator_bits: test
+nt_siblings_map_to_exact_nn_copyplan_abi: test
+paired_ratio_and_nearest_rank_are_not_order_ambiguous: test
+transpose_mapping_preserves_each_original_nt_dot_product: test
+
+26 tests, 0 benchmarks

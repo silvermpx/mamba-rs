@@ -1,0 +1,29 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_scalar_nt_copyplan_siblings_discovery-d283d3917b8450ec",
+    "cuda_suite::ada_f32_nt_copyplan_in_prism_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "ec76a1d7cc30a8a8a49b6cbb5bb64a4e200c9e7e65fd4f4dd02284d62493ab3a",
+  "cache_stable": true,
+  "counts": {
+    "MambaBiNtCopyPlanSiblingsArtifactsV1": 1,
+    "MambaBiNtCopyPlanSiblingsBitsV1": 56,
+    "MambaBiNtCopyPlanSiblingsCompilerV1": 2,
+    "MambaBiNtCopyPlanSiblingsDecisionV1": 4,
+    "MambaBiNtCopyPlanSiblingsGraphV1": 14,
+    "MambaBiNtCopyPlanSiblingsResourceV1": 2,
+    "MambaBiNtCopyPlanSiblingsScreenV1": 16
+  },
+  "drain": "2026-09-08T13:07:22Z",
+  "elapsed_s": 38.01667666435242,
+  "executed_exactly_one": true,
+  "exit": 0,
+  "pre": "2026-09-08T13:06:44Z",
+  "release": "2026-09-08T13:07:17Z",
+  "source_sha256": "589aff760bf672f72f8d35b2aa8c0df60c725ca74569fc17308a7c8d8d99cbd1",
+  "started_utc": "2026-09-08T13:06:44Z",
+  "test_log_sha256": "287d58db6323f9f7d5ec345ee83441d1bbb5dfbb9fb6700d5608f6c2f48c72ca"
+}
