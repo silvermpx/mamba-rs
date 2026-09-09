@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 exact-F32 TN rolled dual-chunk compile stop: rolling the two
+1024-row chains through one mainloop cuts raw/fused SASS text to53.7/54.7% and
+static FFMA sites to50% of the unrolled dual-chunk retained-best. Both rolled
+kernels nevertheless compile at168regs/shared32768 with16B stack,16/16B spill
+stores/loads and LDL/STL. One bounded lifetime cleanup is SASS-identical. The
+hard local0 gate therefore stopped before GPU/timing/exact/Fast. Keep the
+unrolled two-node retained-best and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-f32-tn-rolled-dual-chunk-20260909/report.md`.
+
 NEW 2026-09-09 TF32 NT d768-out retained-best: the test-only stage-sliced
 A-ldmatrix candidate interleaves four bounded next-stage copy slices before
 ascending K8 MMA issues. Exact target/aligned+misaligned-tail/exception/K0,
