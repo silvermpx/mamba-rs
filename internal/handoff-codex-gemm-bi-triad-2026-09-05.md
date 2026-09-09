@@ -2351,3 +2351,14 @@ reproduced main summaries. Immediate pre/post GPU snapshots were idle with
 no compute apps;1800MHz SM clocks,post-run temperatures up to77C are preserved.
 No competing workload was stopped. Continue direct pairing then actualAUTO
 promotion and101 confirmation on allthree toolkits before mixed/remaining gaps.
+
+## Ada Triad BF16 NT M64N192/S3 stop (2026-09-09)
+
+The direct BF16 sibling of the F16 M64N192/BK64/S3 candidate is exact on target,
+tails, exceptional values, K0, eager/graph repeats and guards. It compiles with
+127 registers, local0, 98,304 bytes dynamic shared and occupancy1. Against the
+retained BF16 M64N128/S3 body it improves eager by1.23–1.44%, but graph p50/p95
+ratios are only `0.99007/0.99072` and `0.99007/0.99007`. The strict all-strata
+`<0.99` admission therefore fails; once7 and Fast were not run. Preserve the
+retained M64N128 route and do not retry this unchanged adapter. Frozen evidence:
+`internal/perf/ada-triad-bf16-nt-m64n192-s3-20260909/`.
