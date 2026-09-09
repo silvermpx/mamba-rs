@@ -65,6 +65,25 @@ the once7-only minimum; the earlier minimum included once3.
 - [CUDA13.2](evidence/exact-nt-prequal-f04584c8-cuda132.log), SHA-256
   `0ee5b5dd3014809d1bdbb384214263b95f523f6196451fe3f837b7ba30541e62`
 
+### Independent receipt correction
+
+A post-admission receipt audit found that the initial `fadf5250` CUDA12.8 and
+CUDA13.0 composed rows copied the Fixed `header_manifest_digest` into the
+`TriadScalar` half of the identity. The actual live scalar headers are distinct:
+CUDA12.8 begins `[44,148,40,137,...]` and CUDA13.0 begins
+`[76,60,172,174,...]`; the corresponding Fixed headers begin
+`[241,78,18,144,...]` and `[218,132,133,168,...]`. CUDA13.2 was already
+correct. Only those two scalar header literals require correction; the raw
+receipts confirm every other scalar and Fixed cohort field.
+
+The native
+`admitted_composed_cohorts_match_independent_live_identity_receipts`
+regression now parses the three tracked pre-admission `IdentityV1` records and
+compares `nvrtc_version`, compile key, artifact/source/header digests and NVRTC
+library domain independently for both modules against the dispatch constants.
+An in-memory mutation reproduces both historical wrong-module headers and must
+be rejected specifically at `scalar.header_manifest_digest`.
+
 The ignored historical
 `ada_f32_nt_copyplan_siblings_pre_admission_qualification` remains as the
 reproducible evidence entry, but now fails immediately with a clear instruction
@@ -108,7 +127,43 @@ from the pre-admission table and must not be described as another improvement
 over the previous AUTO. Fast has a distinct numerical contract.
 
 [Raw CUDA13.2 receipt](evidence/exact-nt-admitted-fadf5250-cuda132.log).
-CUDA12.8/13.0 actual-AUTO follow-ups remain pending at this checkpoint.
+CUDA12.8/13.0 follow-ups were still pending at that checkpoint; the corrected
+results below complete them.
+
+### CUDA12.8 / CUDA13.0 corrected actual AUTO results
+
+The first CUDA13.0 post-admission run at `fadf5250` rejected the physical AUTO
+identity because the wrong Scalar header prevented admission. Preserve this
+as a selector failure, not a candidate numerical or performance failure:
+[failed receipt](evidence/exact-nt-admitted-fadf5250-cuda130-failed.log), SHA-256
+`3f5814aa31589858fe7b89136129e14a72c1a75c9eb4f6dba92ad6d01b126540`.
+
+Both CUDA12.8 and CUDA13.0 passed after correcting only the two Scalar header
+literals. The immutable source is Git tree
+`29dc3e5a821d770bf53e6652922d003078bbd9b7` (parent commit `36d81318` plus
+those two corrections), archived to `/root/mamba-exact-nt-headers.QhhWHT`.
+Each run used its explicit toolkit/Driver ABI, disabled kernel caches, and
+passed five idle GPU/VRAM samples before execution. Each test reported
+1 passed, 0 failed, including physical AUTO eager/prepared identity, graph
+structure, exact bits, edge cases, immutability and red zones.
+
+| CUDA | Cell | AUTO / forced generic exact p50 | Worst p95 | AUTO / Fast p50 |
+| --- | --- | --- | --- | --- |
+| 12.8 | d768-in | `.33764–.33855` | `.33878` | `2.36921–2.37263` |
+| 12.8 | Prism | `.57188–.57348` | `.57385` | `3.89584–3.91013` |
+| 13.0 | d768-in | `.33703–.33798` | `.33821` | `2.36564–2.36914` |
+| 13.0 | Prism | `.57135–.57276` | `.57321` | `3.89140–3.90522` |
+
+Root independently reconstructed all 16 strata, 336 brackets and 1,344
+observations per toolkit, reproduced every p50/p95 within `1e-12`, and
+confirmed all exact-generic admission ratios below `.99`. As above, Prism's
+forced generic denominator is not its old slim AUTO. These are successful
+multi-toolkit dispatch checks, not additional discoveries or Fast wins.
+
+- [CUDA12.8 raw receipt](evidence/exact-nt-headers-29dc3e5a-cuda128.log), SHA-256
+  `2a21a972dd892db99df4d95e5a2b287e3368922faad49cdd190a1731e001e436`
+- [CUDA13.0 raw receipt](evidence/exact-nt-headers-29dc3e5a-cuda130.log), SHA-256
+  `11129e7596c9b40d64f20c37ed591bac119056f3a5ffbd72ea2289063e31d435`
 
 ## TDD and host verification
 
