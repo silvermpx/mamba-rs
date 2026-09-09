@@ -38,6 +38,8 @@ mod common;
 mod triad_half_nn_m128n64_source;
 #[path = "support/triad_half_nn_n64_source.rs"]
 mod triad_half_nn_n64_source;
+#[path = "support/triad_half_remaining_qualification.rs"]
+mod triad_half_remaining_qualification;
 #[path = "support/triad_half_nt_compact_source.rs"]
 mod triad_half_nt_compact_source;
 #[path = "support/triad_half_nt_direct_epilogue_source.rs"]

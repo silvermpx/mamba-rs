@@ -44,22 +44,31 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 - [ ] Exact-F32 TN d128-in/out module, routes and focused qualification.
 - [x] Four-cell TF32 joint source frozen (`560169d5`).
 - [x] TF32 joint standalone composer, two frozen primitives and four typed
-  specs; 26 native source-contract checks pass. CUDA compilation is pending.
+  specs; 26 native source-contract checks pass at that historical checkpoint.
 - [x] Retained-winner audit recovers TF32 NN d768-out baseline N96, missing
   from the four-cell plan; joint source now has five exports. Add the required
   frozen alignment helper. All five-body/source contracts pass 28/28.
 - [ ] TF32 joint module, NN/TN routes, transform/scratch ownership and admission.
   Module-only wiring now compiles on Ada/CUDA13.2 and passes seven focused
-  composition, ABI/resource-validator and artifact-identity tests. Live module
-  loading and the five-cell launch/selector layer remain pending.
+  composition, ABI/resource-validator and artifact-identity tests. The five-cell
+  launch/selector layer remains pending.
 - [x] TF32 joint module live CUDA13.2 loading/ABI/resources: all five symbols
   bound with local0 and no exclusions; 1/1 module test passes. Five-cell
   selector/launch integration and the combined admission batch remain open.
 - [ ] Remaining half improvements beyond the eleven Fast-winning cells:
-  F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells. Establish
-  the missing actual-AUTO comparisons before selecting the final cell map.
+  integrate F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells.
+- [x] Missing half actual-AUTO comparison: seven rows pass CUDA13.2 eager/graph
+  exact oracles, physical manifests, guards and paired once7 p50/p95 gates.
+  Both d768-in tournaments retain vec2; compact remains selected for F16 out
+  and both Prism rows. New TN production exports/admission remain pending.
 - [ ] Reconcile every retained-winner report with production dispatch and the
   qualification harness. No candidate disappears because it loses to Fast.
+- [x] Independent retained-winner census finds no further omitted Triad winner
+  beyond the explicit large-TN, d128, five-cell TF32 and seven-cell half sets.
+  The existing TF32 NT finalist already selects its stage-sliced body for
+  d768-out/large-deep and its A-only-ldmatrix body for d768-in/Prism. The
+  separate inference F16 NN d768-in N96/S3 experiment lacks an actual-AUTO
+  comparison; keep it labelled as unqualified, not a missing Triad admission.
 - [ ] Preserve or justify every route from the saved RTX 5090 inference and
   Triad snapshots; investigate any newly observed route or speed regression.
 

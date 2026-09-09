@@ -1,0 +1,15 @@
+
+running 1 test
+test triad_half_remaining_qualification::ada_half_remaining_seven_cells_vs_actual_auto_and_fast_once7 ... GPU quiet gate half-remaining-actual-auto/pre-context: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+GPU quiet gate half-remaining-actual-auto/cohort: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=534MiB sm_clock=1800MHz temperature=40C pstate=P2; quiet_samples=5
+{"schema":"MambaBiHalfTnTc64Bk64S2RegpipeVec2ResourceV1","candidate":"tc64_bk64_s2_regpipe_vec2_epilogue","dtype":"F16","symbol":"gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_f16","source_sha256":"5c5f4b289698a88b7f3c6d4e460ea5182cc0ccbb17417d6651eed7ff7f95475a","threads":128,"registers":125,"register_cap":168,"local_bytes":0,"static_shared_bytes":32768,"dynamic_shared_bytes":0,"max_threads":128,"occupancy":3,"required_occupancy":3}
+Error: "d768_in_proj F16 actual AUTO must record exactly one GEMM route, observed 0"
+FAILED
+
+failures:
+
+failures:
+    triad_half_remaining_qualification::ada_half_remaining_seven_cells_vs_actual_auto_and_fast_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 8.06s
+
