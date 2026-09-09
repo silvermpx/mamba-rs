@@ -29,10 +29,13 @@ the prior M64N64/BK64/S2 regpipe+float2 kernel and do not retry this unchanged
 issue order. Evidence:
 `internal/perf/ada-triad-half-tn-regpipe-vec2-issue-20260909/report.md`.
 
-NEW 2026-09-09 actual-Triad TF32 NT Prism retained-best: the test-only
-stage-sliced A-ldmatrix candidate passes target/M/N/K-tail/exception/K0,
+CORRECTION 2026-09-09: the frozen harness/raw schema says `Prism`, but the
+measured `(4096,3072,1536)` workload is project cell `large_deep`; canonical
+`prism_in_proj` is `(4621,384,1928)`. The raw receipt remains byte-identical.
+The actual-Triad TF32 NT `large_deep` retained-best is the test-only
+stage-sliced A-ldmatrix candidate. It passes target/M/N/K-tail/exception/K0,
 eager/graph/guard exactness and resource gates; candidate and frozen A-only
-Prism comparator both use98regs/shared49152/occupancy2. It wins every paired
+`large_deep` comparator both use98regs/shared49152/occupancy2. It wins every paired
 once7 retained stratum by1.85–2.19% (p50 `0.97807-0.97882`, worst p95
 `.981452`). cuBLAS Fast remains about1.56x faster, so retain for joint
 integration but do not claim a Fast win or production promotion. Evidence:

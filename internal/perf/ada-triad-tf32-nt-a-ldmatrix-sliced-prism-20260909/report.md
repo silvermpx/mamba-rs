@@ -1,16 +1,22 @@
-# Ada Triad TF32 NT Prism stage-sliced A-ldmatrix — 2026-09-09
+# Ada Triad TF32 NT large_deep stage-sliced A-ldmatrix — 2026-09-09
 
-Outcome: **new test-only retained-best for Prism, not a cuBLAS Fast win.**
+Outcome: **new test-only retained-best for `large_deep`, not a cuBLAS Fast win.**
 The actual training-Triad candidate applies the already frozen four-slice
-A-ldmatrix schedule to Prism `(M,K,N)=(4096,3072,1536)`. It preserves the
+A-ldmatrix schedule to `large_deep` `(M,K,N)=(4096,3072,1536)`. It preserves the
 compact A-x4 ldmatrix parent, S2 staging, RNA conversion, ordered MMA and
 epilogue while interleaving bounded next-stage copy slices before the ascending
 K8 MMA issues.
 
+The frozen harness path and raw JSON schema call this cell `Prism`. That was a
+labeling error only: the project workload table names `(4096,3072,1536)`
+`large_deep`; canonical `prism_in_proj` is `(4621,384,1928)`. The raw receipt is
+left byte-for-byte unchanged so its recorded SHA256 remains valid.
+
 ## Gates and identity
 
 - CUDA 13.2 / SM89 NVIDIA RTX 6000 Ada Generation; grid 1,536, block 256.
-- Candidate and frozen Prism A-only ldmatrix comparator both pass resources:
+- Candidate and frozen `large_deep` A-only ldmatrix comparator both pass
+  resources:
   98 registers, local/static 0, dynamic shared 49,152 bytes and occupancy 2.
 - Exact PASS: target, separate M/N/K tails, exceptional input and K=0;
   eager/graph repeats, 20-operation checks and guards pass.
@@ -37,11 +43,11 @@ Ratios are candidate/comparator; strict admission requires both p50 and p95
 | graph ABBA | 0.978471 | 0.981452 | 1.560726 | 1.562250 |
 | graph BAAB | 0.978268 | 0.979108 | 1.561354 | 1.562782 |
 
-The candidate beats the frozen Prism A-only ldmatrix comparator by about
+The candidate beats the frozen `large_deep` A-only ldmatrix comparator by about
 1.85–2.19% across the paired p50/p95 results and passes the retained gate in
 every stratum. Native cuBLAS Fast remains about 1.56x faster, so retain this as
-the new test-only Prism leader for joint integration but do not claim a Fast
-win or production promotion.
+the new test-only `large_deep` leader for joint integration but do not claim a
+Fast win or production promotion.
 
 ## Frozen evidence
 
