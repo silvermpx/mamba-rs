@@ -4,9 +4,28 @@ mod bxor;
 mod m96;
 
 const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89_half.cu");
+const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_fixed/common.cuh");
 const LAYOUT: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh");
 const SWIZZLE: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
 const S3: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+
+#[test]
+fn standalone_source_defines_each_fixed_common_half_helper_once() {
+    for definition in [
+        "static __device__ __forceinline__ bool gbf_aligned16(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;\n}",
+        "static __device__ __forceinline__ bool gbf_aligned4(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 3ull) == 0ull;\n}",
+        "static __device__ __forceinline__ void gbf_store_pair_rne(\n    __nv_bfloat16* dst, float v0, float v1) {\n    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);\n}",
+        "static __device__ __forceinline__ void gbf_store_pair_rne(\n    __half* dst, float v0, float v1) {\n    *reinterpret_cast<__half2*>(dst) = __floats2half2_rn(v0, v1);\n}",
+        "static __device__ __forceinline__ void gbf_store_pair_rne(\n    float* dst, float v0, float v1) {\n    if ((reinterpret_cast<unsigned long long>(dst) & 7ull) == 0ull) {\n        *reinterpret_cast<float2*>(dst) = make_float2(v0, v1);\n    } else {\n        dst[0] = v0;\n        dst[1] = v1;\n    }\n}",
+    ] {
+        assert_eq!(FIXED_COMMON.matches(definition).count(), 1);
+        assert_eq!(
+            PRODUCTION.matches(definition).count(),
+            1,
+            "standalone TriadSm89Half source must define {definition:?} exactly once",
+        );
+    }
+}
 
 fn callable_exports(source: &str) -> std::collections::BTreeSet<String> {
     let mut exports = std::collections::BTreeSet::new();

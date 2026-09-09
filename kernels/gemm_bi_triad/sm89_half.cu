@@ -53,6 +53,30 @@ __device__ __forceinline__ float2 pair_to_f2(const __half* p) {
 
 #endif  // _MAMBA_TYPED_PRELUDE_CUH
 
+static __device__ __forceinline__ bool gbf_aligned16(const void* p) {
+    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;
+}
+static __device__ __forceinline__ bool gbf_aligned4(const void* p) {
+    return (reinterpret_cast<unsigned long long>(p) & 3ull) == 0ull;
+}
+static __device__ __forceinline__ void gbf_store_pair_rne(
+    __nv_bfloat16* dst, float v0, float v1) {
+    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
+}
+static __device__ __forceinline__ void gbf_store_pair_rne(
+    __half* dst, float v0, float v1) {
+    *reinterpret_cast<__half2*>(dst) = __floats2half2_rn(v0, v1);
+}
+static __device__ __forceinline__ void gbf_store_pair_rne(
+    float* dst, float v0, float v1) {
+    if ((reinterpret_cast<unsigned long long>(dst) & 7ull) == 0ull) {
+        *reinterpret_cast<float2*>(dst) = make_float2(v0, v1);
+    } else {
+        dst[0] = v0;
+        dst[1] = v1;
+    }
+}
+
 // Production Fixed SM89 homogeneous-half packed/XOR staging twin.
 // Only staging addresses change; exact ascending k16 chain, copy issue
 // schedule, bias seed, alpha/beta, conversion and 136-float output stride stay.
