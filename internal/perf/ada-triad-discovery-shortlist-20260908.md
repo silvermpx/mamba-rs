@@ -79,6 +79,14 @@ twin retains an8-byte stack frame after one bounded scalarization fix. Evidence:
 [one-wave atlas](ada-triad-bf16-tn-one-wave-atlas-20260909/report.md),
 [M128N64 dual-fused](ada-triad-f32-tn-m128n64-bk16-dual-fused-20260909/report.md).
 
+Two final reuse/transpose checks also stop at once3. The canonical-Prism TF32
+TN M64N64 wave winner does not transfer to d768-out: despite 83regs and
+occupancy2, it loses the retained N96 route 27.9–29.3%. The exact-F32 TN
+32x8/256-thread transpose is bit-exact and resource-clean at 24regs/occupancy6,
+but improves the retained 32x16 pipeline only 0.10–0.15% at p50 and misses the
+strict 1% gate in every stratum. Evidence: [TF32 d768-out reuse](ada-triad-tf32-tn-transpose-rna-m64n64-d768-out-20260909/report.md) and
+[exact-F32 32x8 transpose](ada-triad-f32-tn-transpose-32x8-d768-in-20260909/report.md).
+
 ## Integration and cleanup boundary
 
 - Selected half NN uses the existing Fixed S3 holder; NT B-XOR and new TN

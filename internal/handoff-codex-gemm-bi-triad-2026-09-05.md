@@ -2480,3 +2480,55 @@ CTAs and models25% less staging, but its raw verification twin retains an8-byte
 stack frame after the one approved static-unroll fix, so it also stops before
 exact/timing. Evidence: `internal/perf/ada-triad-bf16-tn-one-wave-atlas-20260909/`
 and `internal/perf/ada-triad-f32-tn-m128n64-bk16-dual-fused-20260909/`.
+
+Two additional frozen candidates stop without promotion. Reusing the
+canonical-Prism TF32 TN M64N64/BK32/S3 A-only RNA winner on d768-out is exact
+and resource-valid at83regs/local0/49,152B/occupancy2, but loses the retained
+N96 route27.9–29.3% in all once3 strata. Separately, replacing only the
+exact-F32 TN d768-in transpose with the canonical padded32x8/256-thread body
+passes all exact/resource gates at24regs/local0/4,224B/occupancy6, but gains
+only0.10–0.15% p50 and misses the strict1% retained gate. Both stop before
+once7/vendor timing; production remains unchanged. Evidence:
+`internal/perf/ada-triad-tf32-tn-transpose-rna-m64n64-d768-out-20260909/` and
+`internal/perf/ada-triad-f32-tn-transpose-32x8-d768-in-20260909/`.
+
+## Owner-requested v0.7.0 pre-release finalization contract
+
+Defer this phase until the current kernel discovery is frozen and the selected
+Ada/SM89 plus RTX5090/SM120 routes have been assembled and qualified through
+production AUTO. Do not publish a release without the owner's separate explicit
+approval.
+
+Required execution order is: finish the remaining kernel candidates; assemble
+production AUTO; finalize and verify the public API; refresh documentation and
+benchmarks; audit/move/delete test artifacts; run the complete release gate;
+then merge the verified branch into `main`. The owner explicitly authorizes
+that final merge after the gate is green. Publication still requires a separate
+explicit approval.
+
+1. Finish the public API and dispatch semantics. Define the default AUTO
+   behavior, precision/determinism policies, qualified custom-route selection,
+   cuBLAS fallback and explicit diagnostic forcing without duplicate or
+   contradictory entry points. Verify eager, captured-graph, views, alignment,
+   tails, fallbacks and cache/identity behavior through the public API.
+2. Perform a full documentation edit across README, `docs/`, code docstrings,
+   examples and benchmark descriptions. Remove stale claims, boastful wording,
+   AI-like filler and irrelevant competitor comparisons. Keep only precise,
+   reproducible cuBLAS Fast and cuBLAS Pedantic comparisons, clearly separated
+   by numerical contract, device, CUDA version, shape and execution path.
+3. Audit tests and discovery artifacts. Keep correctness, determinism,
+   dispatcher, identity, architecture/toolkit, guard and graph gates. Retain a
+   compact reproducible qualification toolkit for production winners. Move
+   useful future-optimization experiments/evidence under `internal/`; remove
+   duplicate or dead losing harnesses only after their conclusions and source
+   hashes are preserved in Git/report evidence. Ensure published crate contents
+   are not inflated by one-off artifacts.
+4. Produce fresh assembled-production benchmarks and an honest support matrix.
+   Compare old AUTO, new AUTO, cuBLAS Fast and, for exact F32, cuBLAS Pedantic as
+   independently labelled denominators. Preserve architecture-specific SM89 and
+   SM120 winners and portable fallbacks; do not infer cross-GPU/toolkit results
+   without an actual qualification run.
+5. Prepare the v0.7.0 release consistently: version fields/manifests/lockfiles,
+   concise project-style changelog, README/docs/examples and release checks.
+   Review the final diff, merge into `main` only after the agreed verification,
+   and stop before publication pending explicit owner approval.
