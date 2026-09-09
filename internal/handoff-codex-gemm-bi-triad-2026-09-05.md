@@ -18,6 +18,16 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+NEW 2026-09-09 F16 NN d768-in retained-best: the test-only M128N96/BK64/S3
+eight-warp candidate passes target/M/N/K-tail/exception/K0 exactness,
+eager/graph repeats, guards and resources156regs/local0/shared86016/occupancy1.
+It beats frozen Fixed S3 in every once7 stratum by13.3–13.7% at p50 (worst
+p95 `.866740`). It is a cuBLAS Fast near miss: p50 `1.007640-1.009345`, worst
+p95 `1.011727`; do not claim a Fast win or production promotion. The corrected
+compile-only source labels now match runtime composed-source hashes without a
+PTX/CUBIN/SASS change. Evidence:
+`internal/perf/ada-triad-half-nn-n96-s3-20260909/report.md`.
+
 Latest 2026-09-09 F16 NT N192 near-miss stop: widening d768-out M64N128/S3 to
 M64N192/12warps/grid256 passes target/tails/exception/K0/eager/graph/guard
 exactness and resources127regs/local0/shared98304/occupancy1. It is faster in

@@ -1,0 +1,30 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_half_tn_bk32_s3_regpipe_vec2_bf16_d768_in_discovery.rs (/root/bf16-tn-bk32-s3-target-20260909/release/deps/gemm_bi_half_tn_bk32_s3_regpipe_vec2_bf16_d768_in_discovery-09ac6eee8427b821)
+
+running 1 test
+test cuda_suite::ada_bf16_tn_bk32_s3_regpipe_vec2_d768_in_scout3_then_once7 ... GPU quiet gate half-tn-bk32-s3-regpipe-vec2/pre-context: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+GPU quiet gate half-tn-bk32-s3-regpipe-vec2/cohort: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=534MiB sm_clock=1800MHz temperature=41C pstate=P2; quiet_samples=5
+{"schema":"MambaBiHalfTnBk32S3ResourceV1","arm":"bk32_s3_regpipe_vec2","registers":120,"register_cap":128,"local_bytes":0,"static_shared_bytes":24576,"dynamic_shared_bytes":0,"block_threads":128,"active_ctas":4,"required_active_ctas":4}
+{"schema":"MambaBiHalfTnBk32S3ResourceV1","arm":"retained_regpipe_vec2","registers":125,"register_cap":128,"local_bytes":0,"static_shared_bytes":32768,"dynamic_shared_bytes":0,"block_threads":128,"active_ctas":3,"required_active_ctas":3}
+{"schema":"MambaBiHalfTnBk32S3BitsV1","case":"d768_in","shape":[2048,768,3072],"alpha_bits":1065353216,"exceptional":false,"candidate_vs_retained_exact":true,"eager_graph_repeats":3,"words":2359296}
+{"schema":"MambaBiHalfTnBk32S3BitsV1","case":"aligned_tail_negative_alpha","shape":[67,72,72],"alpha_bits":3208642560,"exceptional":false,"candidate_vs_retained_exact":true,"eager_graph_repeats":3,"words":5184}
+{"schema":"MambaBiHalfTnBk32S3BitsV1","case":"misaligned_tail_negative_alpha","shape":[67,69,71],"alpha_bits":3208642560,"exceptional":false,"candidate_vs_retained_exact":true,"eager_graph_repeats":3,"words":4899}
+{"schema":"MambaBiHalfTnBk32S3BitsV1","case":"exceptional_full_tile","shape":[64,64,64],"alpha_bits":1065353216,"exceptional":true,"candidate_vs_retained_exact":true,"eager_graph_repeats":3,"words":4096}
+{"schema":"MambaBiHalfTnBk32S3BitsV1","case":"k0","shape":[0,65,67],"alpha_bits":1065353216,"exceptional":false,"candidate_vs_retained_exact":true,"eager_graph_repeats":3,"words":4355}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"ABBA","windows":3,"window":0,"operations":20,"raw_us":[112.28159666061401, 87.29599714279175, 87.04000115394592, 111.30880117416382],"ratio":1.2825256976141217}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"ABBA","windows":3,"window":1,"operations":20,"raw_us":[111.41120195388794, 87.1936023235321, 86.9376003742218, 111.10399961471558],"ratio":1.277859442312769}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"ABBA","windows":3,"window":2,"operations":20,"raw_us":[113.04960250854492, 87.14240193367004, 87.29599714279175, 113.35680484771729],"ratio":1.297916104223252}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"BAAB","windows":3,"window":0,"operations":20,"raw_us":[86.9376003742218, 113.15200328826904, 113.30560445785522, 87.09120154380798],"ratio":1.301265108133016}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"BAAB","windows":3,"window":1,"operations":20,"raw_us":[86.94720268249512, 113.40800523757935, 113.51039409637451, 87.09120154380798],"ratio":1.3038409559242488}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"eager","order":"BAAB","windows":3,"window":2,"operations":20,"raw_us":[86.78399920463562, 113.35680484771729, 113.2032036781311, 87.1936023235321],"ratio":1.3022366473374296}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"ABBA","windows":3,"window":0,"operations":20,"raw_us":[111.7184042930603, 86.6815984249115, 86.47680282592773, 111.56480312347412],"ratio":1.289473717726718}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"ABBA","windows":3,"window":1,"operations":20,"raw_us":[112.12799549102783, 86.6815984249115, 86.37440204620361, 111.56480312347412],"ratio":1.2926035387709}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"ABBA","windows":3,"window":2,"operations":20,"raw_us":[111.87200546264648, 86.63039803504944, 86.42560243606567, 112.74240016937256],"ratio":1.297929023093941}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"BAAB","windows":3,"window":0,"operations":20,"raw_us":[86.57919764518738, 112.02559471130371, 112.38399744033813, 86.63039803504944],"ratio":1.295595612184937}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"BAAB","windows":3,"window":1,"operations":20,"raw_us":[86.42560243606567, 111.92320585250854, 111.61600351333618, 86.73279881477356],"ratio":1.2909521441123915}
+{"schema":"MambaBiHalfTnBk32S3TimingV1","comparator":"retained_regpipe_vec2","path":"graph","order":"BAAB","windows":3,"window":2,"operations":20,"raw_us":[86.37440204620361, 112.4351978302002, 112.17919588088989, 86.57919764518738],"ratio":1.298697420070353}
+{"schema":"MambaBiHalfTnBk32S3ScoutDecisionV1","candidate":"bk32_s3_regpipe_vec2","comparator":"retained_regpipe_vec2","windows":3,"threshold":0.99,"strata":[[1.2825256976141217, 1.297916104223252], [1.3022366473374296, 1.3038409559242488], [1.2926035387709, 1.297929023093941], [1.295595612184937, 1.298697420070353]],"pass":false,"decision":"stop_no_retry"}
+GPU quiet gate half-tn-bk32-s3-regpipe-vec2/post: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=578MiB sm_clock=1800MHz temperature=41C pstate=P2; quiet_samples=5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 104.80s
