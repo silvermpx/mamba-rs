@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 half-NT GROUP_M8 stop: changing only the F16 d768-out
+M64N128/S3 CTA raster from row-major to grouped traversal preserves exact full,
+ragged-group, M/N/K-tail, exceptional, K0, eager/graph and guard bits. Resources
+are unchanged at119regs/local0/shared73728/occupancy1. It nevertheless loses
+the frozen row-major parent by0.26–0.46% across the once3 p50 strata (worst p95
+1.00464). Stop before once7/Fast, keep row-major S3 and do not GROUP_M sweep.
+Evidence: `internal/perf/ada-triad-half-nt-m64n128-s3-groupm8-20260909/report.md`.
+
 Latest 2026-09-09 half-TN B-x4 resource stop: a test-only F16 d768-in
 regpipe+vec2 variant fuses four B `ldmatrix.x2.trans` loads into two x4 loads.
 All-lane mapping/alignment and a reversible source seam pass, but both the
