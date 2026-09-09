@@ -157,7 +157,7 @@ fn five_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
 #[cfg(feature = "cuda")]
 mod live {
     use super::*;
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+    use mamba_rs::mamba_ssm::gpu::context::{F32TriadPolicy, GpuCtx};
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
@@ -205,6 +205,20 @@ mod live {
             } else {
                 PhysicalQualificationRoute::Tf32Forced(prior_route(case))
             },
+            PhysicalQualificationF32Epilogue::new(
+                1.0,
+                if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+                false,
+            ),
+        )
+    }
+
+    fn auto_request(case: LiteralCase) -> PhysicalQualificationRequest {
+        let op = op(case);
+        PhysicalQualificationRequest::contiguous_f32(
+            op,
+            case.dims,
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
             PhysicalQualificationF32Epilogue::new(
                 1.0,
                 if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
@@ -445,6 +459,99 @@ mod live {
 
             drop(auto);
             drop(forced);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an idle RTX 6000 Ada and explicit CUDA toolkit selection"]
+    fn sm89_tf32_joint_post_admission_auto_uses_the_toolkit_winner_map() -> Result<(), String> {
+        let auto_device = GpuDevice::new(0)?;
+        let auto_ctx = GpuCtx::new(&auto_device)?;
+        let prior_device = GpuDevice::new(0)?;
+        let prior_ctx = GpuCtx::new(&prior_device)?;
+        let identity = auto_ctx.gemm_route();
+        if identity.device.compute_capability != (8, 9)
+            || identity.device.multiprocessor_count != 142
+        {
+            return Err(format!(
+                "TF32 joint post-admission smoke requires CC8.9/142SM, got {:?}/{}SM",
+                identity.device.compute_capability, identity.device.multiprocessor_count,
+            ));
+        }
+        let nvrtc = auto_ctx
+            .kernels
+            .triad_sm89_tf32_joint_compiler_identity()
+            .ok_or_else(|| "TriadSm89Tf32Joint compiler identity is absent".to_string())?
+            .nvrtc_version;
+        if !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2)) {
+            return Err(format!("no frozen post-admission map for CUDA {nvrtc:?}"));
+        }
+
+        let auto_requests = CASES.map(auto_request);
+        let prior_requests = CASES.map(|case| request(case, false));
+        presize_physical_qualification_suite(&auto_ctx, &auto_requests)?;
+        presize_physical_qualification_suite(&prior_ctx, &prior_requests)?;
+
+        for (index, case) in CASES.into_iter().enumerate() {
+            let mut auto = qualify_physical_launch(&auto_ctx, auto_requests[index])?;
+            let mut prior = qualify_physical_launch(&prior_ctx, prior_requests[index])?;
+            let keeps_portable = case.name == "nn_prism" && matches!(nvrtc, (12, 8) | (13, 0));
+            if keeps_portable {
+                assert_prior_auto_manifest(case, &auto)?;
+            } else {
+                assert_forced_manifest(case, &auto)?;
+            }
+            assert_prior_auto_manifest(case, &prior)?;
+
+            let mut repeated = None;
+            for (path_index, graph) in [false, false, true, true].into_iter().enumerate() {
+                let bits = compare_one_path(
+                    case,
+                    &auto_ctx,
+                    &mut auto,
+                    &prior_ctx,
+                    &mut prior,
+                    graph,
+                    0x89_7f_32a0_u64 ^ index as u64,
+                )?;
+                if let Some(expected) = &repeated {
+                    if &bits != expected {
+                        return Err(format!(
+                            "{} admitted AUTO path {path_index} is not bit-repeatable",
+                            case.name,
+                        ));
+                    }
+                } else {
+                    repeated = Some(bits);
+                }
+            }
+
+            let auto_guards = auto.validate_red_zones(&auto_ctx)?;
+            let prior_guards = prior.validate_red_zones(&prior_ctx)?;
+            if auto_guards.allocation_count() < 3
+                || auto_guards.element_count() == 0
+                || prior_guards.allocation_count() < 3
+                || prior_guards.element_count() == 0
+            {
+                return Err(format!("{} did not validate all facade guards", case.name));
+            }
+            println!(
+                "{{\"schema\":\"MambaTriadSm89Tf32JointPostAdmissionV1\",\"cuda\":[{},{}],\"case\":\"{}\",\"auto_symbol\":\"{}\",\"module\":\"{}\",\"eager_graph_manifest_equal\":true,\"prior_bits_equal\":true,\"repeatable\":true,\"inputs_unchanged\":true,\"guards_checked\":true}}",
+                nvrtc.0,
+                nvrtc.1,
+                case.name,
+                if keeps_portable {
+                    case.old_auto_symbol
+                } else {
+                    case.gemm_symbol
+                },
+                if keeps_portable {
+                    "TriadSm80"
+                } else {
+                    "TriadSm89Tf32Joint"
+                },
+            );
         }
         Ok(())
     }

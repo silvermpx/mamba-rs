@@ -429,6 +429,169 @@ const SM89_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         ],
     };
 
+const fn sm89_observed_tf32_identity(
+    module_kind: ModuleKind,
+    nvrtc_version: (i32, i32),
+    compile_key: [u8; 32],
+    artifact_digest: [u8; 32],
+    source_digest: [u8; 32],
+    header_manifest_digest: [u8; 32],
+    nvrtc_library_domain: [u8; 32],
+) -> Tf32AutoQualificationIdentity {
+    Tf32AutoQualificationIdentity {
+        module_kind,
+        module_target: "sm_89",
+        device_target: "sm_89",
+        compute_capability: (8, 9),
+        multiprocessor_count: 142,
+        nvrtc_version,
+        driver_api_version: 13_020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101_376,
+        tensor_map_access: false,
+        compile_key,
+        artifact_digest,
+        source_digest,
+        invocation_digest: compile_key,
+        header_manifest_digest,
+        nvrtc_library_domain,
+        driver_build_digest: [
+            209, 237, 197, 165, 188, 62, 16, 162, 104, 142, 33, 86, 141, 204, 189, 229, 226, 128,
+            220, 57, 20, 77, 216, 30, 133, 56, 67, 202, 152, 178, 208, 225,
+        ],
+    }
+}
+
+const SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
+    sm89_observed_tf32_identity(
+        ModuleKind::TriadSm80,
+        (12, 8),
+        [
+            115, 251, 236, 117, 87, 169, 84, 98, 165, 85, 227, 159, 27, 60, 148, 232, 210, 188,
+            199, 4, 122, 20, 248, 243, 227, 250, 81, 167, 104, 236, 91, 154,
+        ],
+        [
+            182, 33, 78, 28, 44, 79, 121, 42, 106, 118, 91, 225, 249, 77, 81, 41, 74, 253, 10, 235,
+            71, 79, 144, 231, 6, 72, 80, 88, 192, 209, 9, 71,
+        ],
+        [
+            59, 70, 11, 111, 224, 14, 152, 253, 84, 128, 107, 48, 212, 134, 175, 226, 81, 64, 215,
+            24, 208, 105, 29, 127, 192, 2, 9, 31, 150, 169, 142, 22,
+        ],
+        [
+            63, 26, 249, 173, 248, 124, 3, 126, 223, 65, 173, 51, 126, 153, 64, 154, 211, 252, 116,
+            145, 232, 159, 219, 28, 73, 243, 197, 27, 189, 106, 237, 133,
+        ],
+        [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+    );
+
+const SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
+    sm89_observed_tf32_identity(
+        ModuleKind::TriadSm80,
+        (13, 0),
+        [
+            254, 172, 131, 235, 65, 252, 198, 41, 208, 196, 191, 155, 225, 117, 141, 158, 146, 196,
+            49, 114, 142, 23, 193, 244, 108, 252, 213, 197, 169, 235, 194, 125,
+        ],
+        [
+            248, 107, 115, 43, 241, 152, 61, 217, 69, 94, 77, 173, 232, 221, 199, 117, 218, 192,
+            141, 2, 210, 155, 125, 120, 3, 88, 176, 165, 246, 213, 47, 241,
+        ],
+        [
+            59, 70, 11, 111, 224, 14, 152, 253, 84, 128, 107, 48, 212, 134, 175, 226, 81, 64, 215,
+            24, 208, 105, 29, 127, 192, 2, 9, 31, 150, 169, 142, 22,
+        ],
+        [
+            26, 74, 232, 129, 252, 240, 135, 55, 234, 128, 75, 22, 221, 248, 58, 44, 80, 58, 79,
+            175, 20, 244, 157, 120, 37, 250, 134, 117, 82, 39, 47, 215,
+        ],
+        [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+    );
+
+const SM89_JOINT_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
+    sm89_observed_tf32_identity(
+        ModuleKind::TriadSm89Tf32Joint,
+        (12, 8),
+        [
+            127, 197, 232, 79, 137, 135, 101, 65, 103, 128, 33, 142, 99, 58, 212, 6, 147, 165, 125,
+            248, 177, 12, 142, 38, 164, 158, 247, 229, 169, 44, 193, 230,
+        ],
+        [
+            254, 7, 63, 163, 130, 131, 121, 7, 232, 129, 62, 216, 45, 26, 247, 148, 238, 124, 97,
+            82, 55, 194, 112, 149, 212, 35, 78, 168, 94, 166, 183, 1,
+        ],
+        [
+            174, 75, 67, 44, 205, 226, 120, 160, 196, 212, 167, 167, 66, 252, 74, 124, 158, 80, 50,
+            152, 176, 31, 152, 54, 3, 86, 164, 35, 52, 249, 3, 85,
+        ],
+        [
+            11, 100, 16, 45, 50, 24, 41, 146, 13, 2, 46, 50, 26, 208, 209, 58, 114, 47, 51, 41,
+            147, 120, 192, 233, 214, 84, 118, 200, 134, 249, 14, 89,
+        ],
+        [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+    );
+
+const SM89_JOINT_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
+    sm89_observed_tf32_identity(
+        ModuleKind::TriadSm89Tf32Joint,
+        (13, 0),
+        [
+            89, 126, 28, 3, 43, 176, 63, 233, 64, 245, 196, 114, 218, 3, 215, 215, 207, 131, 231,
+            15, 32, 140, 6, 75, 78, 251, 61, 228, 163, 88, 190, 220,
+        ],
+        [
+            53, 81, 119, 2, 121, 112, 54, 54, 216, 192, 151, 4, 186, 184, 59, 208, 119, 187, 152,
+            148, 235, 69, 82, 179, 175, 195, 215, 229, 90, 63, 46, 19,
+        ],
+        [
+            174, 75, 67, 44, 205, 226, 120, 160, 196, 212, 167, 167, 66, 252, 74, 124, 158, 80, 50,
+            152, 176, 31, 152, 54, 3, 86, 164, 35, 52, 249, 3, 85,
+        ],
+        [
+            11, 100, 16, 45, 50, 24, 41, 146, 13, 2, 46, 50, 26, 208, 209, 58, 114, 47, 51, 41,
+            147, 120, 192, 233, 214, 84, 118, 200, 134, 249, 14, 89,
+        ],
+        [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+    );
+
+const SM89_JOINT_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
+    sm89_observed_tf32_identity(
+        ModuleKind::TriadSm89Tf32Joint,
+        (13, 2),
+        [
+            80, 103, 20, 35, 207, 221, 177, 128, 238, 96, 198, 24, 230, 56, 208, 177, 211, 150,
+            236, 251, 18, 3, 54, 79, 51, 140, 14, 147, 75, 74, 19, 129,
+        ],
+        [
+            249, 180, 50, 88, 129, 62, 112, 51, 18, 6, 193, 224, 66, 209, 218, 166, 47, 95, 96, 20,
+            55, 97, 247, 146, 166, 28, 1, 109, 222, 23, 54, 239,
+        ],
+        [
+            174, 75, 67, 44, 205, 226, 120, 160, 196, 212, 167, 167, 66, 252, 74, 124, 158, 80, 50,
+            152, 176, 31, 152, 54, 3, 86, 164, 35, 52, 249, 3, 85,
+        ],
+        [
+            11, 100, 16, 45, 50, 24, 41, 146, 13, 2, 46, 50, 26, 208, 209, 58, 114, 47, 51, 41,
+            147, 120, 192, 233, 214, 84, 118, 200, 134, 249, 14, 89,
+        ],
+        [
+            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
+            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
+        ],
+    );
+
 const SM120_TF32_QUALIFIED_TUNING_REVISION: u16 = F32_TF32_TUNING_REVISION;
 #[cfg(test)]
 const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
@@ -2054,6 +2217,99 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
+/// CUDA 12.8 and 13.0 share the same exact-cell winner map. Four rows move to
+/// the joint Ada module; NN Prism retains the measured portable winner.
+const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
+    sm89_tf32_route_cell(
+        Tn,
+        (768, 3072, 2048),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Tn,
+        (1536, 768, 2048),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Tn,
+        (384, 1928, 4621),
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_cell(
+        Nn,
+        4621,
+        1928,
+        384,
+        M128N128,
+        S3,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nn,
+        (2048, 768, 1536),
+        Tf32PhysicalRoute::Sm89NnN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+];
+
+/// CUDA 13.2 independently qualified all five rows into the joint Ada module.
+const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
+    sm89_tf32_route_cell(
+        Tn,
+        (768, 3072, 2048),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Tn,
+        (1536, 768, 2048),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Tn,
+        (384, 1928, 4621),
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nn,
+        (4621, 1928, 384),
+        Tf32PhysicalRoute::Sm89NnDirectN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nn,
+        (2048, 768, 1536),
+        Tf32PhysicalRoute::Sm89NnN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+];
+
+const SM89_JOINT_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
+    Tf32AutoEvidenceCohort {
+        identity: SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
+        portable: Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
+        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
+        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
+        portable: Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
+        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
+        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
+        portable: None,
+        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
+        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2,
+    },
+];
+
 /// CUDA 13.2: four independently admitted NT cells from the stage-sliced
 /// finalist qualification recorded in the 2026-09-09 Ada TF32 report.
 /// Lower toolkit identities below carry their own independent qualification.
@@ -2336,6 +2592,21 @@ fn measured_tf32_route_with_operands(
     availability: F32TriadAvailability,
     tuning_revision: u16,
 ) -> Option<Tf32PhysicalRoute> {
+    if let Some(joint) = availability.joint
+        && let Some(cohort) = matching_tf32_cohort(joint, SM89_JOINT_TF32_EVIDENCE_COHORTS)
+        && cohort.tuning_revision == super::contract::SM89_TF32_JOINT_TUNING_REVISION
+        && let Some(route) = measured_tf32_cell(request, operands, cohort.cells)
+    {
+        let portable_twin_matches = route.module_kind() != ModuleKind::TriadSm80
+            || cohort.portable.is_some_and(|twin| {
+                availability
+                    .portable
+                    .is_some_and(|portable| twin.matches(portable))
+            });
+        if portable_twin_matches && resolve_tf32_forced(request, availability, route).is_ok() {
+            return Some(route);
+        }
+    }
     if let Some(finalist) = availability.finalist
         && let Some(cohort) = matching_tf32_cohort(finalist, SM89_FINALIST_TF32_EVIDENCE_COHORTS)
         && cohort.tuning_revision == super::contract::SM89_FINALIST_TUNING_REVISION
@@ -10424,7 +10695,10 @@ mod sm120_tests {
 #[cfg(test)]
 mod tf32_tests {
     use super::{
-        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_TF32_EVIDENCE_CELLS,
+        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_EVIDENCE_COHORTS,
+        SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
+        SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8,
+        SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0, SM89_TF32_EVIDENCE_CELLS,
         SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS,
         SM120_TF32_RETIRED_COHORTS, Tf32AutoEvidenceCohort, Tf32AutoOperandGate,
         matching_tf32_cohort, measured_tf32_cell, measured_tf32_route_with_operands,
@@ -10562,6 +10836,266 @@ mod tf32_tests {
             49_152,
         ));
         availability
+    }
+
+    #[test]
+    fn sm89_joint_cohorts_freeze_the_toolkit_specific_winner_map() {
+        let expected = [
+            (
+                SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
+                Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
+                5,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N128,
+                    stages: Tf32PortableStages::S3,
+                }),
+            ),
+            (
+                SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
+                Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
+                5,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N128,
+                    stages: Tf32PortableStages::S3,
+                }),
+            ),
+            (
+                SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
+                None,
+                5,
+                Tf32PhysicalRoute::Sm89NnDirectN96V1,
+            ),
+        ];
+        assert_eq!(SM89_JOINT_TF32_EVIDENCE_COHORTS.len(), expected.len());
+        for (cohort, (identity, portable, cells, nn_prism)) in
+            SM89_JOINT_TF32_EVIDENCE_COHORTS.iter().zip(expected)
+        {
+            assert_eq!(cohort.identity, identity);
+            assert_eq!(cohort.portable, portable);
+            assert_eq!(cohort.cells.len(), cells);
+            assert_eq!(cohort.cells[3].route, nn_prism);
+        }
+    }
+
+    fn sm89_joint_availability(
+        joint: super::Tf32AutoQualificationIdentity,
+        portable: Option<super::Tf32AutoQualificationIdentity>,
+    ) -> F32TriadAvailability {
+        F32TriadAvailability {
+            portable: portable.map(qualified_module_for_auto_identity),
+            specialized: None,
+            finalist: None,
+            joint: Some(qualified_module_for_auto_identity(joint)),
+        }
+    }
+
+    fn sm89_joint_operands(op: ResolvedGemmOp) -> F32TriadOperands {
+        F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+        }
+    }
+
+    #[test]
+    fn sm89_joint_auto_selects_each_toolkit_specific_winner() {
+        let requests = [
+            (ResolvedGemmOp::Tn, (768, 3072, 2048)),
+            (ResolvedGemmOp::Tn, (1536, 768, 2048)),
+            (ResolvedGemmOp::Tn, (384, 1928, 4621)),
+            (ResolvedGemmOp::Nn, (4621, 1928, 384)),
+            (ResolvedGemmOp::Nn, (2048, 768, 1536)),
+        ];
+        for cohort in SM89_JOINT_TF32_EVIDENCE_COHORTS {
+            let availability = sm89_joint_availability(cohort.identity, cohort.portable);
+            for ((op, (rows, columns, reduction)), cell) in requests.into_iter().zip(cohort.cells) {
+                let request = normalized_request(op, rows, columns, reduction);
+                assert_eq!(
+                    resolve_f32_triad_auto_with_operands(
+                        F32TriadPolicy::AllowDeterministicTf32V1,
+                        request,
+                        sm89_joint_operands(op),
+                        availability,
+                    )
+                    .unwrap(),
+                    F32TriadSelection::Tf32(cell.route),
+                    "CUDA {:?} failed to select {op:?}/{rows}/{columns}/{reduction}",
+                    cohort.identity.nvrtc_version,
+                );
+                assert_no_tf32_route(
+                    resolve_f32_triad_auto_with_operands(
+                        F32TriadPolicy::ExactScalarFmaV1,
+                        request,
+                        sm89_joint_operands(op),
+                        availability,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sm89_joint_lower_toolkits_require_the_exact_portable_twin_only_for_nn_prism() {
+        for cohort in &SM89_JOINT_TF32_EVIDENCE_COHORTS[..2] {
+            let without_portable = sm89_joint_availability(cohort.identity, None);
+            for cell in cohort
+                .cells
+                .iter()
+                .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm89Tf32Joint)
+            {
+                let request = normalized_request(
+                    cell.op,
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                );
+                assert_eq!(
+                    resolve_f32_triad_auto_with_operands(
+                        F32TriadPolicy::AllowDeterministicTf32V1,
+                        request,
+                        sm89_joint_operands(cell.op),
+                        without_portable,
+                    )
+                    .unwrap(),
+                    F32TriadSelection::Tf32(cell.route),
+                );
+            }
+
+            let prism = cohort.cells[3];
+            let request = normalized_request(
+                prism.op,
+                prism.shape.output_rows,
+                prism.shape.output_columns,
+                prism.shape.reduction,
+            );
+            assert_no_tf32_route(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    sm89_joint_operands(prism.op),
+                    without_portable,
+                )
+                .unwrap(),
+            );
+            let mut wrong_portable = qualified_module_for_auto_identity(cohort.portable.unwrap());
+            wrong_portable.artifact.artifact_digest[0] ^= 1;
+            let wrong_twin = F32TriadAvailability {
+                portable: Some(wrong_portable),
+                ..without_portable
+            };
+            assert_no_tf32_route(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    sm89_joint_operands(prism.op),
+                    wrong_twin,
+                )
+                .unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_joint_identities_reject_every_single_field_mutation() {
+        for cohort in SM89_JOINT_TF32_EVIDENCE_COHORTS {
+            let exact = qualified_module_for_auto_identity(cohort.identity);
+            assert_eq!(
+                matching_tf32_cohort(exact, SM89_JOINT_TF32_EVIDENCE_COHORTS),
+                Some(cohort),
+            );
+            for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
+                let mut drifted = exact;
+                mutate(&mut drifted);
+                if drifted == exact {
+                    drifted.device_caps.tensor_map_access = !exact.device_caps.tensor_map_access;
+                }
+                assert!(
+                    matching_tf32_cohort(drifted, SM89_JOINT_TF32_EVIDENCE_COHORTS).is_none(),
+                    "CUDA {:?} identity mutation {field} was admitted",
+                    cohort.identity.nvrtc_version,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sm89_joint_auto_rejects_neighboring_shapes_and_operand_drift() {
+        for cohort in SM89_JOINT_TF32_EVIDENCE_COHORTS {
+            let availability = sm89_joint_availability(cohort.identity, cohort.portable);
+            for cell in cohort.cells {
+                let request = normalized_request(
+                    cell.op,
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                );
+                for field in 0..6 {
+                    let mut neighbor = request;
+                    match field {
+                        0 => neighbor.shape.m += 1,
+                        1 => neighbor.shape.k += 1,
+                        2 => neighbor.shape.n += 1,
+                        3 => neighbor.shape.lda += 1,
+                        4 => neighbor.shape.ldb += 1,
+                        5 => neighbor.shape.ldc += 1,
+                        _ => unreachable!(),
+                    }
+                    if let Ok(selection) = resolve_f32_triad_auto_with_operands(
+                        F32TriadPolicy::AllowDeterministicTf32V1,
+                        neighbor,
+                        sm89_joint_operands(cell.op),
+                        availability,
+                    ) {
+                        assert_no_tf32_route_for(selection, "neighboring joint request");
+                    }
+                }
+                for bad_operands in [
+                    F32TriadOperands {
+                        a: 0,
+                        ..sm89_joint_operands(cell.op)
+                    },
+                    F32TriadOperands {
+                        b: 0x3004,
+                        ..sm89_joint_operands(cell.op)
+                    },
+                    F32TriadOperands {
+                        output: 0x1004,
+                        ..sm89_joint_operands(cell.op)
+                    },
+                    F32TriadOperands {
+                        bias: Some(0x4000),
+                        ..sm89_joint_operands(cell.op)
+                    },
+                    F32TriadOperands {
+                        alpha: 0.5,
+                        ..sm89_joint_operands(cell.op)
+                    },
+                    F32TriadOperands {
+                        beta: if cell.op == ResolvedGemmOp::Tn {
+                            0.0
+                        } else {
+                            1.0
+                        },
+                        ..sm89_joint_operands(cell.op)
+                    },
+                ] {
+                    assert_no_tf32_route_for(
+                        resolve_f32_triad_auto_with_operands(
+                            F32TriadPolicy::AllowDeterministicTf32V1,
+                            request,
+                            bad_operands,
+                            availability,
+                        )
+                        .unwrap(),
+                        "joint operand drift",
+                    );
+                }
+            }
+        }
     }
 
     /// TF32 fail-closed: a request or operand set that drifts off a measured
@@ -14444,7 +14978,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm89_joint_forced_routes_are_exact_cell_only_and_auto_stays_closed() {
+    fn sm89_joint_forced_routes_are_exact_cell_only_and_unqualified_auto_stays_closed() {
         let joint = qualified_module(
             ModuleKind::TriadSm89Tf32Joint,
             "sm_89",
