@@ -37,9 +37,9 @@ struct Params {
 }
 
 impl Cell {
-    fn params(self) -> Params {
+    fn params(self, alpha: f32) -> Params {
         Params {
-            alpha: 1.0,
+            alpha,
             beta: 0.0,
             m: self.m as i32,
             n: self.out as i32,
@@ -58,6 +58,23 @@ impl Cell {
     }
     fn fixed_grid(self) -> (u32, u32, u32) {
         ((self.m.div_ceil(64) * self.out.div_ceil(64)) as u32, 1, 1)
+    }
+    fn prior_auto_symbol(self) -> &'static str {
+        if self.name == "prism" {
+            "gemm_bi_nt_slim"
+        } else {
+            "gemm_bi_nt"
+        }
+    }
+    fn prior_auto_grid(self) -> (u32, u32, u32) {
+        let bn = if self.name == "prism" { 64 } else { 128 };
+        ((self.m.div_ceil(128) * self.out.div_ceil(bn)) as u32, 1, 1)
+    }
+    fn prior_auto_block(self) -> (u32, u32, u32) {
+        (if self.name == "prism" { 128 } else { 256 }, 1, 1)
+    }
+    fn prior_auto_shared(self) -> u32 {
+        if self.name == "prism" { 0 } else { 33_376 }
     }
 }
 
@@ -85,7 +102,7 @@ fn quantile(values: &[f64], q: f64) -> f64 {
 fn nt_siblings_map_to_exact_nn_copyplan_abi() {
     assert_eq!((size_of::<Params>(), align_of::<Params>()), (32, 4));
     for cell in CELLS {
-        let p = cell.params();
+        let p = cell.params(1.0);
         assert_eq!(
             (p.alpha.to_bits(), p.beta.to_bits()),
             (1.0_f32.to_bits(), 0)
@@ -103,9 +120,32 @@ fn nt_siblings_map_to_exact_nn_copyplan_abi() {
 }
 
 #[test]
+fn pre_admission_matrix_freezes_prior_auto_and_once3_then_once7() {
+    assert_eq!(
+        (
+            CELLS[0].prior_auto_symbol(),
+            CELLS[0].prior_auto_grid(),
+            CELLS[0].prior_auto_block(),
+            CELLS[0].prior_auto_shared(),
+        ),
+        ("gemm_bi_nt", (96, 1, 1), (256, 1, 1), 33_376)
+    );
+    assert_eq!(
+        (
+            CELLS[1].prior_auto_symbol(),
+            CELLS[1].prior_auto_grid(),
+            CELLS[1].prior_auto_block(),
+            CELLS[1].prior_auto_shared(),
+        ),
+        ("gemm_bi_nt_slim", (222, 1, 1), (128, 1, 1), 0)
+    );
+    assert_eq!([3_usize, 7], [3, 7]);
+}
+
+#[test]
 fn transpose_mapping_preserves_each_original_nt_dot_product() {
     for cell in CELLS {
-        let p = cell.params();
+        let p = cell.params(1.0);
         for row in [0, cell.m - 1] {
             for col in [0, cell.out - 1] {
                 for k in [0, cell.reduction - 1] {
@@ -177,23 +217,46 @@ mod cuda_suite {
     struct Buffer {
         gpu: GpuBuffer,
         seed: Vec<f32>,
+        active_offset: usize,
         len: usize,
     }
     impl Buffer {
-        // All arms use origin-zero buffers: the public facade owns A and C.
-        // Trailing guards and an explicit pointer check keep the timed cohort 256B aligned.
-        fn new(ctx: &GpuCtx, mut values: Vec<f32>) -> Result<Self, String> {
+        fn guarded(ctx: &GpuCtx, values: Vec<f32>) -> Result<Self, String> {
+            Self::new(ctx, values, GUARD)
+        }
+        fn production(ctx: &GpuCtx, values: Vec<f32>) -> Result<Self, String> {
+            Self::new(ctx, values, 0)
+        }
+        fn new(ctx: &GpuCtx, values: Vec<f32>, active_offset: usize) -> Result<Self, String> {
             let len = values.len();
-            values.resize(len + GUARD, f32::from_bits(GUARD_BITS));
-            let gpu = GpuBuffer::from_cpu(&ctx.stream, &values)?;
-            if gpu.cached_ptr() % 256 != 0 {
-                return Err("timed buffer is not 256B aligned".into());
+            let total = active_offset
+                .checked_add(len)
+                .and_then(|n| n.checked_add(GUARD))
+                .ok_or_else(|| "guarded allocation extent overflow".to_string())?;
+            let mut seed = vec![f32::from_bits(GUARD_BITS); total];
+            seed[active_offset..active_offset + len].copy_from_slice(&values);
+            let gpu = GpuBuffer::from_cpu(&ctx.stream, &seed)?;
+            let pointer = if active_offset == 0 {
+                gpu.cached_ptr()
+            } else {
+                gpu.raw_ptr_at(&ctx.stream, active_offset)
+            };
+            if pointer % 256 != 0 {
+                return Err("timed active pointer is not 256B aligned".into());
             }
             Ok(Self {
                 gpu,
-                seed: values,
+                seed,
+                active_offset,
                 len,
             })
+        }
+        fn ptr(&self, ctx: &GpuCtx) -> u64 {
+            if self.active_offset == 0 {
+                self.gpu.cached_ptr()
+            } else {
+                self.gpu.raw_ptr_at(&ctx.stream, self.active_offset)
+            }
         }
         fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
             self.gpu.upload(&ctx.stream, &self.seed)
@@ -203,17 +266,27 @@ mod cuda_suite {
             ctx.stream
                 .synchronize()
                 .map_err(|e| format!("download sync: {e:?}"))?;
-            if data[self.len..].iter().any(|x| x.to_bits() != GUARD_BITS) {
-                return Err("output/input/scratch trailing guard changed".into());
+            if data[..self.active_offset]
+                .iter()
+                .chain(&data[self.active_offset + self.len..])
+                .any(|x| x.to_bits() != GUARD_BITS)
+            {
+                return Err("output/input/scratch red zone changed".into());
             }
-            Ok(data[..self.len].iter().map(|x| x.to_bits()).collect())
+            Ok(data[self.active_offset..self.active_offset + self.len]
+                .iter()
+                .map(|x| x.to_bits())
+                .collect())
         }
         fn unchanged(&self, ctx: &GpuCtx) -> Result<(), String> {
-            let actual = self.bits(ctx)?;
+            let actual = self.gpu.to_cpu(&ctx.stream)?;
+            ctx.stream
+                .synchronize()
+                .map_err(|e| format!("unchanged sync: {e:?}"))?;
             if actual
                 .iter()
                 .zip(&self.seed)
-                .any(|(a, b)| *a != b.to_bits())
+                .any(|(a, b)| a.to_bits() != b.to_bits())
             {
                 return Err("input storage bits changed".into());
             }
@@ -226,9 +299,13 @@ mod cuda_suite {
         b: Buffer,
         scratch: Buffer,
         output: Buffer,
+        production_a: Buffer,
+        production_b: Buffer,
+        production_output: Buffer,
+        alpha: f32,
     }
     impl Fixture {
-        fn new(ctx: &GpuCtx, cell: Cell, exceptional: bool) -> Result<Self, String> {
+        fn new(ctx: &GpuCtx, cell: Cell, exceptional: bool, alpha: f32) -> Result<Self, String> {
             let mut a =
                 full_mantissa::finite_full_mantissa_values(cell.m * cell.reduction, 0x8931_a001);
             let mut b =
@@ -246,37 +323,58 @@ mod cuda_suite {
                     }
                 }
             }
+            let output = vec![f32::from_bits(0x7fc0_bbbb); cell.m * cell.out];
             Ok(Self {
                 cell,
-                a: Buffer::new(ctx, a)?,
-                b: Buffer::new(ctx, b)?,
-                scratch: Buffer::new(
+                a: Buffer::guarded(ctx, a.clone())?,
+                b: Buffer::guarded(ctx, b.clone())?,
+                scratch: Buffer::guarded(
                     ctx,
                     vec![f32::from_bits(0x7fc0_aaaa); cell.out * cell.reduction],
                 )?,
-                output: Buffer::new(ctx, vec![f32::from_bits(0x7fc0_bbbb); cell.m * cell.out])?,
+                output: Buffer::guarded(ctx, output.clone())?,
+                production_a: Buffer::production(ctx, a)?,
+                production_b: Buffer::production(ctx, b)?,
+                production_output: Buffer::production(ctx, output)?,
+                alpha,
             })
         }
-        fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
-            self.output.reset(ctx)?;
-            self.scratch.reset(ctx)
+        fn reset(&mut self, ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
+            match arm {
+                Arm::Auto | Arm::Fast => self.production_output.reset(ctx),
+                Arm::Candidate => {
+                    self.output.reset(ctx)?;
+                    self.scratch.reset(ctx)
+                }
+                Arm::Generic => self.output.reset(ctx),
+            }
         }
-        fn validate(&self, ctx: &GpuCtx, golden: &[u32], scratch: bool) -> Result<(), String> {
-            let actual = self.output.bits(ctx)?;
+        fn validate(&self, ctx: &GpuCtx, golden: &[u32], arm: Arm) -> Result<(), String> {
+            let (output, a, b) = if matches!(arm, Arm::Auto | Arm::Fast) {
+                (
+                    &self.production_output,
+                    &self.production_a,
+                    &self.production_b,
+                )
+            } else {
+                (&self.output, &self.a, &self.b)
+            };
+            let actual = output.bits(ctx)?;
             if let Some(i) = actual.iter().zip(golden).position(|(a, b)| a != b) {
                 return Err(format!(
                     "{} exact output mismatch {i}: {:08x} != {:08x}",
                     self.cell.name, actual[i], golden[i]
                 ));
             }
-            self.a.unchanged(ctx)?;
-            self.b.unchanged(ctx)?;
+            a.unchanged(ctx)?;
+            b.unchanged(ctx)?;
             let transposed = self.scratch.bits(ctx)?;
-            if scratch {
+            if arm == Arm::Candidate {
                 for row in 0..self.cell.out {
                     for k in 0..self.cell.reduction {
                         if transposed[k * self.cell.out + row]
-                            != self.b.seed[row * self.cell.reduction + k].to_bits()
+                            != self.b.seed[self.b.active_offset + row * self.cell.reduction + k]
+                                .to_bits()
                         {
                             return Err(format!("transpose changed B bits at ({row},{k})"));
                         }
@@ -296,22 +394,20 @@ mod cuda_suite {
     }
     fn launch(ctx: &GpuCtx, fixed: &CudaFunction, f: &mut Fixture, arm: Arm) -> Result<(), String> {
         let cell = f.cell;
-        let a = f.a.gpu.cached_ptr();
-        let b = f.b.gpu.cached_ptr();
-        let output = f.output.gpu.cached_ptr();
-        let p = cell.params();
+        let p = cell.params(f.alpha);
         match arm {
             Arm::Auto => gpu_gemm_bi_backward_dx_raw(
                 ctx,
-                &mut f.output.gpu,
-                &f.a.gpu,
-                b,
+                &mut f.production_output.gpu,
+                &f.production_a.gpu,
+                f.production_b.gpu.cached_ptr(),
                 cell.m,
                 cell.out,
                 cell.reduction,
             ),
             Arm::Candidate => {
-                let scratch = f.scratch.gpu.cached_ptr();
+                let scratch = f.scratch.ptr(ctx);
+                let b = f.b.ptr(ctx);
                 if cell.reduction != 0 {
                     let mut t = ctx
                         .stream
@@ -324,6 +420,8 @@ mod cuda_suite {
                         .map_err(|e| format!("transpose: {e:?}"))?;
                 }
                 let bias = 0_u64;
+                let output = f.output.ptr(ctx);
+                let a = f.a.ptr(ctx);
                 let mut k = ctx.stream.launch_builder(fixed);
                 k.arg(&output);
                 k.arg(&a);
@@ -335,6 +433,9 @@ mod cuda_suite {
                     .map_err(|e| format!("CopyPlan: {e:?}"))
             }
             Arm::Generic => {
+                let output = f.output.ptr(ctx);
+                let a = f.a.ptr(ctx);
+                let b = f.b.ptr(ctx);
                 let mut k = ctx.stream.launch_builder(&ctx.kernels.gemm_bi_nt);
                 k.arg(&output);
                 k.arg(&a);
@@ -354,6 +455,9 @@ mod cuda_suite {
                 .map_err(|e| format!("generic exact NT: {e:?}"))
             }
             Arm::Fast => {
+                let output = f.production_output.gpu.cached_ptr();
+                let a = f.production_a.gpu.cached_ptr();
+                let b = f.production_b.gpu.cached_ptr();
                 let dtype = WeightDtype::F32.cuda_data_type();
                 // C^T = B * A^T in column-major storage: transpose physical B.
                 unsafe {
@@ -422,6 +526,7 @@ mod cuda_suite {
             }
             let mut identities = Vec::new();
             let mut candidate_names = Vec::new();
+            let mut auto_names = Vec::new();
             for node in nodes {
                 let mut ty = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
                 if sys::cuGraphNodeGetType(node, &mut ty) != sys::CUresult::CUDA_SUCCESS {
@@ -467,7 +572,25 @@ mod cuda_suite {
                     {
                         return Err(format!("candidate launch changed: {name}"));
                     }
+                    let expected_abi: &[(usize, usize)] = if name == TRANSPOSE {
+                        &[(0, 8), (8, 8), (16, 4), (20, 4)]
+                    } else {
+                        &[(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+                    };
+                    driver_abi_gate(params.func, &name, expected_abi)?;
                     candidate_names.push(name.clone());
+                } else if arm == Arm::Auto && CELLS.contains(&f.cell) {
+                    if name != f.cell.prior_auto_symbol()
+                        || grid != f.cell.prior_auto_grid()
+                        || block != f.cell.prior_auto_block()
+                        || params.sharedMemBytes != f.cell.prior_auto_shared()
+                    {
+                        return Err(format!(
+                            "{} prior AUTO physical graph changed: {name} grid={grid:?} block={block:?} shared={}",
+                            f.cell.name, params.sharedMemBytes
+                        ));
+                    }
+                    auto_names.push(name.clone());
                 }
                 identities.push(json!({"symbol":name,"grid":grid,"block":block,"dynamic_shared":params.sharedMemBytes}));
             }
@@ -482,6 +605,14 @@ mod cuda_suite {
                 if candidate_names != expected {
                     return Err("candidate must time the entire expected pipeline".into());
                 }
+            } else if arm == Arm::Auto
+                && CELLS.contains(&f.cell)
+                && auto_names != [f.cell.prior_auto_symbol()]
+            {
+                return Err(format!(
+                    "{} prior AUTO graph must contain exactly one frozen fallback node",
+                    f.cell.name
+                ));
             }
             println!(
                 "{}",
@@ -547,12 +678,40 @@ mod cuda_suite {
         Ok(())
     }
 
+    fn driver_abi_gate(
+        function: sys::CUfunction,
+        symbol: &str,
+        expected: &[(usize, usize)],
+    ) -> Result<(), String> {
+        for (index, &(expected_offset, expected_size)) in expected.iter().enumerate() {
+            let (mut offset, mut size) = (usize::MAX, usize::MAX);
+            let result =
+                unsafe { sys::cuFuncGetParamInfo(function, index, &mut offset, &mut size) };
+            if result != sys::CUresult::CUDA_SUCCESS
+                || (offset, size) != (expected_offset, expected_size)
+            {
+                return Err(format!(
+                    "{symbol} Driver ABI parameter {index} changed: result={result:?} actual=({offset},{size}) expected=({expected_offset},{expected_size})"
+                ));
+            }
+        }
+        let (mut offset, mut size) = (0, 0);
+        let terminal =
+            unsafe { sys::cuFuncGetParamInfo(function, expected.len(), &mut offset, &mut size) };
+        if terminal != sys::CUresult::CUDA_ERROR_INVALID_VALUE {
+            return Err(format!(
+                "{symbol} exposes an unexpected terminal Driver ABI parameter: {terminal:?} ({offset},{size})"
+            ));
+        }
+        Ok(())
+    }
+
     fn check_bits(
         ctx: &GpuCtx,
         fixed: &CudaFunction,
         f: &mut Fixture,
     ) -> Result<(Vec<u32>, Vec<u32>), String> {
-        f.reset(ctx)?;
+        f.reset(ctx, Arm::Generic)?;
         launch(ctx, fixed, f, Arm::Generic)?;
         let exact = f.output.bits(ctx)?;
         let mut fast_golden = Vec::new();
@@ -560,27 +719,31 @@ mod cuda_suite {
             if arm == Arm::Fast && f.cell.reduction == 0 {
                 continue;
             }
-            f.reset(ctx)?;
+            f.reset(ctx, arm)?;
             launch(ctx, fixed, f, arm)?;
-            let eager = f.output.bits(ctx)?;
+            let eager = if matches!(arm, Arm::Auto | Arm::Fast) {
+                f.production_output.bits(ctx)?
+            } else {
+                f.output.bits(ctx)?
+            };
             let golden = if arm == Arm::Fast {
                 fast_golden = eager;
                 &fast_golden
             } else {
                 &exact
             };
-            f.validate(ctx, golden, arm == Arm::Candidate)?;
+            f.validate(ctx, golden, arm)?;
             let graph = capture(ctx, fixed, f, arm)?;
             graph_identity(&graph, f, arm)?;
             for path in ["eager", "graph"] {
                 for repeat in 0..2 {
-                    f.reset(ctx)?;
+                    f.reset(ctx, arm)?;
                     if path == "graph" {
                         graph.launch().map_err(|e| format!("bits graph: {e:?}"))?;
                     } else {
                         launch(ctx, fixed, f, arm)?;
                     }
-                    f.validate(ctx, golden, arm == Arm::Candidate)?;
+                    f.validate(ctx, golden, arm)?;
                     println!(
                         "{}",
                         json!({"schema":"MambaBiNtCopyPlanSiblingsBitsV1","cell":f.cell.name,"arm":format!("{arm:?}"),"path":path,"repeat":repeat,"words":golden.len(),"oracle":if arm == Arm::Fast {"vendor_self"} else {"generic_exact"}})
@@ -589,6 +752,27 @@ mod cuda_suite {
             }
         }
         Ok((exact, fast_golden))
+    }
+
+    fn check_candidate_bits(
+        ctx: &GpuCtx,
+        fixed: &CudaFunction,
+        f: &mut Fixture,
+    ) -> Result<(), String> {
+        f.reset(ctx, Arm::Generic)?;
+        launch(ctx, fixed, f, Arm::Generic)?;
+        let exact = f.output.bits(ctx)?;
+        for arm in [Arm::Generic, Arm::Candidate] {
+            f.reset(ctx, arm)?;
+            launch(ctx, fixed, f, arm)?;
+            f.validate(ctx, &exact, arm)?;
+            let graph = capture(ctx, fixed, f, arm)?;
+            graph_identity(&graph, f, arm)?;
+            f.reset(ctx, arm)?;
+            graph.launch().map_err(|e| format!("bits graph: {e:?}"))?;
+            f.validate(ctx, &exact, arm)?;
+        }
+        Ok(())
     }
 
     fn measure(
@@ -600,7 +784,7 @@ mod cuda_suite {
         path: &str,
         golden: &[u32],
     ) -> Result<f64, String> {
-        f.reset(ctx)?;
+        f.reset(ctx, arm)?;
         let start = ctx
             .stream
             .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
@@ -623,11 +807,85 @@ mod cuda_suite {
         ) * 1000.0
             / OPS as f64;
         // Downloads and resets are outside both events; all logical output is overwritten.
-        f.validate(ctx, golden, arm == Arm::Candidate)?;
+        f.validate(ctx, golden, arm)?;
         if !us.is_finite() || us <= 0.0 {
             return Err("invalid elapsed time".into());
         }
         Ok(us)
+    }
+
+    fn paired_candidate_vs_prior_auto_screen(
+        ctx: &GpuCtx,
+        fixed: &CudaFunction,
+        f: &mut Fixture,
+        golden: &[u32],
+        windows: usize,
+    ) -> Result<Vec<[f64; 2]>, String> {
+        if !matches!(windows, 3 | 7) {
+            return Err("pre-admission screen permits only once3 or once7".into());
+        }
+        let candidate_graph = capture(ctx, fixed, f, Arm::Candidate)?;
+        graph_identity(&candidate_graph, f, Arm::Candidate)?;
+        let auto_graph = capture(ctx, fixed, f, Arm::Auto)?;
+        graph_identity(&auto_graph, f, Arm::Auto)?;
+        let mut strata = Vec::new();
+        for path in ["eager", "graph"] {
+            for candidate_endpoints in [true, false] {
+                let arms = if candidate_endpoints {
+                    [Arm::Candidate, Arm::Auto, Arm::Auto, Arm::Candidate]
+                } else {
+                    [Arm::Auto, Arm::Candidate, Arm::Candidate, Arm::Auto]
+                };
+                let mut raw = Vec::new();
+                for bracket in 0..windows + 2 {
+                    let mut observations = [0.; 4];
+                    for (index, arm) in arms.into_iter().enumerate() {
+                        let graph = if arm == Arm::Candidate {
+                            &candidate_graph
+                        } else {
+                            &auto_graph
+                        };
+                        observations[index] = measure(ctx, fixed, f, arm, graph, path, golden)?;
+                    }
+                    if bracket >= 2 {
+                        raw.push(observations);
+                    }
+                }
+                let ratios = raw
+                    .iter()
+                    .map(|observation| ratio(*observation, candidate_endpoints))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let p50 = quantile(&ratios, 0.5);
+                let p95 = quantile(&ratios, 0.95);
+                println!(
+                    "{}",
+                    json!({
+                        "schema":"MambaBiNtCopyPlanSiblingsPreAdmissionScreenV1",
+                        "cell":f.cell.name,
+                        "toolkit":format!("{:?}",ctx.kernels.compiler_identity().nvrtc_version),
+                        "phase":format!("once{windows}"),
+                        "path":path,
+                        "order":if candidate_endpoints {"ABBA"} else {"BAAB"},
+                        "windows":windows,
+                        "raw_observations_us":raw,
+                        "ratio_direction":"candidate_over_prior_actual_auto",
+                        "ratio_p50":p50,
+                        "ratio_p95":p95,
+                    })
+                );
+                strata.push([p50, p95]);
+            }
+        }
+        if strata
+            .iter()
+            .any(|values| values[0] >= 0.99 || values[1] >= 0.99)
+        {
+            return Err(format!(
+                "{} once{windows} failed strict candidate/prior-AUTO p50+p95<.99: {strata:?}",
+                f.cell.name
+            ));
+        }
+        Ok(strata)
     }
 
     #[test]
@@ -731,10 +989,14 @@ mod cuda_suite {
                 false,
             ),
         ] {
-            check_bits(&ctx, &fixed, &mut Fixture::new(&ctx, cell, exceptional)?)?;
+            check_bits(
+                &ctx,
+                &fixed,
+                &mut Fixture::new(&ctx, cell, exceptional, 1.0)?,
+            )?;
         }
         for cell in CELLS {
-            let mut f = Fixture::new(&ctx, cell, false)?;
+            let mut f = Fixture::new(&ctx, cell, false, 1.0)?;
             let (exact, fast) = check_bits(&ctx, &fixed, &mut f)?;
             let candidate_graph = capture(&ctx, &fixed, &mut f, Arm::Candidate)?;
             for comparator in [Arm::Auto, Arm::Fast] {
@@ -790,13 +1052,13 @@ mod cuda_suite {
     }
 
     #[test]
-    #[ignore = "requires integrated RTX6000Ada AUTO on frozen CUDA12.8/13.0/13.2; resource, exact eager and prepared-graph identity"]
-    fn ada_f32_nt_copyplan_siblings_integrated_auto_qualification() -> Result<(), String> {
+    #[ignore = "pre-admission RTX6000Ada qualification; run independently on frozen CUDA12.8/13.0/13.2 before populating the production cohort"]
+    fn ada_f32_nt_copyplan_siblings_pre_admission_qualification() -> Result<(), String> {
         if cfg!(debug_assertions) {
-            return Err("integrated AUTO qualification requires --release".into());
+            return Err("pre-admission qualification requires --release".into());
         }
         let quiet = common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
-        quiet.require_pre_context("nt-copyplan-siblings-integrated/pre")?;
+        quiet.require_pre_context("nt-copyplan-siblings-pre-admission/pre")?;
         let device = GpuDevice::new(0)?;
         let id = device.identity();
         if id.compute_capability != (8, 9) || id.multiprocessor_count != 142 {
@@ -819,9 +1081,19 @@ mod cuda_suite {
             || fixed_compiler.nvrtc_library_domain != scalar_compiler.nvrtc_library_domain
         {
             return Err(format!(
-                "integrated composed compiler cohort is not frozen: fixed={fixed_compiler:?} scalar={scalar_compiler:?}"
+                "pre-admission composed compiler domain is not frozen: fixed={fixed_compiler:?} scalar={scalar_compiler:?}"
             ));
         }
+        println!(
+            "{}",
+            json!({
+                "schema":"MambaBiNtCopyPlanSiblingsPreAdmissionIdentityV1",
+                "fixed_compiler":format!("{fixed_compiler:?}"),
+                "scalar_compiler":format!("{scalar_compiler:?}"),
+                "artifacts":format!("{:?}",ctx.kernels.artifact_set_identity()),
+                "production_admission":false,
+            })
+        );
         let fixed = ctx
             .kernels
             .fixed_sm89_f32_n64_copyplan
@@ -841,6 +1113,66 @@ mod cuda_suite {
             4_224,
             18,
         )?;
+        let mut abi_probe = Fixture::new(&ctx, CELLS[0], false, 1.0)?;
+        let abi_graph = capture(&ctx, &fixed, &mut abi_probe, Arm::Candidate)?;
+        graph_identity(&abi_graph, &abi_probe, Arm::Candidate)?;
+        abi_probe.a.unchanged(&ctx)?;
+        abi_probe.b.unchanged(&ctx)?;
+        abi_probe.output.bits(&ctx)?;
+        abi_probe.scratch.bits(&ctx)?;
+        drop(abi_graph);
+        drop(abi_probe);
+
+        for (cell, exceptional) in [
+            (
+                Cell {
+                    name: "tail",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                false,
+            ),
+            (
+                Cell {
+                    name: "exceptional",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                true,
+            ),
+            (
+                Cell {
+                    name: "zero_reduction",
+                    m: 67,
+                    out: 68,
+                    reduction: 0,
+                },
+                false,
+            ),
+        ] {
+            check_bits(
+                &ctx,
+                &fixed,
+                &mut Fixture::new(&ctx, cell, exceptional, 1.0)?,
+            )?;
+        }
+        check_candidate_bits(
+            &ctx,
+            &fixed,
+            &mut Fixture::new(
+                &ctx,
+                Cell {
+                    name: "nonunit_alpha",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                false,
+                0.375,
+            )?,
+        )?;
 
         for cell in CELLS {
             let request = PhysicalQualificationRequest::contiguous(
@@ -848,59 +1180,77 @@ mod cuda_suite {
                 (cell.m, cell.out, cell.reduction),
                 PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
             );
-            let qualified = qualify_physical_launch(&ctx, request)?;
-            let evidence = qualified.evidence();
-            let nodes = evidence.nodes();
-            if !evidence.eager_graph_equal()
-                || evidence.launch_count() != 2
-                || nodes.len() != 2
-                || [nodes[0].symbol, nodes[1].symbol] != [TRANSPOSE, FIXED]
-                || [nodes[0].module_kind, nodes[1].module_kind]
-                    != [ModuleKind::TriadScalar, ModuleKind::Fixed]
-                || nodes.iter().any(|node| {
-                    node.logical_op != ResolvedGemmOp::Nt
-                        || node.shape != (cell.m, cell.out, cell.reduction)
-                        || node.strides != (cell.reduction, cell.reduction, cell.out)
-                        || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
-                        || node.launch.arguments_digest == [0; 32]
-                })
-                || (
-                    nodes[0].launch.grid_dim,
-                    nodes[0].launch.block_dim,
-                    nodes[0].launch.shared_mem_bytes,
-                ) != (cell.transpose_grid(), (32, 16, 1), 0)
-                || (
-                    nodes[1].launch.grid_dim,
-                    nodes[1].launch.block_dim,
-                    nodes[1].launch.shared_mem_bytes,
-                ) != (cell.fixed_grid(), (128, 1, 1), 0)
-                || nodes[0].launch.arguments_digest == nodes[1].launch.arguments_digest
-                || evidence.launch_digest() == [0; 32]
             {
-                return Err(format!(
-                    "{} integrated AUTO eager/prepared graph identity changed: {evidence:?}",
-                    cell.name
-                ));
+                let mut qualified = qualify_physical_launch(&ctx, request)?;
+                let evidence = qualified.evidence();
+                let nodes = evidence.nodes();
+                if !evidence.eager_graph_equal()
+                    || evidence.launch_count() != 1
+                    || nodes.len() != 1
+                    || nodes[0].symbol != cell.prior_auto_symbol()
+                    || nodes[0].module_kind != ModuleKind::TriadScalar
+                    || nodes[0].logical_op != ResolvedGemmOp::Nt
+                    || nodes[0].shape != (cell.m, cell.out, cell.reduction)
+                    || nodes[0].strides != (cell.reduction, cell.reduction, cell.out)
+                    || nodes[0].numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+                    || nodes[0].launch.grid_dim != cell.prior_auto_grid()
+                    || nodes[0].launch.block_dim != cell.prior_auto_block()
+                    || nodes[0].launch.shared_mem_bytes != cell.prior_auto_shared()
+                    || nodes[0].launch.arguments_digest == [0; 32]
+                    || evidence.launch_digest() == [0; 32]
+                {
+                    return Err(format!(
+                        "{} actual AUTO must remain the prior eager/prepared fallback: {evidence:?}",
+                        cell.name
+                    ));
+                }
+                qualified.seed_f32_operands(&ctx, 0x00a1_7680 ^ cell.m as u64)?;
+                let before = qualified.f32_operand_bits(&ctx)?;
+                qualified.measure_eager_window_ms(&ctx, 1)?;
+                let eager = qualified.f32_output_bits(&ctx)?;
+                if qualified.f32_operand_bits(&ctx)? != before {
+                    return Err(format!("{} actual AUTO eager mutated A/B", cell.name));
+                }
+                qualified.validate_red_zones(&ctx)?;
+                qualified.seed_f32_operands(&ctx, 0x00a1_7680 ^ cell.m as u64)?;
+                let before = qualified.f32_operand_bits(&ctx)?;
+                qualified.measure_graph_window_ms(&ctx, 1)?;
+                if qualified.f32_output_bits(&ctx)? != eager
+                    || qualified.f32_operand_bits(&ctx)? != before
+                {
+                    return Err(format!(
+                        "{} actual AUTO captured graph changed output bits or A/B",
+                        cell.name
+                    ));
+                }
+                qualified.validate_red_zones(&ctx)?;
             }
-            qualified.validate_red_zones(&ctx)?;
-            let mut fixture = Fixture::new(&ctx, cell, false)?;
-            check_bits(&ctx, &fixed, &mut fixture)?;
+
+            let mut fixture = Fixture::new(&ctx, cell, false, 1.0)?;
+            let (exact, _) = check_bits(&ctx, &fixed, &mut fixture)?;
+            quiet.require_cohort("nt-copyplan-siblings-pre-admission/timed")?;
+            let once3 =
+                paired_candidate_vs_prior_auto_screen(&ctx, &fixed, &mut fixture, &exact, 3)?;
+            let once7 =
+                paired_candidate_vs_prior_auto_screen(&ctx, &fixed, &mut fixture, &exact, 7)?;
             println!(
                 "{}",
                 json!({
-                    "schema":"MambaBiNtCopyPlanSiblingsIntegratedAutoV1",
+                    "schema":"MambaBiNtCopyPlanSiblingsPreAdmissionDecisionV1",
                     "cell":cell.name,
                     "shape":[cell.m,cell.out,cell.reduction],
-                    "symbols":[TRANSPOSE,FIXED],
-                    "modules":["TriadScalar","Fixed"],
-                    "eager_graph_equal":true,
+                    "candidate_symbols":[TRANSPOSE,FIXED],
+                    "prior_actual_auto_symbol":cell.prior_auto_symbol(),
                     "exact_oracle":"generic_exact_f32",
-                    "launch_digest":format!("{:02x?}",evidence.launch_digest()),
+                    "once3":once3,
+                    "once7":once7,
+                    "production_admission":false,
+                    "decision":"qualified_for_separate_identity_admission_commit",
                 })
             );
         }
         drop(ctx);
-        quiet.verify_post_cohort("nt-copyplan-siblings-integrated/post")?;
+        quiet.verify_post_cohort("nt-copyplan-siblings-pre-admission/post")?;
         Ok(())
     }
 }

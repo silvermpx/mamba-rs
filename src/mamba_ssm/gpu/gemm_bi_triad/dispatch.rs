@@ -5001,6 +5001,7 @@ impl NtFixedCopyPlanComposedQualificationIdentity {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
     46, 194, 80, 187, 109, 173, 186, 103, 14, 36, 85, 42, 153, 57, 180, 195, 8, 171, 74, 15, 240,
     195, 225, 30, 138, 195, 124, 98, 177, 254, 209, 98,
@@ -5009,7 +5010,8 @@ const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
 /// Frozen whole-pipeline identities for the portable transpose followed by
 /// the Fixed CopyPlan kernel. Each entry binds both modules to the same live
 /// toolkit domain; a Fixed-only match is intentionally insufficient.
-const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
+#[cfg_attr(not(test), allow(dead_code))]
+const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
     &[NtFixedCopyPlanComposedQualificationIdentity] = &[
     NtFixedCopyPlanComposedQualificationIdentity {
         scalar: ScalarTransposeQualificationIdentity {
@@ -5081,6 +5083,12 @@ const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
         fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[2],
     },
 ];
+
+// Intentionally empty until the unchanged composed pipeline has passed the
+// complete live qualification on an exact toolkit domain. The frozen rows
+// above are inputs to that qualification, not production admission evidence.
+const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
+    &[NtFixedCopyPlanComposedQualificationIdentity] = &[];
 
 fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
@@ -5958,7 +5966,8 @@ pub(super) fn nt_routes_to_big(
 mod scalar_wave_policy_tests {
     use super::{
         FIXED_COPYPLAN_EVIDENCE_COHORTS, NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
-        ScalarDispatchPlan, ScalarLaunchFacts, scalar_dispatch_plan, scalar_launch_plan,
+        NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES, ScalarDispatchPlan, ScalarLaunchFacts,
+        scalar_dispatch_plan, scalar_launch_plan,
     };
     use crate::mamba_ssm::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::mamba_ssm::gpu::kernel_identity::{
@@ -6112,7 +6121,7 @@ mod scalar_wave_policy_tests {
     }
 
     fn nt_fixed_copyplan_sibling_facts(index: usize) -> ScalarLaunchFacts {
-        let identity = NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS[index];
+        let identity = NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
         let mut facts = fixed_copyplan_facts(index);
         facts.scalar_artifact = ArtifactIdentity {
             module_kind: ModuleKind::TriadScalar,
@@ -7109,23 +7118,33 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_admits_only_the_two_retained_cells() {
+    fn nt_fixed_copyplan_sibling_selector_stays_disabled_until_live_qualification() {
+        assert!(
+            NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS.is_empty(),
+            "Batch A must remain fail-closed until every toolkit passes live qualification"
+        );
+    }
+
+    #[test]
+    fn nt_fixed_copyplan_sibling_selector_keeps_both_retained_cells_on_prior_auto() {
         let operands = nn_qualified_operands();
         let cells = [
             (
                 (2_048, 768, 3_072),
-                "NtD768InSm89FixedCopyPlanQualified",
                 ScalarDispatchPlan::NtFinal { slim: false },
             ),
             (
                 (4_621, 384, 1_928),
-                "NtPrismSm89FixedCopyPlanQualified",
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ];
-        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS.len() {
+        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
             let facts = nt_fixed_copyplan_sibling_facts(cohort);
-            for (dims, selected, fallback) in cells {
+            assert!(
+                NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[cohort].matches(facts),
+                "cohort {cohort} candidate identity"
+            );
+            for (dims, fallback) in cells {
                 let request = F32TriadRequest {
                     op: ResolvedGemmOp::Nt,
                     shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
@@ -7136,14 +7155,37 @@ mod scalar_wave_policy_tests {
                     "cohort {cohort} cell {dims:?} prior plan"
                 );
                 assert_eq!(
-                    format!(
-                        "{:?}",
-                        scalar_launch_plan(facts, request, operands).unwrap()
-                    ),
-                    selected,
-                    "cohort {cohort} cell {dims:?} retained route"
+                    scalar_launch_plan(facts, request, operands).unwrap(),
+                    fallback,
+                    "cohort {cohort} cell {dims:?} must stay on prior AUTO"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn disabled_nt_siblings_do_not_change_existing_nn_or_d768_out_routes() {
+        let operands = nn_qualified_operands();
+        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
+            let facts = nt_fixed_copyplan_sibling_facts(cohort);
+            let nn = F32TriadRequest {
+                op: ResolvedGemmOp::Nn,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (2_048, 768, 3_072)),
+            };
+            assert_eq!(
+                scalar_launch_plan(facts, nn, operands).unwrap(),
+                ScalarDispatchPlan::NnSm89FixedCopyPlanQualified,
+                "cohort {cohort} NN"
+            );
+            let d768_out = F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
+            };
+            assert_eq!(
+                scalar_launch_plan(facts, d768_out, operands).unwrap(),
+                ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified,
+                "cohort {cohort} d768-out"
+            );
         }
     }
 
@@ -7151,15 +7193,13 @@ mod scalar_wave_policy_tests {
     fn nt_fixed_copyplan_sibling_selector_fails_closed_on_contract_mutations() {
         let facts = nt_fixed_copyplan_sibling_facts(2);
         let operands = nn_qualified_operands();
-        for (dims, selected, fallback) in [
+        for (dims, fallback) in [
             (
                 (2_048, 768, 3_072),
-                "NtD768InSm89FixedCopyPlanQualified",
                 ScalarDispatchPlan::NtFinal { slim: false },
             ),
             (
                 (4_621, 384, 1_928),
-                "NtPrismSm89FixedCopyPlanQualified",
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ] {
@@ -7179,13 +7219,10 @@ mod scalar_wave_policy_tests {
                             (neighbor[0], neighbor[1], neighbor[2]),
                         ),
                     };
-                    assert_ne!(
-                        format!(
-                            "{:?}",
-                            scalar_launch_plan(facts, neighbor, operands).unwrap()
-                        ),
-                        selected,
-                        "shape neighbor {neighbor:?}"
+                    assert_eq!(
+                        scalar_launch_plan(facts, neighbor, operands).unwrap(),
+                        scalar_dispatch_plan(neighbor, facts.multiprocessor_count).unwrap(),
+                        "shape neighbor {neighbor:?} must retain prior AUTO"
                     );
                 }
             }
@@ -7203,21 +7240,14 @@ mod scalar_wave_policy_tests {
                     ..request.shape
                 },
             ] {
-                assert_ne!(
-                    format!(
-                        "{:?}",
-                        scalar_launch_plan(
-                            facts,
-                            F32TriadRequest {
-                                op: ResolvedGemmOp::Nt,
-                                shape,
-                            },
-                            operands,
-                        )
-                        .unwrap()
-                    ),
-                    selected,
-                    "stride mutation {shape:?}"
+                let mutated = F32TriadRequest {
+                    op: ResolvedGemmOp::Nt,
+                    shape,
+                };
+                assert_eq!(
+                    scalar_launch_plan(facts, mutated, operands).unwrap(),
+                    scalar_dispatch_plan(mutated, facts.multiprocessor_count).unwrap(),
+                    "stride mutation {shape:?} must retain prior AUTO"
                 );
             }
             for mutation in [
