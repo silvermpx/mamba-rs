@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 TN full-tile staging stop: the exact-shape
+d768-in candidate removes per-copy extent/zero-fill predicates with direct
+16-byte cp.async while keeping the four-warp regpipe+float2 math. Exact target,
+tails, exception, K0, eager/graph and guards pass; resources improve125->118
+registers at shared32768/occupancy3. It is consistently0.32–0.80% faster, but
+once3 p50/p95 `0.99205-0.99678` miss the strict1% retained gate. Stop before
+once7/Fast and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-half-tn-vec2-full-tile-stage-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad F16 TN eight-warp 16x32 stop: the test-only
 d768-in M64N64/BK64/S2 variant raises the compute-warps from four to eight while
 preserving exact target/tails/exception/K0, graph/repeats/guards and the K16
