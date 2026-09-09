@@ -18,6 +18,17 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 TN issue-order stop: the test-only d768-in
+candidate changes only the eight independent HMMA traversal order inside each
+K16 group while preserving each output's ascending K16 association, real
+seven-argument TN ABI, staging, epilogue and resources125regs/local0/
+shared32768/occupancy3. Target/tails/exception/K0/eager/graph/20-op/guards pass
+exactly, but the once3 candidate/retained ratios are parity to slightly slower:
+p50 `0.999705-1.000550`, worst p95 `1.001476`. Stop before once7/Fast; retain
+the prior M64N64/BK64/S2 regpipe+float2 kernel and do not retry this unchanged
+issue order. Evidence:
+`internal/perf/ada-triad-half-tn-regpipe-vec2-issue-20260909/report.md`.
+
 NEW 2026-09-09 actual-Triad TF32 NT Prism retained-best: the test-only
 stage-sliced A-ldmatrix candidate passes target/M/N/K-tail/exception/K0,
 eager/graph/guard exactness and resource gates; candidate and frozen A-only
