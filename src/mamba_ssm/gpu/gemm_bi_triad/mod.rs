@@ -41,8 +41,8 @@ mod dispatch;
 mod launch;
 pub(crate) mod modules;
 mod qualification;
-mod sm89_finalist_source;
 mod sm89_exact_f32_source;
+mod sm89_finalist_source;
 mod sm89_half_source;
 mod sm89_tf32_joint_source;
 #[cfg(test)]
@@ -56,20 +56,20 @@ pub use contract::{
     SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS, SCALAR_TN_M16N16_REGISTER_CAP,
     SCALAR_TN_M16N16_STATIC_SHARED_BYTES, SCALAR_TN_M16N16_THREADS,
     SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS, SM80_TF32_ROUTE_SPECS, SM80_TF32_WIDE_ROUTE_SPECS,
-    SM89_FINALIST_TF32_ROUTE_SPECS, SM89_FINALIST_TUNING_REVISION, SM90A_DYNAMIC_SHARED_BYTES,
-    SM90A_STAGES, SM90A_TF32_ROUTE_SPECS, SM90A_TILE, SM100_KERNEL_SPECS,
-    SM100_TENSOR_MAP_REVISION, SM100_TF32_ROUTE_SPECS, SM100_TUNING_REVISION, SM120_KERNEL_SPECS,
-    SM120_SCHEDULE_REVISION, SM120_STREAMK_KERNEL_SPECS, SM120_TENSOR_MAP_REVISION,
-    SM120_TF32_ROUTE_SPECS, SM120_TUNING_REVISION, Sm90aForcedRoute, Sm90aLaunchOperands,
-    Sm90aMapRequest, Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps, Sm90aRouteIdentity,
-    Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100KernelSpec,
-    Sm100LaunchOperands, Sm100MapRequest, Sm100NumericContract, Sm100Op, Sm100PhysicalRoute,
-    Sm100PreparedLaunch, Sm100PreparedTensorMaps, Sm100RouteIdentity, Sm100Schedule, Sm100Shape,
-    Sm100Stages, Sm100TargetCandidate, Sm100TargetKind, Sm100TensorMap, Sm100Tile, Sm120Bk,
-    Sm120ForcedRoute, Sm120KernelResources, Sm120KernelSpec, Sm120LaunchOperands, Sm120MapRequest,
-    Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120PreparedLaunch,
-    Sm120PreparedTensorMaps, Sm120RouteIdentity, Sm120Schedule, Sm120Shape, Sm120Stages,
-    Sm120TargetCandidate, Sm120TensorMap, Sm120Tile, TF32_SCHEDULE_REVISION,
+    SM89_FINALIST_TF32_ROUTE_SPECS, SM89_FINALIST_TUNING_REVISION, SM89_TF32_JOINT_TUNING_REVISION,
+    SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TF32_ROUTE_SPECS, SM90A_TILE,
+    SM100_KERNEL_SPECS, SM100_TENSOR_MAP_REVISION, SM100_TF32_ROUTE_SPECS, SM100_TUNING_REVISION,
+    SM120_KERNEL_SPECS, SM120_SCHEDULE_REVISION, SM120_STREAMK_KERNEL_SPECS,
+    SM120_TENSOR_MAP_REVISION, SM120_TF32_ROUTE_SPECS, SM120_TUNING_REVISION, Sm90aForcedRoute,
+    Sm90aLaunchOperands, Sm90aMapRequest, Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps,
+    Sm90aRouteIdentity, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
+    Sm100KernelSpec, Sm100LaunchOperands, Sm100MapRequest, Sm100NumericContract, Sm100Op,
+    Sm100PhysicalRoute, Sm100PreparedLaunch, Sm100PreparedTensorMaps, Sm100RouteIdentity,
+    Sm100Schedule, Sm100Shape, Sm100Stages, Sm100TargetCandidate, Sm100TargetKind, Sm100TensorMap,
+    Sm100Tile, Sm120Bk, Sm120ForcedRoute, Sm120KernelResources, Sm120KernelSpec,
+    Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op, Sm120PhysicalRoute,
+    Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120RouteIdentity, Sm120Schedule, Sm120Shape,
+    Sm120Stages, Sm120TargetCandidate, Sm120TensorMap, Sm120Tile, TF32_SCHEDULE_REVISION,
     TF32_SPLITK_EXTENSION_SPECS, TF32_TENSOR_MAP_REVISION, TcFwdOperands, Tf32KernelSpec,
     Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
     Tf32QualifiedModule, Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages,
@@ -109,14 +109,14 @@ pub use qualification::{
     tf32_qualification_route_specs,
 };
 #[doc(hidden)]
-pub use sm89_half_source::{
-    SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfKernelSpec, Sm89HalfRoute,
+pub use sm89_exact_f32_source::{
+    D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL, SM89_EXACT_F32_KERNEL_SPECS,
+    Sm89ExactF32DualChunkParams, Sm89ExactF32KernelKind, Sm89ExactF32KernelSpec,
+    Sm89ExactF32TnRoute,
 };
 #[doc(hidden)]
-pub use sm89_exact_f32_source::{
-    D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL,
-    SM89_EXACT_F32_KERNEL_SPECS, Sm89ExactF32DualChunkParams, Sm89ExactF32KernelKind,
-    Sm89ExactF32KernelSpec, Sm89ExactF32TnRoute,
+pub use sm89_half_source::{
+    SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfKernelSpec, Sm89HalfRoute,
 };
 #[doc(hidden)]
 pub use sm89_tf32_joint_source::{

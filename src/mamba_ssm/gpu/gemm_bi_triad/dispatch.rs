@@ -2433,6 +2433,7 @@ fn resolve_f32_triad_auto_impl(
             if availability.portable.is_none()
                 && availability.specialized.is_none()
                 && availability.finalist.is_none()
+                && availability.joint.is_none()
             {
                 return Ok(F32TriadSelection::ScalarFmaV1);
             }
@@ -2507,6 +2508,10 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => availability.portable,
         Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => availability.finalist,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89NnDirectN96V1
+        | Tf32PhysicalRoute::Sm89NnN96V1 => availability.joint,
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
@@ -2515,7 +2520,35 @@ pub fn resolve_tf32_forced(
     }
     .ok_or_else(|| format!("forced TF32 route {route:?} has no qualified module"))?;
     ensure_tf32_binding_contract(binding, module_kind, dynamic_shared_bytes, route)?;
+    if !sm89_joint_route_matches_request(route, request) {
+        return Err(format!(
+            "forced TF32 route {route:?} is not qualified for {request:?}"
+        ));
+    }
     Ok(route)
+}
+
+fn sm89_joint_route_matches_request(route: Tf32PhysicalRoute, request: F32TriadRequest) -> bool {
+    let shape = request.shape;
+    let dims = (shape.m, shape.k, shape.n);
+    let contiguous = shape == F32TriadShape::contiguous(request.op, dims);
+    match route {
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 => {
+            request.op == ResolvedGemmOp::Tn
+                && matches!(dims, (2_048, 768, 3_072) | (2_048, 1_536, 768))
+                && contiguous
+        }
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => {
+            request.op == ResolvedGemmOp::Tn && dims == (4_621, 384, 1_928) && contiguous
+        }
+        Tf32PhysicalRoute::Sm89NnDirectN96V1 => {
+            request.op == ResolvedGemmOp::Nn && dims == (4_621, 384, 1_928) && contiguous
+        }
+        Tf32PhysicalRoute::Sm89NnN96V1 => {
+            request.op == ResolvedGemmOp::Nn && dims == (2_048, 1_536, 768) && contiguous
+        }
+        _ => true,
+    }
 }
 
 fn ensure_tf32_binding_contract(
@@ -2565,6 +2598,10 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+            | Tf32PhysicalRoute::Sm89NnDirectN96V1
+            | Tf32PhysicalRoute::Sm89NnN96V1
     ) && !binding.device_caps.tensor_map_access
     {
         return Err(format!(
@@ -2604,6 +2641,12 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((12, 1), "compute_120", "sm_120")
         ),
         Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => {
+            (cc, target, device_target) == ((8, 9), "sm_89", "sm_89")
+        }
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89NnDirectN96V1
+        | Tf32PhysicalRoute::Sm89NnN96V1 => {
             (cc, target, device_target) == ((8, 9), "sm_89", "sm_89")
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
@@ -10504,6 +10547,7 @@ mod tf32_tests {
             portable: Some(portable),
             specialized: None,
             finalist: None,
+            joint: None,
         }
     }
 
@@ -10545,6 +10589,7 @@ mod tf32_tests {
             portable: None,
             specialized: Some(specialized),
             finalist: None,
+            joint: None,
         }
     }
 
@@ -12912,6 +12957,7 @@ mod tf32_tests {
                 )),
                 specialized: None,
                 finalist: None,
+                joint: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -12924,6 +12970,7 @@ mod tf32_tests {
                 )),
                 specialized: None,
                 finalist: None,
+                joint: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -12936,6 +12983,7 @@ mod tf32_tests {
                 )),
                 specialized: None,
                 finalist: None,
+                joint: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -12948,6 +12996,7 @@ mod tf32_tests {
                 )),
                 specialized: None,
                 finalist: None,
+                joint: None,
             },
         ];
         for availability in cases {
@@ -14281,6 +14330,7 @@ mod tf32_tests {
                     portable: Some(portable),
                     specialized: None,
                     finalist: None,
+                    joint: None,
                 },
             ] {
                 assert_eq!(
@@ -14324,6 +14374,7 @@ mod tf32_tests {
                     )),
                     specialized: None,
                     finalist: None,
+                    joint: None,
                 },
             ),
             (
@@ -14341,6 +14392,7 @@ mod tf32_tests {
                         73_984,
                     )),
                     finalist: None,
+                    joint: None,
                 },
             ),
             (
@@ -14360,6 +14412,7 @@ mod tf32_tests {
                         131_328,
                     )),
                     finalist: None,
+                    joint: None,
                 },
             ),
             (
@@ -14378,6 +14431,7 @@ mod tf32_tests {
                         73_856,
                     )),
                     finalist: None,
+                    joint: None,
                 },
             ),
         ];
@@ -14386,6 +14440,88 @@ mod tf32_tests {
                 resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
                 route
             );
+        }
+    }
+
+    #[test]
+    fn sm89_joint_forced_routes_are_exact_cell_only_and_auto_stays_closed() {
+        let joint = qualified_module(
+            ModuleKind::TriadSm89Tf32Joint,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            101_376,
+        );
+        let availability = F32TriadAvailability {
+            joint: Some(joint),
+            ..F32TriadAvailability::default()
+        };
+        for (op, dims, route) in [
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NnDirectN96V1,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89NnN96V1,
+            ),
+        ] {
+            let request = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, dims),
+            };
+            assert_eq!(
+                resolve_tf32_forced(request, availability, route).unwrap(),
+                route
+            );
+            assert_eq!(
+                resolve_f32_triad_auto(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    availability,
+                )
+                .unwrap(),
+                F32TriadSelection::ScalarFmaV1,
+                "empty joint cohort must not admit {op:?}/{dims:?}"
+            );
+            let mut neighbors = Vec::new();
+            for field in 0..6 {
+                let mut neighbor = request;
+                match field {
+                    0 => neighbor.shape.m += 1,
+                    1 => neighbor.shape.k += 1,
+                    2 => neighbor.shape.n += 1,
+                    3 => neighbor.shape.lda += 1,
+                    4 => neighbor.shape.ldb += 1,
+                    5 => neighbor.shape.ldc += 1,
+                    _ => unreachable!(),
+                }
+                neighbors.push(neighbor);
+            }
+            for neighbor in neighbors {
+                assert!(
+                    resolve_tf32_forced(neighbor, availability, route).is_err(),
+                    "joint route {route:?} accepted neighboring request {neighbor:?}"
+                );
+            }
         }
     }
 
@@ -14518,6 +14654,7 @@ mod tf32_tests {
             let assert_prior = |request, operands, actual: F32TriadAvailability| {
                 let previous = F32TriadAvailability {
                     finalist: None,
+                    joint: None,
                     ..actual
                 };
                 assert_eq!(
@@ -14638,6 +14775,7 @@ mod tf32_tests {
             )),
             specialized: None,
             finalist: None,
+            joint: None,
         };
 
         assert_eq!(
@@ -14663,6 +14801,7 @@ mod tf32_tests {
             )),
             specialized: None,
             finalist: None,
+            joint: None,
         };
 
         assert_eq!(
@@ -14711,6 +14850,7 @@ mod tf32_tests {
                     49_408,
                 )),
                 finalist: None,
+                joint: None,
             };
             assert_eq!(
                 resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
@@ -14729,6 +14869,7 @@ mod tf32_tests {
                 49_408,
             )),
             finalist: None,
+            joint: None,
         };
         assert!(resolve_tf32_forced(request(ResolvedGemmOp::Nn), generic, route).is_err());
     }
@@ -14801,6 +14942,7 @@ mod tf32_tests {
                         portable: None,
                         specialized: Some(invalid),
                         finalist: None,
+                        joint: None,
                     },
                     route,
                 )
@@ -14827,6 +14969,7 @@ mod tf32_tests {
                     )),
                     specialized: None,
                     finalist: None,
+                    joint: None,
                 },
                 illegal,
             )

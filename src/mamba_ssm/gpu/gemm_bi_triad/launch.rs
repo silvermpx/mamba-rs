@@ -5,13 +5,17 @@ use super::super::context::{GpuCtx, HalfTriadPolicy};
 use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::*;
 use super::dispatch::*;
+use super::sm89_tf32_joint_source::{
+    Sm89Tf32JointGemmParams, Sm89Tf32JointTransposeParams, TN_PRE_RNA_TRANSPOSE_SYMBOL,
+};
 use crate::mamba_ssm::gpu::kernel_identity::{
     FramedSha256, GemmPolicy, GemmRouteIdentity, ModuleKind, NoPhysicalObserver,
-    PhysicalCudaLaunchError, PhysicalGemmBackend, PhysicalLaunchObservation,
-    PhysicalLaunchObserver, PolicyDtype, RecordingPhysicalObserver, ResolvedGemmLaunchSet,
-    ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
-    ResolvedInstructionShape, ResolvedKernelLaunch, ResolvedNumericContract,
-    ResolvedOperandConversion, ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch,
+    PhysicalConversionArguments, PhysicalCudaLaunchError, PhysicalGemmBackend,
+    PhysicalLaunchObservation, PhysicalLaunchObserver, PolicyDtype, RecordingPhysicalObserver,
+    ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
+    ResolvedInputTransform, ResolvedInstructionFamily, ResolvedInstructionShape,
+    ResolvedKernelLaunch, ResolvedNumericContract, ResolvedOperandConversion,
+    ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch, ResolvedTransformOutputOwnership,
     SCHEDULE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION,
     SM89_HALF_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION, build_resolved_gemm_launch_set,
     build_zero_reduction_route_identity, enqueue_prepared_physical_launch,
@@ -99,6 +103,8 @@ struct Sm80Tf32KernelParams {
 }
 
 unsafe impl DeviceRepr for Sm80Tf32KernelParams {}
+unsafe impl DeviceRepr for Sm89Tf32JointGemmParams {}
+unsafe impl DeviceRepr for Sm89Tf32JointTransposeParams {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -493,6 +499,16 @@ enum PreparedF32Kind {
         plan: Tf32StreamKLaunchPlan,
         workspace: Tf32StreamKWorkspace,
     },
+    Tf32TnPreRna {
+        route: Tf32PhysicalRoute,
+        transpose_params: Sm89Tf32JointTransposeParams,
+        gemm_params: Sm89Tf32JointGemmParams,
+        transpose_config: cudarc::driver::LaunchConfig,
+        gemm_config: cudarc::driver::LaunchConfig,
+        scratch: CUptr,
+        scratch_elements: usize,
+        transform: ResolvedInputTransform,
+    },
 }
 
 pub(in crate::mamba_ssm::gpu) struct PreparedF32TriadLaunch {
@@ -523,11 +539,31 @@ impl PreparedF32TriadLaunch {
                 | PreparedF32Kind::Tf32 { .. }
                 | PreparedF32Kind::Tf32SplitK { .. }
                 | PreparedF32Kind::Tf32StreamK { .. }
+                | PreparedF32Kind::Tf32TnPreRna { .. }
         )
     }
 
     pub(in crate::mamba_ssm::gpu) fn physical_graph_launch_count(&self) -> usize {
-        self.routes.len()
+        match self.kind {
+            PreparedF32Kind::Tf32TnPreRna { .. } => 2,
+            _ => self.routes.len(),
+        }
+    }
+
+    pub(in crate::mamba_ssm::gpu) fn physical_graph_scratch_range(
+        &self,
+    ) -> Option<PhysicalArgumentRange> {
+        match self.kind {
+            PreparedF32Kind::Tf32TnPreRna {
+                scratch,
+                scratch_elements,
+                ..
+            } => Some(PhysicalArgumentRange {
+                pointer: scratch,
+                required_bytes: u64::try_from(scratch_elements).ok()?.checked_mul(4)?,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -3207,6 +3243,10 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
             ctx.kernels.f32_triad_availability().portable
         }
         Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => ctx.kernels.f32_triad_availability().finalist,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89NnDirectN96V1
+        | Tf32PhysicalRoute::Sm89NnN96V1 => ctx.kernels.f32_triad_availability().joint,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3269,17 +3309,20 @@ fn tf32_params(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
-        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => {
-            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-                alpha: operands.alpha,
-                beta: operands.beta,
-                m,
-                k,
-                n,
-                lda: checked_i32(shape.lda, "lda")?,
-                ldb: checked_i32(shape.ldb, "ldb")?,
-                ldc,
-            })
+        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+        | Tf32PhysicalRoute::Sm89NnDirectN96V1
+        | Tf32PhysicalRoute::Sm89NnN96V1 => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+            alpha: operands.alpha,
+            beta: operands.beta,
+            m,
+            k,
+            n,
+            lda: checked_i32(shape.lda, "lda")?,
+            ldb: checked_i32(shape.ldb, "ldb")?,
+            ldc,
+        }),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => {
+            return Err("Ada TF32 TN parameters require the two-node pre-RNA pipeline".into());
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
             PreparedTf32Params::Sm90a(Sm90aTf32KernelParams {
@@ -3627,6 +3670,14 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::Sm89MmaTf32Compact8V1,
             ResolvedNumericContract::MmaTf32RnaV1,
         ),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => (
+            PhysicalGemmBackend::Sm89MmaTf32PreRnaV1,
+            ResolvedNumericContract::MmaTf32PreRnaAV1,
+        ),
+        Tf32PhysicalRoute::Sm89NnDirectN96V1 | Tf32PhysicalRoute::Sm89NnN96V1 => (
+            PhysicalGemmBackend::Sm89MmaTf32AddHalfV1,
+            ResolvedNumericContract::MmaTf32AddHalfUlpV1,
+        ),
         Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
             PhysicalGemmBackend::MmaTf32RnaSplitK2V1,
             ResolvedNumericContract::MmaTf32RnaSplitK2V1,
@@ -3718,10 +3769,10 @@ fn tf32_resolved_route(
         },
         tensor_maps_digest: digests.maps,
         resources_digest: digests.resources,
-        tuning_table_revision: if spec.route == Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 {
-            SM89_FINALIST_TUNING_REVISION
-        } else {
-            F32_TF32_TUNING_REVISION
+        tuning_table_revision: match spec.module_kind {
+            ModuleKind::TriadSm89Finalist => SM89_FINALIST_TUNING_REVISION,
+            ModuleKind::TriadSm89Tf32Joint => SM89_TF32_JOINT_TUNING_REVISION,
+            _ => F32_TF32_TUNING_REVISION,
         },
         schedule_revision: spec.schedule_revision,
     }
@@ -4027,6 +4078,7 @@ fn prepare_tf32_f32(
             })
             .unwrap_or(error)
     })?;
+    validate_sm89_tf32_joint_operands(request, operands, route)?;
     if matches!(
         route,
         Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
@@ -4040,6 +4092,12 @@ fn prepare_tf32_f32(
     }
     if route.is_exact_fma() {
         return prepare_sm120_fma_f32(ctx, request, operands, output_resources, route);
+    }
+    if matches!(
+        route,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+    ) {
+        return prepare_sm89_tf32_tn_pre_rna(ctx, request, operands, output_resources, route);
     }
     let spec = tf32_kernel_spec(request.op, route)?;
     let binding = f32_map_binding(ctx, route)?;
@@ -4065,7 +4123,10 @@ fn prepare_tf32_f32(
         ))
     } else if matches!(
         route,
-        Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+        Tf32PhysicalRoute::MmaTf32RnaV1(_)
+            | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+            | Tf32PhysicalRoute::Sm89NnDirectN96V1
+            | Tf32PhysicalRoute::Sm89NnN96V1
     ) {
         None
     } else {
@@ -4129,6 +4190,193 @@ fn prepare_tf32_f32(
             config,
         },
     })
+}
+
+fn validate_sm89_tf32_joint_operands(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+) -> Result<(), String> {
+    if !matches!(
+        route,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+            | Tf32PhysicalRoute::Sm89NnDirectN96V1
+            | Tf32PhysicalRoute::Sm89NnN96V1
+    ) {
+        return Ok(());
+    }
+    let required_beta: f32 = if request.op == ResolvedGemmOp::Tn {
+        1.0
+    } else {
+        0.0
+    };
+    if operands.alpha.to_bits() != 1.0_f32.to_bits()
+        || operands.beta.to_bits() != required_beta.to_bits()
+        || operands.bias.is_some()
+        || [operands.output, operands.a, operands.b]
+            .into_iter()
+            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
+    {
+        return Err(format!(
+            "Ada TF32 joint route {route:?} requires exact alpha/beta, no bias, and non-null 16-byte aligned operands"
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_sm89_tf32_tn_pre_rna(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    output_resources: F32LaunchResourceSnapshot,
+    route: Tf32PhysicalRoute,
+) -> Result<PreparedF32TriadLaunch, String> {
+    use cudarc::driver::DevicePtr;
+
+    let spec = tf32_kernel_spec(request.op, route)?;
+    let binding = f32_map_binding(ctx, route)?;
+    let allocation_domain = binding.allocation_domain;
+    let (output_stride, scratch_elements) = sm89_tf32_tn_scratch_layout(request)?;
+    let scratch_buffer = ctx.kernels.transpose_scratch_buf(&ctx.stream)?;
+    if scratch_elements > scratch_buffer.len()
+        || scratch_buffer.len() != SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
+    {
+        return Err(format!(
+            "Ada TF32 transpose scratch has {} elements, needs {scratch_elements} with exact capacity {SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS}",
+            scratch_buffer.len()
+        ));
+    }
+    let (scratch, _) = scratch_buffer.device_ptr(&ctx.stream);
+    let scratch_bytes = u64::try_from(scratch_elements)
+        .ok()
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or_else(|| "Ada TF32 transpose byte extent overflows u64".to_string())?;
+    let resources = output_resources
+        .with_inputs(request, operands, allocation_domain)?
+        .with_scratch(
+            None,
+            Some((scratch, scratch_bytes)),
+            None,
+            allocation_domain,
+        )?;
+    let transpose_params = Sm89Tf32JointTransposeParams {
+        rows: checked_i32(request.shape.m, "Ada TF32 transpose rows")?,
+        columns: checked_i32(request.shape.k, "Ada TF32 transpose columns")?,
+        output_stride: checked_i32(output_stride, "Ada TF32 transpose stride")?,
+    };
+    let gemm_params = Sm89Tf32JointGemmParams {
+        alpha: operands.alpha,
+        beta: operands.beta,
+        m: checked_i32(request.shape.k, "Ada TF32 physical M")?,
+        k: checked_i32(request.shape.m, "Ada TF32 physical K")?,
+        n: checked_i32(request.shape.n, "Ada TF32 physical N")?,
+        lda: checked_i32(output_stride, "Ada TF32 physical lda")?,
+        ldb: checked_i32(request.shape.ldb, "Ada TF32 physical ldb")?,
+        ldc: checked_i32(request.shape.ldc, "Ada TF32 physical ldc")?,
+    };
+    let transpose_config = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            checked_u32(request.shape.k.div_ceil(32), "Ada TF32 transpose grid x")?,
+            checked_u32(output_stride.div_ceil(32), "Ada TF32 transpose grid y")?,
+            1,
+        ),
+        block_dim: (32, 8, 1),
+        shared_mem_bytes: 0,
+    };
+    let physical_rows = checked_u32(request.shape.k, "Ada TF32 physical rows")?;
+    let columns = checked_u32(request.shape.n, "Ada TF32 physical columns")?;
+    let gemm_config = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            checked_tile_grid(physical_rows, spec.tile.0, columns, spec.tile.1)?,
+            1,
+            1,
+        ),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let resources_digest = resources.digest(request, operands, [0; 32]);
+    let arguments_digest = FramedSha256::new(b"triad-sm89-tf32-pre-rna-gemm-arguments.v1")
+        .required(b"symbol", spec.symbol.as_bytes())
+        .required(b"output", &operands.output.to_le_bytes())
+        .required(b"scratch", &scratch.to_le_bytes())
+        .required(b"B", &operands.b.to_le_bytes())
+        .required(b"bias-null", &0_u64.to_le_bytes())
+        .required(b"alpha", &operands.alpha.to_bits().to_le_bytes())
+        .required(b"beta", &operands.beta.to_bits().to_le_bytes())
+        .required(b"physical-m", &gemm_params.m.to_le_bytes())
+        .required(b"physical-k", &gemm_params.k.to_le_bytes())
+        .required(b"physical-n", &gemm_params.n.to_le_bytes())
+        .required(b"physical-lda", &gemm_params.lda.to_le_bytes())
+        .required(b"physical-ldb", &gemm_params.ldb.to_le_bytes())
+        .required(b"physical-ldc", &gemm_params.ldc.to_le_bytes())
+        .finish();
+    let resolved = tf32_resolved_route(
+        request,
+        spec,
+        binding,
+        Tf32LaunchDigests {
+            maps: [0; 32],
+            resources: resources_digest,
+            arguments: arguments_digest,
+        },
+        false,
+        gemm_config,
+    );
+    let transform = ResolvedInputTransform {
+        numeric_contract: ResolvedNumericContract::Tf32RnaPreprocessV1,
+        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+        output_ownership: ResolvedTransformOutputOwnership::PreparedScratchAllocationV1,
+        target: binding.qualified.target,
+        artifact: binding.qualified.artifact,
+        compiler: binding.qualified.compiler,
+        device: binding.qualified.device,
+        device_caps: binding.qualified.device_caps,
+        output_stride: checked_u32(output_stride, "Ada TF32 transform stride")?,
+        output_elements: u64::try_from(scratch_elements)
+            .map_err(|_| "Ada TF32 transform extent exceeds u64".to_string())?,
+        resources_digest: resources.physical_digest(),
+        tuning_table_revision: SM89_TF32_JOINT_TUNING_REVISION,
+        schedule_revision: SCHEDULE_REVISION,
+    };
+    let routes = vec![resolved].into_boxed_slice();
+    let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
+    let managed_epoch = resources.managed_epoch();
+    Ok(PreparedF32TriadLaunch {
+        context_token: ctx.instance_token(),
+        stream_token: ctx.stream_token(),
+        request,
+        operands,
+        resources,
+        managed_epoch,
+        routes,
+        resolved_launch_set,
+        kind: PreparedF32Kind::Tf32TnPreRna {
+            route,
+            transpose_params,
+            gemm_params,
+            transpose_config,
+            gemm_config,
+            scratch,
+            scratch_elements,
+            transform,
+        },
+    })
+}
+
+fn sm89_tf32_tn_scratch_layout(request: F32TriadRequest) -> Result<(usize, usize), String> {
+    let output_stride = request
+        .shape
+        .m
+        .checked_add(3)
+        .map(|value| value & !3)
+        .ok_or_else(|| "Ada TF32 transpose stride overflows usize".to_string())?;
+    let scratch_elements = request
+        .shape
+        .k
+        .checked_mul(output_stride)
+        .ok_or_else(|| "Ada TF32 transpose extent overflows usize".to_string())?;
+    Ok((output_stride, scratch_elements))
 }
 
 fn prepare_tf32_streamk_f32(
@@ -5089,6 +5337,9 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
     prepared: &PreparedF32TriadLaunch,
 ) -> Result<PreparedTriadPhysicalGraphSequence, String> {
     validate_prepared_f32_triad(ctx, prepared)?;
+    if matches!(prepared.kind, PreparedF32Kind::Tf32TnPreRna { .. }) {
+        return prepare_sm89_tf32_tn_pre_rna_graph_sequence(ctx, observer, prepared);
+    }
     if let PreparedF32Kind::Tf32SplitK {
         params,
         plan,
@@ -5148,7 +5399,10 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
         } => {
             match (*physical_route, *params) {
                 (
-                    Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+                    Tf32PhysicalRoute::MmaTf32RnaV1(_)
+                    | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+                    | Tf32PhysicalRoute::Sm89NnDirectN96V1
+                    | Tf32PhysicalRoute::Sm89NnN96V1,
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -5240,6 +5494,9 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                 .ok_or_else(|| format!("qualified TF32 symbol {} is unavailable", route.symbol))?
                 .clone()
         }
+        PreparedF32Kind::Tf32TnPreRna { .. } => {
+            return Err("Ada TF32 pre-RNA graph sequence was not expanded".into());
+        }
     };
     Ok(PreparedTriadPhysicalGraphSequence {
         launches: vec![PreparedTriadPhysicalGraphLaunch {
@@ -5248,6 +5505,107 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
             node,
             arguments: Box::new(arguments),
         }]
+        .into_boxed_slice(),
+    })
+}
+
+fn prepare_sm89_tf32_tn_pre_rna_graph_sequence<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &O,
+    prepared: &PreparedF32TriadLaunch,
+) -> Result<PreparedTriadPhysicalGraphSequence, String> {
+    let PreparedF32Kind::Tf32TnPreRna {
+        transpose_params,
+        gemm_params,
+        transpose_config,
+        gemm_config,
+        scratch,
+        scratch_elements,
+        transform,
+        ..
+    } = &prepared.kind
+    else {
+        return Err("prepared launch is not an Ada TF32 pre-RNA pipeline".into());
+    };
+    let [resolved] = prepared.routes.as_ref() else {
+        return Err("Ada TF32 pre-RNA graph requires exactly one GEMM route".into());
+    };
+    let scratch_bytes = u64::try_from(*scratch_elements)
+        .ok()
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or_else(|| "Ada TF32 graph scratch span overflows u64".to_string())?;
+    let transform_observation = PhysicalLaunchObservation::input_transform(
+        TN_PRE_RNA_TRANSPOSE_SYMBOL,
+        prepared.request.op,
+        PolicyDtype::F32,
+        (
+            prepared.request.shape.m,
+            prepared.request.shape.k,
+            prepared.request.shape.n,
+        ),
+        (
+            prepared.request.shape.lda,
+            prepared.request.shape.ldb,
+            prepared.request.shape.ldc,
+        ),
+        *transform,
+        PhysicalConversionArguments::new(
+            prepared.operands.a,
+            sm89_tf32_tn_source_bytes(prepared.request)?,
+            *scratch,
+            scratch_bytes,
+        ),
+    );
+    let transform_node =
+        resolve_physical_launch_observation(observer, transform_observation, *transpose_config)?;
+    let physical = physical_prepared_f32_route(prepared, *resolved);
+    let gemm_node = resolve_physical_launch_observation(
+        observer,
+        PhysicalLaunchObservation::gemm(PolicyDtype::F32, None, physical),
+        *gemm_config,
+    )?;
+
+    let mut transform_arguments = PhysicalScalarKernelArguments::new();
+    transform_arguments.push(prepared.operands.a)?;
+    transform_arguments.push(*scratch)?;
+    transform_arguments.push(*transpose_params)?;
+    let mut gemm_arguments = PhysicalScalarKernelArguments::new();
+    gemm_arguments.push(prepared.operands.output)?;
+    gemm_arguments.push(*scratch)?;
+    gemm_arguments.push(prepared.operands.b)?;
+    gemm_arguments.push(0_u64)?;
+    gemm_arguments.push(*gemm_params)?;
+
+    let transform_function = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(TN_PRE_RNA_TRANSPOSE_SYMBOL)
+        .ok_or_else(|| "qualified Ada TF32 transpose symbol is unavailable".to_string())?
+        .clone();
+    let gemm_function = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(resolved.symbol)
+        .ok_or_else(|| {
+            format!(
+                "qualified Ada TF32 symbol {} is unavailable",
+                resolved.symbol
+            )
+        })?
+        .clone();
+    Ok(PreparedTriadPhysicalGraphSequence {
+        launches: vec![
+            PreparedTriadPhysicalGraphLaunch {
+                function: transform_function,
+                config: *transpose_config,
+                node: transform_node,
+                arguments: Box::new(transform_arguments),
+            },
+            PreparedTriadPhysicalGraphLaunch {
+                function: gemm_function,
+                config: *gemm_config,
+                node: gemm_node,
+                arguments: Box::new(gemm_arguments),
+            },
+        ]
         .into_boxed_slice(),
     })
 }
@@ -5825,6 +6183,28 @@ fn validate_prepared_f32_triad(
             }
             validate_tf32_streamk_prepared_layout(ctx, prepared, *route, *plan)?;
         }
+        PreparedF32Kind::Tf32TnPreRna {
+            route,
+            scratch,
+            scratch_elements,
+            transform,
+            ..
+        } => {
+            f32_map_binding(ctx, *route)?;
+            let identity = prepared
+                .resources
+                .transpose_scratch_identity()
+                .ok_or_else(|| "prepared Ada TF32 route lost transpose scratch".to_string())?;
+            let required_bytes = u64::try_from(*scratch_elements)
+                .ok()
+                .and_then(|elements| elements.checked_mul(4))
+                .ok_or_else(|| "prepared Ada TF32 scratch extent overflows u64".to_string())?;
+            if !identity.matches_requested_range(*scratch, required_bytes)
+                || transform.output_elements != *scratch_elements as u64
+            {
+                return Err("prepared Ada TF32 scratch identity changed before launch".into());
+            }
+        }
     }
     let mut live = ResolvedGemmLaunchSetBuilder::new(prepared.routes.len())?;
     for route in &prepared.routes {
@@ -5960,6 +6340,116 @@ unsafe fn enqueue_tf32_f32<O: PhysicalLaunchObserver>(
     unsafe { enqueue_tf32_raw(&ctx.stream, function, launch, observer) }
 }
 
+fn sm89_tf32_tn_source_bytes(request: F32TriadRequest) -> Result<u64, String> {
+    u64::try_from(request.shape.m)
+        .ok()
+        .and_then(|rows| rows.checked_mul(request.shape.lda as u64))
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or_else(|| "Ada TF32 transpose input span overflows u64".to_string())
+}
+
+unsafe fn enqueue_sm89_tf32_tn_pre_rna<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    prepared: &PreparedF32TriadLaunch,
+    observer: &mut O,
+    logical_dtype: Option<PolicyDtype>,
+) -> Result<(), String> {
+    let PreparedF32Kind::Tf32TnPreRna {
+        route,
+        transpose_params,
+        gemm_params,
+        transpose_config,
+        gemm_config,
+        scratch,
+        scratch_elements,
+        transform,
+    } = &prepared.kind
+    else {
+        return Err("prepared launch is not an Ada TF32 pre-RNA pipeline".into());
+    };
+    let [resolved] = prepared.routes.as_ref() else {
+        return Err("Ada TF32 pre-RNA pipeline requires exactly one GEMM route".into());
+    };
+    let transpose = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(TN_PRE_RNA_TRANSPOSE_SYMBOL)
+        .ok_or_else(|| "qualified Ada TF32 transpose symbol is unavailable".to_string())?;
+    let gemm = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(resolved.symbol)
+        .ok_or_else(|| {
+            format!(
+                "qualified Ada TF32 symbol {} is unavailable",
+                resolved.symbol
+            )
+        })?;
+    ctx.record_resolved_gemm_route(*resolved)?;
+    let scratch_bytes = u64::try_from(*scratch_elements)
+        .ok()
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or_else(|| "Ada TF32 scratch span overflows u64".to_string())?;
+    let source_bytes = sm89_tf32_tn_source_bytes(prepared.request)?;
+    let transform_observation = logical_dtype.map(|dtype| {
+        PhysicalLaunchObservation::input_transform(
+            TN_PRE_RNA_TRANSPOSE_SYMBOL,
+            prepared.request.op,
+            dtype,
+            (
+                prepared.request.shape.m,
+                prepared.request.shape.k,
+                prepared.request.shape.n,
+            ),
+            (
+                prepared.request.shape.lda,
+                prepared.request.shape.ldb,
+                prepared.request.shape.ldc,
+            ),
+            *transform,
+            PhysicalConversionArguments::new(
+                prepared.operands.a,
+                source_bytes,
+                *scratch,
+                scratch_bytes,
+            ),
+        )
+    });
+    let mut transpose_builder = ctx.stream.launch_builder(transpose);
+    transpose_builder.arg(&prepared.operands.a);
+    transpose_builder.arg(scratch);
+    transpose_builder.arg(transpose_params);
+    unsafe {
+        enqueue_with_physical_observation(
+            observer,
+            &mut transpose_builder,
+            *transpose_config,
+            transform_observation,
+        )
+    }
+    .map_err(|error| error.with_driver_context(format_args!("{TN_PRE_RNA_TRANSPOSE_SYMBOL}")))?;
+
+    let physical = physical_prepared_f32_route(prepared, *resolved);
+    let gemm_observation =
+        logical_dtype.map(|dtype| PhysicalLaunchObservation::gemm(dtype, None, physical));
+    let output = prepared.operands.output;
+    let b = prepared.operands.b;
+    let bias = 0_u64;
+    let mut gemm_builder = ctx.stream.launch_builder(gemm);
+    gemm_builder.arg(&output);
+    gemm_builder.arg(scratch);
+    gemm_builder.arg(&b);
+    gemm_builder.arg(&bias);
+    gemm_builder.arg(gemm_params);
+    unsafe {
+        enqueue_with_physical_observation(
+            observer,
+            &mut gemm_builder,
+            *gemm_config,
+            gemm_observation,
+        )
+    }
+    .map_err(|error| error.with_driver_context(format_args!("{:?}", route)))
+}
+
 unsafe fn enqueue_tf32_splitk_f32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     prepared: &PreparedF32TriadLaunch,
@@ -6010,7 +6500,10 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
     let bias = launch.operands.bias.unwrap_or(0);
     match (launch.route, launch.params) {
         (
-            Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            Tf32PhysicalRoute::MmaTf32RnaV1(_)
+            | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+            | Tf32PhysicalRoute::Sm89NnDirectN96V1
+            | Tf32PhysicalRoute::Sm89NnN96V1,
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {
@@ -6280,6 +6773,10 @@ pub(in crate::mamba_ssm::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                 )
             }
         }
+        PreparedF32Kind::Tf32TnPreRna { .. } => {
+            let mut observer = NoPhysicalObserver;
+            unsafe { enqueue_sm89_tf32_tn_pre_rna(ctx, prepared, &mut observer, None) }
+        }
     }
 }
 
@@ -6408,6 +6905,9 @@ where
                 observer,
                 Some(logical_dtype),
             )
+        },
+        PreparedF32Kind::Tf32TnPreRna { .. } => unsafe {
+            enqueue_sm89_tf32_tn_pre_rna(ctx, prepared, observer, Some(logical_dtype))
         },
     }
 }
@@ -15553,6 +16053,133 @@ mod sm89_exact_f32_tn_route_tests {
                     ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
                 )
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sm89_tf32_joint_route_tests {
+    use super::*;
+
+    fn request(op: ResolvedGemmOp, dims: (usize, usize, usize)) -> F32TriadRequest {
+        F32TriadRequest {
+            op,
+            shape: F32TriadShape::contiguous(op, dims),
+        }
+    }
+
+    fn operands(op: ResolvedGemmOp) -> F32TriadOperands {
+        F32TriadOperands {
+            output: 0x3000,
+            a: 0x1000,
+            b: 0x2000,
+            bias: None,
+            alpha: 1.0,
+            beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+        }
+    }
+
+    #[test]
+    fn exact_cells_freeze_transpose_layout_and_physical_gemm_geometry() {
+        for (dims, route, stride, elements, physical, grid) in [
+            (
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+                2_048,
+                1_572_864,
+                (768, 2_048, 3_072),
+                192,
+            ),
+            (
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+                2_048,
+                3_145_728,
+                (1_536, 2_048, 768),
+                96,
+            ),
+            (
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+                4_624,
+                1_775_616,
+                (384, 4_621, 1_928),
+                186,
+            ),
+        ] {
+            let request = request(ResolvedGemmOp::Tn, dims);
+            assert_eq!(
+                sm89_tf32_tn_scratch_layout(request).unwrap(),
+                (stride, elements)
+            );
+            let spec = tf32_kernel_spec(request.op, route).unwrap();
+            assert_eq!(
+                (request.shape.k, request.shape.m, request.shape.n,),
+                physical
+            );
+            assert_eq!(
+                checked_tile_grid(
+                    u32::try_from(physical.0).unwrap(),
+                    spec.tile.0,
+                    u32::try_from(physical.2).unwrap(),
+                    spec.tile.1,
+                )
+                .unwrap(),
+                grid
+            );
+        }
+    }
+
+    #[test]
+    fn exact_cells_reject_alpha_beta_bias_null_and_alignment_drift() {
+        for (op, dims, route) in [
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NnDirectN96V1,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89NnN96V1,
+            ),
+        ] {
+            let request = request(op, dims);
+            let valid = operands(op);
+            validate_sm89_tf32_joint_operands(request, valid, route).unwrap();
+
+            let mut mutations = Vec::new();
+            mutations.push(F32TriadOperands {
+                alpha: 0.5,
+                ..valid
+            });
+            mutations.push(F32TriadOperands {
+                beta: if op == ResolvedGemmOp::Tn { 0.0 } else { 1.0 },
+                ..valid
+            });
+            mutations.push(F32TriadOperands {
+                bias: Some(0x4000),
+                ..valid
+            });
+            mutations.push(F32TriadOperands { output: 0, ..valid });
+            mutations.push(F32TriadOperands { a: 0x1004, ..valid });
+            mutations.push(F32TriadOperands { b: 0x2004, ..valid });
+            for mutation in mutations {
+                assert!(
+                    validate_sm89_tf32_joint_operands(request, mutation, route).is_err(),
+                    "joint route {route:?} accepted operand drift {mutation:?}"
+                );
+            }
         }
     }
 }

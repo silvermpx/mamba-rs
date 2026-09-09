@@ -6821,6 +6821,7 @@ mod tests {
             tile: Some(route.tile),
             launch: route.launch,
             gemm_route: Some(route),
+            input_transform: None,
         };
         (
             Sm120AutoBranchSeal {

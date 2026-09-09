@@ -515,6 +515,9 @@ fn conversion_observation(
         PhysicalLaunchKind::Gemm => {
             return Err("conversion launch cannot use GEMM kind".into());
         }
+        PhysicalLaunchKind::InputTransform => {
+            return Err("conversion launch cannot use input-transform kind".into());
+        }
     };
     Ok(PhysicalLaunchObservation::conversion(
         kind,
@@ -1409,7 +1412,10 @@ fn prepare_f32_physical_graph_observer(
 ) -> Result<RecordingPhysicalObserver, String> {
     let request = prepared.physical_graph_request();
     let operands = prepared.physical_graph_operands();
-    let ranges = f32_physical_argument_ranges(request, operands)?;
+    let mut ranges = f32_physical_argument_ranges(request, operands)?;
+    if let Some(scratch) = prepared.physical_graph_scratch_range() {
+        ranges.push(scratch);
+    }
     prepare_physical_observer(ctx, capacity, &ranges)
 }
 
@@ -1697,6 +1703,9 @@ fn prepare_conversion_graph_launch(
         }
         PhysicalLaunchKind::Gemm => {
             return Err("physical graph conversion cannot bind a GEMM node".into());
+        }
+        PhysicalLaunchKind::InputTransform => {
+            return Err("physical graph conversion cannot bind an input-transform node".into());
         }
     }
     arguments.push(count_i32)?;

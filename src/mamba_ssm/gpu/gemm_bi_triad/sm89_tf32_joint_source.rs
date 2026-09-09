@@ -140,26 +140,30 @@ const fn gemm_spec(
     }
 }
 
+// Register caps cover the largest spill-free allocation observed across the
+// supported CUDA 12.8, 13.0, and 13.2 JITs. CUDA 13.2 allocates 124/124/127
+// registers for the N96 kernels; CUDA 12.8 and 13.0 allocate 131/131/135.
+// Occupancy remains sealed independently below.
 pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 5] = [
     gemm_spec(
         NN_ADD_HALF_DIRECT_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
         86_016,
-        124,
+        131,
         1,
     ),
     gemm_spec(
         NN_ADD_HALF_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
         86_016,
-        124,
+        131,
         1,
     ),
     gemm_spec(
         TN_PRE_RNA_N96_SYMBOL,
         Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3,
         86_016,
-        127,
+        135,
         1,
     ),
     gemm_spec(

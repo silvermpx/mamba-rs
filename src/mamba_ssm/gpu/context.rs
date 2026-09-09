@@ -1191,7 +1191,7 @@ impl GpuCtx {
             ModuleKind::TriadSm89Finalist => availability.finalist,
             ModuleKind::TriadSm89Half => None,
             ModuleKind::TriadSm89ExactF32 => None,
-            ModuleKind::TriadSm89Tf32Joint => None,
+            ModuleKind::TriadSm89Tf32Joint => availability.joint,
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 availability.specialized
             }
@@ -1230,6 +1230,9 @@ impl GpuCtx {
                 NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1
             }
             ResolvedNumericContract::MmaTf32RnaV1
+            | ResolvedNumericContract::MmaTf32PreRnaAV1
+            | ResolvedNumericContract::MmaTf32AddHalfUlpV1
+            | ResolvedNumericContract::Tf32RnaPreprocessV1
             | ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
             | ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
             | ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 => {
@@ -1256,6 +1259,8 @@ impl GpuCtx {
         let uses_qualified_tf32_module = matches!(
             route.numeric_contract,
             super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32PreRnaAV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlpV1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
@@ -1305,6 +1310,8 @@ impl GpuCtx {
         let tf32_numeric = matches!(
             route.numeric_contract,
             super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32PreRnaAV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlpV1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
@@ -1356,6 +1363,48 @@ impl GpuCtx {
         {
             return Err(format!(
                 "{label}: captured typed Tensor Core route is disabled by the live policy"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_resolved_input_transform(
+        &self,
+        symbol: &'static str,
+        transform: &super::kernel_identity::ResolvedInputTransform,
+        label: &str,
+    ) -> Result<(), String> {
+        use super::kernel_identity::{ResolvedOperandConversion, ResolvedTransformOutputOwnership};
+        if self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1
+            || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocessV1
+            || transform.operand_conversion != ResolvedOperandConversion::RegisterCvtRnaTf32F32V1
+            || transform.output_ownership
+                != ResolvedTransformOutputOwnership::PreparedScratchAllocationV1
+            || symbol != super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL
+        {
+            return Err(format!(
+                "{label}: captured input transform contract is unavailable"
+            ));
+        }
+        let binding = self
+            .live_qualified_tf32_binding(ModuleKind::TriadSm89Tf32Joint)
+            .ok_or_else(|| format!("{label}: captured input transform module is not loaded"))?;
+        if transform.artifact != binding.artifact
+            || transform.compiler != binding.compiler
+            || transform.target != binding.target
+            || transform.device != binding.device
+            || transform.device_caps != binding.device_caps
+            || transform.tuning_table_revision
+                != super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
+            || transform.schedule_revision != super::kernel_identity::SCHEDULE_REVISION
+            || transform.resources_digest == [0; 32]
+            || self
+                .kernels
+                .triad_sm89_tf32_joint_function(symbol)
+                .is_none()
+        {
+            return Err(format!(
+                "{label}: captured input transform no longer matches its live module or resources"
             ));
         }
         Ok(())
@@ -1628,6 +1677,9 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
         | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
         PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
+        PhysicalGemmBackend::Sm89MmaTf32PreRnaV1 | PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 => {
+            ModuleKind::TriadSm89Tf32Joint
+        }
         PhysicalGemmBackend::Sm89Mma16HalfS3V1 => ModuleKind::TriadSm89Half,
         PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
             ModuleKind::TriadSm90a
@@ -1646,6 +1698,9 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
     match backend {
         PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => {
             super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
+        }
+        PhysicalGemmBackend::Sm89MmaTf32PreRnaV1 | PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 => {
+            super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
         PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => {
             super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
