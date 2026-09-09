@@ -1,5 +1,15 @@
 # Handoff: the deterministic GEMM triad (gemm_bi_triad) — state on 2026-09-05
 
+RELEASE 0.7.0 INTEGRATION CRITERION, clarified by the user on 2026-09-09:
+production `Deterministic` routing must select the fastest fully qualified
+retained implementation currently available for every covered cell. A route
+does not need to beat cuBLAS Fast to replace a slower incumbent AUTO route;
+cuBLAS Fast remains a separately labelled reference and a target for later
+0.7.1/0.7.2 optimization. Before finalizing 0.7.0, benchmark the unchanged
+monolithic kernel from `main` against the release branch on identical shapes,
+CUDA toolkits, eager/graph paths, and measurement settings. Report only
+reproducible deltas in the changelog.
+
 FINALIZATION CONTRACT, reaffirmed by the user on 2026-09-09: the public
 forward/inference family and its files/modules/tests/documentation must be
 renamed from `gemm_bi_fixed` / Fixed to `gemm_bi_inference` / Inference. Do
