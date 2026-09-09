@@ -1,5 +1,19 @@
 # Handoff: the deterministic GEMM triad (gemm_bi_triad) — state on 2026-09-05
 
+FINALIZATION CONTRACT, reaffirmed by the user on 2026-09-09: the public
+forward/inference family and its files/modules/tests/documentation must be
+renamed from `gemm_bi_fixed` / Fixed to `gemm_bi_inference` / Inference. Do
+this as a separate pre-release mechanical change after the active Triad
+qualification is frozen, so the rename cannot invalidate or obscure kernel
+evidence. The public execution modes are exactly `Deterministic`,
+`CublasFast`, and `CublasPedantic`; `Deterministic` may use only our
+Inference/Triad kernels and our portable deterministic fallback, never a
+hidden cuBLAS fallback. The two currently dirty files
+`tests/gemm_bi_sm120_tf32_selector_qualification.rs` and
+`tests/support/triad_discovery_samples.rs` are Codex-owned WIP and must be
+reviewed, kept or cleaned deliberately, verified, and committed before final
+merge preparation.
+
 MANDATORY continuation method, reaffirmed by the user on2026-09-08: read
 `internal/agent-operational-rules.md#binding-search-method-research---candidates---short-measurements-2026-09-08`
 before taking the next kernel task. Find the bottleneck -> primary-source
