@@ -1,11 +1,14 @@
-# Ada Triad F16 NN N96/S3 retained win and Fast near miss — 2026-09-09
+# Ada Fixed/inference F16 NN N96/S3 retained win and Fast near miss — 2026-09-09
 
 ## Decision
 
 Retain the test-only F16 NN d768-in `(2048,768,3072)` M128N96/BK64/S3
-candidate as the new shortlist leader over the frozen Fixed S3 comparator. It
-passes the strict retained-best gate in every once7 stratum, but does not beat
-native-half cuBLAS Fast. Production and dispatcher remain unchanged.
+candidate as the new **Fixed/inference** shortlist leader over the frozen Fixed
+S3 comparator. It passes the strict retained-best gate in every once7 stratum,
+but does not beat native-half cuBLAS Fast. Its `gemm_bi_nn_fixed_sm89_*` symbol
+and `FixedSm89HalfSwizzleParams` ABI belong to the standalone Fixed dispatcher,
+so this result must not be counted as a training-Triad win.
+Production and dispatcher remain unchanged.
 
 The candidate narrows the parent CTA from N128 to N96 and uses eight 64x24
 warp tiles. On the target shape this raises the launch from 96 to 128 CTAs,

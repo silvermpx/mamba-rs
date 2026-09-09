@@ -5,11 +5,26 @@ claim or release qualification. Five shapes are `i128=(1024,128,512)`,
 `o128=(1024,256,128)`, `i768=(2048,768,3072)`,
 `o768=(2048,1536,768)`, and `P=(4621,384,1928)`.
 
+> **Scope correction:** this matrix tracks logical Triad workload/candidate
+> evidence, not production-Triad physical-route ownership or admission. Of the
+> nine `Y` cells, five use Fixed NN kernels with the five-argument Fixed ABI and
+> four use test-only NT adapters; zero are already integrated production-Triad
+> replacements. The authoritative historical inventory of the public AUTO
+> paths is the [current21 production-route smoke](ada-triad-current21-20260906/smoke-inventory.md),
+> which records production Triad physical routes for all 60 cells.
+
+| `Y` candidate ownership | Cells | Physical status |
+| --- | ---: | --- |
+| Fixed NN, F16/BF16 | 5 | Existing Fixed five-argument holder, not a production-Triad admission |
+| Test-only NT adapter, F16/BF16 | 4 | Test-only seven-argument symbol, not a production-Triad admission |
+| Integrated production-Triad replacement | 0 | None of the nine `Y` candidates is integrated yet |
+
 Legend: **Y** = strict paired cuBLAS Fast win in every eager/graph x ABBA/BAAB
 p50+p95 stratum; **N** = explicit paired Fast evidence exists but strict win
 fails; **U** = no qualifying paired Fast evidence. Retained-best improvements
 remain N when cuBLAS Fast still wins. Historical independent eager quantiles do
-not change U into Y/N.
+not change U into Y/N. These letters describe the logical workload result only;
+they do not encode kernel source family, ABI or dispatcher admission.
 
 | Precision / op | i128 | o128 | i768 | o768 | P |
 | --- | ---: | ---: | ---: | ---: | ---: |

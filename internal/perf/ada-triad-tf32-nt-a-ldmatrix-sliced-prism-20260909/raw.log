@@ -1,0 +1,90 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling crossbeam-utils v0.8.22
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling libc v0.2.186
+   Compiling bitflags v2.13.1
+   Compiling crossbeam-epoch v0.9.20
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.3
+   Compiling crossbeam-deque v0.8.7
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.228
+   Compiling paste v1.0.15
+   Compiling rayon-core v1.13.0
+   Compiling libm v0.2.16
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_json v1.0.150
+   Compiling zerocopy v0.8.54
+   Compiling memchr v2.8.3
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling itoa v1.0.18
+   Compiling fastrand v2.4.1
+   Compiling equivalent v1.0.2
+   Compiling once_cell v1.21.4
+   Compiling cudarc v0.19.9
+   Compiling reborrow v0.5.5
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling cpufeatures v0.2.17
+   Compiling either v1.16.0
+   Compiling libloading v0.9.0
+   Compiling raw-cpuid v11.6.0
+   Compiling generic-array v0.14.7
+   Compiling pulp v0.22.3
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling rayon v1.12.0
+   Compiling tempfile v3.27.0
+   Compiling hashbrown v0.16.1
+   Compiling bytemuck_derive v1.11.0
+   Compiling zerocopy-derive v0.8.54
+   Compiling serde_derive v1.0.228
+   Compiling bytemuck v1.25.1
+   Compiling num-complex v0.4.6
+   Compiling safetensors v0.8.0
+   Compiling half v2.7.1
+   Compiling mamba-rs v0.6.9 (/root/mamba-rs-triad-tf32-nt-sliced-prism-20260909)
+    Finished `release` profile [optimized] target(s) in 41.64s
+     Running tests/gemm_bi_tf32_nt_compact_a_ldmatrix_sliced_prism_discovery.rs (/root/tf32-nt-sliced-prism-target-20260909/release/deps/gemm_bi_tf32_nt_compact_a_ldmatrix_sliced_prism_discovery-8886b4fd43a10333)
+
+running 1 test
+test cuda_suite::ada_tf32_nt_a_ldmatrix_sliced_prism_scout3_then_once7 ... GPU quiet gate tf32-nt-a-ldmatrix-sliced-prism/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+{"dynamic_shared_bytes":49152,"local_bytes":0,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":2,"registers":98,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismResourceV1","static_shared_bytes":0,"symbol":"gemm_bi_nt_test_compact_a_ldmatrix_sliced_sm80_mma_tf32_v1_m128n64_bk32_s2","threads":256}
+{"dynamic_shared_bytes":49152,"local_bytes":0,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":2,"registers":98,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismResourceV1","static_shared_bytes":0,"symbol":"gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2","threads":256}
+{"candidate_ptx_sha":"abf41b272d3857a2c9af0fdbe9e9eb752c58bc74dd9547c12b2c9bc483db17e3","candidate_source_sha":"521b592024c6ad946972cbc2454e9aa62905b6d1305e5ba5b0b60392cbc64ad8","candidate_symbol":"gemm_bi_nt_test_compact_a_ldmatrix_sliced_sm80_mma_tf32_v1_m128n64_bk32_s2","change":"four_next_stage_copy_slices_interleaved_before_ascending_k8_issues","retained_ptx_sha":"17ba9734e6e628dcd88761475e2b4a518cf66b46eb613a2aec67cea7ccfa1f32","retained_source_sha":"263cdf63dedfbebd84fd668fd3e5aa00a5f4b80241d17f5c336e5e9d60945619","retained_symbol":"gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2","schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismIdentityV1"}
+{"candidate_retained_exact":true,"case":"prism","eager_repeats":2,"exceptional":false,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[4096,3072,1536]}
+{"candidate_retained_exact":true,"case":"m_tail_negative_alpha","eager_repeats":2,"exceptional":false,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[129,64,64]}
+{"candidate_retained_exact":true,"case":"n_tail","eager_repeats":2,"exceptional":false,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[128,67,64]}
+{"candidate_retained_exact":true,"case":"k_tail","eager_repeats":2,"exceptional":false,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[128,64,71]}
+{"candidate_retained_exact":true,"case":"exception","eager_repeats":2,"exceptional":true,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[128,64,64]}
+{"candidate_retained_exact":true,"case":"k0","eager_repeats":2,"exceptional":false,"graph_repeats":2,"guards":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismBitsV1","shape":[129,67,0]}
+GPU quiet gate tf32-nt-a-ldmatrix-sliced-prism/scout: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=726MiB sm_clock=1800MHz temperature=41C pstate=P2; quiet_samples=5
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"eager","phase":"Scout","ratio_direction":"candidate_over_comparator","ratio_p50":0.9800044156788061,"ratio_p95":0.9814765733461949,"raw_observations_us":[[566.374397277832,579.0719985961914,576.8703937530518,566.323184967041],[564.8896217346191,576.5632152557373,576.3120174407959,566.6304111480713],[564.5311832427979,577.5360107421875,577.2799968719482,567.193603515625]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":3}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"eager","phase":"Scout","ratio_direction":"candidate_over_comparator","ratio_p50":0.9788690933551102,"ratio_p95":0.9809033163307089,"raw_observations_us":[[576.8191814422607,567.193603515625,564.2240047454834,579.0224075317383],[576.9216060638428,566.374397277832,564.8384094238281,579.0256023406982],[576.0511875152588,566.323184967041,564.5311832427979,576.8191814422607]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":3}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"graph","phase":"Scout","ratio_direction":"candidate_over_comparator","ratio_p50":0.9789921812740144,"ratio_p95":0.9796370854037366,"raw_observations_us":[[565.503978729248,578.4575939178467,577.023983001709,565.5551910400391],[564.6848201751709,578.7136077880859,576.5120029449463,566.2720203399658],[564.5311832427979,577.5360107421875,576.5632152557373,566.0672187805176]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":3}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"graph","phase":"Scout","ratio_direction":"candidate_over_comparator","ratio_p50":0.9796632491075788,"ratio_p95":0.9797807366301092,"raw_observations_us":[[577.3312091827393,566.2255764007568,564.3263816833496,578.4063816070557],[576.5120029449463,567.142391204834,564.9407863616943,579.0719985961914],[576.6143798828125,566.1776065826416,564.7871971130371,577.6895999908447]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":3}
+GPU quiet gate tf32-nt-a-ldmatrix-sliced-prism/qualification: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=726MiB sm_clock=1800MHz temperature=43C pstate=P2; quiet_samples=5
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"eager","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":0.9788193408040103,"ratio_p95":0.979434827107052,"raw_observations_us":[[566.6304111480713,579.5839786529541,578.1504154205322,566.5279865264893],[565.6576156616211,579.0719985961914,578.3552169799805,567.3471927642822],[565.3503894805908,579.8912048339844,577.4847984313965,567.6112174987793],[565.8112049102783,579.7376155853271,578.1504154205322,567.5519943237305],[565.6064033508301,578.6623954772949,579.1823863983154,567.4496173858643],[564.9407863616943,580.1472187042236,577.843189239502,567.142391204834],[566.0672187805176,579.6864032745361,577.9967784881592,567.8080081939697]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"eager","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":0.9780743977774071,"ratio_p95":0.9796306646004885,"raw_observations_us":[[577.9967784881592,567.193603515625,566.1695957183838,580.2495956420898],[578.4575939178467,567.3984050750732,565.2480125427246,580.6079864501953],[578.8159847259521,566.8863773345947,566.2720203399658,580.0447940826416],[578.5088062286377,567.091178894043,565.7599925994873,579.7376155853271],[577.945613861084,566.9375896453857,565.2480125427246,579.0207862854004],[577.6895999908447,566.2720203399658,564.9919986724854,579.3791770935059],[577.6895999908447,567.142391204834,565.5551910400391,578.5600185394287]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"graph","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":0.9784713834548013,"ratio_p95":0.9814517981583342,"raw_observations_us":[[566.6927814483643,578.6111831665039,577.3824214935303,567.8592205047607],[565.4528141021729,579.3280124664307,576.7680168151855,566.5311813354492],[565.6576156616211,579.5839786529541,578.6111831665039,567.6032066345215],[564.8896217346191,579.0207862854004,578.2527923583984,566.6304111480713],[565.1455879211426,580.6079864501953,578.6623954772949,567.0432090759277],[564.9919986724854,577.9967784881592,578.7136077880859,566.8352127075195],[565.4016017913818,579.5839786529541,578.7136077880859,566.5279865264893]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"retained_a_ldmatrix","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"graph","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":0.9782676146950361,"ratio_p95":0.9791077947781603,"raw_observations_us":[[578.7136077880859,566.5887832641602,565.9135818481445,579.2255878448486],[578.3040046691895,566.7840003967285,566.0672187805176,578.7199974060059],[577.3824214935303,567.091178894043,564.7871971130371,579.2768001556396],[577.6383876800537,566.9888019561768,564.6336078643799,579.1232109069824],[577.3824214935303,566.2208080291748,566.2255764007568,579.6351909637451],[579.7408103942871,566.9888019561768,565.4016017913818,580.1983833312988],[579.1232109069824,567.8080081939697,566.323184967041,580.2591800689697]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"abi":"opaque","arm":"cublas_fast_tf32","nodes":1,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismGraphV1","timing":"whole_graph"}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"cublas_fast_tf32","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"eager","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":1.5612884522993908,"ratio_p95":1.5657021442502301,"raw_observations_us":[[567.9103851318359,363.0592107772827,362.444806098938,568.012809753418],[566.4271831512451,364.0320062637329,363.26398849487305,567.6032066345215],[566.9888019561768,363.4687900543213,362.80319690704346,567.244815826416],[566.1695957183838,363.82720470428467,362.5472068786621,567.9103851318359],[565.9743785858154,363.72480392456055,362.1376037597656,567.0400142669678],[566.425609588623,363.77599239349365,362.80319690704346,568.1151866912842],[566.323184967041,363.4176015853882,363.0592107772827,567.091178894043]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"cublas_fast_tf32","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"eager","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":1.5605292806817952,"ratio_p95":1.562226934695484,"raw_observations_us":[[362.8544092178345,567.244815826416,566.0672187805176,364.85118865966797],[364.0320062637329,568.5760021209717,566.6304111480713,363.4176015853882],[363.5200023651123,567.961597442627,566.0160064697266,364.23680782318115],[363.1103992462158,568.2688236236572,566.7327880859375,363.4176015853882],[362.64960765838623,567.8592205047607,566.2720203399658,364.083194732666],[362.64960765838623,566.425609588623,565.6576156616211,363.5200023651123],[362.64960765838623,567.9232120513916,566.539192199707,363.9904022216797]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"cublas_fast_tf32","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"ABBA","path":"graph","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":1.5607259384026977,"ratio_p95":1.5622497396279111,"raw_observations_us":[[566.483211517334,363.2143974304199,362.8544092178345,567.8175926208496],[565.9647941589355,363.5711908340454,362.29119300842285,567.244815826416],[565.2480125427246,362.9055976867676,362.18879222869873,566.425609588623],[564.5311832427979,363.16161155700684,362.2528076171875,566.6304111480713],[565.4016017913818,363.26398849487305,362.444806098938,566.8863773345947],[566.1695957183838,363.5711908340454,362.4959945678711,566.8352127075195],[566.0672187805176,363.36960792541504,362.5472068786621,567.5007820129395]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"candidate":"a_ldmatrix_stage_sliced","cell":"prism","comparator":"cublas_fast_tf32","grid":[1536,1,1],"logical_gemms_per_observation":20,"order":"BAAB","path":"graph","phase":"Qualification","ratio_direction":"candidate_over_comparator","ratio_p50":1.5613540274348716,"ratio_p95":1.5627821527689634,"raw_observations_us":[[362.24000453948975,567.7055835723877,564.2367839813232,363.72480392456055],[362.393593788147,567.142391204834,567.142391204834,363.4176015853882],[362.5983953475952,567.5007820129395,566.6304111480713,363.26398849487305],[363.0592107772827,567.6032066345215,566.7840003967285,363.5711908340454],[362.4959945678711,567.193603515625,566.323184967041,363.4687900543213],[362.9568099975586,566.8863773345947,566.323184967041,363.4176015853882],[362.64960765838623,567.8592205047607,565.7087802886963,363.36638927459717]],"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismScreenV1","shape":[4096,3072,1536],"warmups_per_arm":3,"windows":7}
+{"cell":"prism","decision":"shortlist_retained_only","fast_once7":[[1.5612884522993908,1.5657021442502301],[1.5605292806817952,1.562226934695484],[1.5607259384026977,1.5622497396279111],[1.5613540274348716,1.5627821527689634]],"fast_win":false,"promotion":false,"retained_once7":[[0.9788193408040103,0.979434827107052],[0.9780743977774071,0.9796306646004885],[0.9784713834548013,0.9814517981583342],[0.9782676146950361,0.9791077947781603]],"retained_scout":[[0.9800044156788061,0.9814765733461949],[0.9788690933551102,0.9809033163307089],[0.9789921812740144,0.9796370854037366],[0.9796632491075788,0.9797807366301092]],"retained_win":true,"schema":"MambaBiTriadTf32NtALdmatrixSlicedPrismDecisionV1","shape":[4096,3072,1536],"strata_order":["eager/ABBA","eager/BAAB","graph/ABBA","graph/BAAB"]}
+GPU quiet gate tf32-nt-a-ldmatrix-sliced-prism/post: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=726MiB sm_clock=1800MHz temperature=46C pstate=P2; quiet_samples=5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 167.14s
