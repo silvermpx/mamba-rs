@@ -191,7 +191,8 @@ mod cuda_suite {
         device::GpuDevice,
         dtype::WeightDtype,
         gemm_bi_triad::{
-            PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
+            PhysicalQualificationRequest, PhysicalQualificationRoute,
+            QualifiedPhysicalLaunchEvidence, qualify_physical_launch,
         },
         graph_capture::capture_into_graph,
         kernel_identity::{ModuleKind, ResolvedGemmOp, ResolvedNumericContract},
@@ -525,8 +526,9 @@ mod cuda_suite {
                 return Err("graph node query failed".into());
             }
             let mut identities = Vec::new();
-            let mut candidate_names = Vec::new();
-            let mut auto_names = Vec::new();
+            let exact_pipeline =
+                arm == Arm::Candidate || (arm == Arm::Auto && CELLS.contains(&f.cell));
+            let mut pipeline_nodes = Vec::new();
             for node in nodes {
                 let mut ty = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
                 if sys::cuGraphNodeGetType(node, &mut ty) != sys::CUresult::CUDA_SUCCESS {
@@ -560,17 +562,17 @@ mod cuda_suite {
                 };
                 let grid = (params.gridDimX, params.gridDimY, params.gridDimZ);
                 let block = (params.blockDimX, params.blockDimY, params.blockDimZ);
-                if arm == Arm::Candidate {
+                if exact_pipeline {
                     let (expected_grid, expected_block) = match name.as_str() {
                         TRANSPOSE => (f.cell.transpose_grid(), (32, 16, 1)),
                         FIXED => (f.cell.fixed_grid(), (128, 1, 1)),
-                        _ => return Err(format!("wrong candidate symbol {name}")),
+                        _ => return Err(format!("wrong admitted pipeline symbol {name}")),
                     };
                     if grid != expected_grid
                         || block != expected_block
                         || params.sharedMemBytes != 0
                     {
-                        return Err(format!("candidate launch changed: {name}"));
+                        return Err(format!("admitted pipeline launch changed: {name}"));
                     }
                     let expected_abi: &[(usize, usize)] = if name == TRANSPOSE {
                         &[(0, 8), (8, 8), (16, 4), (20, 4)]
@@ -578,41 +580,93 @@ mod cuda_suite {
                         &[(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
                     };
                     driver_abi_gate(params.func, &name, expected_abi)?;
-                    candidate_names.push(name.clone());
-                } else if arm == Arm::Auto && CELLS.contains(&f.cell) {
-                    if name != f.cell.prior_auto_symbol()
-                        || grid != f.cell.prior_auto_grid()
-                        || block != f.cell.prior_auto_block()
-                        || params.sharedMemBytes != f.cell.prior_auto_shared()
-                    {
-                        return Err(format!(
-                            "{} prior AUTO physical graph changed: {name} grid={grid:?} block={block:?} shared={}",
-                            f.cell.name, params.sharedMemBytes
-                        ));
+                    if params.kernelParams.is_null() {
+                        return Err(format!("{name} graph omitted packed arguments"));
                     }
-                    auto_names.push(name.clone());
+                    let scratch_index = if name == TRANSPOSE { 0 } else { 2 };
+                    let scratch_storage = *params.kernelParams.add(scratch_index);
+                    if scratch_storage.is_null() {
+                        return Err(format!("{name} graph scratch argument is null storage"));
+                    }
+                    let scratch = std::ptr::read_unaligned(scratch_storage.cast::<u64>());
+                    if scratch == 0 {
+                        return Err(format!("{name} graph scratch pointer is null"));
+                    }
+                    pipeline_nodes.push((node, name.clone(), scratch));
                 }
                 identities.push(json!({"symbol":name,"grid":grid,"block":block,"dynamic_shared":params.sharedMemBytes}));
             }
-            if arm == Arm::Candidate {
-                candidate_names.sort();
+            if exact_pipeline {
+                let mut pipeline_names = pipeline_nodes
+                    .iter()
+                    .map(|(_, name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                pipeline_names.sort();
                 let mut expected = if f.cell.reduction == 0 {
                     vec![FIXED.to_owned()]
                 } else {
                     vec![FIXED.to_owned(), TRANSPOSE.to_owned()]
                 };
                 expected.sort();
-                if candidate_names != expected {
-                    return Err("candidate must time the entire expected pipeline".into());
+                if pipeline_names != expected {
+                    return Err("admitted route must contain the entire expected pipeline".into());
                 }
-            } else if arm == Arm::Auto
-                && CELLS.contains(&f.cell)
-                && auto_names != [f.cell.prior_auto_symbol()]
-            {
-                return Err(format!(
-                    "{} prior AUTO graph must contain exactly one frozen fallback node",
-                    f.cell.name
-                ));
+                if f.cell.reduction != 0
+                    && (pipeline_nodes.len() != 2 || pipeline_nodes[0].2 != pipeline_nodes[1].2)
+                {
+                    return Err(
+                        "transpose output and Fixed B must share one exact scratch pointer".into(),
+                    );
+                }
+                let mut edge_count = 0_usize;
+                if sys::cuGraphGetEdges_v2(
+                    graph.cu_graph(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut edge_count,
+                ) != sys::CUresult::CUDA_SUCCESS
+                {
+                    return Err("graph edge-count query failed".into());
+                }
+                let expected_edges = usize::from(f.cell.reduction != 0);
+                if edge_count != expected_edges {
+                    return Err(format!(
+                        "admitted route has {edge_count} graph edges, expected {expected_edges}"
+                    ));
+                }
+                if expected_edges == 1 {
+                    let mut from = std::ptr::null_mut();
+                    let mut to = std::ptr::null_mut();
+                    let mut edge: sys::CUgraphEdgeData = std::mem::zeroed();
+                    if sys::cuGraphGetEdges_v2(
+                        graph.cu_graph(),
+                        &mut from,
+                        &mut to,
+                        &mut edge,
+                        &mut edge_count,
+                    ) != sys::CUresult::CUDA_SUCCESS
+                    {
+                        return Err("graph edge query failed".into());
+                    }
+                    let symbol_for = |handle| {
+                        pipeline_nodes
+                            .iter()
+                            .find_map(|(node, name, _)| (*node == handle).then_some(name.as_str()))
+                    };
+                    if symbol_for(from) != Some(TRANSPOSE)
+                        || symbol_for(to) != Some(FIXED)
+                        || edge.from_port != 0
+                        || edge.to_port != 0
+                        || edge.type_
+                            != sys::CUgraphDependencyType::CU_GRAPH_DEPENDENCY_TYPE_DEFAULT as u8
+                        || edge.reserved != [0; 5]
+                    {
+                        return Err(
+                            "admitted graph is not the exact transpose -> Fixed chain".into()
+                        );
+                    }
+                }
             }
             println!(
                 "{}",
@@ -888,6 +942,126 @@ mod cuda_suite {
         Ok(strata)
     }
 
+    fn paired_post_admission_screen(
+        ctx: &GpuCtx,
+        fixed: &CudaFunction,
+        f: &mut Fixture,
+        exact: &[u32],
+        fast: &[u32],
+        comparator: Arm,
+    ) -> Result<Vec<[f64; 2]>, String> {
+        if !matches!(comparator, Arm::Generic | Arm::Fast) {
+            return Err("post-admission comparator must be Generic or Fast".into());
+        }
+        let auto_graph = capture(ctx, fixed, f, Arm::Auto)?;
+        graph_identity(&auto_graph, f, Arm::Auto)?;
+        let comparator_graph = capture(ctx, fixed, f, comparator)?;
+        graph_identity(&comparator_graph, f, comparator)?;
+        let mut strata = Vec::new();
+        for path in ["eager", "graph"] {
+            for auto_endpoints in [true, false] {
+                let arms = if auto_endpoints {
+                    [Arm::Auto, comparator, comparator, Arm::Auto]
+                } else {
+                    [comparator, Arm::Auto, Arm::Auto, comparator]
+                };
+                let mut raw = Vec::new();
+                for bracket in 0..23 {
+                    let mut observations = [0.; 4];
+                    for (index, arm) in arms.into_iter().enumerate() {
+                        let (graph, golden) = if arm == Arm::Auto {
+                            (&auto_graph, exact)
+                        } else {
+                            (
+                                &comparator_graph,
+                                if comparator == Arm::Fast { fast } else { exact },
+                            )
+                        };
+                        observations[index] = measure(ctx, fixed, f, arm, graph, path, golden)?;
+                    }
+                    if bracket >= 2 {
+                        raw.push(observations);
+                    }
+                }
+                let ratios = raw
+                    .iter()
+                    .map(|observation| ratio(*observation, auto_endpoints))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let p50 = quantile(&ratios, 0.5);
+                let p95 = quantile(&ratios, 0.95);
+                println!(
+                    "{}",
+                    json!({
+                        "schema":"MambaBiNtCopyPlanSiblingsPostAdmissionOnce21V1",
+                        "cell":f.cell.name,
+                        "toolkit":format!("{:?}",ctx.kernels.compiler_identity().nvrtc_version),
+                        "comparator":format!("{comparator:?}"),
+                        "path":path,
+                        "order":if auto_endpoints {"ABBA"} else {"BAAB"},
+                        "windows":21,
+                        "raw_observations_us":raw,
+                        "ratio_direction":"actual_auto_over_comparator",
+                        "ratio_p50":p50,
+                        "ratio_p95":p95,
+                        "fast_is_separately_labeled":comparator == Arm::Fast,
+                    })
+                );
+                strata.push([p50, p95]);
+            }
+        }
+        if comparator == Arm::Generic
+            && strata
+                .iter()
+                .any(|values| values[0] >= 0.99 || values[1] >= 0.99)
+        {
+            return Err(format!(
+                "{} post-admission AUTO failed strict improvement over forced Generic p50+p95<.99: {strata:?}",
+                f.cell.name
+            ));
+        }
+        Ok(strata)
+    }
+
+    fn require_admitted_physical_identity(
+        evidence: &QualifiedPhysicalLaunchEvidence,
+        cell: Cell,
+    ) -> Result<(), String> {
+        let nodes = evidence.nodes();
+        if !evidence.eager_graph_equal()
+            || evidence.launch_count() != 2
+            || nodes.len() != 2
+            || nodes[0].symbol != TRANSPOSE
+            || nodes[0].module_kind != ModuleKind::TriadScalar
+            || nodes[0].logical_op != ResolvedGemmOp::Nt
+            || nodes[0].shape != (cell.m, cell.out, cell.reduction)
+            || nodes[0].strides != (cell.reduction, cell.reduction, cell.out)
+            || nodes[0].numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+            || nodes[0].launch.grid_dim != cell.transpose_grid()
+            || nodes[0].launch.block_dim != (32, 16, 1)
+            || nodes[0].launch.shared_mem_bytes != 0
+            || nodes[1].symbol != FIXED
+            || nodes[1].module_kind != ModuleKind::Fixed
+            || nodes[1].logical_op != ResolvedGemmOp::Nt
+            || nodes[1].shape != (cell.m, cell.out, cell.reduction)
+            || nodes[1].strides != (cell.reduction, cell.reduction, cell.out)
+            || nodes[1].tile != Some((64, 64))
+            || nodes[1].numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+            || nodes[1].launch.grid_dim != cell.fixed_grid()
+            || nodes[1].launch.block_dim != (128, 1, 1)
+            || nodes[1].launch.shared_mem_bytes != 0
+            || nodes[0].launch.arguments_digest == [0; 32]
+            || nodes[1].launch.arguments_digest == [0; 32]
+            || nodes[0].launch.arguments_digest == nodes[1].launch.arguments_digest
+            || evidence.launch_digest() == [0; 32]
+        {
+            return Err(format!(
+                "{} admitted eager/prepared physical identity changed: {evidence:?}",
+                cell.name
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "Ada CUDA13.2 discovery: two F32 NT siblings, bits then short AUTO/Fast pairs"]
     fn ada_f32_nt_copyplan_in_prism_discovery_once7() -> Result<(), String> {
@@ -1070,6 +1244,21 @@ mod cuda_suite {
         ctx.set_bi_tensor_cores(false);
         ctx.set_fast_gemm(false);
         ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        let historical_request = PhysicalQualificationRequest::contiguous(
+            ResolvedGemmOp::Nt,
+            (CELLS[0].m, CELLS[0].out, CELLS[0].reduction),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        );
+        let historical_probe = qualify_physical_launch(&ctx, historical_request)?;
+        let historical_nodes = historical_probe.evidence().nodes();
+        if historical_nodes.len() != 1 || historical_nodes[0].symbol != CELLS[0].prior_auto_symbol()
+        {
+            return Err(
+                "historical pre-admission gate requires an empty production cohort; AUTO is already admitted—run the post-admission qualification instead"
+                    .into(),
+            );
+        }
+        drop(historical_probe);
         let fixed_compiler = ctx.kernels.compiler_identity();
         let scalar_compiler = ctx.kernels.triad_scalar_compiler_identity();
         if ![(12, 8), (13, 0), (13, 2)].contains(&fixed_compiler.nvrtc_version)
@@ -1251,6 +1440,187 @@ mod cuda_suite {
         }
         drop(ctx);
         quiet.verify_post_cohort("nt-copyplan-siblings-pre-admission/post")?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "post-admission RTX6000Ada qualification; run independently on frozen CUDA12.8/13.0/13.2"]
+    fn ada_f32_nt_copyplan_siblings_post_admission_qualification() -> Result<(), String> {
+        if cfg!(debug_assertions) {
+            return Err("post-admission qualification requires --release".into());
+        }
+        if std::env::var("NVIDIA_TF32_OVERRIDE").ok().as_deref() == Some("0") {
+            return Err("cuBLAS Fast disabled".into());
+        }
+        let quiet = common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
+        quiet.require_pre_context("nt-copyplan-siblings-post-admission/pre")?;
+        let device = GpuDevice::new(0)?;
+        let id = device.identity();
+        if id.compute_capability != (8, 9) || id.multiprocessor_count != 142 {
+            return Err("requires RTX6000Ada/142 SM".into());
+        }
+        let ctx = GpuCtx::new(&device)?;
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_bi_tensor_cores(false);
+        ctx.set_fast_gemm(false);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        let fixed_compiler = ctx.kernels.compiler_identity();
+        let scalar_compiler = ctx.kernels.triad_scalar_compiler_identity();
+        if ![(12, 8), (13, 0), (13, 2)].contains(&fixed_compiler.nvrtc_version)
+            || scalar_compiler.nvrtc_version != fixed_compiler.nvrtc_version
+            || fixed_compiler.target.as_str() != "sm_89"
+            || scalar_compiler.target.as_str() != "sm_89"
+            || !fixed_compiler.nvrtc_library_known
+            || !scalar_compiler.nvrtc_library_known
+            || fixed_compiler.nvrtc_library_domain != scalar_compiler.nvrtc_library_domain
+        {
+            return Err(format!(
+                "post-admission composed compiler domain is not frozen: fixed={fixed_compiler:?} scalar={scalar_compiler:?}"
+            ));
+        }
+        println!(
+            "{}",
+            json!({
+                "schema":"MambaBiNtCopyPlanSiblingsPostAdmissionIdentityV1",
+                "fixed_compiler":format!("{fixed_compiler:?}"),
+                "scalar_compiler":format!("{scalar_compiler:?}"),
+                "artifacts":format!("{:?}",ctx.kernels.artifact_set_identity()),
+                "production_admission":true,
+            })
+        );
+        let fixed = ctx
+            .kernels
+            .fixed_sm89_f32_n64_copyplan
+            .as_ref()
+            .ok_or_else(|| {
+                format!(
+                    "CopyPlan unavailable: {:?}",
+                    ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection
+                )
+            })?
+            .clone();
+        integrated_resource_gate(&fixed, FIXED, 128, 32_768, 135)?;
+        integrated_resource_gate(
+            &ctx.kernels.gemm_bi_transpose_f32_32x16_d768_v1,
+            TRANSPOSE,
+            512,
+            4_224,
+            18,
+        )?;
+
+        for (cell, exceptional) in [
+            (
+                Cell {
+                    name: "tail",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                false,
+            ),
+            (
+                Cell {
+                    name: "exceptional",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                true,
+            ),
+            (
+                Cell {
+                    name: "zero_reduction",
+                    m: 67,
+                    out: 68,
+                    reduction: 0,
+                },
+                false,
+            ),
+        ] {
+            check_bits(
+                &ctx,
+                &fixed,
+                &mut Fixture::new(&ctx, cell, exceptional, 1.0)?,
+            )?;
+        }
+        check_candidate_bits(
+            &ctx,
+            &fixed,
+            &mut Fixture::new(
+                &ctx,
+                Cell {
+                    name: "nonunit_alpha",
+                    m: 67,
+                    out: 68,
+                    reduction: 36,
+                },
+                false,
+                0.375,
+            )?,
+        )?;
+
+        for cell in CELLS {
+            let request = PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Nt,
+                (cell.m, cell.out, cell.reduction),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            );
+            {
+                let mut qualified = qualify_physical_launch(&ctx, request)?;
+                require_admitted_physical_identity(qualified.evidence(), cell)?;
+                qualified.seed_f32_operands(&ctx, 0x00a2_7680 ^ cell.m as u64)?;
+                let before = qualified.f32_operand_bits(&ctx)?;
+                qualified.measure_eager_window_ms(&ctx, 1)?;
+                let eager = qualified.f32_output_bits(&ctx)?;
+                if qualified.f32_operand_bits(&ctx)? != before {
+                    return Err(format!("{} admitted AUTO eager mutated A/B", cell.name));
+                }
+                qualified.validate_red_zones(&ctx)?;
+                qualified.seed_f32_operands(&ctx, 0x00a2_7680 ^ cell.m as u64)?;
+                let before = qualified.f32_operand_bits(&ctx)?;
+                qualified.measure_graph_window_ms(&ctx, 1)?;
+                if qualified.f32_output_bits(&ctx)? != eager
+                    || qualified.f32_operand_bits(&ctx)? != before
+                {
+                    return Err(format!(
+                        "{} admitted AUTO prepared graph changed output bits or A/B",
+                        cell.name
+                    ));
+                }
+                qualified.validate_red_zones(&ctx)?;
+            }
+
+            let mut fixture = Fixture::new(&ctx, cell, false, 1.0)?;
+            let (exact, fast) = check_bits(&ctx, &fixed, &mut fixture)?;
+            quiet.require_cohort("nt-copyplan-siblings-post-admission/timed")?;
+            let generic = paired_post_admission_screen(
+                &ctx,
+                &fixed,
+                &mut fixture,
+                &exact,
+                &fast,
+                Arm::Generic,
+            )?;
+            let fast_labeled =
+                paired_post_admission_screen(&ctx, &fixed, &mut fixture, &exact, &fast, Arm::Fast)?;
+            println!(
+                "{}",
+                json!({
+                    "schema":"MambaBiNtCopyPlanSiblingsPostAdmissionDecisionV1",
+                    "cell":cell.name,
+                    "shape":[cell.m,cell.out,cell.reduction],
+                    "actual_auto_symbols":[TRANSPOSE,FIXED],
+                    "forced_generic_symbol":"gemm_bi_nt",
+                    "actual_auto_over_forced_generic_once21":generic,
+                    "actual_auto_over_fast_once21_labeled_only":fast_labeled,
+                    "production_admission":true,
+                    "decision":"retain_admitted_route_if_all_generic_strata_p50_p95_lt_0.99",
+                })
+            );
+        }
+        drop(ctx);
+        quiet.verify_post_cohort("nt-copyplan-siblings-post-admission/post")?;
         Ok(())
     }
 }

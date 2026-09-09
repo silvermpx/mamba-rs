@@ -5001,7 +5001,6 @@ impl NtFixedCopyPlanComposedQualificationIdentity {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
     46, 194, 80, 187, 109, 173, 186, 103, 14, 36, 85, 42, 153, 57, 180, 195, 8, 171, 74, 15, 240,
     195, 225, 30, 138, 195, 124, 98, 177, 254, 209, 98,
@@ -5010,7 +5009,6 @@ const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
 /// Frozen whole-pipeline identities for the portable transpose followed by
 /// the Fixed CopyPlan kernel. Each entry binds both modules to the same live
 /// toolkit domain; a Fixed-only match is intentionally insufficient.
-#[cfg_attr(not(test), allow(dead_code))]
 const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
     &[NtFixedCopyPlanComposedQualificationIdentity] = &[
     NtFixedCopyPlanComposedQualificationIdentity {
@@ -5084,11 +5082,12 @@ const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
     },
 ];
 
-// Intentionally empty until the unchanged composed pipeline has passed the
-// complete live qualification on an exact toolkit domain. The frozen rows
-// above are inputs to that qualification, not production admission evidence.
+// The three frozen candidates passed the complete pre-admission qualification
+// on their exact CUDA12.8/13.0/13.2 toolkit domains. Admission is deliberately
+// an alias of that sealed set so no unqualified identity can be appended here.
 const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
-    &[NtFixedCopyPlanComposedQualificationIdentity] = &[];
+    &[NtFixedCopyPlanComposedQualificationIdentity] =
+    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
 
 fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
@@ -7118,23 +7117,26 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_stays_disabled_until_live_qualification() {
-        assert!(
-            NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS.is_empty(),
-            "Batch A must remain fail-closed until every toolkit passes live qualification"
+    fn nt_fixed_copyplan_sibling_selector_admits_only_all_three_live_passed_cohorts() {
+        assert_eq!(
+            NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
+            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+            "Batch A admission must contain exactly the three live-passed candidates"
         );
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_keeps_both_retained_cells_on_prior_auto() {
+    fn nt_fixed_copyplan_sibling_selector_admits_both_retained_cells() {
         let operands = nn_qualified_operands();
         let cells = [
             (
                 (2_048, 768, 3_072),
+                ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified,
                 ScalarDispatchPlan::NtFinal { slim: false },
             ),
             (
                 (4_621, 384, 1_928),
+                ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified,
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ];
@@ -7144,7 +7146,7 @@ mod scalar_wave_policy_tests {
                 NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[cohort].matches(facts),
                 "cohort {cohort} candidate identity"
             );
-            for (dims, fallback) in cells {
+            for (dims, selected, fallback) in cells {
                 let request = F32TriadRequest {
                     op: ResolvedGemmOp::Nt,
                     shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
@@ -7156,15 +7158,15 @@ mod scalar_wave_policy_tests {
                 );
                 assert_eq!(
                     scalar_launch_plan(facts, request, operands).unwrap(),
-                    fallback,
-                    "cohort {cohort} cell {dims:?} must stay on prior AUTO"
+                    selected,
+                    "cohort {cohort} cell {dims:?} retained route"
                 );
             }
         }
     }
 
     #[test]
-    fn disabled_nt_siblings_do_not_change_existing_nn_or_d768_out_routes() {
+    fn nt_fixed_copyplan_sibling_admission_does_not_change_existing_nn_or_d768_out_routes() {
         let operands = nn_qualified_operands();
         for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
             let facts = nt_fixed_copyplan_sibling_facts(cohort);

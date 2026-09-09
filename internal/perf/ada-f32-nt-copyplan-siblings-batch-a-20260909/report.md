@@ -1,92 +1,90 @@
-# Ada exact-F32 NT Fixed CopyPlan siblings — Batch A pre-admission
+# Ada exact-F32 NT Fixed CopyPlan siblings — Batch A admission
 
-Date: 2026-09-09. This batch wires the retained exact-F32 NT d768-in
-`(2048,768,3072)` and canonical Prism `(4621,384,1928)` plans, but leaves
-their production admission deliberately fail-closed. It does not add a CUDA
-kernel and does not start the TN export batch.
+Date: 2026-09-09. The retained exact-F32 NT d768-in
+`(2048,768,3072)` and canonical Prism `(4621,384,1928)` routes are admitted
+only for the three live-qualified CUDA12.8/13.0/13.2 composed identities. No
+new CUDA kernel or TN export is part of this batch.
 
 ## Production routes
 
-| Cell | plan tag | physical route | transpose scratch |
+| Cell | tag | physical route | transpose scratch |
 | --- | ---: | --- | ---: |
 | d768-in | 39 | `gemm_bi_transpose_f32_32x16_d768_v1` (`TriadScalar`) → `gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1` (`Fixed`) | 2,359,296 f32 |
 | Prism | 40 | same ordered symbols/modules | 740,352 f32 |
 
-The dormant selector is exact-shape and exact-stride only. It requires CC8.9/142 SM,
-no bias, `alpha=+1` and `beta=+0` by bits, non-null 16-byte-aligned output/A/B
-pointers, a loaded Fixed function and a sealed composed identity. The
-production evidence cohort is currently empty, so both cells resolve to their
-prior AUTO plans: `NtFinal { slim: false }` and `NtFinal { slim: true }`.
+The selector remains exact-shape and exact-stride only. It requires CC8.9/142
+SM, no bias, `alpha=+1` and `beta=+0` by bits, non-null 16-byte-aligned
+output/A/B pointers, a loaded Fixed function, and a same-domain composed
+identity. The admitted evidence cohort is an alias of exactly the three frozen
+qualification candidates; identities cannot be added to admission without
+first extending the sealed candidate table.
 
-Three CUDA12.8/13.0/13.2 identity rows are retained only as qualification
-candidates. Each candidate pins both the `TriadScalar`
-transpose compiler/artifact and the Fixed CopyPlan compiler/artifact in the
-same NVRTC/library domain. A later commit may move an individual row into the
-production cohort only after that exact domain passes the ignored live gate.
-Existing NN and NT d768-out Fixed admissions retain their previous Fixed-only
-gate unchanged.
+Every shape, stride, operand, device, compiler, module, artifact, digest,
+target, toolkit-library-domain, or availability mutation falls back to the
+exact prior AUTO selector. Existing NN d768-in and NT d768-out Fixed routes are
+tested unchanged.
 
-When admitted, eager execution and prepared graph construction consume the same
-`ScalarDispatchPlan` and the same two-node `scalar_physical_nodes` description.
-The eager branch now recognizes both sibling tags as Fixed CopyPlan routes;
-the ordered modules, configs, argument layouts, scratch pointer and function
-lifetime behavior therefore match prepared graph rehydration.
+Eager execution and prepared graph construction consume the same tags 39/40
+and the same physical plan. The required graph is exactly two nodes and one
+default dependency: transpose then Fixed. The operation-level gate checks both
+Driver ABIs, both launch configurations, and that transpose output and Fixed B
+are the same non-null scratch pointer. Physical qualification independently
+checks ordered module/symbol/config/numeric identity, allocation-bound argument
+digests, route digest, eager/prepared equality, exact output, A/B immutability,
+and red zones.
 
-## Evidence provenance
+## Frozen pre-admission evidence
 
-The retained CUDA13.2 correctness/performance evidence remains
-`internal/perf/ada-f32-nt-copyplan-siblings-20260908/report.md`: d768-in was
-`.4317–.4331` of prior actual AUTO p50 with worst p95 `.4334`; Prism was
-`.8700–.8717` with worst p95 `.8722`. These are retained-best improvements,
-not cuBLAS Fast wins.
+All three runs used the exact fail-closed source snapshot `f04584c8`. Live
+correctness, Driver ABI, resource, guard, actual-prior-AUTO identity, once3 and
+once7 gates passed on each toolkit. Across the four eager/graph ABBA/BAAB
+once7 strata per cell, all recorded p50 and p95 ratios were:
 
-Fixed CUDA12.8/13.0/13.2 identities are the existing production cohorts from
-`internal/perf/ada-scalar-nn-live-fixed-screen-20260908/evidence/`. The
-unchanged `TriadScalar` identities are frozen in the CUDA12.8/13.0/13.2 Ada
-artifact logs under `internal/perf/ada-half-swizzle-force-20260906/`; the
-CUDA13.2 compiler/artifact pair is also recorded directly in the sibling
-discovery log. No identity was synthesized from a different target.
+| toolkit | d768-in candidate/prior AUTO | Prism candidate/prior AUTO | log |
+| --- | ---: | ---: | --- |
+| CUDA12.8 | `.33606–.33777` | `.79681–.79937` | `/root/logs/exact-nt-prequal-f04584c8-cuda128.log` |
+| CUDA13.0 | `.33651–.33786` | `.79631–.79859` | `/root/logs/exact-nt-prequal-f04584c8-cuda130.log` |
+| CUDA13.2 | `.43148–.43328` | `.86942–.87176` | `/root/logs/exact-nt-prequal-f04584c8-cuda132.log` |
 
-## Required live qualification
+Each bound is below the strict `.99` admission threshold. These are whole
+pipeline retained-best improvements over the prior actual AUTO, not cuBLAS
+Fast wins. Fixed and `TriadScalar` compiler/artifact identities are the exact
+same-domain rows frozen in `dispatch.rs`; no identity was synthesized from a
+different target.
+
+The ignored historical
+`ada_f32_nt_copyplan_siblings_pre_admission_qualification` remains as the
+reproducible evidence entry, but now fails immediately with a clear instruction
+when it observes that AUTO is already admitted. It must only be run from the
+fail-closed `f04584c8` snapshot.
+
+## Post-admission gate
 
 The ignored
-`cuda_suite::ada_f32_nt_copyplan_siblings_pre_admission_qualification` entry is
-the only promotion gate. Run it independently on CUDA12.8, CUDA13.0 and
-CUDA13.2 while the production cohort remains empty. It requires:
+`ada_f32_nt_copyplan_siblings_post_admission_qualification` is the release
+follow-up for each frozen toolkit. It requires:
 
-- live Driver ABI and resource caps for both physical functions before timing;
-- target, tail, exceptional-payload, non-unit-alpha and K0 exactness;
-- A/B immutability and two-sided 256-byte-aligned candidate output/scratch red
-  zones for eager and captured-graph execution;
-- the exact prior public AUTO symbol/config/module in eager/prepared evidence
-  and the operation-level captured graph;
-- paired whole-pipeline candidate/prior-public-AUTO eager and graph ABBA plus
-  BAAB, strict p50 and p95 below `.99` at once3 and then once7.
+- exact live Driver ABI and resource caps for both physical functions;
+- tail, exceptional-payload, non-unit-alpha and K0 exactness;
+- target actual AUTO eager/prepared physical identity plus an exact operation
+  graph with transpose → Fixed ordering/configuration/shared scratch;
+- exact bits, A/B immutability and output/input/scratch red zones;
+- once21 actual AUTO versus forced generic exact F32 in eager/graph ABBA and
+  BAAB, with every p50 and p95 strictly below `.99`;
+- a separately labeled once21 actual AUTO/cuBLAS Fast comparison with no false
+  exactness or promotion claim.
 
-The candidate timing arm launches both transpose and Fixed nodes. The AUTO arm
-uses `gpu_gemm_bi_backward_dx_raw`; because admission is empty, it remains the
-actual prior production fallback rather than aliasing the candidate.
-
-No toolkit row is authorized by the current CPU-only commit. The live logs,
-artifact/compiler identities and timing strata must be frozen before a
-separate minimal admission commit.
+No GPU or post-admission timing was run while preparing this admission commit.
 
 ## TDD and host verification
 
-The review regression started RED because the composed production cohort was
-non-empty. After separating qualification candidates from the empty production
-cohort, host tests require both new cells to resolve exactly to their prior
-fallback while existing NN and d768-out routes remain unchanged.
-
-The final current-tree checks were run from an isolated temporary copy because
-the repository-local Cargo shim executes a committed fleet snapshot and native
-Cargo rejects this worktree's nested workspace location. No CUDA test or GPU
-work was executed.
+The selector test first failed with an empty cohort while expecting all three
+qualified rows. After admission, the scoped checks were:
 
 ```text
 cargo test --no-default-features --features 'cuda,cudarc/cuda-13000' \
   --lib nt_fixed_copyplan_sibling -- --nocapture
-4 passed before the concurrent Batch B1 WIP entered the shared tree
+5 passed
 
 cargo test --no-default-features \
   --test gemm_bi_scalar_nt_copyplan_siblings_discovery -- --nocapture
@@ -94,8 +92,5 @@ cargo test --no-default-features \
 
 cargo test --no-default-features --features 'cuda,cudarc/cuda-13000' \
   --test gemm_bi_scalar_nt_copyplan_siblings_discovery --no-run
-deferred: the shared tree contains concurrent, uncommitted Batch B1 module
-plumbing that currently fails before this test is compiled
+compiled successfully; ignored CUDA tests were not executed
 ```
-
-No live CUDA test or GPU timing was executed in this fail-close repair.
