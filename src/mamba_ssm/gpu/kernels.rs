@@ -660,60 +660,73 @@ impl MambaKernels {
                 },
             )
         };
-        let (fixed, scalar, sm80, finalist, finalist_rejection, specialized) =
-            if let Some(artifacts) = sm120_artifacts {
-                (
-                    artifacts.fixed,
-                    artifacts.scalar,
-                    artifacts.sm80,
-                    None,
-                    None,
-                    artifacts.specialized,
-                )
-            } else {
-                let fixed = compile(super::kernel_identity::ModuleKind::Fixed)?;
-                let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
-                let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
-                let (finalist, finalist_rejection) =
-                    if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
-                        match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
-                            Ok(module) => (Some(module), None),
-                            Err(error) => (None, Some(error)),
-                        }
-                    } else {
-                        (None, None)
-                    };
-                let specialized = match (arch, device_cc) {
-                    ("sm_90a", Some((9, 0))) => {
-                        compile(super::kernel_identity::ModuleKind::TriadSm90a)
-                            .ok()
-                            .and_then(|module| {
-                                super::gemm_bi_triad::modules::qualify_specialized_module(module)
-                                    .ok()
-                            })
+        let (
+            fixed,
+            scalar,
+            sm80,
+            finalist,
+            finalist_rejection,
+            sm89_half,
+            sm89_half_rejection,
+            specialized,
+        ) = if let Some(artifacts) = sm120_artifacts {
+            (
+                artifacts.fixed,
+                artifacts.scalar,
+                artifacts.sm80,
+                None,
+                None,
+                None,
+                None,
+                artifacts.specialized,
+            )
+        } else {
+            let fixed = compile(super::kernel_identity::ModuleKind::Fixed)?;
+            let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
+            let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
+            let (finalist, finalist_rejection) =
+                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                    match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
+                        Ok(module) => (Some(module), None),
+                        Err(error) => (None, Some(error)),
                     }
-                    ("sm_100a", Some(device_cc @ (10, 0)))
-                    | ("sm_103a", Some(device_cc @ (10, 3))) => {
-                        super::gemm_bi_triad::modules::compile_sm100_optional(
-                            ctx, state_cap, device_cc,
-                        )
-                    }
-                    ("sm_110a", Some(device_cc @ (11, 0))) => {
-                        super::gemm_bi_triad::modules::compile_sm100_optional(
-                            ctx, state_cap, device_cc,
-                        )
-                    }
-                    _ => None,
+                } else {
+                    (None, None)
                 };
-                (
-                    fixed,
-                    scalar,
-                    sm80,
-                    finalist,
-                    finalist_rejection,
-                    specialized,
-                )
+            let (sm89_half, sm89_half_rejection) =
+                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                    match compile(super::kernel_identity::ModuleKind::TriadSm89Half) {
+                        Ok(module) => (Some(module), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
+                };
+            let specialized = match (arch, device_cc) {
+                ("sm_90a", Some((9, 0))) => compile(super::kernel_identity::ModuleKind::TriadSm90a)
+                    .ok()
+                    .and_then(|module| {
+                        super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
+                    }),
+                ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103a", Some(device_cc @ (10, 3))) => {
+                    super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
+                }
+                ("sm_110a", Some(device_cc @ (11, 0))) => {
+                    super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
+                }
+                _ => None,
             };
+            (
+                fixed,
+                scalar,
+                sm80,
+                finalist,
+                finalist_rejection,
+                sm89_half,
+                sm89_half_rejection,
+                specialized,
+            )
+        };
         let compiler_identity = fixed.compiler_identity;
         let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
@@ -750,6 +763,8 @@ impl MambaKernels {
             sm80,
             finalist,
             finalist_rejection,
+            sm89_half,
+            sm89_half_rejection,
             specialized,
         )?;
         // A rejected TF32 module used to be recorded and never shown: the
@@ -1241,6 +1256,39 @@ impl MambaKernels {
         &self,
     ) -> Option<super::kernel_identity::CompilerIdentity> {
         self.triad.sm89_finalist_compiler_identity()
+    }
+
+    pub fn triad_sm89_half_compiler_identity(
+        &self,
+    ) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.triad.sm89_half_compiler_identity()
+    }
+
+    pub fn triad_sm89_half_artifact_identity(
+        &self,
+    ) -> Option<super::kernel_identity::ArtifactIdentity> {
+        self.triad.artifact_set_identity().sm89_half
+    }
+
+    pub fn triad_sm89_half_rejection(&self) -> Option<&str> {
+        self.triad.sm89_half_rejection()
+    }
+
+    pub fn triad_sm89_half_exclusions(&self) -> Vec<(&'static str, &str)> {
+        self.triad
+            .sm89_half_exclusions()
+            .iter()
+            .map(|excluded| (excluded.symbol, excluded.reason.as_str()))
+            .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn triad_sm89_half_function(
+        &self,
+        route: super::gemm_bi_triad::Sm89HalfRoute,
+        dtype: super::dtype::WeightDtype,
+    ) -> Option<&CudaFunction> {
+        self.triad.sm89_half_function(route, dtype)
     }
 
     pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {

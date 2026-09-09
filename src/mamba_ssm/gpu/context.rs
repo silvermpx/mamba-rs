@@ -1162,6 +1162,9 @@ impl GpuCtx {
                 .specialized
                 .filter(|artifact| artifact.module_kind == module_kind)
                 .zip(self.kernels.triad_sm89_finalist_compiler_identity()),
+            ModuleKind::TriadSm89Half => artifacts
+                .sm89_half
+                .zip(self.kernels.triad_sm89_half_compiler_identity()),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
                 .kernels
                 .artifact_set_identity()
@@ -1180,6 +1183,7 @@ impl GpuCtx {
         match module_kind {
             ModuleKind::TriadSm80 => availability.portable,
             ModuleKind::TriadSm89Finalist => availability.finalist,
+            ModuleKind::TriadSm89Half => None,
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 availability.specialized
             }

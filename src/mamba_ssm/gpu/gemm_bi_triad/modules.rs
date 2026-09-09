@@ -10,6 +10,7 @@ use cudarc::driver::{
     LaunchConfig,
 };
 
+use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, CompilerIdentity, CudaTarget, FramedSha256, ModuleKind,
     ResolvedGemmOp, Sha256Digest,
@@ -510,6 +511,7 @@ pub(crate) struct CompiledModule {
     /// The first step that kept the module's TF32 routes from qualifying.
     tf32_qualification_error: Option<String>,
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
+    sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -689,6 +691,8 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
     {
         let extensions = module_composes_extensions(request.module_kind, request.arch);
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
+        let sm89_half_abi =
+            census_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let fixed_half_abi =
             census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
@@ -754,6 +758,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             hit.artifact_digest,
             tf32_qualification_error,
             tf32_driver_abi,
+            sm89_half_abi,
             fixed_half_abi,
             fixed_half_swizzle_abi,
             fixed_half_s3_abi,
@@ -771,6 +776,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         artifact_digest,
         tf32_qualification_error,
         tf32_driver_abi,
+        sm89_half_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
@@ -801,6 +807,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 request.ctx,
                 request.module_kind,
                 extensions,
+                &ptx_source,
+            );
+            let sm89_half_abi = census_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
                 &ptx_source,
             );
             let fixed_half_abi = census_fixed_sm89_half_driver_abi(
@@ -920,6 +932,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 artifact_digest,
                 tf32_qualification_error,
                 tf32_driver_abi,
+                sm89_half_abi,
                 fixed_half_abi,
                 fixed_half_swizzle_abi,
                 fixed_half_s3_abi,
@@ -963,6 +976,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualified: tf32_qualification_error.is_none(),
         tf32_qualification_error,
         tf32_driver_abi,
+        sm89_half_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
@@ -1521,6 +1535,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm89Finalist requires exact target sm_89, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm89Half && arch != "sm_89" {
+        return Err(format!(
+            "TriadSm89Half requires exact target sm_89, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
         return Err(format!(
             "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, or compute_110f/a target, got {arch}"
@@ -1621,6 +1640,56 @@ fn validate_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
+        return Err("TriadSm89Half requires exact sm_89 source and PTX targets".into());
+    }
+    let expected = super::sm89_half_source::SM89_HALF_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect::<BTreeSet<_>>();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.starts_with("gemm_bi_"))
+        .collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err("TriadSm89Half PTX inventory is incomplete, duplicated, or foreign".into());
+    }
+    let parsed = parse_ptx(ptx)?;
+    for spec in super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
+        let mma = if spec.dtype == crate::mamba_ssm::gpu::dtype::WeightDtype::Bf16 {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        require_ptx_entry_tokens(
+            "TriadSm89Half",
+            entry,
+            &["cp.async.cg.shared.global", "ldmatrix.sync.aligned", mma],
+        )?;
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token.starts_with("wgmma.")
+                || token.starts_with("tcgen05.")
+                || token.starts_with("cp.async.bulk.tensor.")
+        }) {
+            return Err(format!(
+                "TriadSm89Half {} contains a forbidden instruction family",
+                spec.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     match module_kind {
         ModuleKind::Fixed => {
@@ -1646,6 +1715,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         }
         ModuleKind::TriadSm80 => validate_sm80_ptx(arch, ptx),
         ModuleKind::TriadSm89Finalist => validate_sm89_finalist_ptx(arch, ptx),
+        ModuleKind::TriadSm89Half => validate_sm89_half_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
@@ -2202,6 +2272,83 @@ fn validate_fixed_sm89_half_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Res
         ));
     }
     Ok(())
+}
+
+fn validate_sm89_half_driver_abi(
+    spec: &super::sm89_half_source::Sm89HalfKernelSpec,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    const NN: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    const NT: [(usize, usize); 7] = [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)];
+    let expected: &[(usize, usize)] = match spec.op {
+        ResolvedGemmOp::Nn => &NN,
+        ResolvedGemmOp::Nt => &NT,
+        ResolvedGemmOp::Tn => return Err("TriadSm89Half owns no TN kernel".into()),
+    };
+    if abi.parameter_count() != expected.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(expected.iter().copied())
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{} has the wrong live Driver parameter ABI",
+            spec.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn census_sm89_half_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::TriadSm89Half {
+        return Ok(BTreeMap::new());
+    }
+    if arch != "sm_89" {
+        return Err("TriadSm89Half Driver ABI census requires exact sm_89".into());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(spec.symbol).unwrap(),
+            )
+        }
+        .map_err(|error| {
+            format!(
+                "load TriadSm89Half/{} for Driver ABI: {error:?}",
+                spec.symbol
+            )
+        })?;
+        let count = if spec.op == ResolvedGemmOp::Nn { 5 } else { 7 };
+        let abi = query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_sm89_half_driver_abi(spec, &abi)?;
+        if census.insert(spec.symbol, abi).is_some() {
+            return Err(format!(
+                "duplicate TriadSm89Half ABI symbol {}",
+                spec.symbol
+            ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
 }
 
 fn census_fixed_sm89_half_driver_abi(
@@ -6910,6 +7057,10 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         validate_module_target(kind, arch)?;
         return super::sm89_finalist_source::compose_sm89_finalist_source();
     }
+    if kind == ModuleKind::TriadSm89Half {
+        validate_module_target(kind, arch)?;
+        return super::sm89_half_source::compose_sm89_half_source();
+    }
     let base = module_fragments(kind)?;
     if kind == ModuleKind::Fixed && fixed_sm89_half_composed(arch) {
         let mut fragments = base.to_vec();
@@ -7249,6 +7400,132 @@ pub(crate) fn qualify_specialized_module(
     })
 }
 
+fn retain_sm89_half_symbol<T>(
+    functions: &mut HashMap<&'static str, T>,
+    exclusions: &mut Vec<Tf32SymbolExclusion>,
+    symbol: &'static str,
+    loaded: Result<T, String>,
+) -> Result<(), String> {
+    match loaded {
+        Ok(function) => {
+            if functions.insert(symbol, function).is_some() {
+                return Err(format!("duplicate TriadSm89Half function {symbol}"));
+            }
+        }
+        Err(reason) => exclusions.push(Tf32SymbolExclusion { symbol, reason }),
+    }
+    Ok(())
+}
+
+fn load_sm89_half_functions(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> Result<
+    (
+        HashMap<&'static str, CudaFunction>,
+        Vec<Tf32SymbolExclusion>,
+    ),
+    String,
+> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm89Half
+        || module.compiler_identity.target.as_str() != "sm_89"
+        || ctx
+            .compute_capability()
+            .map_err(|error| format!("query TriadSm89Half CC: {error:?}"))?
+            != (8, 9)
+    {
+        return Err("TriadSm89Half requires an exact sm_89/CC8.9 binding".into());
+    }
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query TriadSm89Half opt-in shared memory: {error:?}"))?;
+    let optin_shared = u32::try_from(optin_shared)
+        .map_err(|_| format!("negative TriadSm89Half opt-in shared memory {optin_shared}"))?;
+    let abi = module.sm89_half_driver_abi.as_ref().map_err(Clone::clone)?;
+    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        validate_sm89_half_driver_abi(
+            spec,
+            abi.get(spec.symbol)
+                .ok_or_else(|| format!("{} has no live Driver ABI census", spec.symbol))?,
+        )?;
+    }
+    let mut functions = HashMap::new();
+    let mut exclusions = Vec::new();
+    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        let loaded = (|| {
+            if optin_shared < spec.dynamic_shared_bytes {
+                return Err(format!(
+                    "{} needs {} dynamic shared bytes, device exposes {optin_shared}",
+                    spec.symbol, spec.dynamic_shared_bytes
+                ));
+            }
+            let function = load_function(&module.module, ModuleKind::TriadSm89Half, spec.symbol)?;
+            set_dynamic_shared(
+                &function,
+                spec.symbol,
+                i32::try_from(spec.dynamic_shared_bytes)
+                    .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?,
+            )?;
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative local memory", spec.symbol))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|error| format!("query {} registers: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative register count", spec.symbol))?;
+            let static_shared_bytes =
+                u32::try_from(function.shared_size_bytes().map_err(|error| {
+                    format!("query {} static shared memory: {error:?}", spec.symbol)
+                })?)
+                .map_err(|_| format!("{} returned negative static shared memory", spec.symbol))?;
+            if static_shared_bytes != 0 {
+                return Err(format!(
+                    "{} uses {static_shared_bytes} static shared bytes, expected zero",
+                    spec.symbol
+                ));
+            }
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?;
+            tf32_symbol_admission(
+                spec.symbol,
+                local_bytes,
+                registers,
+                spec.register_cap,
+                max_threads,
+                i32::try_from(spec.threads)
+                    .map_err(|_| format!("{} thread count exceeds i32::MAX", spec.symbol))?,
+            )?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    spec.threads,
+                    spec.dynamic_shared_bytes as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+            if occupancy < spec.occupancy_gate {
+                return Err(format!(
+                    "{} occupancy {occupancy} misses its {}-CTA gate",
+                    spec.symbol, spec.occupancy_gate
+                ));
+            }
+            Ok(function)
+        })();
+        retain_sm89_half_symbol(&mut functions, &mut exclusions, spec.symbol, loaded)?;
+    }
+    if functions.len() + exclusions.len() != super::sm89_half_source::SM89_HALF_KERNEL_SPECS.len() {
+        return Err("TriadSm89Half lost a symbol while applying resource gates".into());
+    }
+    Ok((functions, exclusions))
+}
+
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
     allocation_domain: super::contract::AllocationDomain,
@@ -7257,6 +7534,7 @@ pub struct GemmBiKernels {
     scalar_compiler_identity: CompilerIdentity,
     sm80_compiler_identity: CompilerIdentity,
     finalist_compiler_identity: Option<CompilerIdentity>,
+    sm89_half_compiler_identity: Option<CompilerIdentity>,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
     f32_triad_availability: super::contract::F32TriadAvailability,
@@ -7264,9 +7542,12 @@ pub struct GemmBiKernels {
     portable_tf32_functions: HashMap<&'static str, CudaFunction>,
     tf32_splitk_functions: HashMap<&'static str, CudaFunction>,
     finalist_tf32_functions: HashMap<&'static str, CudaFunction>,
+    sm89_half_functions: HashMap<&'static str, CudaFunction>,
+    sm89_half_exclusions: Vec<Tf32SymbolExclusion>,
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
     portable_tf32_rejection: Option<String>,
     finalist_tf32_rejection: Option<String>,
+    sm89_half_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
     tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
@@ -7349,6 +7630,8 @@ impl GemmBiKernels {
         sm80: CompiledModule,
         finalist: Option<CompiledModule>,
         finalist_compile_rejection: Option<String>,
+        sm89_half: Option<CompiledModule>,
+        sm89_half_compile_rejection: Option<String>,
         specialized: Option<QualifiedSpecializedModule>,
     ) -> Result<Self, String> {
         let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
@@ -7383,6 +7666,15 @@ impl GemmBiKernels {
             artifacts.push(finalist.artifact_identity);
         } else if let Some(specialized) = specialized.as_ref() {
             artifacts.push(specialized.module.artifact_identity);
+        }
+        if sm89_half.is_some() && specialized.is_some() {
+            return Err(
+                "SM89 half and architecture-specialized triad modules are mutually exclusive"
+                    .into(),
+            );
+        }
+        if let Some(sm89_half) = sm89_half.as_ref() {
+            artifacts.push(sm89_half.artifact_identity);
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
@@ -7503,6 +7795,17 @@ impl GemmBiKernels {
             specialized: specialized_binding,
             finalist: finalist_binding,
         };
+        let mut sm89_half_rejection = sm89_half_compile_rejection;
+        let (sm89_half_functions, sm89_half_exclusions) = match sm89_half.as_ref() {
+            Some(module) => match load_sm89_half_functions(ctx, module) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    sm89_half_rejection = Some(error);
+                    (HashMap::new(), Vec::new())
+                }
+            },
+            None => (HashMap::new(), Vec::new()),
+        };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
         let load_half_dynsmem = |base: &str, bytes: i32| {
@@ -7581,6 +7884,9 @@ impl GemmBiKernels {
         if let Some(finalist) = finalist.as_ref() {
             anchors.push(finalist.module.clone());
         }
+        if let Some(sm89_half) = sm89_half.as_ref() {
+            anchors.push(sm89_half.module.clone());
+        }
         if let Some(specialized) = specialized.as_ref() {
             anchors.push(specialized.module.module.clone());
         }
@@ -7593,6 +7899,7 @@ impl GemmBiKernels {
             scalar_compiler_identity: scalar.compiler_identity,
             sm80_compiler_identity: sm80.compiler_identity,
             finalist_compiler_identity: finalist.as_ref().map(|module| module.compiler_identity),
+            sm89_half_compiler_identity: sm89_half.as_ref().map(|module| module.compiler_identity),
             specialized_compiler_identity: specialized
                 .as_ref()
                 .map(|specialized| specialized.module.compiler_identity),
@@ -7602,10 +7909,13 @@ impl GemmBiKernels {
             portable_tf32_functions,
             tf32_splitk_functions,
             finalist_tf32_functions,
+            sm89_half_functions,
+            sm89_half_exclusions,
             tf32_excluded_symbols,
             specialized_tf32_functions,
             portable_tf32_rejection,
             finalist_tf32_rejection,
+            sm89_half_rejection,
             specialized_tf32_rejection,
             specialized_functions,
             sm120_target,
@@ -7718,6 +8028,14 @@ impl GemmBiKernels {
         self.finalist_tf32_rejection.as_deref()
     }
 
+    pub(crate) fn sm89_half_rejection(&self) -> Option<&str> {
+        self.sm89_half_rejection.as_deref()
+    }
+
+    pub(crate) fn sm89_half_exclusions(&self) -> &[Tf32SymbolExclusion] {
+        &self.sm89_half_exclusions
+    }
+
     /// Why the portable SM80 TF32 routes are not bound, if they are not.
     pub(crate) fn portable_tf32_rejection(&self) -> Option<&str> {
         self.portable_tf32_rejection.as_deref()
@@ -7778,6 +8096,22 @@ impl GemmBiKernels {
 
     pub fn sm89_finalist_compiler_identity(&self) -> Option<CompilerIdentity> {
         self.finalist_compiler_identity
+    }
+
+    pub fn sm89_half_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .sm89_half
+            .and(self.sm89_half_compiler_identity)
+    }
+
+    pub fn sm89_half_function(
+        &self,
+        route: super::sm89_half_source::Sm89HalfRoute,
+        dtype: WeightDtype,
+    ) -> Option<&CudaFunction> {
+        let spec = super::sm89_half_source::kernel_spec(route, dtype)?;
+        self.sm89_half_compiler_identity()?;
+        self.sm89_half_functions.get(spec.symbol)
     }
 
     pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -9112,6 +9446,32 @@ mod tests {
         validate_tf32_parameter_abi, validate_tf32_ptx_inventory, validate_tf32_splitk_ptx,
         validate_tn_narrow_splitm_partial_ptx,
     };
+
+    #[test]
+    fn sm89_half_resource_failure_excludes_only_the_bad_symbol() {
+        let mut functions = HashMap::new();
+        let mut exclusions = Vec::new();
+        super::retain_sm89_half_symbol(&mut functions, &mut exclusions, "nn_f16", Ok(11_u8))
+            .unwrap();
+        super::retain_sm89_half_symbol(
+            &mut functions,
+            &mut exclusions,
+            "nt_bf16",
+            Err("registers 168 exceed cap 167".into()),
+        )
+        .unwrap();
+        super::retain_sm89_half_symbol(&mut functions, &mut exclusions, "nt_f16", Ok(13_u8))
+            .unwrap();
+
+        assert_eq!(functions, HashMap::from([("nn_f16", 11), ("nt_f16", 13)]));
+        assert_eq!(
+            exclusions,
+            [super::Tf32SymbolExclusion {
+                symbol: "nt_bf16",
+                reason: "registers 168 exceed cap 167".into(),
+            }]
+        );
+    }
 
     #[test]
     fn sm89_finalist_inventory_replaces_one_legacy_entry_and_rejects_foreign_families() {

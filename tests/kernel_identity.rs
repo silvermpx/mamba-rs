@@ -52,6 +52,8 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::TriadSm100 as u8, 5);
     assert_eq!(ModuleKind::TriadSm120 as u8, 6);
     assert_eq!(ModuleKind::Mamba3Combined as u8, 7);
+    assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
+    assert_eq!(ModuleKind::TriadSm89Half as u8, 9);
 }
 
 #[test]
@@ -369,6 +371,28 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn artifact_set_tracks_sm89_tf32_and_half_as_two_visible_modules() {
+    let fixed = artifact(ModuleKind::Fixed, 1);
+    let scalar = artifact(ModuleKind::TriadScalar, 3);
+    let sm80 = artifact(ModuleKind::TriadSm80, 5);
+    let finalist = artifact(ModuleKind::TriadSm89Finalist, 7);
+    let half = artifact(ModuleKind::TriadSm89Half, 9);
+
+    let both = build_artifact_set(&[fixed, scalar, sm80, finalist, half]).unwrap();
+    assert_eq!(both.module_count, 5);
+    assert_eq!(both.specialized, Some(finalist));
+    assert_eq!(both.sm89_half, Some(half));
+
+    let half_only = build_artifact_set(&[fixed, scalar, sm80, half]).unwrap();
+    assert_eq!(half_only.module_count, 4);
+    assert_eq!(half_only.specialized, None);
+    assert_eq!(half_only.sm89_half, Some(half));
+
+    assert!(build_artifact_set(&[fixed, scalar, sm80, half, finalist]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, finalist, finalist]).is_err());
 }
 
 #[test]
