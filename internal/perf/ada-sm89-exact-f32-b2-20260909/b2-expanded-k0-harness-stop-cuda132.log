@@ -1,0 +1,19 @@
+
+running 1 test
+test live::sm89_exact_f32_large_tn_forced_correctness_and_actual_auto_admission ... {"abi_bytes":56,"abi_parameters":4,"local_bytes":0,"occupancy":3,"registers":163,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":32768,"symbol":"gemm_bi_tn_sm89_f32_n64_dual_chunk_fused_finalize_v1"}
+{"abi_bytes":40,"abi_parameters":7,"local_bytes":0,"occupancy":4,"registers":107,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":16384,"symbol":"gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1"}
+{"abi_bytes":40,"abi_parameters":7,"local_bytes":0,"occupancy":4,"registers":107,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":16384,"symbol":"gemm_bi_tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1"}
+{"alpha_bits":1065353216,"dims":[2048,768,3072],"exact":true,"exceptional":false,"guarded_allocations":7,"guarded_elements":896,"output_words":2359296,"partial_words":0,"route":"D768InDualChunkFused","schema":"MambaTriadSm89ExactF32B2RawProbeV1","transpose_words":1572864}
+{"alpha_bits":1065353216,"dims":[2047,68,132],"exact":true,"exceptional":false,"guarded_allocations":7,"guarded_elements":896,"output_words":8976,"partial_words":0,"route":"D768InDualChunkFused","schema":"MambaTriadSm89ExactF32B2RawProbeV1","transpose_words":139196}
+{"alpha_bits":1065353216,"dims":[2047,68,132],"exact":true,"exceptional":true,"guarded_allocations":7,"guarded_elements":896,"output_words":8976,"partial_words":0,"route":"D768InDualChunkFused","schema":"MambaTriadSm89ExactF32B2RawProbeV1","transpose_words":139196}
+{"alpha_bits":3208642560,"dims":[2047,68,132],"exact":true,"exceptional":false,"guarded_allocations":7,"guarded_elements":896,"output_words":8976,"partial_words":0,"route":"D768InDualChunkFused","schema":"MambaTriadSm89ExactF32B2RawProbeV1","transpose_words":139196}
+Error: "K0 output active input changed"
+FAILED
+
+failures:
+
+failures:
+    live::sm89_exact_f32_large_tn_forced_correctness_and_actual_auto_admission
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 27.03s
+

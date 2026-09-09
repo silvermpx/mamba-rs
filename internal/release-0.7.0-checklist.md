@@ -39,6 +39,11 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   smoke passes for all three routes against actual prior AUTO, with exact
   eager/graph bits and guards. Cohorts remain empty pending final qualification.
 - [ ] Large exact-F32 TN combined qualification and admission.
+- [x] Large exact-F32 TN expanded CUDA13.2 check: all three production forced
+  routes pass full/tail/exceptional/K0/non-unit raw oracles, repeated bits,
+  eager/prepared identity, guards and paired once3/once7 versus actual AUTO.
+  Raw replay matches all 24 screens/480 observations. AUTO remains unadmitted
+  pending the combined supported-toolkit phase; no fresh Fast arm was run.
 - [x] Exact-F32 TN d128-in/out source-only promotion (`7d390fa7`), with
   normalized retained-body parity and exactly two exports; 13 native checks pass.
 - [ ] Exact-F32 TN d128-in/out module, routes and focused qualification.
