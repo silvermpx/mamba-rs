@@ -87,6 +87,12 @@ but improves the retained 32x16 pipeline only 0.10–0.15% at p50 and misses the
 strict 1% gate in every stratum. Evidence: [TF32 d768-out reuse](ada-triad-tf32-tn-transpose-rna-m64n64-d768-out-20260909/report.md) and
 [exact-F32 32x8 transpose](ada-triad-f32-tn-transpose-32x8-d768-in-20260909/report.md).
 
+The final BF16 TN d768-in packed-CTA-raster check is exact and resource-neutral
+at 125regs/local0/32KiB/occupancy3, but stays within roughly ±0.15% of the
+retained linear raster. It misses the strict 1% gate and stops once3 before
+Fast. The current discovery shortlist is now frozen for joint production-AUTO
+integration. Evidence: [packed raster](ada-triad-bf16-tn-packed-raster-d768-in-20260909/report.md).
+
 ## Integration and cleanup boundary
 
 - Selected half NN uses the existing Fixed S3 holder; NT B-XOR and new TN

@@ -2492,6 +2492,14 @@ once7/vendor timing; production remains unchanged. Evidence:
 `internal/perf/ada-triad-tf32-tn-transpose-rna-m64n64-d768-out-20260909/` and
 `internal/perf/ada-triad-f32-tn-transpose-32x8-d768-in-20260909/`.
 
+The final BF16 TN d768-in packed-raster candidate preserves the retained
+M64N64/BK64/S2 body and only remaps 576 CTAs to grid `(4,48,3)`. It passes
+target/tail/exception/K0 eager+graph exactness and remains resource-neutral at
+125regs/local0/32KiB/occupancy3, but once3 ratios remain within about ±0.15%
+of retained and fail the strict1% gate. Stop before once7/Fast. Evidence:
+`internal/perf/ada-triad-bf16-tn-packed-raster-d768-in-20260909/`. This freezes
+the current discovery shortlist; proceed to joint production-AUTO assembly.
+
 ## Owner-requested v0.7.0 pre-release finalization contract
 
 Defer this phase until the current kernel discovery is frozen and the selected
