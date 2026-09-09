@@ -4,21 +4,24 @@ pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_tf
 pub const PRIMITIVES: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89_tf32_joint_primitives.cuh");
 
-pub const SOURCE_SHA256: &str = "5fbb9fc1481052da3591196f73f8d372a3616e07657dc13da4f2a1d8a1e95bd3";
+pub const SOURCE_SHA256: &str = "e1e8a2ad1d2d03b4d0e02730f087eab1c26cfc7712f867fbbead13b032e3624c";
 pub const PRIMITIVES_SHA256: &str =
-    "80bf255d0ee7e464fbbc3225f47e4096c5886125673c92af0954770e706a77ba";
+    "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
 
 pub const COPY_CG_PRIMITIVE: &str = "gbf_tf32_copy_cg";
 pub const MMA_M16N8K8_PRIMITIVE: &str = "gbf_tf32_mma_m16n8k8";
+pub const ALIGNMENT_PRIMITIVE: &str = "gbf_aligned16";
 
 pub const TN_PRE_RNA_TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
 pub const TN_PRE_RNA_N96_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1";
 pub const TN_PRE_RNA_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
 pub const NN_ADD_HALF_DIRECT_N96_SYMBOL: &str =
     "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
+pub const NN_ADD_HALF_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
 
-pub const SM89_TF32_JOINT_SYMBOLS: [&str; 4] = [
+pub const SM89_TF32_JOINT_SYMBOLS: [&str; 5] = [
     NN_ADD_HALF_DIRECT_N96_SYMBOL,
+    NN_ADD_HALF_N96_SYMBOL,
     TN_PRE_RNA_N96_SYMBOL,
     TN_PRE_RNA_M64N64_SYMBOL,
     TN_PRE_RNA_TRANSPOSE_SYMBOL,
@@ -88,6 +91,7 @@ pub const GEMM_TERMINAL_ARGUMENT: u32 = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sm89Tf32JointKernelKind {
     NnAddHalfDirectM128N96Bk32S3,
+    NnAddHalfM128N96Bk32S3,
     TnPreRnaM128N96Bk32S3,
     TnPreRnaM64N64Bk32S3,
     TnPreRnaTranspose32x32,
@@ -136,10 +140,17 @@ const fn gemm_spec(
     }
 }
 
-pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 4] = [
+pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 5] = [
     gemm_spec(
         NN_ADD_HALF_DIRECT_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
+        86_016,
+        124,
+        1,
+    ),
+    gemm_spec(
+        NN_ADD_HALF_N96_SYMBOL,
+        Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
         86_016,
         124,
         1,
@@ -223,9 +234,13 @@ pub fn validate_primitives_text(source: &str) -> Result<(), String> {
             ));
         }
     }
+    let alignment_signature = "static __device__ __forceinline__ bool gbf_aligned16(const void* p)";
+    if source.matches(alignment_signature).count() != 1 {
+        return Err("SM89 TF32 joint alignment primitive must have one definition".into());
+    }
     let mut names = BTreeSet::new();
     let mut tokens = source;
-    while let Some(name_at) = tokens.find("gbf_tf32_") {
+    while let Some(name_at) = tokens.find("gbf_") {
         let name = &tokens[name_at..];
         let name_end = name
             .bytes()
@@ -234,9 +249,13 @@ pub fn validate_primitives_text(source: &str) -> Result<(), String> {
         names.insert(&name[..name_end]);
         tokens = &name[name_end..];
     }
-    let expected = [COPY_CG_PRIMITIVE, MMA_M16N8K8_PRIMITIVE]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let expected = [
+        COPY_CG_PRIMITIVE,
+        MMA_M16N8K8_PRIMITIVE,
+        ALIGNMENT_PRIMITIVE,
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     if names != expected {
         return Err(format!(
             "SM89 TF32 joint primitive references changed: expected {expected:?}, observed {names:?}"

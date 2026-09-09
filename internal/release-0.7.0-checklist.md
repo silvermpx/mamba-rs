@@ -45,6 +45,9 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 - [x] Four-cell TF32 joint source frozen (`560169d5`).
 - [x] TF32 joint standalone composer, two frozen primitives and four typed
   specs; 26 native source-contract checks pass. CUDA compilation is pending.
+- [x] Retained-winner audit recovers TF32 NN d768-out baseline N96, missing
+  from the four-cell plan; joint source now has five exports. Add the required
+  frozen alignment helper. All five-body/source contracts pass 28/28.
 - [ ] TF32 joint module, NN/TN routes, transform/scratch ownership and admission.
 - [ ] Remaining half improvements beyond the eleven Fast-winning cells:
   F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells. Establish

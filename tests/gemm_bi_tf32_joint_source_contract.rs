@@ -14,6 +14,7 @@ mod tn_raw;
 
 const FIXED_N96: &str = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
 const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
+const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_fixed/common.cuh");
 
 const TN_N96_SECTION: &str = "TN_N96";
 const TN_M64N64_SECTION: &str = "TN_M64N64";
@@ -326,6 +327,20 @@ fn materialized_sections_are_normalized_retained_bodies_only() {
 }
 
 #[test]
+fn retained_nn_d768_out_body_is_not_lost_from_joint_source() {
+    let symbol = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
+    assert!(
+        joint::export_inventory(joint::SOURCE)
+            .unwrap()
+            .contains(&symbol)
+    );
+    let retained = nn_parent::compose_triad_nn_n96_source(FIXED_N96)
+        .expect("retained NN d768-out N96 body")
+        .replace(nn_parent::TRIAD_NN_N96_SYMBOL, symbol);
+    assert_eq!(extract_section(joint::SOURCE, "NN_N96"), retained);
+}
+
+#[test]
 fn retained_transforms_are_reversible_and_joint_source_has_no_discovery_markers() {
     let retained_tn = retained_tn_n96();
     let raw = tn_raw::candidate_source(FIXED_N96).unwrap();
@@ -356,13 +371,13 @@ fn sealed_validator_rejects_extra_exports_and_discovery_markers() {
 }
 
 #[test]
-fn composed_source_contains_only_the_four_sealed_exports() {
+fn composed_source_contains_only_the_five_sealed_exports() {
     let composed = joint::compose_source().expect("compose standalone joint source");
     assert_eq!(
         joint::export_inventory(&composed).unwrap(),
         joint::SM89_TF32_JOINT_SYMBOLS
     );
-    assert_eq!(composed.matches("extern \"C\"").count(), 4);
+    assert_eq!(composed.matches("extern \"C\"").count(), 5);
     assert!(composed.starts_with(joint::PRIMITIVES));
     joint::validate_source_text(&composed).expect("composed inventory remains sealed");
 }
@@ -388,7 +403,16 @@ fn primitive_owner_is_frozen_and_byte_equal_to_fixed_tf32_definitions() {
 }
 
 #[test]
+fn standalone_primitives_include_the_retained_alignment_dependency() {
+    let helper = "static __device__ __forceinline__ bool gbf_aligned16(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;\n}";
+    assert_eq!(FIXED_COMMON.matches(helper).count(), 1);
+    assert_eq!(joint::PRIMITIVES.matches(helper).count(), 1);
+}
+
+#[test]
 fn primitive_validator_rejects_missing_foreign_and_exported_code() {
+    let missing_alignment = joint::PRIMITIVES.replacen("gbf_aligned16", "gbf_aligned_missing", 1);
+    assert!(joint::validate_primitives_text(&missing_alignment).is_err());
     let missing = joint::PRIMITIVES.replacen("gbf_tf32_copy_cg", "gbf_tf32_copy_removed", 1);
     assert!(joint::validate_primitives_text(&missing).is_err());
 
@@ -461,14 +485,25 @@ fn typed_params_match_the_frozen_driver_abi() {
 }
 
 #[test]
-fn four_typed_specs_bind_symbols_abi_and_retained_resources() {
+fn five_typed_specs_bind_symbols_abi_and_retained_resources() {
     use joint::Sm89Tf32JointKernelKind as Kind;
 
-    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 4);
+    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 5);
     let expected = [
         (
             joint::NN_ADD_HALF_DIRECT_N96_SYMBOL,
             Kind::NnAddHalfDirectM128N96Bk32S3,
+            (256, 1, 1),
+            86_016,
+            0,
+            124,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::NN_ADD_HALF_N96_SYMBOL,
+            Kind::NnAddHalfM128N96Bk32S3,
             (256, 1, 1),
             86_016,
             0,

@@ -1,3 +1,7 @@
+static __device__ __forceinline__ bool gbf_aligned16(const void* p) {
+    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;
+}
+
 __device__ __forceinline__ void gbf_tf32_copy_cg(
     unsigned shared_dst, const void* global_src, int valid_bytes) {
     asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;\n"

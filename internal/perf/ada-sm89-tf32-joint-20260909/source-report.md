@@ -56,3 +56,25 @@ verified both owner SHA-256 values above against the files.
 ## Deferred gates
 
 The subsequent module integration must compile this exact composition on each CUDA host, prove exact four-export PTX inventory, Driver ABI, stack/spill/local memory, per-symbol registers/shared memory/occupancy/SASS, and artifact identity before any forced route or AUTO admission. This source-only preparation makes no compile, correctness, performance, graph, or admission claim.
+
+## Root assembly correction: five exports
+
+The subsequent retained-winner audit recovered the missing NN TF32 d768-out
+baseline N96 body. Its saved actual-AUTO improvement is 18.1–18.6%; the later
+direct epilogue's sub-1% incremental result did not invalidate that baseline.
+The owner now appends the exact retained baseline body with a production
+export name in its own namespace. Existing four sections are unchanged and
+still pass their complete-body parity tests. Updated owner SHA-256:
+`e1e8a2ad1d2d03b4d0e02730f087eab1c26cfc7712f867fbbead13b032e3624c`.
+
+Source inspection also found the missing `gbf_aligned16` dependency used by
+every GEMM epilogue. The primitives now include its exact Fixed/common.cuh
+definition; updated SHA-256:
+`c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e`.
+
+Both new native tests were observed failing before their implementation:
+missing NN export, then zero alignment-helper definitions instead of one.
+After correction, the complete no-default-features source suite passes 28/28
+on the Ada Linux CPU worker. The previously recorded 13 discovery-helper
+unused-item warnings remain. No GPU or timing result is claimed. Module and
+route integration must use five exports, not the earlier four-export census.
