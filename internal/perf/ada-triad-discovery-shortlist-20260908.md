@@ -68,6 +68,17 @@ at once3 before Fast. Evidence: [BF16 TN M64N96](ada-triad-bf16-tn-m64n96-regpip
 [TF32 copy lifetime](ada-triad-tf32-nn-m96n96-s2-copy-lifetime-prism-20260909/report.md),
 [TF32 single fragment](ada-triad-tf32-nn-m96n96-s2-single-fragment-prism-20260909/report.md).
 
+The next four bounded mechanisms also stop without a new winner. TF32 N96
+`__grid_constant__` Params is exact/resource-neutral but loses7.4–7.6%;
+cross-BK fragment prefetch rises124->149regs. BF16 TN one-wave atlas models
+29.69% less staging but compiles at130regs over its128 cap. Exact-F32 TN
+M128N64/BK16 dual-fused reduces modeled staging25%, but its raw verification
+twin retains an8-byte stack frame after one bounded scalarization fix. Evidence:
+[grid constant](ada-triad-tf32-nn-n96-direct-grid-constant-prism-20260909/report.md),
+[cross-BK prefetch](ada-triad-tf32-nn-n96-cross-bk-prefetch-prism-20260909/report.md),
+[one-wave atlas](ada-triad-bf16-tn-one-wave-atlas-20260909/report.md),
+[M128N64 dual-fused](ada-triad-f32-tn-m128n64-bk16-dual-fused-20260909/report.md).
+
 ## Integration and cleanup boundary
 
 - Selected half NN uses the existing Fixed S3 holder; NT B-XOR and new TN

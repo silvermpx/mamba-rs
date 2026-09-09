@@ -2465,3 +2465,18 @@ bits, but loses retained direct N96 by0.77–1.71% p50, worst p951.01951. Stop
 both mechanisms unchanged; no once7/Fast ran. Evidence:
 `internal/perf/ada-triad-tf32-nn-m96n96-s2-copy-lifetime-prism-20260909/` and
 `internal/perf/ada-triad-tf32-nn-m96n96-s2-single-fragment-prism-20260909/`.
+
+The next TF32 NN Prism mechanisms do not advance. `__grid_constant__` Params
+is exact/resource-neutral and produces eight fewer SASS instructions, but loses
+retained7.4–7.6% once3. Cross-BK fragment prefetch preserves HMMA/LDGSTS and
+stack0 but raises registers124->149, so it stops before exact/timing. Evidence:
+`internal/perf/ada-triad-tf32-nn-n96-direct-grid-constant-prism-20260909/` and
+`internal/perf/ada-triad-tf32-nn-n96-cross-bk-prefetch-prism-20260909/`.
+
+BF16 TN d768-out one-wave atlas (grid142,29.69% less modeled staging) stops at
+130regs over its128 cap after repairing two harness-only compile/parser defects;
+no exact/timing ran. Exact-F32 TN d768-in M128N64/BK16 dual-fused halves GEMM
+CTAs and models25% less staging, but its raw verification twin retains an8-byte
+stack frame after the one approved static-unroll fix, so it also stops before
+exact/timing. Evidence: `internal/perf/ada-triad-bf16-tn-one-wave-atlas-20260909/`
+and `internal/perf/ada-triad-f32-tn-m128n64-bk16-dual-fused-20260909/`.
