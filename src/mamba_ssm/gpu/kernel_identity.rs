@@ -2925,6 +2925,8 @@ pub enum PhysicalGemmBackend {
     Sm89MmaTf32Compact8V1 = 21,
     ScalarFmaSm89FixedCopyPlanV1 = 22,
     Sm89Mma16HalfS3V1 = 23,
+    ScalarFmaSm89ExactF32DualChunkFusedV1 = 24,
+    ScalarFmaSm89ExactF32DirectSplitMPartialV1 = 25,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
@@ -2932,6 +2934,8 @@ pub enum PhysicalGemmBackend {
 pub(crate) const SM89_FIXED_COPYPLAN_ROUTE_REVISION: u16 = 1;
 /// Scoped route epoch for the isolated Ada half-Triad S3 AUTO cohort.
 pub(crate) const SM89_HALF_ROUTE_REVISION: u16 = 1;
+/// Scoped route epoch for the isolated Ada exact-F32 large-TN family.
+pub(crate) const SM89_EXACT_F32_TN_ROUTE_REVISION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -2959,6 +2963,7 @@ pub enum ResolvedNumericContract {
     /// partial slabs fold in a fixed order: bit-stable for a shape on a
     /// device, not bit-equal to the one-CTA-per-tile ladder.
     MmaSyncF32StreamKFixedOrderV1 = 20,
+    ScalarFmaTnSplitMPartialV1 = 21,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3005,6 +3010,7 @@ pub enum ResolvedOutputOwnership {
     OneThreadPerOutputElementFixedSplitKReduceV1 = 10,
     OwnerCtaPerOutputTileStreamKFixedOrderV1 = 11,
     OwnerCtaPerOutputTileFixedSplitFoldV1 = 12,
+    OneCtaPerOutputTilePerSplitMPartitionV1 = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -5074,6 +5080,22 @@ mod physical_launch_tests {
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8V1 as u8, 21);
         assert_eq!(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 as u8, 22);
         assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3V1 as u8, 23);
+        assert_eq!(
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
+            24
+        );
+        assert_eq!(
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
+            25
+        );
+        assert_eq!(
+            ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
+            21
+        );
+        assert_eq!(
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1 as u8,
+            13
+        );
     }
 
     #[test]

@@ -944,6 +944,14 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
     );
     assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 as u8, 15);
     assert_eq!(
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
+        24
+    );
+    assert_eq!(
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
+        25
+    );
+    assert_eq!(
         ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1 as u8,
         12
     );
@@ -954,6 +962,14 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
     assert_eq!(
         ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1 as u8,
         14
+    );
+    assert_eq!(
+        ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
+        21
+    );
+    assert_eq!(
+        ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1 as u8,
+        13
     );
 }
 

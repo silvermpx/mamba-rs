@@ -23,8 +23,8 @@ use super::{
     TcFwdOperands, TcTile, Tf32KernelSpec, Tf32PhysicalRoute, enqueue_validated_prepared_f32_triad,
     gemm_bi_backward_dw_tc_with_tile, gemm_bi_backward_dx_tc_with_tile,
     gemm_bi_forward_tc_with_tile, gemm_bi_forward_tc_with_tile_shape, launch_prepared_f32_triad,
-    prepare_f32_triad_forced, tf32_kernel_spec, validate_prepared_f32_triad_for_timing,
-    with_cached_f32_triad_prepared,
+    launch_sm89_exact_f32_tn_forced, prepare_f32_triad_forced, prepare_sm89_exact_f32_tn_forced,
+    tf32_kernel_spec, validate_prepared_f32_triad_for_timing, with_cached_f32_triad_prepared,
 };
 use crate::mamba_ssm::gpu::{
     blas::{
@@ -133,6 +133,8 @@ pub enum PhysicalQualificationRoute {
     },
     /// Prepared deterministic F32 Tensor Core route.
     Tf32Forced(Tf32PhysicalRoute),
+    /// Forced retained Ada exact-F32 TN route used before public AUTO admission.
+    Sm89ExactF32TnForced(super::Sm89ExactF32TnRoute),
 }
 
 #[doc(hidden)]
@@ -394,7 +396,9 @@ struct PhysicalTimedRequestIdentity {
 impl PhysicalQualificationRoute {
     fn logical_dtype(self) -> PolicyDtype {
         match self {
-            Self::F32Policy(_) | Self::Tf32Forced(_) => PolicyDtype::F32,
+            Self::F32Policy(_) | Self::Tf32Forced(_) | Self::Sm89ExactF32TnForced(_) => {
+                PolicyDtype::F32
+            }
             Self::HalfPolicy { dtype, .. } | Self::HalfForced { dtype, .. } => match dtype {
                 WeightDtype::F32 => PolicyDtype::F32,
                 WeightDtype::Bf16 => PolicyDtype::Bf16,
@@ -434,6 +438,11 @@ impl PhysicalQualificationRoute {
             Self::Tf32Forced(_) => PhysicalQualificationPolicy {
                 bi_tensor_cores: false,
                 f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+            },
+            Self::Sm89ExactF32TnForced(_) => PhysicalQualificationPolicy {
+                bi_tensor_cores: false,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
                 half_triad_policy: HalfTriadPolicy::TiledParityV1,
             },
         }
@@ -567,6 +576,7 @@ impl PhysicalQualificationRequest {
                 self.route,
                 PhysicalQualificationRoute::F32Policy(_)
                     | PhysicalQualificationRoute::Tf32Forced(_)
+                    | PhysicalQualificationRoute::Sm89ExactF32TnForced(_)
             ) {
                 return Err("F32 qualification epilogue requires an F32 route".into());
             }
@@ -639,6 +649,11 @@ impl PhysicalQualificationRequest {
                 } else {
                     tf32_kernel_spec(self.op, route)?;
                 }
+            }
+            PhysicalQualificationRoute::Sm89ExactF32TnForced(_)
+                if self.op != ResolvedGemmOp::Tn =>
+            {
+                return Err("forced SM89 exact-F32 route only supports TN".into());
             }
             _ => {}
         }
@@ -782,6 +797,9 @@ fn timed_request_digest(identity: PhysicalTimedRequestIdentity) -> [u8; 32] {
             digest.required(b"route", b"tf32-forced"),
             route,
         ),
+        PhysicalQualificationRoute::Sm89ExactF32TnForced(route) => digest
+            .required(b"route", b"sm89-exact-f32-tn-forced")
+            .required(b"forced-symbol", route.symbol().as_bytes()),
     };
     digest = match identity.layout {
         PhysicalQualificationLayout::Contiguous => digest.required(b"layout", b"contiguous"),
@@ -2092,6 +2110,24 @@ impl QualifiedPhysicalLaunch<'_> {
                 })
             }
             (
+                PhysicalQualificationRoute::Sm89ExactF32TnForced(_),
+                QualifiedPhysicalResources::F32(resources),
+            ) => {
+                let prepared = resources.prepared.as_ref().ok_or_else(|| {
+                    "forced SM89 exact-F32 holder has no prepared launch".to_string()
+                })?;
+                measure_production_eager(ctx, iterations, || unsafe {
+                    launch_sm89_exact_f32_tn_forced(
+                        ctx,
+                        prepared,
+                        resources.output.cached_ptr(),
+                        &resources.a,
+                        &resources.b,
+                        self.request.dims,
+                    )
+                })
+            }
+            (
                 PhysicalQualificationRoute::HalfPolicy { dtype, .. },
                 QualifiedPhysicalResources::Half(resources),
             ) => measure_production_eager(ctx, iterations, || {
@@ -2120,20 +2156,40 @@ impl QualifiedPhysicalLaunch<'_> {
         self.policy.validate(ctx)?;
         self.resources.validate()?;
         self.evidence.validate_timed_request(ctx, self.request)?;
-        let (PhysicalQualificationRoute::Tf32Forced(_), QualifiedPhysicalResources::F32(resources)) =
-            (self.request.route, &mut self.resources)
-        else {
-            return Err("prevalidated eager timing requires a forced TF32 holder".into());
+        let QualifiedPhysicalResources::F32(resources) = &mut self.resources else {
+            return Err("prevalidated eager timing requires a forced F32 holder".into());
         };
+        if !matches!(
+            self.request.route,
+            PhysicalQualificationRoute::Tf32Forced(_)
+                | PhysicalQualificationRoute::Sm89ExactF32TnForced(_)
+        ) {
+            return Err("prevalidated eager timing requires a forced F32 holder".into());
+        }
         let prepared = resources
             .prepared
             .as_ref()
             .ok_or_else(|| "forced TF32 holder has no prepared launch".to_string())?;
         validate_prepared_f32_triad_for_timing(ctx, prepared)?;
         measure_production_eager(ctx, iterations, || unsafe {
-            enqueue_validated_prepared_f32_triad(ctx, prepared, |_| {
-                Err("forced TF32 performance route selected scalar code".into())
-            })
+            match self.request.route {
+                PhysicalQualificationRoute::Tf32Forced(_) => {
+                    enqueue_validated_prepared_f32_triad(ctx, prepared, |_| {
+                        Err("forced TF32 performance route selected scalar code".into())
+                    })
+                }
+                PhysicalQualificationRoute::Sm89ExactF32TnForced(_) => {
+                    launch_sm89_exact_f32_tn_forced(
+                        ctx,
+                        prepared,
+                        resources.output.cached_ptr(),
+                        &resources.a,
+                        &resources.b,
+                        self.request.dims,
+                    )
+                }
+                _ => unreachable!(),
+            }
         })
     }
 }
@@ -2915,6 +2971,9 @@ fn allocate_f32_resources(
             operands,
             route,
         )?),
+        PhysicalQualificationRoute::Sm89ExactF32TnForced(route) => Some(
+            prepare_sm89_exact_f32_tn_forced(ctx, triad_request, operands, route)?,
+        ),
         _ => return Err("non-F32 route requested F32 qualification resources".into()),
     };
     Ok(QualifiedF32Resources {
@@ -3146,6 +3205,22 @@ fn qualify_f32_launch<'ctx>(
                 })
             }
         }
+        PhysicalQualificationRoute::Sm89ExactF32TnForced(_) => {
+            let prepared = resources
+                .prepared
+                .as_ref()
+                .ok_or_else(|| "forced SM89 exact-F32 holder has no prepared launch".to_string())?;
+            unsafe {
+                launch_sm89_exact_f32_tn_forced(
+                    ctx,
+                    prepared,
+                    resources.output.cached_ptr(),
+                    &resources.a,
+                    &resources.b,
+                    request.dims,
+                )
+            }
+        }
         _ => Err("non-F32 route requested F32 branch proof".into()),
     });
     let production =
@@ -3166,6 +3241,15 @@ fn qualify_f32_launch<'ctx>(
                 .prepared
                 .take()
                 .ok_or_else(|| "forced TF32 holder has no prepared launch".to_string())?;
+            let result = prepare_f32_preflight(ctx, &mut resources, &prepared);
+            resources.prepared = Some(prepared);
+            result?
+        }
+        PhysicalQualificationRoute::Sm89ExactF32TnForced(_) => {
+            let prepared = resources
+                .prepared
+                .take()
+                .ok_or_else(|| "forced SM89 exact-F32 holder has no prepared launch".to_string())?;
             let result = prepare_f32_preflight(ctx, &mut resources, &prepared);
             resources.prepared = Some(prepared);
             result?
@@ -3213,7 +3297,9 @@ pub fn qualify_physical_launch(
     let policy = begin_physical_qualification_policy(ctx, request.route.policy())?;
     policy.validate(ctx)?;
     match request.route {
-        PhysicalQualificationRoute::F32Policy(_) | PhysicalQualificationRoute::Tf32Forced(_) => {
+        PhysicalQualificationRoute::F32Policy(_)
+        | PhysicalQualificationRoute::Tf32Forced(_)
+        | PhysicalQualificationRoute::Sm89ExactF32TnForced(_) => {
             let resources = allocate_f32_resources(ctx, request)?;
             ctx.stream
                 .synchronize()

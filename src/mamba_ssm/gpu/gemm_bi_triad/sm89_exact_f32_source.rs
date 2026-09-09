@@ -14,6 +14,23 @@ pub const D768_IN_FUSED_SYMBOL: &str = "gemm_bi_tn_sm89_f32_n64_dual_chunk_fused
 pub const D768_OUT_RAW_SYMBOL: &str = "gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1";
 pub const PRISM_RAW_SYMBOL: &str = "gemm_bi_tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sm89ExactF32TnRoute {
+    D768InDualChunkFused,
+    D768OutDirectBk16,
+    PrismDirectBk16,
+}
+
+impl Sm89ExactF32TnRoute {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::D768InDualChunkFused => D768_IN_FUSED_SYMBOL,
+            Self::D768OutDirectBk16 => D768_OUT_RAW_SYMBOL,
+            Self::PrismDirectBk16 => PRISM_RAW_SYMBOL,
+        }
+    }
+}
+
 const DUAL_BEGIN: &str = "// SM89_EXACT_F32_DUAL_BEGIN";
 const DUAL_END: &str = "// SM89_EXACT_F32_DUAL_END";
 const EPILOGUE_BEGIN: &str = "// SM89_EXACT_F32_FUSED_EPILOGUE_BEGIN";
@@ -39,6 +56,8 @@ pub struct Sm89ExactF32DualChunkParams {
     pub ldb: i32,
     pub ldc: i32,
 }
+
+unsafe impl cudarc::driver::DeviceRepr for Sm89ExactF32DualChunkParams {}
 
 const _: () = assert!(std::mem::size_of::<Sm89ExactF32DualChunkParams>() == 32);
 const _: () = assert!(std::mem::align_of::<Sm89ExactF32DualChunkParams>() == 4);

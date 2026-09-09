@@ -12,10 +12,11 @@ use crate::mamba_ssm::gpu::kernel_identity::{
     ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
     ResolvedInstructionShape, ResolvedKernelLaunch, ResolvedNumericContract,
     ResolvedOperandConversion, ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch,
-    SCHEDULE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION, SM89_HALF_ROUTE_REVISION, Sha256Digest,
-    TUNING_TABLE_REVISION, build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
-    enqueue_prepared_physical_launch, enqueue_with_physical_observation,
-    prepare_recording_physical_observer, resolve_physical_launch_observation,
+    SCHEDULE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION,
+    SM89_HALF_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION, build_resolved_gemm_launch_set,
+    build_zero_reduction_route_identity, enqueue_prepared_physical_launch,
+    enqueue_with_physical_observation, prepare_recording_physical_observer,
+    resolve_physical_launch_observation,
 };
 use cudarc::driver::{
     CudaFunction, CudaStream, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg,
@@ -2027,7 +2028,10 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::NnSplitKSlim { .. }
         | ScalarDispatchPlan::NnM32N64SplitK32Qualified
         | ScalarDispatchPlan::TnNarrowSplitM { .. }
-        | ScalarDispatchPlan::TnSplitM { .. } => 2,
+        | ScalarDispatchPlan::TnSplitM { .. }
+        | ScalarDispatchPlan::TnD768InSm89DualChunkQualified
+        | ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
+        | ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => 2,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
@@ -2082,6 +2086,9 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
             (22, m_chunk as u64, chunks as u64)
         }
         ScalarDispatchPlan::TnSplitM { m_chunk, chunks } => (11, m_chunk as u64, chunks as u64),
+        ScalarDispatchPlan::TnD768InSm89DualChunkQualified => (41, 1_024, 2),
+        ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => (42, 512, 4),
+        ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => (43, 784, 6),
         ScalarDispatchPlan::TnM16N16SplitM16Qualified => (35, 0, 0),
         ScalarDispatchPlan::TnFinal { slim } => (12, u64::from(slim), 0),
         ScalarDispatchPlan::NtNarrow => (13, 0, 0),
@@ -2172,6 +2179,9 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::TnNarrow, _)
         | (ScalarDispatchPlan::TnNarrowSplitM { .. }, _)
         | (ScalarDispatchPlan::TnSplitM { .. }, _)
+        | (ScalarDispatchPlan::TnD768InSm89DualChunkQualified, _)
+        | (ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified, _)
+        | (ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified, _)
         | (ScalarDispatchPlan::TnFinal { .. }, _)
         | (ScalarDispatchPlan::NtNarrow, _)
         | (ScalarDispatchPlan::NtSmallBatchWide, _)
@@ -2592,6 +2602,61 @@ fn scalar_physical_nodes(
                 super::contract::SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES,
             ),
         ),
+        ScalarDispatchPlan::TnD768InSm89DualChunkQualified => {
+            push_scalar_node(
+                &mut nodes,
+                context,
+                "gemm_bi_transpose_f32_32x16_d768_v1",
+                (32, 32),
+                (1, 1),
+                cfg((24, 64, 1), (32, 16, 1), 0),
+            );
+            push_scalar_node(
+                &mut nodes,
+                context,
+                super::D768_IN_FUSED_SYMBOL,
+                (64, 64),
+                (32, 2),
+                cfg((576, 1, 1), (128, 1, 1), 0),
+            );
+        }
+        ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
+        | ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => {
+            let (symbol, raw_grid, chunks) = match plan {
+                ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => {
+                    (super::D768_OUT_RAW_SYMBOL, 288, 4)
+                }
+                ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => {
+                    (super::PRISM_RAW_SYMBOL, 186, 6)
+                }
+                _ => unreachable!(),
+            };
+            push_scalar_node(
+                &mut nodes,
+                context,
+                symbol,
+                (64, 64),
+                (16, 2),
+                cfg((raw_grid, 1, chunks), (128, 1, 1), 0),
+            );
+            push_scalar_node(
+                &mut nodes,
+                context,
+                "gemm_bi_splitm_reduce",
+                (1, 1),
+                (1, 1),
+                cfg(
+                    (
+                        checked_u32_product(k, n, "SM89 exact-F32 TN reducer outputs")?
+                            .div_ceil(256),
+                        1,
+                        1,
+                    ),
+                    (256, 1, 1),
+                    0,
+                ),
+            );
+        }
         ScalarDispatchPlan::TnSplitM { chunks, .. } => {
             push_scalar_node(
                 &mut nodes,
@@ -2923,6 +2988,20 @@ fn scalar_route_contract(
     ResolvedNumericContract,
     ResolvedOutputOwnership,
 ) {
+    if symbol == super::D768_IN_FUSED_SYMBOL {
+        return (
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        );
+    }
+    if symbol == super::D768_OUT_RAW_SYMBOL || symbol == super::PRISM_RAW_SYMBOL {
+        return (
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
+            ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
+        );
+    }
     if symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" {
         return (
             PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
@@ -2990,22 +3069,39 @@ fn scalar_resolved_routes(
         .map_err(|error| format!("reserve scalar route plan: {error}"))?;
     for node in nodes {
         let (backend, numeric_contract, ownership) = scalar_route_contract(node.symbol);
-        let (module_kind, artifact, compiler, tuning_table_revision) =
-            if backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 {
-                (
-                    ModuleKind::Fixed,
-                    context.artifacts.fixed,
-                    ctx.kernels.compiler_identity(),
-                    SM89_FIXED_COPYPLAN_ROUTE_REVISION,
-                )
-            } else {
-                (
-                    ModuleKind::TriadScalar,
-                    context.artifacts.triad_scalar,
-                    ctx.kernels.triad_scalar_compiler_identity(),
-                    TUNING_TABLE_REVISION,
-                )
-            };
+        let (module_kind, artifact, compiler, tuning_table_revision) = if backend
+            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+        {
+            (
+                ModuleKind::Fixed,
+                context.artifacts.fixed,
+                ctx.kernels.compiler_identity(),
+                SM89_FIXED_COPYPLAN_ROUTE_REVISION,
+            )
+        } else if matches!(
+            backend,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
+                | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1
+        ) {
+            (
+                ModuleKind::TriadSm89ExactF32,
+                context
+                    .artifacts
+                    .sm89_exact_f32
+                    .ok_or_else(|| "SM89 exact-F32 route lost its artifact identity".to_string())?,
+                ctx.kernels
+                    .triad_sm89_exact_f32_compiler_identity()
+                    .ok_or_else(|| "SM89 exact-F32 route lost its compiler identity".to_string())?,
+                SM89_EXACT_F32_TN_ROUTE_REVISION,
+            )
+        } else {
+            (
+                ModuleKind::TriadScalar,
+                context.artifacts.triad_scalar,
+                ctx.kernels.triad_scalar_compiler_identity(),
+                TUNING_TABLE_REVISION,
+            )
+        };
         routes.push(ResolvedGemmRoute {
             op: request.op,
             dtype: PolicyDtype::F32,
@@ -3697,9 +3793,6 @@ fn scalar_transpose_scratch_elements(
     if !plan.needs_transpose_scratch() {
         return Ok(None);
     }
-    if request.op != ResolvedGemmOp::Nt {
-        return Err("scalar transpose scratch is only valid for NT plans".into());
-    }
     let rows = match plan {
         ScalarDispatchPlan::NtSplitKTail { k_main, .. } => k_main,
         ScalarDispatchPlan::NtSplitKMain { .. }
@@ -3712,10 +3805,15 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
+        ScalarDispatchPlan::TnD768InSm89DualChunkQualified => request.shape.m,
         _ => return Err("scalar plan declares unsupported transpose scratch".into()),
     };
+    let columns = match plan {
+        ScalarDispatchPlan::TnD768InSm89DualChunkQualified => request.shape.k,
+        _ => request.shape.n,
+    };
     let elements = rows
-        .checked_mul(request.shape.n)
+        .checked_mul(columns)
         .ok_or_else(|| "scalar transpose scratch extent overflows usize".to_string())?;
     if elements > super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS {
         return Err(format!(
@@ -3733,6 +3831,19 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
         fixed_artifact: kernels.artifact_set_identity().fixed,
         fixed_compiler: kernels.compiler_identity(),
         fixed_copyplan_loaded: kernels.fixed_sm89_f32_n64_copyplan.is_some(),
+        sm89_exact_f32_artifact: kernels.triad_sm89_exact_f32_artifact_identity(),
+        sm89_exact_f32_compiler: kernels.triad_sm89_exact_f32_compiler_identity(),
+        sm89_exact_f32_symbols_loaded: [
+            kernels
+                .triad_sm89_exact_f32_function(super::D768_IN_FUSED_SYMBOL)
+                .is_some(),
+            kernels
+                .triad_sm89_exact_f32_function(super::D768_OUT_RAW_SYMBOL)
+                .is_some(),
+            kernels
+                .triad_sm89_exact_f32_function(super::PRISM_RAW_SYMBOL)
+                .is_some(),
+        ],
         compute_capability: kernels.triad_scalar_compute_capability(),
         multiprocessor_count: kernels.multiprocessor_count(),
     }
@@ -5635,6 +5746,46 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad_forced(
     let output_resources =
         F32LaunchResourceSnapshot::query_output(request, operands, allocation_domain)?;
     prepare_tf32_f32(ctx, request, operands, output_resources, route)
+}
+
+pub(in crate::mamba_ssm::gpu) fn prepare_sm89_exact_f32_tn_forced(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: super::Sm89ExactF32TnRoute,
+) -> Result<PreparedF32TriadLaunch, String> {
+    request.shape.validate(request.op)?;
+    validate_f32_triad_operands(request, operands)?;
+    require_f32_preparation_outside_capture(ctx)?;
+    let plan =
+        forced_sm89_exact_f32_plan(scalar_launch_facts(&ctx.kernels), request, operands, route)?;
+    let allocation_domain = validated_allocation_domain(&ctx.stream, &ctx.kernels, "f32 Triad")?;
+    let output_resources =
+        F32LaunchResourceSnapshot::query_output(request, operands, allocation_domain)?;
+    prepare_scalar_f32_with_plan(ctx, request, operands, output_resources, plan)
+}
+
+pub(in crate::mamba_ssm::gpu) unsafe fn launch_sm89_exact_f32_tn_forced(
+    ctx: &GpuCtx,
+    prepared: &PreparedF32TriadLaunch,
+    output: CUptr,
+    a: &GpuBuffer,
+    b: &GpuBuffer,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    unsafe {
+        launch_prepared_f32_triad(ctx, prepared, |control| {
+            gemm_bi_backward_dw_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                output,
+                b,
+                a,
+                dims,
+                Some(control),
+            )
+        })
+    }
 }
 
 fn validate_prepared_f32_triad(
@@ -8466,6 +8617,141 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
                 "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1 backward_dw"
             ))
         })?;
+        return Ok(());
+    }
+
+    if scalar_plan == ScalarDispatchPlan::TnD768InSm89DualChunkQualified {
+        let transposed_ptr = {
+            use cudarc::driver::DevicePtr;
+            kernels.transpose_scratch_buf(stream)?.device_ptr(stream).0
+        };
+        let transpose_cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (24, 64, 1),
+            block_dim: (32, 16, 1),
+            shared_mem_bytes: 0,
+        };
+        let rows = checked_dims.m_i32;
+        let columns = checked_dims.k_i32;
+        let x_ptr = x_saved.raw_ptr(stream);
+        let mut transpose = scalar_launch_builder(
+            stream,
+            &kernels.gemm_bi_transpose_f32_32x16_d768_v1,
+            &control,
+        );
+        transpose.arg(&transposed_ptr);
+        transpose.arg(&x_ptr);
+        transpose.arg(&rows);
+        transpose.arg(&columns);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            "gemm_bi_transpose_f32_32x16_d768_v1",
+            transpose_cfg,
+            &mut transpose,
+        )
+        .map_err(|error| {
+            error.with_driver_context(format_args!("transpose X for SM89 exact-F32 TN"))
+        })?;
+
+        let function = kernels
+            .triad_sm89_exact_f32_function(super::D768_IN_FUSED_SYMBOL)
+            .ok_or_else(|| "qualified SM89 exact-F32 d768-in kernel is unavailable".to_string())?;
+        let params = super::Sm89ExactF32DualChunkParams {
+            alpha,
+            m: checked_dims.k_i32,
+            n: checked_dims.n_i32,
+            k0: 1_024,
+            k1: 1_024,
+            lda: checked_dims.m_i32,
+            ldb: checked_dims.n_i32,
+            ldc: checked_dims.n_i32,
+        };
+        let dy_ptr = dy.raw_ptr(stream);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (576, 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut fused = scalar_launch_builder(stream, function, &control);
+        fused.arg(&dw_ptr);
+        fused.arg(&transposed_ptr);
+        fused.arg(&dy_ptr);
+        fused.arg(&params);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            super::D768_IN_FUSED_SYMBOL,
+            cfg,
+            &mut fused,
+        )
+        .map_err(|error| {
+            error.with_driver_context(format_args!("{}", super::D768_IN_FUSED_SYMBOL))
+        })?;
+        return Ok(());
+    }
+
+    if matches!(
+        scalar_plan,
+        ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
+            | ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified
+    ) {
+        let (symbol, raw_grid, chunks, m_chunk) = match scalar_plan {
+            ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => {
+                (super::D768_OUT_RAW_SYMBOL, 288, 4, 512)
+            }
+            ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => {
+                (super::PRISM_RAW_SYMBOL, 186, 6, 784)
+            }
+            _ => unreachable!(),
+        };
+        let partial_ptr = {
+            use cudarc::driver::DevicePtr;
+            kernels.splitk_scratch_buf(stream)?.device_ptr(stream).0
+        };
+        let function = kernels
+            .triad_sm89_exact_f32_function(symbol)
+            .ok_or_else(|| format!("qualified SM89 exact-F32 kernel {symbol} is unavailable"))?;
+        let m_chunk_i = checked_i32(m_chunk, "SM89 exact-F32 TN chunk")?;
+        let chunks_i = checked_i32(chunks, "SM89 exact-F32 TN partitions")?;
+        let raw_cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (raw_grid, 1, chunks as u32),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut raw = scalar_launch_builder(stream, function, &control);
+        raw.arg(&partial_ptr);
+        raw.arg_buffer(x_saved);
+        raw.arg_buffer(dy);
+        raw.arg(&checked_dims.m_i32);
+        raw.arg(&checked_dims.k_i32);
+        raw.arg(&checked_dims.n_i32);
+        raw.arg(&m_chunk_i);
+        enqueue_scalar_backward(&mut control, request, operands, symbol, raw_cfg, &mut raw)
+            .map_err(|error| error.with_driver_context(format_args!("{symbol}")))?;
+
+        let reduce_cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (checked_dims.kn_u32.div_ceil(256), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut reducer = scalar_launch_builder(stream, &kernels.gemm_bi_splitm_reduce, &control);
+        reducer.arg(&dw_ptr);
+        reducer.arg(&partial_ptr);
+        reducer.arg(&alpha);
+        reducer.arg(&checked_dims.k_i32);
+        reducer.arg(&checked_dims.n_i32);
+        reducer.arg(&chunks_i);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            "gemm_bi_splitm_reduce",
+            reduce_cfg,
+            &mut reducer,
+        )
+        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitm_reduce")))?;
         return Ok(());
     }
 
@@ -14757,6 +15043,9 @@ mod prepared_f32_launch_tests {
             },
             fixed_compiler: compiler,
             fixed_copyplan_loaded: false,
+            sm89_exact_f32_artifact: None,
+            sm89_exact_f32_compiler: None,
+            sm89_exact_f32_symbols_loaded: [false; 3],
             compute_capability: (12, 0),
             multiprocessor_count: 170,
         }
@@ -15184,6 +15473,89 @@ mod scalar_nt_tests;
 #[cfg(test)]
 #[path = "scalar_nn_tn_tests.rs"]
 mod scalar_nn_tn_tests;
+
+#[cfg(test)]
+mod sm89_exact_f32_tn_route_tests {
+    use super::*;
+
+    #[test]
+    fn large_tn_routes_freeze_nodes_scratch_and_numeric_identity() {
+        let cases = [
+            (
+                (2_048, 768, 3_072),
+                ScalarDispatchPlan::TnD768InSm89DualChunkQualified,
+                [
+                    "gemm_bi_transpose_f32_32x16_d768_v1",
+                    super::super::D768_IN_FUSED_SYMBOL,
+                ],
+                [(24, 64, 1), (576, 1, 1)],
+                Some(2_048 * 768),
+            ),
+            (
+                (2_048, 1_536, 768),
+                ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified,
+                [super::super::D768_OUT_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+                [(288, 1, 4), (4_608, 1, 1)],
+                None,
+            ),
+            (
+                (4_621, 384, 1_928),
+                ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified,
+                [super::super::PRISM_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+                [(186, 1, 6), (2_892, 1, 1)],
+                None,
+            ),
+        ];
+        for (dims, plan, symbols, grids, transpose_elements) in cases {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Tn,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+            };
+            let operands = F32TriadOperands {
+                output: 0x3000,
+                a: 0x1000,
+                b: 0x2000,
+                bias: None,
+                alpha: 1.0,
+                beta: 1.0,
+            };
+            let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+            assert_eq!(nodes.len(), 2);
+            assert_eq!([nodes[0].symbol, nodes[1].symbol], symbols);
+            assert_eq!([nodes[0].launch.grid_dim, nodes[1].launch.grid_dim], grids);
+            assert_ne!(
+                nodes[0].launch.arguments_digest,
+                nodes[1].launch.arguments_digest
+            );
+            assert_eq!(
+                scalar_transpose_scratch_elements(request, plan).unwrap(),
+                transpose_elements
+            );
+            assert_eq!(plan.needs_split_scratch(), transpose_elements.is_none());
+        }
+        assert_eq!(
+            scalar_route_contract(super::super::D768_IN_FUSED_SYMBOL),
+            (
+                PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            )
+        );
+        for symbol in [
+            super::super::D768_OUT_RAW_SYMBOL,
+            super::super::PRISM_RAW_SYMBOL,
+        ] {
+            assert_eq!(
+                scalar_route_contract(symbol),
+                (
+                    PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
+                    ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
+                    ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
+                )
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod sm120_api_tests {

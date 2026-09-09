@@ -1214,6 +1214,7 @@ impl GpuCtx {
             | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1
             | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1
             | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
+            | ResolvedNumericContract::ScalarFmaTnSplitMPartialV1
             | ResolvedNumericContract::ScalarFmaFixedSplitFoldV1
             | ResolvedNumericContract::ZeroReductionEpilogueF32V1 => {
                 NumericContractSet::TRIAD_SCALAR_FMA_V1
@@ -1612,6 +1613,10 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
         | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
         | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
+        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 => {
+            ModuleKind::TriadSm89ExactF32
+        }
         PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => ModuleKind::Fixed,
         PhysicalGemmBackend::Sm80Mma16V1
         | PhysicalGemmBackend::MmaTf32RnaV1
@@ -1642,6 +1647,10 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
             super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
         }
         PhysicalGemmBackend::Sm89Mma16HalfS3V1 => super::kernel_identity::SM89_HALF_ROUTE_REVISION,
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
+        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 => {
+            super::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
+        }
         _ => generic,
     }
 }
@@ -1655,6 +1664,8 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
             | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
             | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1
             | PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
+            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1
             | PhysicalGemmBackend::Sm120TmaFmaExactV1
     )
 }
@@ -1782,6 +1793,24 @@ mod tests {
     }
 
     #[test]
+    fn sm89_exact_f32_tn_routes_use_the_isolated_module_and_private_revision() {
+        for backend in [
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
+        ] {
+            assert_eq!(
+                expected_route_module(backend),
+                ModuleKind::TriadSm89ExactF32
+            );
+            assert_eq!(
+                expected_route_tuning_revision(backend, 45),
+                crate::mamba_ssm::gpu::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
+            );
+            assert!(scalar_backend_supports_logical_f32(backend));
+        }
+    }
+
+    #[test]
     fn logical_f32_accepts_only_scalar_triad_backends() {
         for backend in [
             PhysicalGemmBackend::ScalarFmaV1,
@@ -1790,6 +1819,8 @@ mod tests {
             PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
             PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
             PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
             PhysicalGemmBackend::Sm120TmaFmaExactV1,
         ] {
             assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");
