@@ -1161,6 +1161,50 @@ impl PhysicalGraphKernelArguments {
     }
 }
 
+fn push_nn_half_graph_arguments(
+    arguments: &mut PhysicalGraphKernelArguments,
+    request: HalfPhysicalTraceRequest,
+    shape: super::gemm_bi_triad::F32TriadShape,
+    checked: super::gemm_bi_triad::GemmDims,
+    base: &str,
+) -> Result<(), String> {
+    arguments.push(request.output)?;
+    arguments.push(request.a)?;
+    arguments.push(request.b)?;
+    arguments.push(request.bias)?;
+    if sm89_half_nn_graph_uses_parameter_bundle(base) {
+        arguments.push(super::gemm_bi_triad::Sm89HalfNnParams {
+            alpha: 1.0,
+            beta: 0.0,
+            m: checked.m_i32,
+            n: checked.n_i32,
+            k: checked.k_i32,
+            lda: i32::try_from(shape.lda).map_err(|_| "NN lda exceeds i32::MAX")?,
+            ldb: i32::try_from(shape.ldb).map_err(|_| "NN ldb exceeds i32::MAX")?,
+            ldc: i32::try_from(shape.ldc).map_err(|_| "NN ldc exceeds i32::MAX")?,
+        })?;
+        return Ok(());
+    }
+    arguments.push(1.0_f32)?;
+    arguments.push(0.0_f32)?;
+    arguments.push(checked.m_i32)?;
+    if base == "gemm_bi_nn_gemv" {
+        arguments.push(checked.k_i32)?;
+        arguments.push(checked.k_i32)?;
+        arguments.push(1_i32)?;
+    } else {
+        arguments.push(checked.n_i32)?;
+        arguments.push(checked.k_i32)?;
+        arguments.push(i32::try_from(shape.lda).map_err(|_| "NN lda exceeds i32::MAX")?)?;
+        arguments.push(i32::try_from(shape.ldb).map_err(|_| "NN ldb exceeds i32::MAX")?)?;
+        arguments.push(i32::try_from(shape.ldc).map_err(|_| "NN ldc exceeds i32::MAX")?)?;
+        if matches!(base, "gemm_bi_nn_narrow" | "gemm_bi_nn_narrow_small") {
+            arguments.push(0_i32)?;
+        }
+    }
+    Ok(())
+}
+
 struct PreparedPhysicalGraphLaunch {
     function: CudaFunction,
     config: LaunchConfig,
@@ -1551,28 +1595,7 @@ fn prepare_native_half_graph_launch(
     let mut arguments = PhysicalGraphKernelArguments::new();
     match request.op {
         ResolvedGemmOp::Nn => {
-            let beta = 0.0_f32;
-            arguments.push(request.output)?;
-            arguments.push(request.a)?;
-            arguments.push(request.b)?;
-            arguments.push(request.bias)?;
-            arguments.push(alpha)?;
-            arguments.push(beta)?;
-            arguments.push(checked.m_i32)?;
-            if base == "gemm_bi_nn_gemv" {
-                arguments.push(checked.k_i32)?;
-                arguments.push(checked.k_i32)?;
-                arguments.push(1_i32)?;
-            } else {
-                arguments.push(checked.n_i32)?;
-                arguments.push(checked.k_i32)?;
-                arguments.push(i32::try_from(shape.lda).map_err(|_| "NN lda exceeds i32::MAX")?)?;
-                arguments.push(i32::try_from(shape.ldb).map_err(|_| "NN ldb exceeds i32::MAX")?)?;
-                arguments.push(i32::try_from(shape.ldc).map_err(|_| "NN ldc exceeds i32::MAX")?)?;
-                if matches!(base, "gemm_bi_nn_narrow" | "gemm_bi_nn_narrow_small") {
-                    arguments.push(0_i32)?;
-                }
-            }
+            push_nn_half_graph_arguments(&mut arguments, request, shape, checked, base)?;
         }
         ResolvedGemmOp::Tn => {
             arguments.push(request.output)?;
@@ -1619,6 +1642,17 @@ fn prepare_native_half_graph_launch(
         node,
         arguments,
     })
+}
+
+fn native_half_graph_module_supported(module: ModuleKind) -> bool {
+    matches!(
+        module,
+        ModuleKind::TriadSm80 | ModuleKind::TriadScalar | ModuleKind::TriadSm89Half
+    )
+}
+
+fn sm89_half_nn_graph_uses_parameter_bundle(base: &str) -> bool {
+    base == "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
 }
 
 fn prepare_conversion_graph_launch(
@@ -1816,7 +1850,7 @@ pub(super) fn prepare_half_physical_graph_package<'a>(
         .first()
         .ok_or_else(|| "prepared physical graph manifest is empty".to_string())?;
     let (prefix, triad, suffix) = match (first.kind(), first.module_kind()) {
-        (PhysicalLaunchKind::Gemm, ModuleKind::TriadSm80 | ModuleKind::TriadScalar) => (
+        (PhysicalLaunchKind::Gemm, module) if native_half_graph_module_supported(module) => (
             vec![prepare_native_half_graph_launch(
                 ctx, &observer, request, *first,
             )?],
@@ -2395,6 +2429,67 @@ mod physical_graph_tests {
         CapturedPhysicalGraph, capture_into_graph, capture_into_graph_with_physical_plan,
     };
     use crate::mamba_ssm::gpu::kernel_identity::PreparedPhysicalCaptureManifest;
+
+    #[test]
+    fn sm89_half_is_a_native_prepared_graph_module() {
+        assert!(native_half_graph_module_supported(
+            ModuleKind::TriadSm89Half
+        ));
+    }
+
+    #[test]
+    fn sm89_half_nn_graph_uses_the_five_argument_bundle_abi() {
+        let base = "gemm_bi_nn_sm89_m128n128_bk64_s3_v1";
+        assert!(sm89_half_nn_graph_uses_parameter_bundle(base));
+        assert!(!sm89_half_nn_graph_uses_parameter_bundle("gemm_bi_nn_tc"));
+        let dims = (2048, 1536, 768);
+        let request = HalfPhysicalTraceRequest {
+            op: ResolvedGemmOp::Nn,
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: 0x4000,
+            dtype: WeightDtype::F16,
+            dims,
+            nn_strides: None,
+            forced_tile: None,
+            capacity: 1,
+        };
+        let shape =
+            super::super::gemm_bi_triad::F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims);
+        let checked = super::super::gemm_bi_triad::GemmDims::nn(dims, shape.lda).unwrap();
+        let mut arguments = PhysicalGraphKernelArguments::new();
+        push_nn_half_graph_arguments(&mut arguments, request, shape, checked, base).unwrap();
+        assert_eq!(arguments.values().len(), 5);
+        for (argument, pointer) in
+            arguments.values()[..4]
+                .iter()
+                .zip([request.output, request.a, request.b, request.bias])
+        {
+            assert_eq!(
+                &argument.bytes[..std::mem::size_of::<usize>()],
+                &pointer.to_ne_bytes()
+            );
+            assert!(
+                argument.bytes[std::mem::size_of::<usize>()..]
+                    .iter()
+                    .all(|&byte| byte == 0)
+            );
+        }
+        let expected =
+            PhysicalGraphKernelArgument::encode(super::super::gemm_bi_triad::Sm89HalfNnParams {
+                alpha: 1.0,
+                beta: 0.0,
+                m: 2048,
+                n: 768,
+                k: 1536,
+                lda: 1536,
+                ldb: 768,
+                ldc: 768,
+            })
+            .unwrap();
+        assert_eq!(arguments.values()[4].bytes, expected.bytes);
+    }
 
     fn half_branch_is_sm120(branch: HalfPolicyBranchSeal) -> bool {
         matches!(branch, HalfPolicyBranchSeal::Sm120(_))

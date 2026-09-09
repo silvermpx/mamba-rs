@@ -511,7 +511,7 @@ pub(crate) struct CompiledModule {
     /// The first step that kept the module's TF32 routes from qualifying.
     tf32_qualification_error: Option<String>,
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
-    sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    sm89_half_driver_abi: Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -2325,7 +2325,7 @@ fn census_sm89_half_driver_abi(
     kind: ModuleKind,
     arch: &str,
     ptx: &str,
-) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+) -> Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String> {
     if kind != ModuleKind::TriadSm89Half {
         return Ok(BTreeMap::new());
     }
@@ -2343,23 +2343,27 @@ fn census_sm89_half_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(spec.symbol).unwrap(),
-            )
-        }
-        .map_err(|error| {
-            format!(
-                "load TriadSm89Half/{} for Driver ABI: {error:?}",
-                spec.symbol
-            )
-        })?;
-        let count = if spec.op == ResolvedGemmOp::Nn { 5 } else { 7 };
-        let abi = query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
-            get(function, index, offset, size)
-        })?;
-        validate_sm89_half_driver_abi(spec, &abi)?;
+        let abi = (|| {
+            let function = unsafe {
+                cudarc::driver::result::module::get_function(
+                    module.raw(),
+                    CString::new(spec.symbol).unwrap(),
+                )
+            }
+            .map_err(|error| {
+                format!(
+                    "load TriadSm89Half/{} for Driver ABI: {error:?}",
+                    spec.symbol
+                )
+            })?;
+            let count = if spec.op == ResolvedGemmOp::Nn { 5 } else { 7 };
+            let abi =
+                query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
+                    get(function, index, offset, size)
+                })?;
+            validate_sm89_half_driver_abi(spec, &abi)?;
+            Ok(abi)
+        })();
         if census.insert(spec.symbol, abi).is_some() {
             return Err(format!(
                 "duplicate TriadSm89Half ABI symbol {}",
@@ -7437,6 +7441,17 @@ fn retain_sm89_half_symbol<T>(
     Ok(())
 }
 
+fn sm89_half_abi_for_symbol<'a>(
+    census: &'a BTreeMap<&'static str, Result<Tf32DriverAbi, String>>,
+    symbol: &str,
+) -> Result<&'a Tf32DriverAbi, String> {
+    census
+        .get(symbol)
+        .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 fn load_sm89_half_functions(
     ctx: &CudaContext,
     module: &CompiledModule,
@@ -7464,17 +7479,11 @@ fn load_sm89_half_functions(
     let optin_shared = u32::try_from(optin_shared)
         .map_err(|_| format!("negative TriadSm89Half opt-in shared memory {optin_shared}"))?;
     let abi = module.sm89_half_driver_abi.as_ref().map_err(Clone::clone)?;
-    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
-        validate_sm89_half_driver_abi(
-            spec,
-            abi.get(spec.symbol)
-                .ok_or_else(|| format!("{} has no live Driver ABI census", spec.symbol))?,
-        )?;
-    }
     let mut functions = HashMap::new();
     let mut exclusions = Vec::new();
     for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
         let loaded = (|| {
+            validate_sm89_half_driver_abi(spec, sm89_half_abi_for_symbol(abi, spec.symbol)?)?;
             if optin_shared < spec.dynamic_shared_bytes {
                 return Err(format!(
                     "{} needs {} dynamic shared bytes, device exposes {optin_shared}",
@@ -9491,6 +9500,47 @@ mod tests {
                 reason: "registers 168 exceed cap 167".into(),
             }]
         );
+    }
+
+    #[test]
+    fn sm89_half_driver_abi_failure_excludes_only_its_own_symbol() {
+        let nn =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]).unwrap();
+        let nt = Tf32DriverAbi::checked(
+            7,
+            vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)],
+        )
+        .unwrap();
+        let census = std::collections::BTreeMap::from([
+            ("nn_bf16", Ok(nn.clone())),
+            ("nn_f16", Err("nn_f16 Driver ABI mismatch".to_string())),
+            ("nt_bf16", Ok(nt)),
+        ]);
+
+        assert_eq!(
+            super::sm89_half_abi_for_symbol(&census, "nn_bf16").unwrap(),
+            &nn
+        );
+        assert_eq!(
+            super::sm89_half_abi_for_symbol(&census, "nn_f16").unwrap_err(),
+            "nn_f16 Driver ABI mismatch"
+        );
+        assert!(super::sm89_half_abi_for_symbol(&census, "nt_bf16").is_ok());
+
+        let mut functions = HashMap::new();
+        let mut exclusions = Vec::new();
+        for (index, symbol) in ["nn_bf16", "nn_f16", "nt_bf16"].into_iter().enumerate() {
+            let loaded = super::sm89_half_abi_for_symbol(&census, symbol).map(|_| index as u8);
+            super::retain_sm89_half_symbol(&mut functions, &mut exclusions, symbol, loaded)
+                .unwrap();
+        }
+        assert_eq!(
+            functions,
+            HashMap::from([("nn_bf16", 0_u8), ("nt_bf16", 2_u8)])
+        );
+        assert_eq!(exclusions.len(), 1);
+        assert_eq!(exclusions[0].symbol, "nn_f16");
+        assert_eq!(exclusions[0].reason, "nn_f16 Driver ABI mismatch");
     }
 
     fn sm89_half_validator_test_loads(

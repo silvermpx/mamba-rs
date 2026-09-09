@@ -1478,6 +1478,34 @@ impl QualificationStorage {
     }
 }
 
+fn seeded_half_values(storage: QualificationStorage, salt: usize) -> Vec<f32> {
+    let mut values = storage.host_values();
+    for row in 0..storage.rows {
+        for column in 0..storage.width {
+            let logical = row * storage.width + column;
+            let numerator = ((logical * 13 + salt * 7) % 29) as f32 - 14.0;
+            values[storage.offset + row * storage.stride + column] = numerator / 16.0;
+        }
+    }
+    values
+}
+
+fn active_half_bits(storage: QualificationStorage, values: &[f32]) -> Result<Vec<u32>, String> {
+    if values.len() != storage.len {
+        return Err("half qualification storage length changed".into());
+    }
+    let mut active = Vec::with_capacity(storage.rows * storage.width);
+    for row in 0..storage.rows {
+        let start = storage.offset + row * storage.stride;
+        active.extend(
+            values[start..start + storage.width]
+                .iter()
+                .map(|value| value.to_bits()),
+        );
+    }
+    Ok(active)
+}
+
 #[derive(Clone, Copy)]
 struct QualifiedHalfStorage {
     output: QualificationStorage,
@@ -1790,6 +1818,60 @@ impl QualifiedPhysicalLaunch<'_> {
             .synchronize()
             .map_err(|error| format!("synchronize qualification red-zone check: {error:?}"))?;
         self.resources.validate_red_zones(ctx)
+    }
+
+    /// Replaces both half-precision input operands with a deterministic finite pattern.
+    pub fn seed_half_operands(&self, ctx: &GpuCtx, salt: usize) -> Result<(), String> {
+        self.policy.validate(ctx)?;
+        self.resources.validate()?;
+        let QualifiedPhysicalResources::Half(resources) = &self.resources else {
+            return Err("half operand seeding requires a half qualification route".into());
+        };
+        resources.a.upload_f32(
+            &ctx.stream,
+            &seeded_half_values(resources.storage.a, salt ^ 0x2d),
+        )?;
+        resources.b.upload_f32(
+            &ctx.stream,
+            &seeded_half_values(resources.storage.b, salt ^ 0x67),
+        )?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize half qualification seeding: {error:?}"))
+    }
+
+    /// Downloads the active half output as exact widened IEEE words.
+    pub fn half_output_bits(&self, ctx: &GpuCtx) -> Result<Vec<u32>, String> {
+        self.policy.validate(ctx)?;
+        self.resources.validate()?;
+        let QualifiedPhysicalResources::Half(resources) = &self.resources else {
+            return Err("half output download requires a half qualification route".into());
+        };
+        let values = resources.output.to_cpu(ctx)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize half output readback: {error:?}"))?;
+        active_half_bits(resources.storage.output, &values)
+    }
+
+    /// Downloads active half A/B operands as exact widened IEEE words.
+    pub fn half_operand_bits(&self, ctx: &GpuCtx) -> Result<(Vec<u32>, Vec<u32>), String> {
+        self.policy.validate(ctx)?;
+        self.resources.validate()?;
+        let QualifiedPhysicalResources::Half(resources) = &self.resources else {
+            return Err("half operand download requires a half qualification route".into());
+        };
+        let mut a = vec![0.0; resources.storage.a.len];
+        resources.a.download_f32(&ctx.stream, &mut a)?;
+        let mut b = vec![0.0; resources.storage.b.len];
+        resources.b.download_f32(&ctx.stream, &mut b)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize half operand readback: {error:?}"))?;
+        Ok((
+            active_half_bits(resources.storage.a, &a)?,
+            active_half_bits(resources.storage.b, &b)?,
+        ))
     }
 
     /// Replaces every F32 qualification operand with deterministic finite data.
@@ -5110,6 +5192,25 @@ mod tests {
     };
 
     #[test]
+    fn public_half_seed_pattern_preserves_guards_and_is_salt_stable() {
+        let storage = QualificationStorage::new(2, 3, 5, 1, true).unwrap();
+        let first = super::seeded_half_values(storage, 17);
+        let repeated = super::seeded_half_values(storage, 17);
+        let changed = super::seeded_half_values(storage, 19);
+        assert_eq!(first, repeated);
+        assert_ne!(first, changed);
+        assert_eq!(
+            storage.validate_guards(&first, "seed").unwrap(),
+            storage.guard_count()
+        );
+        assert!(
+            first[storage.offset..storage.offset + storage.width]
+                .iter()
+                .all(|value| value.is_finite() && *value != 0.0)
+        );
+    }
+
+    #[test]
     fn splitk2_forced_request_freezes_the_fused_kernel_as_its_planned_route() {
         let request = PhysicalQualificationRequest::contiguous(
             ResolvedGemmOp::Nn,
@@ -8014,18 +8115,6 @@ mod tests {
         }
     }
 
-    fn seeded_half_values(storage: QualificationStorage, salt: usize) -> Vec<f32> {
-        let mut values = storage.host_values();
-        for row in 0..storage.rows {
-            for column in 0..storage.width {
-                let logical = row * storage.width + column;
-                let numerator = ((logical * 13 + salt * 7) % 29) as f32 - 14.0;
-                values[storage.offset + row * storage.stride + column] = numerator / 16.0;
-            }
-        }
-        values
-    }
-
     fn seed_qualified_half_inputs(
         ctx: &GpuCtx,
         qualified: &QualifiedPhysicalLaunch<'_>,
@@ -8033,12 +8122,14 @@ mod tests {
         let QualifiedPhysicalResources::Half(resources) = &qualified.resources else {
             return Err("seeded offset fixture requires half resources".into());
         };
-        resources
-            .a
-            .upload_f32(&ctx.stream, &seeded_half_values(resources.storage.a, 3))?;
-        resources
-            .b
-            .upload_f32(&ctx.stream, &seeded_half_values(resources.storage.b, 11))
+        resources.a.upload_f32(
+            &ctx.stream,
+            &super::seeded_half_values(resources.storage.a, 3),
+        )?;
+        resources.b.upload_f32(
+            &ctx.stream,
+            &super::seeded_half_values(resources.storage.b, 11),
+        )
     }
 
     fn qualified_half_active_output(

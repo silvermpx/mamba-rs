@@ -47,6 +47,7 @@ mod sm89_half_source;
 mod training_pipeline_tests;
 
 pub(super) use contract::GemmDims;
+pub(in crate::mamba_ssm::gpu) use contract::Sm89HalfNnParams;
 pub use contract::{
     CUptr, F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
     F32TriadSelection, F32TriadShape, GemmBiFwdSubOperands, SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES,

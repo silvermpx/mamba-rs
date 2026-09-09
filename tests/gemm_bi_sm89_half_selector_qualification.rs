@@ -6,7 +6,7 @@ use mamba_rs::mamba_ssm::gpu::context::{GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, SM89_HALF_AUTO_CELLS,
-    SM89_HALF_KERNEL_SPECS, presize_physical_qualification_suite, qualify_physical_launch,
+    SM89_HALF_KERNEL_SPECS, TcTile, presize_physical_qualification_suite, qualify_physical_launch,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, PolicyDtype, digest_hex};
 
@@ -15,6 +15,8 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, PolicyDtype, digest_
 fn sm89_half_actual_auto_qualification() -> Result<(), String> {
     let device = GpuDevice::new(0)?;
     let ctx = GpuCtx::new(&device)?;
+    let reference_device = GpuDevice::new(0)?;
+    let reference_ctx = GpuCtx::new(&reference_device)?;
     let compiler = ctx
         .kernels
         .triad_sm89_half_compiler_identity()
@@ -104,9 +106,26 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
         })
         .collect::<Vec<_>>();
     presize_physical_qualification_suite(&ctx, &requests)?;
+    let reference_requests = SM89_HALF_AUTO_CELLS
+        .iter()
+        .map(|&(op, dtype, dims, _)| {
+            PhysicalQualificationRequest::contiguous(
+                op,
+                dims,
+                PhysicalQualificationRoute::HalfForced {
+                    dtype,
+                    tile: TcTile::Tile128,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    presize_physical_qualification_suite(&reference_ctx, &reference_requests)?;
 
-    for (&(op, dtype, dims, route), request) in
-        SM89_HALF_AUTO_CELLS.iter().zip(requests.iter().copied())
+    for (index, ((&(op, dtype, dims, route), request), reference_request)) in SM89_HALF_AUTO_CELLS
+        .iter()
+        .zip(requests.iter().copied())
+        .zip(reference_requests.iter().copied())
+        .enumerate()
     {
         let spec = SM89_HALF_KERNEL_SPECS
             .iter()
@@ -127,7 +146,7 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             })
             .ok_or_else(|| "SM89 half qualification grid overflow".to_string())?;
 
-        let qualified = qualify_physical_launch(&ctx, request)?;
+        let mut qualified = qualify_physical_launch(&ctx, request)?;
         let evidence = qualified.evidence();
         if evidence.nodes().len() != 1
             || evidence.single_launch_symbol() != Some(spec.symbol)
@@ -156,13 +175,91 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 spec.symbol, node.launch
             ));
         }
+        let mut reference = qualify_physical_launch(&reference_ctx, reference_request)?;
+        let expected_reference_symbol = match (op, dtype) {
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+            ) => "gemm_bi_nn_tc_f16",
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+            ) => "gemm_bi_nn_tc_bf16",
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+            ) => "gemm_bi_nt_tc_f16",
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+            ) => "gemm_bi_nt_tc_bf16",
+            _ => {
+                return Err(format!(
+                    "unsupported retained oracle route {op:?}/{dtype:?}"
+                ));
+            }
+        };
+        let reference_evidence = reference.evidence();
+        if reference_evidence.nodes().len() != 1
+            || reference_evidence.single_launch_symbol() != Some(expected_reference_symbol)
+            || reference_evidence.uniform_module_kind() != Some(ModuleKind::TriadSm80)
+            || !reference_evidence.eager_graph_equal()
+        {
+            return Err(format!(
+                "{} retained oracle did not bind independent SM80 Tile128: {:?}",
+                spec.symbol,
+                reference_evidence.nodes()
+            ));
+        }
+        let salt = 0x5a17_usize ^ index;
+        qualified.seed_half_operands(&ctx, salt)?;
+        reference.seed_half_operands(&reference_ctx, salt)?;
+        let original_inputs = qualified.half_operand_bits(&ctx)?;
+        if reference.half_operand_bits(&reference_ctx)? != original_inputs {
+            return Err(format!(
+                "{} oracle inputs differ after seeding",
+                spec.symbol
+            ));
+        }
+
+        qualified.measure_eager_window_ms(&ctx, 1)?;
+        reference.measure_eager_window_ms(&reference_ctx, 1)?;
+        let oracle = reference.half_output_bits(&reference_ctx)?;
+        let eager = qualified.half_output_bits(&ctx)?;
+        if eager != oracle {
+            return Err(format!(
+                "{} eager bits differ from retained Tile128",
+                spec.symbol
+            ));
+        }
+        if qualified.half_operand_bits(&ctx)? != original_inputs
+            || reference.half_operand_bits(&reference_ctx)? != original_inputs
+        {
+            return Err(format!("{} eager launch modified A or B", spec.symbol));
+        }
+
         qualified.measure_graph_window_ms(&ctx, 1)?;
+        reference.measure_graph_window_ms(&reference_ctx, 1)?;
+        let graph = qualified.half_output_bits(&ctx)?;
+        let reference_graph = reference.half_output_bits(&reference_ctx)?;
+        if graph != oracle || reference_graph != oracle {
+            return Err(format!(
+                "{} graph bits differ from eager retained oracle",
+                spec.symbol
+            ));
+        }
+        if qualified.half_operand_bits(&ctx)? != original_inputs
+            || reference.half_operand_bits(&reference_ctx)? != original_inputs
+        {
+            return Err(format!("{} graph replay modified A or B", spec.symbol));
+        }
         let guards = qualified.validate_red_zones(&ctx)?;
+        reference.validate_red_zones(&reference_ctx)?;
         if guards.allocation_count() < 3 || guards.element_count() == 0 {
             return Err(format!("{} did not validate its guards", spec.symbol));
         }
         println!(
-            "{{\"schema\":\"MambaTriadSm89HalfActualAutoV1\",\"op\":\"{:?}\",\"dtype\":\"{:?}\",\"dims\":[{},{},{}],\"symbol\":\"{}\",\"module\":\"TriadSm89Half\",\"grid\":[{},1,1],\"block\":[{},1,1],\"dynamic_shared_bytes\":{},\"eager_graph_equal\":true,\"guard_allocations\":{},\"guard_elements\":{}}}",
+            "{{\"schema\":\"MambaTriadSm89HalfActualAutoV1\",\"op\":\"{:?}\",\"dtype\":\"{:?}\",\"dims\":[{},{},{}],\"symbol\":\"{}\",\"module\":\"TriadSm89Half\",\"grid\":[{},1,1],\"block\":[{},1,1],\"dynamic_shared_bytes\":{},\"eager_graph_equal\":true,\"retained_oracle_bits_equal\":true,\"inputs_unchanged\":true,\"guard_allocations\":{},\"guard_elements\":{}}}",
             op,
             dtype,
             dims.0,

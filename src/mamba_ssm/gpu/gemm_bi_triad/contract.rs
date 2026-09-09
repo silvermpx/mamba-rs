@@ -5465,6 +5465,23 @@ pub struct TcFwdOperands {
     pub bias_ptr: CUptr,
 }
 
+/// Exact by-value parameter bundle shared by the eager and prepared-graph
+/// launchers for the SM89 half NN export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub(in crate::mamba_ssm::gpu) struct Sm89HalfNnParams {
+    pub(crate) alpha: f32,
+    pub(crate) beta: f32,
+    pub(crate) m: i32,
+    pub(crate) n: i32,
+    pub(crate) k: i32,
+    pub(crate) lda: i32,
+    pub(crate) ldb: i32,
+    pub(crate) ldc: i32,
+}
+
+unsafe impl cudarc::driver::DeviceRepr for Sm89HalfNnParams {}
+
 /// Strided scalar-forward operands shared by every deterministic NN bucket.
 #[derive(Clone, Copy)]
 pub struct GemmBiFwdSubOperands {

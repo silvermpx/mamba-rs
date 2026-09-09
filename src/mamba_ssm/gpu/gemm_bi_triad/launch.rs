@@ -131,21 +131,6 @@ unsafe impl DeviceRepr for SgbNnM64N64Params {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-struct Sm89HalfNnParams {
-    alpha: f32,
-    beta: f32,
-    m: i32,
-    n: i32,
-    k: i32,
-    lda: i32,
-    ldb: i32,
-    ldc: i32,
-}
-
-unsafe impl DeviceRepr for Sm89HalfNnParams {}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[repr(C)]
 struct Sm90aTf32KernelParams {
     a_x: i32,
     a_y: i32,

@@ -467,7 +467,23 @@ mod tests {
         assert_declined(changed, valid_request, "compiler output kind");
         let mut changed = valid;
         changed.compiler.as_mut().unwrap().schedule_revision += 1;
-        assert_declined(changed, valid_request, "compiler revision tuple");
+        assert_declined(changed, valid_request, "schedule revision");
+        let revision_mutations: [(&str, fn(&mut CompilerIdentity)); 3] = [
+            ("composer revision", |compiler: &mut CompilerIdentity| {
+                compiler.composer_revision += 1
+            }),
+            ("compiler revision", |compiler: &mut CompilerIdentity| {
+                compiler.compiler_revision += 1
+            }),
+            ("numeric ABI revision", |compiler: &mut CompilerIdentity| {
+                compiler.numeric_abi_revision += 1
+            }),
+        ];
+        for (label, mutate) in revision_mutations {
+            let mut changed = valid;
+            mutate(changed.compiler.as_mut().unwrap());
+            assert_declined(changed, valid_request, label);
+        }
         let mut changed = valid;
         changed.artifact.as_mut().unwrap().module_kind = ModuleKind::TriadSm89Finalist;
         assert_declined(changed, valid_request, "artifact module owner");
@@ -490,6 +506,12 @@ mod tests {
         let mut changed = valid;
         changed.request.shape.lda += 1;
         assert_declined(context, changed, "noncanonical lda");
+        let mut changed = valid;
+        changed.request.shape.ldb += 1;
+        assert_declined(context, changed, "noncanonical ldb");
+        let mut changed = valid;
+        changed.request.shape.ldc += 1;
+        assert_declined(context, changed, "noncanonical ldc");
         let mut changed = valid;
         changed.request.shape.m += 1;
         assert_declined(context, changed, "neighbor shape");
