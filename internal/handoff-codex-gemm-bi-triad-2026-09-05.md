@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 half-TN B-x4 resource stop: a test-only F16 d768-in
+regpipe+vec2 variant fuses four B `ldmatrix.x2.trans` loads into two x4 loads.
+All-lane mapping/alignment and a reversible source seam pass, but both the
+initial loop form and one bounded literal-address refinement compile to137
+registers on CUDA13.2, above the declared128 cap (local0, shared32768 and
+occupancy3 otherwise pass). The resource gate stopped before exact/performance
+and Fast. Do not retry unchanged, run BF16/siblings or wire it. Evidence:
+`internal/perf/ada-triad-half-tn-bx4-20260909/report.md`.
+
 Latest 2026-09-09 half-NT M64N128/S2 stop: the test-only F16 d768-out
 two-stage ping-pong candidate reduces registers119->106, dynamic shared
 73,728->49,152 bytes and raises occupancy1->2 while preserving exact target,

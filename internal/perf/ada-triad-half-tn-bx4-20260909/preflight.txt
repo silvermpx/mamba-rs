@@ -1,0 +1,8 @@
+Attempt 1 immediate external preflight:
+NVIDIA RTX 6000 Ada Generation, total=49140 MiB, used=48 MiB, free=48463 MiB, gpu_util=0%, memory_util=0%
+
+Attempt 2 immediate external preflight:
+NVIDIA RTX 6000 Ada Generation, total=49140 MiB, used=48 MiB, free=48463 MiB, gpu_util=0%, memory_util=0%
+
+Both logs preserve the in-harness five-sample pre-context and post-context
+gates. No user process was stopped or unloaded.
