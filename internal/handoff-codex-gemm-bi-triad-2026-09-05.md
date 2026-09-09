@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad TF32 NT canonical-Prism full-domain resource
+stop: the test-only `(4621,384,1928)` candidate uses a2D grid and direct16-byte
+copies for216 full CTAs/60 complete K stages, but CUDA13.2 produces141
+registers and occupancy1 at shared49152. The declared caps are128 registers
+and occupancy2, so the harness stops before exactness and timing. No
+performance conclusion and no production change; do not retry unchanged.
+Evidence:
+`internal/perf/ada-triad-tf32-nt-prism-full-domain-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad F16 TN full-tile staging stop: the exact-shape
 d768-in candidate removes per-copy extent/zero-fill predicates with direct
 16-byte cp.async while keeping the four-warp regpipe+float2 math. Exact target,

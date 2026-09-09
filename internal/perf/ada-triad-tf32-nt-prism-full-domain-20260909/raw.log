@@ -1,0 +1,13 @@
+compile-only: PASS
+{"candidate_ptx_sha":"35e60c4cc48815f9af50510df30ab05c93274ee6d6dd0427190420485ea47194","candidate_source_sha":"dbeb2f86acbae04b9ac503c69fbbff1f71e835c81a0af54128277e17827b793c","retained_ptx_sha":"17ba9734e6e628dcd88761475e2b4a518cf66b46eb613a2aec67cea7ccfa1f32","retained_source_sha":"263cdf63dedfbebd84fd668fd3e5aa00a5f4b80241d17f5c336e5e9d60945619","schema":"MambaBiTriadTf32NtALdmatrixPrismFullDomainCompileV1"}
+
+external GPU preflight, five samples:
+48, 48463, 0, 0
+48, 48463, 0, 0
+48, 48463, 0, 0
+48, 48463, 0, 0
+48, 48463, 0, 0
+
+GPU quiet gate tf32-nt-a-ldmatrix-prism-full-domain/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+{"dynamic_shared_bytes":49152,"local_bytes":0,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":1,"registers":141,"schema":"MambaBiTriadTf32NtALdmatrixPrismFullDomainResourceV1","static_shared_bytes":0,"symbol":"gemm_bi_nt_test_a_ldmatrix_prism_full_domain_sm80_mma_tf32_v1_m128n64_bk32_s2","threads":256}
+Error: "gemm_bi_nt_test_a_ldmatrix_prism_full_domain_sm80_mma_tf32_v1_m128n64_bk32_s2 resource gate failed: regs=141 local=0 static=0 max_dynamic=49152 occupancy=1"
