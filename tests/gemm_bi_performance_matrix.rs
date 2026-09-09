@@ -2919,6 +2919,7 @@ fn physical_kind_name(kind: PhysicalLaunchKind) -> &'static str {
         PhysicalLaunchKind::Gemm => "gemm",
         PhysicalLaunchKind::InputUpcast => "input_upcast",
         PhysicalLaunchKind::OutputDowncast => "output_downcast",
+        PhysicalLaunchKind::InputTransform => "input_transform",
     }
 }
 
