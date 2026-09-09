@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 NT d768-out M64N192 full-domain stop: a
+target-only literal-shape entry reduces registers127->118 with local0,
+shared98304/occupancy1 and unchanged64HMMA/18LDGSTS. Exact target/tails/
+exception/K0/eager/graph/guards pass, but it loses the measured generic M64N192
+by2.9–3.1% across once3. Stop before once7/Fast; do not retry the unchanged
+specialization wrapper. Evidence:
+`internal/perf/ada-triad-half-nt-m64n192-full-domain-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad TF32 TN sibling retained wins: the unchanged
 A-only transpose-RNA N96 d768-out recipe also wins d768-in by7.3–7.4% (once7
 p50`.92643-.92708`, worst p95`.93225`) and canonical Prism by7.3–7.7%
