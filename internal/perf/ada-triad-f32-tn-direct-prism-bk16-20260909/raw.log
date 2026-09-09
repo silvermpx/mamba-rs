@@ -1,0 +1,13 @@
+external preflight x5: memory.used=48MiB memory.free=48463MiB gpu.util=0% memory.util=0%; no compute PID
+invalid pre-timing run: retained launch forwarded batch=0; graph identity rejected AUTO node_count=1 before resources/exact/timing; no candidate result claimed
+harness regression: retained_auto_launch_uses_the_fixture_batch RED left=0/right=2; corrected GREEN
+corrected internal pre: gpu_util=0% memory_util=0% used=48MiB quiet_samples=5
+actual AUTO: TnSplitM m_chunk=784 chunks=6 nodes=[gemm_bi_tn_splitm_partial_aligned,gemm_bi_splitm_reduce] edge=partial->reducer
+direct source_sha=07ec10cf27ac814a80f7e9c918a6bc2268774347d284d06603fa2aa022b42eef
+resources direct/retained_partial/reducer: regs=107/127/40 local=0/0/0 static_shared=16384/33792/0 occupancy=4/2/6
+exact: six raw chunks finite PASS; six raw chunks exceptional PASS; target PASS; tail PASS; exceptional PASS; nonunit alpha PASS; K0 PASS; eager/graph/repeats/inputs/guards PASS
+once3 candidate/actual_AUTO [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[0.7854905882,0.7864995520],[0.7864950162,0.7874834004],[0.7864477331,0.7871433469],[0.7856413911,0.7878709757]]
+once7 candidate/actual_AUTO [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[0.7864494441,0.7865266952],[0.7865870202,0.7870822058],[0.7860794316,0.7868685082],[0.7865409085,0.7872383562]]
+once7 candidate/Fast [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[2.4006890205,2.4021840397],[2.4012501762,2.4070285591],[2.4022879289,2.4042420654],[2.4052313048,2.4070124817]]
+decision=retain_best_not_fast promotion=false
+internal post: gpu_util=0% memory_util=0% used=758MiB quiet_samples=5

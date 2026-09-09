@@ -2369,3 +2369,14 @@ SASS proves a different issue signature with unchanged127regs/local0, but it is
 parity/slightly slower than the retained M64N192 body: p50 `1.0000–1.00065`,
 worst p95 `1.00131`. It stops before once7/Fast. Frozen evidence:
 `internal/perf/ada-triad-f16-nt-m64n192-issue2211-20260909/`.
+
+Exact-F32 TN canonical Prism `(4621,384,1928)` now has a new retained-best
+direct row-major-X M64N64/BK16/S2 raw-partial candidate. It preserves the same
+six `784/784/784/784/784/701` ordered chains and unchanged FP64 reducer, passes
+all raw/final/tail/exception/non-unit/K0/eager/graph/guard exact gates, and uses
+107regs/local0/16KiB shared/occupancy4. Candidate/actual-AUTO once7 p50 is
+`0.78608–0.78659`, worst p95 `0.78724`: a robust21.3–21.4% win. Candidate/Fast
+is still `2.4007–2.4052x` p50, so this is not a Fast win. An initial invalid
+harness run forwarded batch zero and was rejected before timing; a new native
+regression pins the real fixture batch. Retain for joint dispatcher integration.
+Frozen evidence: `internal/perf/ada-triad-f32-tn-direct-prism-bk16-20260909/`.
