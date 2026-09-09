@@ -18,6 +18,22 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 TN eight-warp 16x32 stop: the test-only
+d768-in M64N64/BK64/S2 variant raises the compute-warps from four to eight while
+preserving exact target/tails/exception/K0, graph/repeats/guards and the K16
+order. It compiles at80regs/local0/shared32768/block256/occupancy3, but loses
+the retained four-warp regpipe+float2 kernel by10.4–11.0% across every once3
+eager/graph ABBA/BAAB stratum. Stop before once7/Fast and do not retry the
+duplicated-B-ldmatrix topology. Evidence:
+`internal/perf/ada-triad-half-tn-8warp-16x32-20260909/report.md`.
+
+Latest 2026-09-09 F16 TN full-domain mapper/epilogue compile stop: replacing
+the target d768-in div/mod CTA mapping with a2D grid and removing full-tile
+epilogue predicates raises ptxas registers125->128. The declared cap stops
+before CUDA context, exact or timing. No performance conclusion; do not retry
+unchanged without a source-backed lifetime refinement. Evidence:
+`internal/perf/ada-triad-half-tn-vec2-full-domain-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad F16 TN issue-order stop: the test-only d768-in
 candidate changes only the eight independent HMMA traversal order inside each
 K16 group while preserving each output's ascending K16 association, real
