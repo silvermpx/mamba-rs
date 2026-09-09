@@ -2422,3 +2422,27 @@ as F16. It is exact across target/tails/exception/K0/eager/graph/guards, uses
 beats cuBLAS Fast in every once7 stratum by7.4–10.3% p50 with worst p95.94901.
 Retain for joint integration. Strict Ada Triad Fast-win count is now11/60.
 Evidence: `internal/perf/ada-triad-bf16-nt-m96n128-s3-20260909/`.
+
+Exact-F32 TN canonical-Prism M64N64/BK32/S2 with exact non-padded tails passes
+all raw/final bit and resource gates at107regs/local0/32KiB/occupancy3. Despite
+halving mainloop/barrier rounds, it loses retained BK16 by3.8–4.0% because
+occupancy falls4->3. It stopped once3 before Fast; retain BK16 and do not retry
+unchanged. Evidence:
+`internal/perf/ada-triad-f32-tn-direct-prism-bk32-exact-tail-20260909/`.
+
+TF32 NN M96N96/S2 direct Prism reached local0/49,152B/occupancy2 but compiled
+at137regs over its frozen128-reg cap, so it stopped before exact/timing. Retry
+only after a concrete >=9-register lifetime reduction. BF16 TN d768-in
+M96N64/BK64/S2 is exact/resource-valid at124regs/local0/49,152B/occupancy2,
+but loses retained M64N64 by9.3–11.7%; stop unchanged. Evidence:
+`internal/perf/ada-triad-tf32-nn-m96n96-s2-direct-prism-20260909/` and
+`internal/perf/ada-triad-bf16-tn-m96n64-regpipe-vec2-20260909/`.
+
+Exact-F32 TN d768-out now has a new retained-best direct M64N64/BK16/S2 raw
+kernel plus unchanged FP64 reducer. It preserves the four exact512-FFMA chains,
+passes all raw/final/tail/exception/non-unit/K0 eager+graph/guard gates, and
+reduces the retained transpose+four-CopyPlan+reducer graph from six nodes to
+two. Once7 wins are14.9–15.0% eager and13.1–13.2% graph; resources are
+107regs/local0/16KiB/occupancy4. Fast remains2.35–2.36x faster. Retain for joint
+integration. Evidence:
+`internal/perf/ada-triad-f32-tn-direct-d768-out-bk16-20260909/`.
