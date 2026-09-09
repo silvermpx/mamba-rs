@@ -2389,3 +2389,19 @@ with worst p95.93716, then beats Fast in all once7 strata: p50.89811-.91410,
 worst p95.92069. Retain for joint integration; discovery did not change the
 production dispatcher. The strict Ada Triad Fast-win count is now10/60.
 Frozen evidence: `internal/perf/ada-triad-f16-nt-m96n128-s3-20260909/`.
+
+The exact-F32 TN canonical-Prism one-node M64N32 fused-finalize follow-up is
+bit-exact on target/tail/exception/non-unit/K0 eager+graph and compiles at
+127regs/local0/12KiB shared/occupancy4, but consistently loses the retained
+direct M64N64 raw-partial plus reducer by12.0–12.2%. It stopped at once3 before
+Fast. Do not retry unchanged. Frozen evidence:
+`internal/perf/ada-triad-f32-tn-direct-prism-fused-n32-20260909/`.
+
+TF32 TN canonical Prism now has a stronger retained-best A-only transpose-RNA
+route. The new M64N64/BK32/S3 eight-warp body reduces resources from
+127regs/86,016B/occupancy1 to83regs/49,152B/occupancy2 and raises the grid from
+63 to186 CTAs. All exact/guard/ABI gates pass. It beats the retained N96 parent
+in every once7 stratum by8.1–8.8% p50 and5.3–7.4% p95. It remains1.68–1.74x
+slower than cuBLAS Fast at p50, so the Triad Fast-win count stays10/60. Retain
+for joint integration. Frozen evidence:
+`internal/perf/ada-triad-tf32-tn-transpose-rna-m64n64-prism-20260909/`.
