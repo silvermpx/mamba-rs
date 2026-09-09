@@ -39,9 +39,12 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   smoke passes for all three routes against actual prior AUTO, with exact
   eager/graph bits and guards. Cohorts remain empty pending final qualification.
 - [ ] Large exact-F32 TN combined qualification and admission.
-- [ ] Exact-F32 TN d128-in/out direct-fold retained candidates: production
-  source, route and focused qualification.
+- [x] Exact-F32 TN d128-in/out source-only promotion (`7d390fa7`), with
+  normalized retained-body parity and exactly two exports; 13 native checks pass.
+- [ ] Exact-F32 TN d128-in/out module, routes and focused qualification.
 - [x] Four-cell TF32 joint source frozen (`560169d5`).
+- [x] TF32 joint standalone composer, two frozen primitives and four typed
+  specs; 26 native source-contract checks pass. CUDA compilation is pending.
 - [ ] TF32 joint module, NN/TN routes, transform/scratch ownership and admission.
 - [ ] Remaining half improvements beyond the eleven Fast-winning cells:
   F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells. Establish

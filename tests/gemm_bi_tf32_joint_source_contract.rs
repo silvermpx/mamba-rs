@@ -13,6 +13,7 @@ mod tn_n96;
 mod tn_raw;
 
 const FIXED_N96: &str = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
 
 const TN_N96_SECTION: &str = "TN_N96";
 const TN_M64N64_SECTION: &str = "TN_M64N64";
@@ -93,6 +94,39 @@ fn remove_single_export(source: &str, symbol: &str) -> String {
         end += 1;
     }
     format!("{}{}", &source[..begin], &source[end..])
+}
+
+fn extract_device_function<'a>(source: &'a str, name: &str) -> &'a str {
+    let signature = format!("void {name}(");
+    let name_at = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("missing device function {name}"));
+    assert_eq!(
+        source.matches(&signature).count(),
+        1,
+        "ambiguous device function {name}"
+    );
+    let start = source[..name_at]
+        .rfind("__device__")
+        .unwrap_or_else(|| panic!("missing __device__ prefix for {name}"));
+    let mut depth = 0_i32;
+    let mut opened = false;
+    for (offset, byte) in source[name_at..].bytes().enumerate() {
+        match byte {
+            b'{' => {
+                opened = true;
+                depth += 1;
+            }
+            b'}' if opened => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start..=name_at + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated device function {name}")
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -319,4 +353,180 @@ fn sealed_validator_rejects_extra_exports_and_discovery_markers() {
         let contaminated = format!("{}\n// {marker}\n", joint::SOURCE);
         assert!(joint::validate_source_text(&contaminated).is_err());
     }
+}
+
+#[test]
+fn composed_source_contains_only_the_four_sealed_exports() {
+    let composed = joint::compose_source().expect("compose standalone joint source");
+    assert_eq!(
+        joint::export_inventory(&composed).unwrap(),
+        joint::SM89_TF32_JOINT_SYMBOLS
+    );
+    assert_eq!(composed.matches("extern \"C\"").count(), 4);
+    assert!(composed.starts_with(joint::PRIMITIVES));
+    joint::validate_source_text(&composed).expect("composed inventory remains sealed");
+}
+
+#[test]
+fn primitive_owner_is_frozen_and_byte_equal_to_fixed_tf32_definitions() {
+    assert_eq!(
+        digest_hex(sha256(joint::PRIMITIVES.as_bytes())),
+        joint::PRIMITIVES_SHA256
+    );
+    joint::validate_primitives_text(joint::PRIMITIVES).expect("sealed primitive owner");
+    for name in [joint::COPY_CG_PRIMITIVE, joint::MMA_M16N8K8_PRIMITIVE] {
+        assert_eq!(
+            extract_device_function(joint::PRIMITIVES, name),
+            extract_device_function(FIXED_TF32, name),
+            "primitive {name} drifted from the proven Fixed TF32 definition"
+        );
+    }
+    assert_eq!(
+        joint::export_inventory(joint::PRIMITIVES).unwrap(),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn primitive_validator_rejects_missing_foreign_and_exported_code() {
+    let missing = joint::PRIMITIVES.replacen("gbf_tf32_copy_cg", "gbf_tf32_copy_removed", 1);
+    assert!(joint::validate_primitives_text(&missing).is_err());
+
+    let foreign = format!(
+        "{}\n__device__ __forceinline__ void gbf_tf32_copy_ca(unsigned, const void*, int) {{}}\n",
+        joint::PRIMITIVES
+    );
+    assert!(joint::validate_primitives_text(&foreign).is_err());
+
+    let foreign_nonvoid = format!(
+        "{}\n__device__ __forceinline__ unsigned gbf_tf32_rna(float value) {{ return (unsigned)value; }}\n",
+        joint::PRIMITIVES
+    );
+    assert!(joint::validate_primitives_text(&foreign_nonvoid).is_err());
+
+    let exported = format!(
+        "{}\nextern \"C\" __global__ void gemm_bi_foreign() {{}}\n",
+        joint::PRIMITIVES
+    );
+    assert!(joint::validate_primitives_text(&exported).is_err());
+}
+
+#[test]
+fn typed_params_match_the_frozen_driver_abi() {
+    assert_eq!(
+        std::mem::size_of::<joint::Sm89Tf32JointTransposeParams>(),
+        12
+    );
+    assert_eq!(
+        std::mem::align_of::<joint::Sm89Tf32JointTransposeParams>(),
+        4
+    );
+    assert_eq!(std::mem::size_of::<joint::Sm89Tf32JointGemmParams>(), 32);
+    assert_eq!(std::mem::align_of::<joint::Sm89Tf32JointGemmParams>(), 4);
+    assert_eq!(
+        joint::TRANSPOSE_DRIVER_ABI,
+        [
+            joint::Sm89Tf32JointAbiParameter { offset: 0, size: 8 },
+            joint::Sm89Tf32JointAbiParameter { offset: 8, size: 8 },
+            joint::Sm89Tf32JointAbiParameter {
+                offset: 16,
+                size: 12
+            },
+        ]
+    );
+    assert_eq!(joint::TRANSPOSE_TERMINAL_ARGUMENT, 3);
+    assert_eq!(
+        joint::GEMM_DRIVER_ABI,
+        [
+            joint::Sm89Tf32JointAbiParameter { offset: 0, size: 8 },
+            joint::Sm89Tf32JointAbiParameter { offset: 8, size: 8 },
+            joint::Sm89Tf32JointAbiParameter {
+                offset: 16,
+                size: 8
+            },
+            joint::Sm89Tf32JointAbiParameter {
+                offset: 24,
+                size: 8
+            },
+            joint::Sm89Tf32JointAbiParameter {
+                offset: 32,
+                size: 32
+            },
+        ]
+    );
+    assert_eq!(joint::GEMM_TERMINAL_ARGUMENT, 5);
+    assert!(joint::SOURCE.contains(
+        "void gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1(\n    const unsigned* input, unsigned* output, GbfTf32TnTransposeParams params)"
+    ));
+}
+
+#[test]
+fn four_typed_specs_bind_symbols_abi_and_retained_resources() {
+    use joint::Sm89Tf32JointKernelKind as Kind;
+
+    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 4);
+    let expected = [
+        (
+            joint::NN_ADD_HALF_DIRECT_N96_SYMBOL,
+            Kind::NnAddHalfDirectM128N96Bk32S3,
+            (256, 1, 1),
+            86_016,
+            0,
+            124,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::TN_PRE_RNA_N96_SYMBOL,
+            Kind::TnPreRnaM128N96Bk32S3,
+            (256, 1, 1),
+            86_016,
+            0,
+            127,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::TN_PRE_RNA_M64N64_SYMBOL,
+            Kind::TnPreRnaM64N64Bk32S3,
+            (256, 1, 1),
+            49_152,
+            0,
+            83,
+            Some(2),
+            5,
+            64,
+        ),
+        (
+            joint::TN_PRE_RNA_TRANSPOSE_SYMBOL,
+            Kind::TnPreRnaTranspose32x32,
+            (32, 8, 1),
+            0,
+            4_224,
+            26,
+            None,
+            3,
+            28,
+        ),
+    ];
+    for (symbol, kind, block, dynamic, static_bytes, regs, occupancy, argc, abi_bytes) in expected {
+        let spec = joint::kernel_spec(symbol).expect("typed joint kernel spec");
+        assert_eq!(spec.kind, kind);
+        assert_eq!(spec.block, block);
+        assert_eq!(spec.dynamic_shared_bytes, dynamic);
+        assert_eq!(spec.static_shared_bytes, static_bytes);
+        assert_eq!(spec.register_cap, regs);
+        assert_eq!(spec.local_bytes, 0);
+        assert_eq!(spec.minimum_max_threads, 256);
+        assert_eq!(spec.minimum_active_blocks, occupancy);
+        assert_eq!(spec.abi_parameters.len(), argc);
+        assert_eq!(spec.abi_parameter_bytes, abi_bytes);
+    }
+    assert_eq!(
+        joint::SM89_TF32_JOINT_KERNEL_SPECS.map(|spec| spec.symbol),
+        joint::SM89_TF32_JOINT_SYMBOLS
+    );
+    assert!(joint::kernel_spec("gemm_bi_unknown").is_none());
 }
