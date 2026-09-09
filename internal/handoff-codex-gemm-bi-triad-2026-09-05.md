@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 TF32 NT d768-in sliced stop: reusing the exact d768-out
+four-slice body preserves target/tails/exception/K0/eager/graph/guard bits and
+resources98regs/local0/shared49152/occupancy2. It is consistently0.45–0.65%
+faster than frozen A-only ldmatrix, but once3 p50 is `0.99349-0.99450` and worst
+p95 `0.99553`, short of the strict1% admission margin. Stop before once7/Fast,
+keep the prior d768-in retained kernel and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-tf32-nt-a-ldmatrix-sliced-in-20260909/report.md`.
+
 Latest 2026-09-09 exact-F32 TN rolled dual-chunk compile stop: rolling the two
 1024-row chains through one mainloop cuts raw/fused SASS text to53.7/54.7% and
 static FFMA sites to50% of the unrolled dual-chunk retained-best. Both rolled
