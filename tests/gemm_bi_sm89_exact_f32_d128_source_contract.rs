@@ -159,3 +159,54 @@ fn validator_rejects_foreign_duplicate_and_placeholder_exports() {
         );
     }
 }
+
+#[test]
+fn retained_specs_pin_direct_fold_geometry_and_resource_limits() {
+    use production::{SM89_EXACT_F32_D128_KERNEL_SPECS, Sm89ExactF32D128KernelKind};
+
+    assert_eq!(SM89_EXACT_F32_D128_KERNEL_SPECS.len(), 2);
+    for (symbol, shape, tile, shared_bytes, register_cap) in [
+        (
+            production::D128_IN_SYMBOL,
+            (1024, 128, 512),
+            (16, 16),
+            4096,
+            112,
+        ),
+        (
+            production::D128_OUT_SYMBOL,
+            (1024, 256, 128),
+            (8, 16),
+            3072,
+            96,
+        ),
+    ] {
+        let spec = production::kernel_spec(symbol).expect("retained d128 symbol");
+        assert_eq!(spec.kind, Sm89ExactF32D128KernelKind::DirectF64FoldFinal);
+        assert_eq!(spec.shape, shape);
+        assert_eq!(spec.tile, tile);
+        assert_eq!(spec.grid, (256, 1, 1));
+        assert_eq!(spec.block, (64, 1, 1));
+        assert_eq!(spec.dynamic_shared_bytes, shared_bytes);
+        assert_eq!(spec.static_shared_bytes, 0);
+        assert_eq!(spec.local_bytes, 0);
+        assert_eq!(spec.register_cap, register_cap);
+        assert_eq!(spec.occupancy_gate, 8);
+        assert_eq!(spec.chunks, 64);
+        assert_eq!(spec.m_chunk, 16);
+        assert_eq!(spec.abi_parameter_count, 7);
+        assert_eq!(spec.abi_parameter_bytes, 40);
+    }
+    assert!(production::kernel_spec(frozen::M8N16_SYMBOL).is_none());
+    assert!(production::kernel_spec("gemm_bi_tn_sm89_f32_d128_foldpipe_v1").is_none());
+    assert!(production::kernel_spec("").is_none());
+}
+
+#[test]
+fn retained_driver_abi_is_seven_separate_arguments() {
+    assert_eq!(
+        production::DIRECT_FOLD_DRIVER_ABI,
+        [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4),]
+    );
+    assert_eq!(production::DIRECT_FOLD_TERMINAL_ARGUMENT, 7);
+}

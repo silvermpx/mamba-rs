@@ -12,6 +12,81 @@ pub const OWNER_SHA256_BYTES: [u8; 32] = [
 pub const D128_IN_SYMBOL: &str = "gemm_bi_tn_sm89_f32_d128_in_m16n16_f64fold_v1";
 pub const D128_OUT_SYMBOL: &str = "gemm_bi_tn_sm89_f32_d128_out_m8n16_f64fold_v1";
 
+/// Separate CUDA Driver arguments: output, A, B, alpha, M, K, N.
+/// Each pair is the byte offset and size in the kernel parameter buffer.
+pub const DIRECT_FOLD_DRIVER_ABI: [(u32, u32); 7] =
+    [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)];
+pub const DIRECT_FOLD_TERMINAL_ARGUMENT: u32 = 7;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sm89ExactF32D128KernelKind {
+    DirectF64FoldFinal,
+}
+
+/// Frozen launch and resource limits for the two retained SplitM64-equivalent
+/// direct folds. These bounds are qualification requirements, not live receipts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm89ExactF32D128KernelSpec {
+    pub symbol: &'static str,
+    pub kind: Sm89ExactF32D128KernelKind,
+    pub shape: (usize, usize, usize),
+    pub tile: (u32, u32),
+    pub grid: (u32, u32, u32),
+    pub block: (u32, u32, u32),
+    pub dynamic_shared_bytes: u32,
+    pub static_shared_bytes: u32,
+    pub local_bytes: u32,
+    pub register_cap: u32,
+    pub occupancy_gate: u32,
+    pub chunks: u32,
+    pub m_chunk: u32,
+    pub abi_parameter_count: u32,
+    pub abi_parameter_bytes: u32,
+}
+
+pub const SM89_EXACT_F32_D128_KERNEL_SPECS: [Sm89ExactF32D128KernelSpec; 2] = [
+    Sm89ExactF32D128KernelSpec {
+        symbol: D128_IN_SYMBOL,
+        kind: Sm89ExactF32D128KernelKind::DirectF64FoldFinal,
+        shape: (1_024, 128, 512),
+        tile: (16, 16),
+        grid: (256, 1, 1),
+        block: (64, 1, 1),
+        dynamic_shared_bytes: 4_096,
+        static_shared_bytes: 0,
+        local_bytes: 0,
+        register_cap: 112,
+        occupancy_gate: 8,
+        chunks: 64,
+        m_chunk: 16,
+        abi_parameter_count: 7,
+        abi_parameter_bytes: 40,
+    },
+    Sm89ExactF32D128KernelSpec {
+        symbol: D128_OUT_SYMBOL,
+        kind: Sm89ExactF32D128KernelKind::DirectF64FoldFinal,
+        shape: (1_024, 256, 128),
+        tile: (8, 16),
+        grid: (256, 1, 1),
+        block: (64, 1, 1),
+        dynamic_shared_bytes: 3_072,
+        static_shared_bytes: 0,
+        local_bytes: 0,
+        register_cap: 96,
+        occupancy_gate: 8,
+        chunks: 64,
+        m_chunk: 16,
+        abi_parameter_count: 7,
+        abi_parameter_bytes: 40,
+    },
+];
+
+pub fn kernel_spec(symbol: &str) -> Option<&'static Sm89ExactF32D128KernelSpec> {
+    SM89_EXACT_F32_D128_KERNEL_SPECS
+        .iter()
+        .find(|spec| spec.symbol == symbol)
+}
+
 const ROUTE_BEGIN: &str = "// SM89_EXACT_F32_D128_ROUTE_BEGIN";
 const ROUTE_END: &str = "// SM89_EXACT_F32_D128_ROUTE_END";
 const NAMESPACE_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_NAMESPACE__";

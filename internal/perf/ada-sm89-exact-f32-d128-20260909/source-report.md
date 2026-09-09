@@ -62,7 +62,7 @@ $ git diff --check -- \
 
 Both commands completed successfully.
 
-## Frozen files and SHA-256
+## Initial source-promotion files and SHA-256 (`7d390fa7`)
 
 ```text
 c684cfcc1165af0ad5cdc2e9e0e1c5c4d7d2986d48fb37b6c192a2dd40718310  kernels/gemm_bi_triad/sm89_exact_f32_d128.cu
@@ -86,3 +86,18 @@ adapter.
 - The worktree contained unrelated root-owned WIP throughout this task. This
   report and the three source/test files were not committed pending root index
   clearance.
+
+## Loader-contract preparation
+
+Root subsequently added two symbol-keyed `DirectF64FoldFinal` specs without
+changing the CUDA owner or its composed source. They expose the exact target
+shapes, tile/grid/block geometry, dynamic shared memory, 64 chunks of 16 rows,
+and seven separate Driver arguments (40 bytes). Resource requirements remain
+the brief's bounds: registers at most 112/96, no static shared or local memory,
+and at least eight active CTAs. These are gates to test, not measured receipts.
+
+Test-first RED failed with seven missing-spec/ABI item errors. The completed
+adapter passed the same no-default-features command on the Linux Ada CPU
+worker: 15 passed, zero failures or warnings. The two additional tests cover
+the symbol-keyed launch/resource contract and the seven-field Driver ABI.
+No CUDA feature, GPU execution, module loading or AUTO routing changed.
