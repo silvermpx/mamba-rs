@@ -6433,6 +6433,7 @@ mod tests {
             .expect("occupancy census");
         assert_eq!(local, 0);
         assert_eq!(static_shared, 0);
+        assert!(registers <= 125);
         assert!(max_threads >= i32::try_from(spec.threads).unwrap());
         assert!(occupancy >= 2);
         println!(
@@ -6466,10 +6467,10 @@ mod tests {
 
         let finalist = capture_forced_route(&ctx, spec, (129, 65, 36), 0x89c3_2000)
             .expect("capture actual finalist route");
-        assert_eq!(finalist.tuning_table_revision, 1);
-        ctx.validate_resolved_gemm_route(&finalist, "live finalist revision 1")
+        assert_eq!(finalist.tuning_table_revision, 2);
+        ctx.validate_resolved_gemm_route(&finalist, "live finalist revision 2")
             .unwrap();
-        for revision in [0, 2] {
+        for revision in [0, 1, 3] {
             let mut stale = finalist;
             stale.tuning_table_revision = revision;
             assert!(
@@ -6495,7 +6496,7 @@ mod tests {
         ctx.validate_resolved_gemm_route(&portable, "live portable revision 45")
             .unwrap();
         let mut wrong_family_revision = portable;
-        wrong_family_revision.tuning_table_revision = 1;
+        wrong_family_revision.tuning_table_revision = 2;
         assert!(
             ctx.validate_resolved_gemm_route(&wrong_family_revision, "wrong portable revision")
                 .is_err()
@@ -6520,7 +6521,7 @@ mod tests {
             );
         }
         println!(
-            "{{\"kind\":\"sm89_nt_finalist_k0_revisions\",\"zero_digest\":\"{}\",\"exceptional_digest\":\"{}\",\"finalist_revision\":1,\"portable_revision\":{},\"shared_route_revision\":{}}}",
+            "{{\"kind\":\"sm89_nt_finalist_k0_revisions\",\"zero_digest\":\"{}\",\"exceptional_digest\":\"{}\",\"finalist_revision\":2,\"portable_revision\":{},\"shared_route_revision\":{}}}",
             digest_hex(&zero),
             digest_hex(&exceptional),
             portable.tuning_table_revision,

@@ -260,10 +260,11 @@ fn qualify_nt_auto_finalist_pair(
 fn parse_sm89_finalist_admitted_cells(
     filter: Option<&str>,
 ) -> Result<Vec<(&'static str, (usize, usize, usize))>, String> {
-    const CELLS: [(&str, (usize, usize, usize)); 3] = [
+    const CELLS: [(&str, (usize, usize, usize)); 4] = [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
         ("prism", (4621, 384, 1928)),
+        ("large_deep", (4096, 3072, 1536)),
     ];
     let Some(filter) = filter else {
         return Ok(CELLS.to_vec());
@@ -290,6 +291,47 @@ fn sm89_finalist_admitted_cells() -> Vec<(&'static str, (usize, usize, usize))> 
     let filter = std::env::var("MAMBA_SM89_FINALIST_ADMITTED_CELLS").ok();
     parse_sm89_finalist_admitted_cells(filter.as_deref())
         .unwrap_or_else(|error| panic!("invalid admitted finalist cell filter: {error}"))
+}
+
+#[test]
+#[ignore = "prints the live Ada SM89 finalist module identity for cohort freezing"]
+fn sm89_finalist_live_binding_identity() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let binding = ctx
+        .kernels
+        .f32_triad_availability()
+        .finalist
+        .expect("bound SM89 finalist module");
+    println!(
+        concat!(
+            "{{\"schema\":\"MambaBiSm89FinalistLiveIdentityV1\",",
+            "\"module_kind\":\"{:?}\",\"target\":\"{}\",",
+            "\"compile_key\":\"{}\",\"artifact_digest\":\"{}\",",
+            "\"source_digest\":\"{}\",\"invocation_digest\":\"{}\",",
+            "\"header_manifest_digest\":\"{}\",\"nvrtc_version\":[{},{}],",
+            "\"nvrtc_library_domain\":\"{}\",\"driver_api_version\":{},",
+            "\"driver_build_sources\":{},\"driver_build_digest\":\"{}\",",
+            "\"optin_shared_bytes\":{},\"tensor_map_access\":{}}}"
+        ),
+        binding.module_kind,
+        binding.target.as_str(),
+        digest_hex(&binding.artifact.compile_key),
+        digest_hex(&binding.artifact.artifact_digest),
+        digest_hex(&binding.compiler.source_digest),
+        digest_hex(&binding.compiler.invocation_digest),
+        digest_hex(&binding.compiler.header_manifest_digest),
+        binding.compiler.nvrtc_version.0,
+        binding.compiler.nvrtc_version.1,
+        digest_hex(&binding.compiler.nvrtc_library_domain),
+        binding.device.driver.api_version,
+        binding.device.driver.build_sources,
+        digest_hex(&binding.device.driver.build_digest),
+        binding.device_caps.optin_shared_bytes,
+        binding.device_caps.tensor_map_access,
+    );
 }
 
 #[test]
@@ -579,11 +621,11 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
     configure_deterministic_tf32(&reference_ctx);
 
     let normal = PhysicalQualificationF32Epilogue::new(1.0, 0.0, false);
-    let mut admitted = 0;
     for (name, dims) in [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
         ("prism", (4621, 384, 1928)),
+        ("large_deep", (4096, 3072, 1536)),
     ] {
         qualify_nt_pair(&candidate_ctx, &reference_ctx, dims, normal, name);
     }
@@ -639,7 +681,7 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
 
 #[test]
 fn sm89_finalist_admitted_cell_filter_is_strict() {
-    assert_eq!(parse_sm89_finalist_admitted_cells(None).unwrap().len(), 3);
+    assert_eq!(parse_sm89_finalist_admitted_cells(None).unwrap().len(), 4);
     assert_eq!(
         parse_sm89_finalist_admitted_cells(Some("prism,d768_in"))
             .unwrap()

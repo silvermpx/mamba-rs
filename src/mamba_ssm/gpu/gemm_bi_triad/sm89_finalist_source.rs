@@ -15,6 +15,175 @@ const PREAMBLES: [&str; 5] = [
 
 const ORIGINAL_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
 
+const ASYNC_MAINLOOP_MARKER: &str = r#"template <SgbTf32Op Op, int BM, int BN, int Stages,
+          int MAtoms, int NAtoms, bool NarrowA, bool NarrowB>
+__device__ __forceinline__ void gemm_bi_tf32_async_mainloop("#;
+
+const WIDE_BRANCH: &str = r#"    if (wide_a && wide_b) {
+        gemm_bi_tf32_async_mainloop<
+            Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
+            storage, problem, tile_count, thread_plan, accumulators);
+    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+
+const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
+        if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {
+            bool use_stage_sliced =
+                (params.m == 2048 && params.k == 1536 && params.n == 768
+                    && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)
+                || (params.m == 4096 && params.k == 3072 && params.n == 1536
+                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);
+            if (use_stage_sliced) {
+                gemm_bi_tf32_nt_compact_sliced_mainloop(
+                    storage, problem, tile_count, thread_plan, accumulators);
+            } else {
+                gemm_bi_tf32_async_mainloop<
+                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
+                    storage, problem, tile_count, thread_plan, accumulators);
+            }
+        } else {
+            gemm_bi_tf32_async_mainloop<
+                Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
+                storage, problem, tile_count, thread_plan, accumulators);
+        }
+    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+
+const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_compact_stage_slice(
+    SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage, int stage,
+    const SgbTf32Problem& problem, int reduction_base, int issue) {
+    {
+        int linear = (int)threadIdx.x + issue * 256;
+        int row = linear >> 3;
+        int reduction = (linear & 7) * 4;
+        int global_row = problem.tile_row + row;
+        int global_reduction = reduction_base + reduction;
+        int valid = global_row < problem.params.m
+            ? problem.params.n - global_reduction : 0;
+        valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
+        int bytes = valid * 4;
+        long long valid_offset =
+            (long long)global_row * problem.params.lda + global_reduction;
+        const float* source = gemm_bi_cp_async_source(
+            problem.a, bytes == 0 ? 0 : valid_offset, bytes);
+        unsigned destination = (unsigned)__cvta_generic_to_shared(
+            &gemm_bi_tf32_a_slot<SgbTf32Nt>(storage, stage, row, reduction));
+        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            destination, source, bytes);
+    }
+    if (issue < 2) {
+        int linear = (int)threadIdx.x + issue * 256;
+        int column = linear >> 3;
+        int reduction = (linear & 7) * 4;
+        int global_column = problem.tile_column + column;
+        int global_reduction = reduction_base + reduction;
+        int valid = global_column < problem.params.k
+            ? problem.params.n - global_reduction : 0;
+        valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
+        int bytes = valid * 4;
+        long long valid_offset =
+            (long long)global_column * problem.params.ldb + global_reduction;
+        const float* source = gemm_bi_cp_async_source(
+            problem.b, bytes == 0 ? 0 : valid_offset, bytes);
+        unsigned destination = (unsigned)__cvta_generic_to_shared(
+            &gemm_bi_tf32_b_slot<SgbTf32Nt>(storage, stage, reduction, column));
+        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            destination, source, bytes);
+    }
+}
+
+__device__ __forceinline__ void gemm_bi_tf32_nt_compact_stage_async(
+    SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage, int stage,
+    const SgbTf32Problem& problem, int reduction_base) {
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        gemm_bi_tf32_nt_compact_stage_slice(
+            storage, stage, problem, reduction_base, issue);
+    }
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+
+__device__ __forceinline__ void gemm_bi_tf32_nt_compact_compute_sliced(
+    SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage, int read_stage,
+    int warp_m, int warp_n, int group, int thread,
+    bool has_next, int write_stage, const SgbTf32Problem& problem,
+    int next_reduction, float (&accumulators)[2][4][4]) {
+    const int k_offsets[4] = {0, 8, 16, 24};
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        if (has_next) {
+            gemm_bi_tf32_nt_compact_stage_slice(
+                storage, write_stage, problem, next_reduction, issue);
+        }
+        int k8 = k_offsets[issue];
+        unsigned a_fragments[2][4];
+        unsigned b_fragments[4][2];
+#pragma unroll
+        for (int m_atom = 0; m_atom < 2; ++m_atom) {
+            int lane = (int)threadIdx.x & 31;
+            int row = warp_m + m_atom * 16 + (lane & 15);
+            int reduction = k8 + ((lane >> 4) << 2);
+            unsigned address = (unsigned)__cvta_generic_to_shared(
+                &gemm_bi_tf32_a_slot<SgbTf32Nt>(
+                    storage, read_stage, row, reduction));
+            unsigned raw0, raw1, raw2, raw3;
+            asm volatile(
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
+                : "r"(address));
+            a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
+            a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
+            a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
+            a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+        }
+#pragma unroll
+        for (int n_atom = 0; n_atom < 4; ++n_atom) {
+            int column = warp_n + n_atom * 8 + group;
+            b_fragments[n_atom][0] = gemm_bi_tf32_rna(
+                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+                    storage, read_stage, k8 + thread, column));
+            b_fragments[n_atom][1] = gemm_bi_tf32_rna(
+                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+                    storage, read_stage, k8 + thread + 4, column));
+        }
+#pragma unroll
+        for (int m_atom = 0; m_atom < 2; ++m_atom) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < 4; ++n_atom) {
+                gemm_bi_tf32_mma_m16n8k8(
+                    accumulators[m_atom][n_atom],
+                    a_fragments[m_atom], b_fragments[n_atom]);
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void gemm_bi_tf32_nt_compact_sliced_mainloop(
+    SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage,
+    const SgbTf32Problem& problem, unsigned tile_count,
+    const SgbTf32ThreadPlan& thread_plan,
+    float (&accumulators)[2][4][4]) {
+    if (tile_count != 0) {
+        gemm_bi_tf32_nt_compact_stage_async(storage, 0, problem, 0);
+    } else {
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+    for (unsigned tile = 0; tile < tile_count; ++tile) {
+        asm volatile("cp.async.wait_group 0;\n" ::);
+        __syncthreads();
+        unsigned next = tile + 1;
+        bool has_next = next < tile_count;
+        gemm_bi_tf32_nt_compact_compute_sliced(
+            storage, static_cast<int>(tile & 1U),
+            thread_plan.warp_m, thread_plan.warp_n,
+            thread_plan.group, thread_plan.thread,
+            has_next, static_cast<int>(next & 1U), problem,
+            static_cast<int>(next * 32U), accumulators);
+        asm volatile("cp.async.commit_group;\n" ::);
+        __syncthreads();
+    }
+}
+
+"#;
+
 #[derive(Clone, Copy)]
 struct Transformation {
     label: &'static str,
@@ -159,7 +328,23 @@ fn transform_sm80_source(source: &str) -> Result<String, String> {
             transformation.label,
         )?;
     }
+    install_stage_sliced_winners(&mut transformed)?;
     Ok(transformed)
+}
+
+fn install_stage_sliced_winners(source: &mut String) -> Result<(), String> {
+    replace_exact(
+        source,
+        ASYNC_MAINLOOP_MARKER,
+        &format!("{SLICED_HELPERS}{ASYNC_MAINLOOP_MARKER}"),
+        "stage-sliced helper insertion",
+    )?;
+    replace_exact(
+        source,
+        WIDE_BRANCH,
+        SLICED_BRANCH,
+        "stage-sliced runtime gate",
+    )
 }
 
 fn finalist_body_from(helper: &str, source: &str) -> Result<String, String> {
@@ -272,6 +457,8 @@ mod tests {
     const TEST_SYMBOL: &str = "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
     #[cfg(not(feature = "cuda"))]
     const FROZEN_HELPER: &str = include_str!("../../../../tests/gemm_bi_tf32_nt_compact_xor.cu");
+    const FROZEN_SLICED_ADAPTER: &str =
+        include_str!("../../../../tests/support/triad_tf32_nt_compact_a_ldmatrix_sliced_source.rs");
 
     #[cfg(not(feature = "cuda"))]
     mod frozen_candidate {
@@ -302,6 +489,43 @@ mod tests {
             let duplicate = format!("{SM80_SOURCE}\n{}", transformation.from);
             let duplicate_error = transform_sm80_source(&duplicate).unwrap_err();
             assert!(duplicate_error.contains(transformation.label));
+            assert!(duplicate_error.contains("observed 2"));
+        }
+    }
+
+    #[test]
+    fn sliced_helpers_match_the_measured_adapter_and_seams_fail_closed() {
+        let measured_helpers = FROZEN_SLICED_ADAPTER
+            .split_once("const SLICED_HELPERS: &str = r#\"")
+            .expect("measured sliced-helper prefix")
+            .1
+            .split_once("\"#;\n\npub const fn a_copy_coordinate")
+            .expect("measured sliced-helper suffix")
+            .0;
+        assert_eq!(SLICED_HELPERS, measured_helpers);
+
+        let mut compact = SM80_SOURCE.to_owned();
+        for transformation in TRANSFORMATIONS {
+            replace_exact(
+                &mut compact,
+                transformation.from,
+                transformation.to,
+                transformation.label,
+            )
+            .unwrap();
+        }
+        for (anchor, label) in [
+            (ASYNC_MAINLOOP_MARKER, "stage-sliced helper insertion"),
+            (WIDE_BRANCH, "stage-sliced runtime gate"),
+        ] {
+            let mut missing = compact.replacen(anchor, "", 1);
+            let missing_error = install_stage_sliced_winners(&mut missing).unwrap_err();
+            assert!(missing_error.contains(label));
+            assert!(missing_error.contains("observed 0"));
+
+            let mut duplicate = format!("{compact}\n{anchor}");
+            let duplicate_error = install_stage_sliced_winners(&mut duplicate).unwrap_err();
+            assert!(duplicate_error.contains(label));
             assert!(duplicate_error.contains("observed 2"));
         }
     }
@@ -370,11 +594,59 @@ mod tests {
         assert_eq!(composed.matches("// chosen helper seam").count(), 1);
         assert!(composed.contains(&chosen));
     }
+
+    #[test]
+    fn finalist_slices_only_the_two_proven_contiguous_shapes() {
+        let body = finalist_body_from(COMPACT_HELPER, SM80_SOURCE).unwrap();
+        let expected_gate = concat!(
+            "bool use_stage_sliced =\n",
+            "                (params.m == 2048 && params.k == 1536 && params.n == 768\n",
+            "                    && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)\n",
+            "                || (params.m == 4096 && params.k == 3072 && params.n == 1536\n",
+            "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);"
+        );
+        assert!(body.contains(expected_gate));
+        assert!(body.contains(
+            "static_assert(sizeof(Sm80Tf32KernelParams) == 32, \"TF32 parameter ABI drift\");"
+        ));
+        assert!(body.contains(concat!(
+            "using SgbTf32KernelSignature = void (*)(\n",
+            "    float*, const float*, const float*, const float*, Sm80Tf32KernelParams);"
+        )));
+        assert_eq!(
+            body.matches("gemm_bi_tf32_nt_compact_sliced_mainloop(")
+                .count(),
+            2
+        );
+        assert_eq!(body.matches(SM89_FINALIST_SYMBOL).count(), 2);
+        assert!(body.contains(concat!(
+            "if (use_stage_sliced) {\n",
+            "                gemm_bi_tf32_nt_compact_sliced_mainloop(\n",
+            "                    storage, problem, tile_count, thread_plan, accumulators);\n",
+            "            } else {\n",
+            "                gemm_bi_tf32_async_mainloop<\n",
+            "                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
+            "                    storage, problem, tile_count, thread_plan, accumulators);\n",
+            "            }"
+        )));
+    }
 }
 
 #[cfg(test)]
 fn reverse_sm80_transformation_for_test(source: &str) -> Result<String, String> {
     let mut restored = source.to_owned();
+    replace_exact(
+        &mut restored,
+        SLICED_BRANCH,
+        WIDE_BRANCH,
+        "stage-sliced runtime gate",
+    )?;
+    replace_exact(
+        &mut restored,
+        &format!("{SLICED_HELPERS}{ASYNC_MAINLOOP_MARKER}"),
+        ASYNC_MAINLOOP_MARKER,
+        "stage-sliced helper insertion",
+    )?;
     for transformation in TRANSFORMATIONS.into_iter().rev() {
         replace_exact(
             &mut restored,

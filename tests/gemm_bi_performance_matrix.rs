@@ -9836,6 +9836,7 @@ mod sm89_nt_finalist_once21 {
     use super::*;
 
     const SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
+    const RETAINED_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3";
     const WINDOWS: usize = 21;
 
     #[derive(Clone, Copy)]
@@ -9844,7 +9845,7 @@ mod sm89_nt_finalist_once21 {
         dims: (usize, usize, usize),
     }
 
-    const CELLS: [NtCell; 3] = [
+    const CELLS: [NtCell; 4] = [
         NtCell {
             name: "d768_in",
             dims: (2048, 768, 3072),
@@ -9856,6 +9857,10 @@ mod sm89_nt_finalist_once21 {
         NtCell {
             name: "prism",
             dims: (4621, 384, 1928),
+        },
+        NtCell {
+            name: "large_deep",
+            dims: (4096, 3072, 1536),
         },
     ];
 
@@ -10231,7 +10236,7 @@ mod sm89_nt_finalist_once21 {
             route_identity_json(candidate.evidence().route_identity()),
             route_identity_json(current.evidence().route_identity()),
         );
-        ratio_p50 < 1.0 && ratio_p95 < 1.0
+        ratio_p50 < 0.99 && ratio_p95 < 0.99
     }
 
     fn emit_finalist_binding(ctx: &GpuCtx, cell: NtCell) -> Result<(), String> {
@@ -10343,6 +10348,36 @@ mod sm89_nt_finalist_once21 {
         Ok(())
     }
 
+    fn validate_retained_manifest(
+        launch: &QualifiedPhysicalLaunch<'_>,
+        cell: NtCell,
+    ) -> Result<(), String> {
+        let evidence = launch.evidence();
+        let [node] = evidence.nodes() else {
+            return Err("retained comparator must have exactly one physical node".into());
+        };
+        let grid = (
+            (cell.dims.0.div_ceil(128) * cell.dims.1.div_ceil(64)) as u32,
+            1,
+            1,
+        );
+        if !evidence.eager_graph_equal()
+            || evidence.launch_count() != 1
+            || evidence.route_identity().tuning_table_revision != 45
+            || node.module_kind != ModuleKind::TriadSm80
+            || node.symbol != RETAINED_SYMBOL
+            || node.shape != cell.dims
+            || node.strides != (cell.dims.2, cell.dims.2, cell.dims.1)
+            || node.tile != Some((128, 64))
+            || node.launch.grid_dim != grid
+            || node.launch.block_dim != (256, 1, 1)
+            || node.launch.shared_mem_bytes != 82_944
+        {
+            return Err(format!("retained physical manifest changed: {node:?}"));
+        }
+        Ok(())
+    }
+
     fn upload_all(
         candidate_ctx: &GpuCtx,
         candidate: &mut QualifiedPhysicalLaunch<'_>,
@@ -10383,7 +10418,12 @@ mod sm89_nt_finalist_once21 {
         );
         let current_request = request(
             cell,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32RnaV1(
+                Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N64,
+                    stages: Tf32PortableStages::S3,
+                },
+            )),
         );
         presize_physical_qualification_suite(&candidate_ctx, &[candidate_request])?;
         presize_physical_qualification_suite(&current_ctx, &[current_request])?;
@@ -10392,9 +10432,7 @@ mod sm89_nt_finalist_once21 {
         candidate.validate_timed_request(&candidate_ctx, candidate_request)?;
         current.validate_timed_request(&current_ctx, current_request)?;
         validate_candidate_manifest(&candidate, cell)?;
-        if !current.evidence().eager_graph_equal() || current.evidence().launch_count() == 0 {
-            return Err("actual current route has no stable physical launch inventory".into());
-        }
+        validate_retained_manifest(&current, cell)?;
         emit_finalist_binding(&candidate_ctx, cell)?;
         let cublas_cell = CublasDenominatorCell {
             dtype: WeightDtype::F32,
@@ -10588,9 +10626,10 @@ mod sm89_nt_finalist_once21 {
             rows += cell_rows;
             admitted_cells += usize::from(admitted);
         }
-        assert_eq!(rows, 24);
+        assert_eq!(rows, 32);
+        assert_eq!(admitted_cells, CELLS.len());
         println!(
-            "{{\"schema\":\"MambaBiSm89NtFinalistOnce21CompletionV1\",\"kind\":\"sm89_nt_finalist_once21_complete\",\"cells\":3,\"admitted_cells\":{},\"rows\":24,\"windows_per_row\":21,\"paired_observations\":504,\"timed_arm_windows\":1008}}",
+            "{{\"schema\":\"MambaBiSm89NtFinalistOnce21CompletionV1\",\"kind\":\"sm89_nt_finalist_once21_complete\",\"cells\":4,\"admitted_cells\":{},\"rows\":32,\"windows_per_row\":21,\"paired_observations\":672,\"timed_arm_windows\":1344}}",
             admitted_cells
         );
     }

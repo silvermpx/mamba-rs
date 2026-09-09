@@ -1908,9 +1908,8 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
-/// CUDA 13.2: three independently admitted NT cells from the paired once-21
-/// run in internal/perf/ada-triad-finalist-integration-20260907/task3-once21-cuda132.
-/// Raw log SHA30041ac542f0128e2ec6f4da793eb42a9d29f93d06d8a24d71006d514ac117bb.
+/// CUDA 13.2: four independently admitted NT cells from the stage-sliced
+/// finalist qualification recorded in the 2026-09-09 Ada TF32 report.
 /// Lower toolkit identities below carry their own independent qualification.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
@@ -1925,24 +1924,24 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            230, 22, 129, 240, 2, 248, 236, 221, 97, 103, 127, 200, 154, 143, 15, 174, 172, 92,
-            228, 148, 219, 80, 63, 204, 151, 253, 52, 70, 51, 236, 45, 101,
+            160, 187, 6, 229, 242, 173, 2, 207, 183, 41, 18, 40, 194, 104, 5, 158, 5, 125, 174,
+            222, 120, 53, 91, 82, 148, 125, 7, 231, 185, 197, 82, 225,
         ],
         artifact_digest: [
-            34, 228, 233, 50, 153, 177, 120, 158, 153, 218, 86, 147, 214, 169, 170, 214, 168, 255,
-            115, 54, 151, 112, 68, 71, 248, 110, 21, 33, 70, 110, 2, 239,
+            221, 200, 107, 117, 55, 91, 53, 181, 223, 55, 94, 42, 240, 8, 203, 115, 99, 53, 100,
+            172, 126, 165, 196, 99, 55, 198, 106, 92, 77, 15, 215, 236,
         ],
         source_digest: [
-            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
-            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+            26, 131, 197, 236, 122, 117, 62, 81, 58, 211, 212, 217, 118, 185, 127, 55, 130, 199,
+            170, 198, 167, 41, 162, 172, 64, 122, 224, 6, 40, 78, 166, 105,
         ],
         invocation_digest: [
-            230, 22, 129, 240, 2, 248, 236, 221, 97, 103, 127, 200, 154, 143, 15, 174, 172, 92,
-            228, 148, 219, 80, 63, 204, 151, 253, 52, 70, 51, 236, 45, 101,
+            160, 187, 6, 229, 242, 173, 2, 207, 183, 41, 18, 40, 194, 104, 5, 158, 5, 125, 174,
+            222, 120, 53, 91, 82, 148, 125, 7, 231, 185, 197, 82, 225,
         ],
         header_manifest_digest: [
-            14, 22, 229, 93, 239, 192, 137, 87, 97, 202, 105, 97, 16, 22, 169, 117, 30, 167, 69,
-            27, 149, 19, 182, 125, 60, 241, 54, 248, 178, 103, 17, 5,
+            108, 0, 162, 176, 154, 86, 135, 38, 5, 108, 28, 153, 154, 94, 8, 165, 114, 215, 182,
+            220, 245, 173, 109, 57, 111, 31, 233, 10, 43, 216, 217, 185,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -1954,8 +1953,7 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         ],
     };
 
-/// CUDA 12.8: all three NT cells passed their own paired current/Fast census.
-/// Raw once21 SHA908cc72be23fcea0a42446c306307f00cd10f6b4913f06f0ae68c0b96ef33a3e.
+/// CUDA 12.8: all four NT cells passed the stage-sliced correctness census.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -1969,24 +1967,24 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            159, 134, 174, 238, 180, 151, 175, 133, 245, 92, 128, 135, 70, 88, 220, 18, 242, 19,
-            80, 130, 135, 147, 171, 66, 240, 66, 50, 49, 103, 52, 253, 54,
+            54, 45, 78, 31, 176, 70, 102, 41, 149, 247, 205, 185, 127, 45, 224, 246, 72, 179, 174,
+            228, 242, 144, 44, 10, 42, 3, 108, 71, 152, 96, 59, 247,
         ],
         artifact_digest: [
-            53, 41, 218, 38, 47, 24, 157, 32, 254, 249, 161, 144, 213, 14, 185, 187, 53, 135, 82,
-            170, 89, 207, 17, 107, 166, 57, 94, 90, 201, 220, 49, 229,
+            209, 167, 9, 143, 78, 33, 107, 163, 185, 173, 90, 124, 33, 183, 129, 54, 243, 83, 10,
+            103, 225, 237, 213, 103, 10, 251, 107, 162, 128, 49, 68, 20,
         ],
         source_digest: [
-            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
-            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+            26, 131, 197, 236, 122, 117, 62, 81, 58, 211, 212, 217, 118, 185, 127, 55, 130, 199,
+            170, 198, 167, 41, 162, 172, 64, 122, 224, 6, 40, 78, 166, 105,
         ],
         invocation_digest: [
-            159, 134, 174, 238, 180, 151, 175, 133, 245, 92, 128, 135, 70, 88, 220, 18, 242, 19,
-            80, 130, 135, 147, 171, 66, 240, 66, 50, 49, 103, 52, 253, 54,
+            54, 45, 78, 31, 176, 70, 102, 41, 149, 247, 205, 185, 127, 45, 224, 246, 72, 179, 174,
+            228, 242, 144, 44, 10, 42, 3, 108, 71, 152, 96, 59, 247,
         ],
         header_manifest_digest: [
-            11, 119, 53, 101, 234, 35, 188, 168, 205, 140, 229, 54, 196, 83, 161, 159, 11, 193, 32,
-            100, 198, 183, 20, 252, 87, 187, 2, 2, 162, 136, 10, 144,
+            182, 98, 11, 75, 29, 53, 48, 74, 177, 203, 152, 239, 30, 229, 243, 32, 89, 128, 126,
+            68, 31, 97, 73, 14, 160, 103, 233, 67, 54, 76, 178, 211,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -1998,8 +1996,7 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         ],
     };
 
-/// CUDA 13.0: all three NT cells passed their own paired current/Fast census.
-/// Raw once21 SHA65601381b92b2a694ba1e271fc700514f0ef2948025f76c49553e8126208765c.
+/// CUDA 13.0: all four NT cells passed the stage-sliced correctness census.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -2013,24 +2010,24 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            238, 242, 233, 40, 2, 240, 92, 200, 234, 191, 101, 161, 86, 213, 195, 20, 91, 18, 133,
-            94, 212, 52, 109, 117, 215, 188, 103, 16, 253, 82, 7, 120,
+            133, 128, 24, 190, 32, 183, 243, 47, 125, 19, 195, 34, 213, 124, 3, 100, 172, 109, 241,
+            212, 59, 93, 129, 188, 152, 103, 234, 105, 50, 117, 55, 147,
         ],
         artifact_digest: [
-            63, 138, 154, 62, 110, 186, 225, 107, 87, 187, 229, 147, 180, 141, 239, 246, 213, 123,
-            12, 249, 238, 165, 140, 59, 97, 191, 110, 155, 147, 122, 109, 107,
+            197, 70, 220, 248, 103, 204, 55, 105, 152, 37, 114, 35, 210, 231, 87, 89, 65, 249, 63,
+            157, 211, 165, 92, 160, 220, 172, 149, 145, 99, 74, 148, 224,
         ],
         source_digest: [
-            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
-            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+            26, 131, 197, 236, 122, 117, 62, 81, 58, 211, 212, 217, 118, 185, 127, 55, 130, 199,
+            170, 198, 167, 41, 162, 172, 64, 122, 224, 6, 40, 78, 166, 105,
         ],
         invocation_digest: [
-            238, 242, 233, 40, 2, 240, 92, 200, 234, 191, 101, 161, 86, 213, 195, 20, 91, 18, 133,
-            94, 212, 52, 109, 117, 215, 188, 103, 16, 253, 82, 7, 120,
+            133, 128, 24, 190, 32, 183, 243, 47, 125, 19, 195, 34, 213, 124, 3, 100, 172, 109, 241,
+            212, 59, 93, 129, 188, 152, 103, 234, 105, 50, 117, 55, 147,
         ],
         header_manifest_digest: [
-            112, 180, 219, 205, 153, 156, 90, 59, 69, 18, 15, 170, 241, 78, 169, 237, 214, 211,
-            195, 174, 131, 128, 153, 197, 254, 13, 1, 146, 41, 22, 237, 178,
+            2, 120, 7, 178, 80, 6, 223, 110, 182, 183, 116, 144, 153, 125, 63, 245, 49, 252, 14,
+            39, 124, 245, 159, 180, 253, 13, 70, 145, 1, 120, 183, 168,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -2058,6 +2055,12 @@ const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Nt,
         (4621, 384, 1928),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4096, 3072, 1536),
         Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
         RequiresVectorAlignmentEvidence,
     ),
@@ -13586,7 +13589,11 @@ mod tf32_tests {
                 super::super::contract::SM89_FINALIST_TUNING_REVISION
             );
             assert!(cohort.portable.is_none());
-            assert!(!cohort.cells.is_empty());
+            assert_eq!(
+                cohort.cells.len(),
+                4,
+                "the stage-sliced finalist cohort must include large_deep"
+            );
             assert_eq!(
                 SM89_FINALIST_TF32_EVIDENCE_COHORTS
                     .iter()

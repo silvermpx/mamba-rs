@@ -427,21 +427,25 @@ mod cuda_suite {
     fn compile_ptx_only(
         transformed: &str,
         label: &str,
+        supports_random_seed: bool,
     ) -> Result<(cudarc::nvrtc::Ptx, String), String> {
         let source = composed_source(transformed);
         let source_sha = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let mut options = vec![
+            "--fmad=true".into(),
+            "--extra-device-vectorization".into(),
+            "-DNDEBUG".into(),
+            "-DGEMM_BI_GROUP_M=16".into(),
+            "-DMAMBA_RS_STATE_CAP=256".into(),
+        ];
+        if supports_random_seed {
+            options.push("--frandom-seed=1295072049".into());
+        }
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(
             source,
             cudarc::nvrtc::CompileOptions {
                 arch: Some("compute_89"),
-                options: vec![
-                    "--fmad=true".into(),
-                    "--extra-device-vectorization".into(),
-                    "-DNDEBUG".into(),
-                    "-DGEMM_BI_GROUP_M=16".into(),
-                    "-DMAMBA_RS_STATE_CAP=256".into(),
-                    "--frandom-seed=1295072049".into(),
-                ],
+                options,
                 include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
                 ..Default::default()
             },
@@ -454,8 +458,9 @@ mod cuda_suite {
         device: &GpuDevice,
         transformed: &str,
         symbol: &str,
+        supports_random_seed: bool,
     ) -> Result<(Arc<CudaModule>, CudaFunction, String, String), String> {
-        let (ptx, source_sha) = compile_ptx_only(transformed, symbol)?;
+        let (ptx, source_sha) = compile_ptx_only(transformed, symbol, supports_random_seed)?;
         let ptx_sha = format!("{:x}", Sha256::digest(ptx.to_src().as_bytes()));
         let module = device
             .context()
@@ -479,9 +484,9 @@ mod cuda_suite {
         let candidate = candidate_source::candidate_source(PRODUCTION, COMPACT_LAYOUT)?;
         let retained = candidate_source::retained_source(PRODUCTION, COMPACT_LAYOUT)?;
         let (candidate_ptx, candidate_source_sha) =
-            compile_ptx_only(&candidate, "TF32 NT sliced candidate")?;
+            compile_ptx_only(&candidate, "TF32 NT sliced candidate", true)?;
         let (retained_ptx, retained_source_sha) =
-            compile_ptx_only(&retained, "TF32 NT retained A-only")?;
+            compile_ptx_only(&retained, "TF32 NT retained A-only", true)?;
         let candidate_ptx = candidate_ptx.to_src();
         let retained_ptx = retained_ptx.to_src();
         for anchor in [
@@ -537,8 +542,12 @@ mod cuda_suite {
         ctx.set_bi_tensor_cores(true);
         ctx.set_fast_gemm(false);
         let compiler = ctx.kernels.compiler_identity();
-        if compiler.nvrtc_version != (13, 2) || compiler.target.as_str() != "sm_89" {
-            return Err(format!("requires CUDA13.2/sm_89, found {compiler:?}"));
+        if !matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2))
+            || compiler.target.as_str() != "sm_89"
+        {
+            return Err(format!(
+                "requires supported CUDA12.8/13.0/13.2 on sm_89, found {compiler:?}"
+            ));
         }
         let mut math = blas::cublasMath_t::CUBLAS_DEFAULT_MATH;
         let mut pointer = blas::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
@@ -555,10 +564,20 @@ mod cuda_suite {
         }
         let candidate_body = candidate_source::candidate_source(PRODUCTION, COMPACT_LAYOUT)?;
         let retained_body = candidate_source::retained_source(PRODUCTION, COMPACT_LAYOUT)?;
+        let supports_random_seed = compiler.nvrtc_version >= (13, 0);
         let (candidate_module, candidate, candidate_source_sha, candidate_ptx_sha) =
-            compile_source(&device, &candidate_body, candidate_source::SYMBOL)?;
-        let (retained_module, retained, retained_source_sha, retained_ptx_sha) =
-            compile_source(&device, &retained_body, candidate_source::RETAINED_SYMBOL)?;
+            compile_source(
+                &device,
+                &candidate_body,
+                candidate_source::SYMBOL,
+                supports_random_seed,
+            )?;
+        let (retained_module, retained, retained_source_sha, retained_ptx_sha) = compile_source(
+            &device,
+            &retained_body,
+            candidate_source::RETAINED_SYMBOL,
+            supports_random_seed,
+        )?;
         let runtime = Runtime {
             _device: device,
             ctx,
@@ -1078,7 +1097,7 @@ mod cuda_suite {
     }
 
     #[test]
-    #[ignore = "requires exclusive quiet CC8.9/142-SM CUDA13.2; TF32 NT sliced Prism once3/once7"]
+    #[ignore = "requires exclusive quiet CC8.9/142-SM CUDA12.8/13.0/13.2; TF32 NT sliced Prism once3/once7"]
     fn ada_tf32_nt_a_ldmatrix_sliced_prism_scout3_then_once7() -> Result<(), String> {
         if std::env::var("NVIDIA_TF32_OVERRIDE").ok().as_deref() == Some("0") {
             return Err("cuBLAS Fast TF32 disabled".into());

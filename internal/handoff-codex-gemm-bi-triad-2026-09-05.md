@@ -2550,3 +2550,15 @@ explicit approval.
    concise project-style changelog, README/docs/examples and release checks.
    Review the final diff, merge into `main` only after the agreed verification,
    and stop before publication pending explicit owner approval.
+
+The Ada deterministic-TF32 NT production assembly now includes the
+stage-sliced mainloop for d768-out `(2048,1536,768)` and large-deep
+`(4096,3072,1536)` behind exact shape/stride gates. The same finalist symbol is
+retained, its private revision advances to 2, and d768-in plus canonical Prism
+keep the former async body. Forced and actual-AUTO outputs are bit-exact across
+CUDA12.8/13.0/13.2. Focused once7 qualification on 12.8 and 13.0 shows the new
+body is about1.2--2.1% faster than the former retained body in every
+eager/graph and ABBA/BAAB stratum; CUDA13.2 production once21 admits4/4 cells.
+cuBLAS Fast remains faster in these NT cells and is reported as a separate
+numerical contract. Evidence:
+`internal/perf/ada-triad-tf32-nt-stage-sliced-auto-20260909/report.md`.

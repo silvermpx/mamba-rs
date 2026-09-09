@@ -1722,7 +1722,7 @@ mod tests {
             super::super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
         );
         assert_ne!(finalist, 0);
-        assert_ne!(finalist, 2);
+        assert_ne!(finalist, 1);
 
         let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32RnaV1, generic);
         assert_eq!(portable, 45);
