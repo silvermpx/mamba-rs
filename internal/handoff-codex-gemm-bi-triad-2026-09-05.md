@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 TN target-only exact-entry stop: combining
+2D mapping, direct full-tile staging and paired epilogue in a no-fallback entry
+cuts resources125->102 registers and SASS text to.396x while preserving
+32HMMA/24LDSM/24LDGSTS, local0 and occupancy3. Exact target/tails/exception/K0/
+eager/graph/guards pass, but candidate/retained once3 p50 is
+`1.00944-1.01375`, worst p95`1.01702`. Stop before once7/Fast; low register
+count did not compensate target-entry overhead. Evidence:
+`internal/perf/ada-triad-half-tn-vec2-exact-entry-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad TF32 TN d768-out retained win: moving A's
 deterministic RNA conversion from repeated N96 GEMM loads into the transpose
 store reduces the whole two-node pipeline by6.5–7.0%. Exact target/tail/
