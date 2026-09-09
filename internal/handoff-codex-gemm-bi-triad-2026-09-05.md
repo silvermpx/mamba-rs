@@ -18,6 +18,16 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad TF32 TN d768-out retained win: moving A's
+deterministic RNA conversion from repeated N96 GEMM loads into the transpose
+store reduces the whole two-node pipeline by6.5–7.0%. Exact target/tail/
+exception/K0/eager/graph/guards pass. All once7 candidate/retained strata pass
+at p50 `.92965-.93000`, worst p95 `.93500`; GEMM resources improve128->127
+registers. cuBLAS Fast still leads by7.8–9.1% at p50, so this is the new
+retained-best, not a Fast win. Keep for joint integration after discovery.
+Evidence:
+`internal/perf/ada-triad-tf32-tn-transpose-rna-n96-d768-out-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad TF32 NT canonical-Prism full-domain resource
 stop: the test-only `(4621,384,1928)` candidate uses a2D grid and direct16-byte
 copies for216 full CTAs/60 complete K stages, but CUDA13.2 produces141
