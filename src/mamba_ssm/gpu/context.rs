@@ -1615,6 +1615,7 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
         | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
         PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
+        PhysicalGemmBackend::Sm89Mma16HalfS3V1 => ModuleKind::TriadSm89Half,
         PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
             ModuleKind::TriadSm90a
         }
@@ -1636,6 +1637,7 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => {
             super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
         }
+        PhysicalGemmBackend::Sm89Mma16HalfS3V1 => super::kernel_identity::SM89_HALF_ROUTE_REVISION,
         _ => generic,
     }
 }
@@ -1758,6 +1760,21 @@ mod tests {
             expected_route_module(PhysicalGemmBackend::ScalarFmaV1),
             ModuleKind::TriadScalar
         );
+    }
+
+    #[test]
+    fn sm89_half_routes_use_the_isolated_module_and_private_revision() {
+        let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
+        let half = expected_route_tuning_revision(PhysicalGemmBackend::Sm89Mma16HalfS3V1, generic);
+        assert_eq!(
+            half,
+            crate::mamba_ssm::gpu::kernel_identity::SM89_HALF_ROUTE_REVISION
+        );
+        assert_eq!(
+            expected_route_module(PhysicalGemmBackend::Sm89Mma16HalfS3V1),
+            ModuleKind::TriadSm89Half
+        );
+        assert_eq!(generic, 45);
     }
 
     #[test]

@@ -716,6 +716,12 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         {
             return Ok(HalfPolicyBranchSeal::Sm90a(seal));
         }
+        let ops = super::gemm_bi_triad::TcFwdOperands { y, x, w, bias_ptr };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm89_half_nn_auto_observed(ctx, observer, &ops, dims)?
+        {
+            return Ok(HalfPolicyBranchSeal::Native(seal));
+        }
     }
     // The SM89 deep-K N=128 bucket keeps the exact
     // scalar contract when its measured Split-K plan wins. Other admitted
@@ -1016,6 +1022,11 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             super::gemm_bi_triad::launch_sm90a_auto_observed(ctx, observer, sm90a_request)?
         {
             return Ok(HalfPolicyBranchSeal::Sm90a(seal));
+        }
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm89_half_nt_auto_observed(ctx, observer, dx, dy, w, dims)?
+        {
+            return Ok(HalfPolicyBranchSeal::Native(seal));
         }
         match super::gemm_bi_triad::gemm_bi_backward_dx_tc_observed(ctx, observer, dx, dy, w, dims)
         {

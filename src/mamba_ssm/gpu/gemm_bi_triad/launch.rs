@@ -12,8 +12,8 @@ use crate::mamba_ssm::gpu::kernel_identity::{
     ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
     ResolvedInstructionShape, ResolvedKernelLaunch, ResolvedNumericContract,
     ResolvedOperandConversion, ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch,
-    SCHEDULE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION,
-    build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
+    SCHEDULE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION, SM89_HALF_ROUTE_REVISION, Sha256Digest,
+    TUNING_TABLE_REVISION, build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
     enqueue_prepared_physical_launch, enqueue_with_physical_observation,
     prepare_recording_physical_observer, resolve_physical_launch_observation,
 };
@@ -128,6 +128,21 @@ struct SgbNnM64N64Params {
 }
 
 unsafe impl DeviceRepr for SgbNnM64N64Params {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+struct Sm89HalfNnParams {
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+}
+
+unsafe impl DeviceRepr for Sm89HalfNnParams {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -9596,6 +9611,13 @@ impl HalfKernelIdentity {
     fn resolve(base: &str, dtype: WeightDtype) -> Result<Self, String> {
         let module_kind = if matches!(
             base,
+            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
+                | "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
+                | "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
+        ) {
+            ModuleKind::TriadSm89Half
+        } else if matches!(
+            base,
             "gemm_bi_nn_tc"
                 | "gemm_bi_nn_tc64"
                 | "gemm_bi_nn_tc16"
@@ -9656,6 +9678,24 @@ impl HalfKernelIdentity {
             ("gemm_bi_nt_tc", WeightDtype::F16) => "gemm_bi_nt_tc_f16",
             ("gemm_bi_nt_tc64", WeightDtype::Bf16) => "gemm_bi_nt_tc64_bf16",
             ("gemm_bi_nt_tc64", WeightDtype::F16) => "gemm_bi_nt_tc64_f16",
+            ("gemm_bi_nn_sm89_m128n128_bk64_s3_v1", WeightDtype::Bf16) => {
+                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16"
+            }
+            ("gemm_bi_nn_sm89_m128n128_bk64_s3_v1", WeightDtype::F16) => {
+                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16"
+            }
+            ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::Bf16) => {
+                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16"
+            }
+            ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::F16) => {
+                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16"
+            }
+            ("gemm_bi_nt_sm89_m96n128_bk64_s3_v1", WeightDtype::Bf16) => {
+                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16"
+            }
+            ("gemm_bi_nt_sm89_m96n128_bk64_s3_v1", WeightDtype::F16) => {
+                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16"
+            }
             (_, WeightDtype::F32) => {
                 return Err("half kernel identity does not accept f32".into());
             }
@@ -9920,6 +9960,19 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
                 ResolvedInstructionFamily::MmaSync,
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             ),
+            ModuleKind::TriadSm89Half => (
+                kernels
+                    .triad_sm89_half_compiler_identity()
+                    .ok_or_else(|| "SM89 half route has no compiler identity".to_string())?,
+                context
+                    .artifacts
+                    .sm89_half
+                    .ok_or_else(|| "SM89 half route has no artifact identity".to_string())?,
+                PhysicalGemmBackend::Sm89Mma16HalfS3V1,
+                ResolvedNumericContract::MmaSyncF32V1,
+                ResolvedInstructionFamily::MmaSync,
+                ResolvedInstructionShape { m: 16, n: 8, k: 16 },
+            ),
             module_kind => {
                 return Err(format!(
                     "half physical GEMM has unsupported module owner {module_kind:?}"
@@ -9963,7 +10016,11 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
         tensor_map_revision: 0,
         tensor_maps_digest: [0; 32],
         resources_digest: half_gemm_resources_digest(identity, config),
-        tuning_table_revision: TUNING_TABLE_REVISION,
+        tuning_table_revision: if identity.module_kind == ModuleKind::TriadSm89Half {
+            SM89_HALF_ROUTE_REVISION
+        } else {
+            TUNING_TABLE_REVISION
+        },
         schedule_revision: SCHEDULE_REVISION,
     })
 }
@@ -10106,6 +10163,33 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
         "gemm_bi_nt_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_tc64_typed.get(request.dtype))
         }
+        "gemm_bi_nn_sm89_m128n128_bk64_s3_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_function(
+                    super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
+                    request.dtype,
+                )
+                .ok_or_else(|| "prepared SM89 half NN symbol is unavailable".to_string())?,
+        ),
+        "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_function(
+                    super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+                    request.dtype,
+                )
+                .ok_or_else(|| "prepared SM89 half NT Bxor symbol is unavailable".to_string())?,
+        ),
+        "gemm_bi_nt_sm89_m96n128_bk64_s3_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_function(
+                    super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3,
+                    request.dtype,
+                )
+                .ok_or_else(|| "prepared SM89 half NT M96 symbol is unavailable".to_string())?,
+        ),
         _ => return Err("native half graph symbol is not a prepared typed route".into()),
     };
     let launch = expected.launch();
@@ -10185,6 +10269,215 @@ unsafe fn enqueue_half_gemm<O: PhysicalLaunchObserver>(
         shared_mem_bytes: config.shared_mem_bytes,
     })
 }
+
+fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRoute) -> &'static str {
+    match route {
+        super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => {
+            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
+        }
+        super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor => {
+            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
+        }
+        super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => {
+            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
+        }
+    }
+}
+
+fn sm89_half_launch_config(
+    spec: &super::sm89_half_source::Sm89HalfKernelSpec,
+    dims: (usize, usize, usize),
+) -> Result<LaunchConfig, String> {
+    let output_columns = match spec.op {
+        ResolvedGemmOp::Nn => dims.2,
+        ResolvedGemmOp::Nt => dims.1,
+        ResolvedGemmOp::Tn => return Err("SM89 half AUTO has no TN route".into()),
+    };
+    Ok(LaunchConfig {
+        grid_dim: (
+            checked_tile_grid(
+                checked_u32(dims.0, "SM89 half output rows")?,
+                spec.tile.0,
+                checked_u32(output_columns, "SM89 half output columns")?,
+                spec.tile.1,
+            )?,
+            1,
+            1,
+        ),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    })
+}
+
+fn sm89_half_auto_context(ctx: &GpuCtx) -> super::sm89_half_source::Sm89HalfAutoContext {
+    super::sm89_half_source::Sm89HalfAutoContext {
+        compiler: ctx.kernels.triad_sm89_half_compiler_identity(),
+        artifact: ctx.kernels.triad_sm89_half_artifact_identity(),
+        compute_capability: ctx.compute_capability(),
+        multiprocessor_count: ctx.kernels.multiprocessor_count(),
+    }
+}
+
+pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    ops: &TcFwdOperands,
+    dims: (usize, usize, usize),
+) -> Result<Option<HalfNativeBranchSeal>, String> {
+    require_half(ops.y.dtype, "output")?;
+    if ops.x.dtype != ops.y.dtype || ops.w.dtype != ops.y.dtype {
+        return Err("SM89 half NN AUTO: mixed dtypes not supported".into());
+    }
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims);
+    let operands = F32TriadOperands {
+        output: ops.y.ptr,
+        a: ops.x.ptr,
+        b: ops.w.ptr,
+        bias: (ops.bias_ptr != 0).then_some(ops.bias_ptr),
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
+        sm89_half_auto_context(ctx),
+        super::sm89_half_source::Sm89HalfAutoRequest {
+            request: F32TriadRequest {
+                op: ResolvedGemmOp::Nn,
+                shape,
+            },
+            operands,
+            dtype: ops.y.dtype,
+        },
+    ) else {
+        return Ok(None);
+    };
+    let Some(function) = ctx
+        .kernels
+        .triad_sm89_half_function(spec.route, ops.y.dtype)
+    else {
+        return Ok(None);
+    };
+    let cfg = sm89_half_launch_config(spec, dims)?;
+    let checked = GemmDims::nn(dims, shape.lda)?;
+    let params = Sm89HalfNnParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: checked.m_i32,
+        n: checked.n_i32,
+        k: checked.k_i32,
+        lda: checked_i32(shape.lda, "SM89 half NN lda")?,
+        ldb: checked_i32(shape.ldb, "SM89 half NN ldb")?,
+        ldc: checked_i32(shape.ldc, "SM89 half NN ldc")?,
+    };
+    let base = sm89_half_base(spec.route);
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&ops.y.ptr);
+    builder.arg(&ops.x.ptr);
+    builder.arg(&ops.w.ptr);
+    builder.arg(&ops.bias_ptr);
+    builder.arg(&params);
+    let seal = unsafe {
+        enqueue_half_gemm(
+            observer,
+            &ctx.kernels,
+            &mut builder,
+            cfg,
+            HalfGemmObservation {
+                base,
+                op: ResolvedGemmOp::Nn,
+                dtype: ops.y.dtype,
+                dims,
+                strides: (shape.lda, shape.ldb, shape.ldc),
+                tile: spec.tile,
+                bk_stages: (64, 3),
+                arguments: HalfGemmArguments {
+                    output: ops.y.ptr,
+                    a: ops.x.ptr,
+                    b: ops.w.ptr,
+                    bias: ops.bias_ptr,
+                },
+            },
+            format_args!("{base}"),
+        )
+    }?;
+    Ok(Some(seal))
+}
+
+pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<Option<HalfNativeBranchSeal>, String> {
+    require_half(dx.dtype, "dX")?;
+    if dx.dtype != dy.dtype || dy.dtype != w.dtype {
+        return Err("SM89 half NT AUTO: mixed dtypes not supported".into());
+    }
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims);
+    let operands = F32TriadOperands {
+        output: dx.ptr,
+        a: dy.ptr,
+        b: w.ptr,
+        bias: None,
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
+        sm89_half_auto_context(ctx),
+        super::sm89_half_source::Sm89HalfAutoRequest {
+            request: F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape,
+            },
+            operands,
+            dtype: dx.dtype,
+        },
+    ) else {
+        return Ok(None);
+    };
+    let Some(function) = ctx.kernels.triad_sm89_half_function(spec.route, dx.dtype) else {
+        return Ok(None);
+    };
+    let cfg = sm89_half_launch_config(spec, dims)?;
+    let checked = GemmDims::nt(dims)?;
+    let alpha = 1.0_f32;
+    let base = sm89_half_base(spec.route);
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&dx.ptr);
+    builder.arg(&dy.ptr);
+    builder.arg(&w.ptr);
+    builder.arg(&alpha);
+    builder.arg(&checked.m_i32);
+    builder.arg(&checked.n_i32);
+    builder.arg(&checked.k_i32);
+    let seal = unsafe {
+        enqueue_half_gemm(
+            observer,
+            &ctx.kernels,
+            &mut builder,
+            cfg,
+            HalfGemmObservation {
+                base,
+                op: ResolvedGemmOp::Nt,
+                dtype: dx.dtype,
+                dims,
+                strides: (shape.lda, shape.ldb, shape.ldc),
+                tile: spec.tile,
+                bk_stages: (64, 3),
+                arguments: HalfGemmArguments {
+                    output: dx.ptr,
+                    a: dy.ptr,
+                    b: w.ptr,
+                    bias: 0,
+                },
+            },
+            format_args!("{base}"),
+        )
+    }?;
+    Ok(Some(seal))
+}
+
 impl TcTile {
     /// CTA tile edge in output elements.
     /// Output-tile extents `(bm, bn)` - the ladder is not square.
@@ -14668,6 +14961,66 @@ mod half_physical_trace_tests {
     }
 
     #[test]
+    fn sm89_half_auto_launch_geometry_and_nn_parameter_abi_are_frozen() {
+        assert_eq!(std::mem::size_of::<Sm89HalfNnParams>(), 32);
+        assert_eq!(std::mem::align_of::<Sm89HalfNnParams>(), 4);
+        for (route, dtype, dims, expected_grid, expected_block, expected_shared) in [
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
+                WeightDtype::Bf16,
+                (2048, 768, 3072),
+                384,
+                256,
+                98_304,
+            ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
+                WeightDtype::F16,
+                (4621, 384, 1928),
+                592,
+                256,
+                98_304,
+            ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+                WeightDtype::F16,
+                (2048, 768, 3072),
+                96,
+                256,
+                98_304,
+            ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+                WeightDtype::Bf16,
+                (4621, 384, 1928),
+                111,
+                256,
+                98_304,
+            ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3,
+                WeightDtype::F16,
+                (2048, 1536, 768),
+                264,
+                384,
+                86_016,
+            ),
+        ] {
+            let spec = super::super::sm89_half_source::kernel_spec(route, dtype).unwrap();
+            let config = sm89_half_launch_config(spec, dims).unwrap();
+            assert_eq!(config.grid_dim, (expected_grid, 1, 1), "{route:?}");
+            assert_eq!(config.block_dim, (expected_block, 1, 1), "{route:?}");
+            assert_eq!(config.shared_mem_bytes, expected_shared, "{route:?}");
+            assert_eq!(
+                sm89_half_base(route),
+                spec.symbol
+                    .trim_end_matches("_bf16")
+                    .trim_end_matches("_f16")
+            );
+        }
+    }
+
+    #[test]
     fn half_kernel_identity_uses_exact_dtype_suffix_and_module_owner() {
         for (base, module_kind) in [
             ("gemm_bi_nn_gemv", ModuleKind::TriadScalar),
@@ -14689,6 +15042,18 @@ mod half_physical_trace_tests {
             ("gemm_bi_tn_tc128x64", ModuleKind::TriadSm80),
             ("gemm_bi_nt_tc", ModuleKind::TriadSm80),
             ("gemm_bi_nt_tc64", ModuleKind::TriadSm80),
+            (
+                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1",
+                ModuleKind::TriadSm89Half,
+            ),
+            (
+                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1",
+                ModuleKind::TriadSm89Half,
+            ),
+            (
+                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1",
+                ModuleKind::TriadSm89Half,
+            ),
         ] {
             for (dtype, suffix) in [(WeightDtype::Bf16, "_bf16"), (WeightDtype::F16, "_f16")] {
                 let identity = HalfKernelIdentity::resolve(base, dtype).unwrap();
