@@ -1,0 +1,8 @@
+external preflight x5: memory.used=48MiB memory.free=48463MiB gpu.util=0% memory.util=0%; no compute PID
+internal pre: gpu_util=0% memory_util=0% used=48MiB quiet_samples=5
+compile candidate: source_sha=31802d9774610fa0792324be715f828cf0c3cbf1e1445ddaaafc789543fdd6fb ptx_sha=af2f5d283946bf832961be610e24114992290f545d5f999e8fde62044d6aed73 cubin_sha=2121be1a640450dbeea178943452cb1044d76c8684c8967fe1e4ca308de8a0c1 sass_sha=9b34f8bb9390855b6b790de7e19986efba01469c182397f89d76f20e7a5cb16f
+resources candidate/retained: regs=127/127 local=0/0 dynamic_shared=98304/98304 occupancy=1/1 HMMA=64/64 LDGSTS=18/18; physical_issue_signature_distinct=true
+exact: target PASS; M tail PASS; K-out tail PASS; reduction tail PASS; exceptional PASS; K0 PASS; eager/graph/inputs/guards PASS
+once3 candidate/retained [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[1.0006134921,1.0007362812],[1.0006540272,1.0013089105],[1.0000000000,1.0006693492],[1.0000000000,1.0006693492]]
+decision=stop_no_once7 fast=false
+internal post: gpu_util=0% memory_util=0% used=546MiB quiet_samples=5

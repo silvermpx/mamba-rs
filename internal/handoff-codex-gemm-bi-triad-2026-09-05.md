@@ -2362,3 +2362,10 @@ ratios are only `0.99007/0.99072` and `0.99007/0.99007`. The strict all-strata
 `<0.99` admission therefore fails; once7 and Fast were not run. Preserve the
 retained M64N128 route and do not retry this unchanged adapter. Frozen evidence:
 `internal/perf/ada-triad-bf16-nt-m64n192-s3-20260909/`.
+
+The follow-up F16 M64N192 issue-rebalance candidate changes the physical
+`cp.async` distribution from1/1/2/2 to2/2/1/1. Exact/resource gates pass and
+SASS proves a different issue signature with unchanged127regs/local0, but it is
+parity/slightly slower than the retained M64N192 body: p50 `1.0000–1.00065`,
+worst p95 `1.00131`. It stops before once7/Fast. Frozen evidence:
+`internal/perf/ada-triad-f16-nt-m64n192-issue2211-20260909/`.
