@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 F16 TN stage-sliced stop: interleaving four next-tile A+B
+cp.async slices with the retained M64N64/BK64/S2 regpipe+vec2 K16 groups passes
+target/tails/exception/K0/eager/graph/20-op/guard exactness. Resources improve
+125->115regs with local0/shared32768/occupancy3 and clean spill-free SASS. It
+still loses retained in all once3 strata: p50 `1.02518-1.03062`, worst p95
+`1.03724`. Stop before once7/Fast, keep regpipe+vec2 and do not retry unchanged.
+Evidence: `internal/perf/ada-triad-half-tn-regpipe-vec2-sliced-20260909/report.md`.
+
 Latest 2026-09-09 TF32 NT d768-in sliced stop: reusing the exact d768-out
 four-slice body preserves target/tails/exception/K0/eager/graph/guard bits and
 resources98regs/local0/shared49152/occupancy2. It is consistently0.45–0.65%
