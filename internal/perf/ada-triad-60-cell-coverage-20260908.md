@@ -39,15 +39,15 @@ they do not encode kernel source family, ABI or dispatcher admission.
 | F16 NT | U | U | **Y** | **Y** | **Y** |
 | BF16 NN | U | U | **Y** | **Y** | **Y** |
 | BF16 TN | N | N | N | N | N |
-| BF16 NT | U | U | **Y** | N | **Y** |
+| BF16 NT | U | U | **Y** | **Y** | **Y** |
 
-Totals: **10 Y**, **33 N**, **17 U**. The three exact-F32 NN `N*` rows have
+Totals: **11 Y**, **32 N**, **17 U**. The three exact-F32 NN `N*` rows have
 valid paired no-win evidence but their candidate timing is provisional because
 the original wrapper retained an exclusive Fixed holder; rerun the repaired
 holder-lifetime wrapper before any admission claim.
 
-The F16 NT d768-out M96N128/BK64/S3 candidate is now a strict Fast winner in
-all four once7 strata, moving that cell from N to Y. The latest half-TN sibling
+The F16 and BF16 NT d768-out M96N128/BK64/S3 candidates are now strict Fast
+winners in all four once7 strata, moving both cells from N to Y. The latest half-TN sibling
 screen converts four former U cells (F16/BF16 x
 o768/P) to N. BF16 o768 gains1.6–1.8% over retained compact but remains slower
 than Fast; the other three stop. TF32 NT o768/P now have A-only retained-best

@@ -2405,3 +2405,20 @@ in every once7 stratum by8.1–8.8% p50 and5.3–7.4% p95. It remains1.68–1.74
 slower than cuBLAS Fast at p50, so the Triad Fast-win count stays10/60. Retain
 for joint integration. Frozen evidence:
 `internal/perf/ada-triad-tf32-tn-transpose-rna-m64n64-prism-20260909/`.
+
+Four follow-ups completed. TF32 NN N96 direct-epilogue `cp.async.ca` is exact
+and resource-neutral but loses retained `cg` by0.9–2.1%; exact-F32 TN Prism
+vec4 FP64 reducer is exact/resource-clean but leaves the whole pipeline at
+parity/slightly slower. Both stopped once3 before Fast. TF32 TN M64N128/S2 is
+exact at123regs/local0/49,152B/occupancy2 but loses the new M64N64/S3 winner by
+1.1–3.2% p50. Do not retry these unchanged. Evidence:
+`internal/perf/ada-triad-tf32-nn-n96-direct-epilogue-ca-20260909/`,
+`internal/perf/ada-triad-f32-tn-prism-vec4-reducer-20260909/`, and
+`internal/perf/ada-triad-tf32-tn-transpose-rna-m64n128-s2-prism-20260909/`.
+
+BF16 NT d768-out now has the same M96N128/BK64/S3 strict Fast-winning geometry
+as F16. It is exact across target/tails/exception/K0/eager/graph/guards, uses
+120regs/local0/86,016B/occupancy1, beats retained M64N128 by7.7–7.9% p50, and
+beats cuBLAS Fast in every once7 stratum by7.4–10.3% p50 with worst p95.94901.
+Retain for joint integration. Strict Ada Triad Fast-win count is now11/60.
+Evidence: `internal/perf/ada-triad-bf16-nt-m96n128-s3-20260909/`.
