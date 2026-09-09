@@ -1666,19 +1666,31 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         } else {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
-        let loads = match spec.route {
-            super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => [
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
-                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
-            ],
-            super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
-            | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => [
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+        let (loads, opposite_x2) = match spec.route {
+            super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => (
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                ],
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
-            ],
+            ),
+            super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
+            | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => (
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+                ],
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ),
         };
         require_ptx_entry_tokens("TriadSm89Half", entry, &["cp.async.cg.shared.global", mma])?;
         require_ptx_entry_tokens("TriadSm89Half", entry, &loads)?;
+        if ptx_has_unquoted_token(&entry.body, |token| token == opposite_x2) {
+            return Err(format!(
+                "TriadSm89Half/{} PTX contains route-incompatible {opposite_x2}",
+                spec.symbol
+            ));
+        }
         if ptx_has_unquoted_token(&entry.body, |token| {
             token.starts_with("atom.")
                 || token.starts_with("atom::")
@@ -9498,6 +9510,19 @@ mod tests {
         }
     }
 
+    fn sm89_half_validator_opposite_x2(
+        route: super::super::sm89_half_source::Sm89HalfRoute,
+    ) -> &'static str {
+        use super::super::sm89_half_source::Sm89HalfRoute;
+
+        match route {
+            Sm89HalfRoute::NnM128N128Bk64S3 => "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => {
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"
+            }
+        }
+    }
+
     fn sm89_half_validator_test_entry(
         spec: super::super::sm89_half_source::Sm89HalfKernelSpec,
     ) -> String {
@@ -9542,27 +9567,51 @@ mod tests {
     }
 
     #[test]
-    fn sm89_half_validator_rejects_either_missing_ldmatrix_form_per_route() {
-        use super::super::sm89_half_source::Sm89HalfRoute;
-        use crate::mamba_ssm::gpu::dtype::WeightDtype;
-
+    fn sm89_half_validator_rejects_missing_or_swapped_ldmatrix_per_spec() {
         let baseline = sm89_half_validator_test_ptx();
-        for route in [
-            Sm89HalfRoute::NnM128N128Bk64S3,
-            Sm89HalfRoute::NtM128N128Bk64S3Bxor,
-            Sm89HalfRoute::NtM96N128Bk64S3,
-        ] {
-            let spec = *super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS
-                .iter()
-                .find(|spec| spec.route == route && spec.dtype == WeightDtype::F16)
-                .unwrap();
+        for &spec in &super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
             let entry = sm89_half_validator_test_entry(spec);
-            for required in sm89_half_validator_test_loads(route) {
-                let malformed_entry = entry.replacen(required, "not_the_required_ldmatrix", 1);
-                let malformed = baseline.replacen(&entry, &malformed_entry, 1);
-                super::validate_sm89_half_ptx("sm_89", &malformed)
-                    .expect_err(&format!("{route:?} must reject when {required} is absent"));
-            }
+            let [required_x4, required_x2] = sm89_half_validator_test_loads(spec.route);
+
+            let missing_x4_entry = entry.replacen(required_x4, "not_the_required_ldmatrix", 1);
+            let missing_x4 = baseline.replacen(&entry, &missing_x4_entry, 1);
+            super::validate_sm89_half_ptx("sm_89", &missing_x4).expect_err(&format!(
+                "{:?}/{:?} must reject when {required_x4} is absent",
+                spec.route, spec.dtype
+            ));
+
+            let opposite_x2 = sm89_half_validator_opposite_x2(spec.route);
+            let swapped_x2_entry = entry.replacen(required_x2, opposite_x2, 1);
+            assert!(swapped_x2_entry.contains("ldmatrix.sync.aligned"));
+            let swapped_x2 = baseline.replacen(&entry, &swapped_x2_entry, 1);
+            super::validate_sm89_half_ptx("sm_89", &swapped_x2).expect_err(&format!(
+                "{:?}/{:?} must reject {opposite_x2} in place of {required_x2}",
+                spec.route, spec.dtype
+            ));
+        }
+    }
+
+    #[test]
+    fn sm89_half_validator_rejects_opposite_x2_coexisting_per_spec() {
+        let baseline = sm89_half_validator_test_ptx();
+        for &spec in &super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+            let entry = sm89_half_validator_test_entry(spec);
+            let opposite_x2 = sm89_half_validator_opposite_x2(spec.route);
+            let coexisting_entry = entry.replacen(
+                "ret;",
+                &format!("{opposite_x2} {{%r4,%r5}}, [%r6];\nret;"),
+                1,
+            );
+            assert!(
+                sm89_half_validator_test_loads(spec.route)
+                    .into_iter()
+                    .all(|required| coexisting_entry.contains(required))
+            );
+            let coexisting = baseline.replacen(&entry, &coexisting_entry, 1);
+            super::validate_sm89_half_ptx("sm_89", &coexisting).expect_err(&format!(
+                "{:?}/{:?} must reject coexisting opposite {opposite_x2}",
+                spec.route, spec.dtype
+            ));
         }
     }
 
