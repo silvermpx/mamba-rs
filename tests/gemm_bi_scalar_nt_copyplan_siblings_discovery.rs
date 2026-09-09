@@ -150,7 +150,11 @@ mod cuda_suite {
         context::{BiGemmFamily, F32TriadPolicy, GpuCtx},
         device::GpuDevice,
         dtype::WeightDtype,
+        gemm_bi_triad::{
+            PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
+        },
         graph_capture::capture_into_graph,
+        kernel_identity::{ModuleKind, ResolvedGemmOp, ResolvedNumericContract},
     };
     use serde_json::json;
     use std::ffi::{CStr, c_void};
@@ -513,6 +517,36 @@ mod cuda_suite {
         Ok(())
     }
 
+    fn integrated_resource_gate(
+        function: &CudaFunction,
+        symbol: &str,
+        threads: u32,
+        expected_shared: usize,
+        register_cap: i32,
+    ) -> Result<(), String> {
+        let registers = function.num_regs().map_err(|e| format!("regs: {e:?}"))?;
+        let local = function
+            .local_size_bytes()
+            .map_err(|e| format!("local: {e:?}"))?;
+        let shared = function
+            .shared_size_bytes()
+            .map_err(|e| format!("shared: {e:?}"))?;
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(threads, 0, None)
+            .map_err(|e| format!("occupancy: {e:?}"))?;
+        if registers <= 0
+            || registers > register_cap
+            || local != 0
+            || shared as usize != expected_shared
+            || occupancy < 3
+        {
+            return Err(format!(
+                "{symbol} integrated resource gate failed: registers={registers}/{register_cap} local={local}/0 shared={shared}/{expected_shared} occupancy={occupancy}/3"
+            ));
+        }
+        Ok(())
+    }
+
     fn check_bits(
         ctx: &GpuCtx,
         fixed: &CudaFunction,
@@ -752,6 +786,121 @@ mod cuda_suite {
             }
         }
         quiet.verify_post_cohort("nt-copyplan-siblings/post")?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires integrated RTX6000Ada AUTO on frozen CUDA12.8/13.0/13.2; resource, exact eager and prepared-graph identity"]
+    fn ada_f32_nt_copyplan_siblings_integrated_auto_qualification() -> Result<(), String> {
+        if cfg!(debug_assertions) {
+            return Err("integrated AUTO qualification requires --release".into());
+        }
+        let quiet = common::gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
+        quiet.require_pre_context("nt-copyplan-siblings-integrated/pre")?;
+        let device = GpuDevice::new(0)?;
+        let id = device.identity();
+        if id.compute_capability != (8, 9) || id.multiprocessor_count != 142 {
+            return Err("requires RTX6000Ada/142 SM".into());
+        }
+        let ctx = GpuCtx::new(&device)?;
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_bi_tensor_cores(false);
+        ctx.set_fast_gemm(false);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        let fixed_compiler = ctx.kernels.compiler_identity();
+        let scalar_compiler = ctx.kernels.triad_scalar_compiler_identity();
+        if ![(12, 8), (13, 0), (13, 2)].contains(&fixed_compiler.nvrtc_version)
+            || scalar_compiler.nvrtc_version != fixed_compiler.nvrtc_version
+            || fixed_compiler.target.as_str() != "sm_89"
+            || scalar_compiler.target.as_str() != "sm_89"
+            || !fixed_compiler.nvrtc_library_known
+            || !scalar_compiler.nvrtc_library_known
+            || fixed_compiler.nvrtc_library_domain != scalar_compiler.nvrtc_library_domain
+        {
+            return Err(format!(
+                "integrated composed compiler cohort is not frozen: fixed={fixed_compiler:?} scalar={scalar_compiler:?}"
+            ));
+        }
+        let fixed = ctx
+            .kernels
+            .fixed_sm89_f32_n64_copyplan
+            .as_ref()
+            .ok_or_else(|| {
+                format!(
+                    "CopyPlan unavailable: {:?}",
+                    ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection
+                )
+            })?
+            .clone();
+        integrated_resource_gate(&fixed, FIXED, 128, 32_768, 135)?;
+        integrated_resource_gate(
+            &ctx.kernels.gemm_bi_transpose_f32_32x16_d768_v1,
+            TRANSPOSE,
+            512,
+            4_224,
+            18,
+        )?;
+
+        for cell in CELLS {
+            let request = PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Nt,
+                (cell.m, cell.out, cell.reduction),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            );
+            let qualified = qualify_physical_launch(&ctx, request)?;
+            let evidence = qualified.evidence();
+            let nodes = evidence.nodes();
+            if !evidence.eager_graph_equal()
+                || evidence.launch_count() != 2
+                || nodes.len() != 2
+                || [nodes[0].symbol, nodes[1].symbol] != [TRANSPOSE, FIXED]
+                || [nodes[0].module_kind, nodes[1].module_kind]
+                    != [ModuleKind::TriadScalar, ModuleKind::Fixed]
+                || nodes.iter().any(|node| {
+                    node.logical_op != ResolvedGemmOp::Nt
+                        || node.shape != (cell.m, cell.out, cell.reduction)
+                        || node.strides != (cell.reduction, cell.reduction, cell.out)
+                        || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+                        || node.launch.arguments_digest == [0; 32]
+                })
+                || (
+                    nodes[0].launch.grid_dim,
+                    nodes[0].launch.block_dim,
+                    nodes[0].launch.shared_mem_bytes,
+                ) != (cell.transpose_grid(), (32, 16, 1), 0)
+                || (
+                    nodes[1].launch.grid_dim,
+                    nodes[1].launch.block_dim,
+                    nodes[1].launch.shared_mem_bytes,
+                ) != (cell.fixed_grid(), (128, 1, 1), 0)
+                || nodes[0].launch.arguments_digest == nodes[1].launch.arguments_digest
+                || evidence.launch_digest() == [0; 32]
+            {
+                return Err(format!(
+                    "{} integrated AUTO eager/prepared graph identity changed: {evidence:?}",
+                    cell.name
+                ));
+            }
+            qualified.validate_red_zones(&ctx)?;
+            let mut fixture = Fixture::new(&ctx, cell, false)?;
+            check_bits(&ctx, &fixed, &mut fixture)?;
+            println!(
+                "{}",
+                json!({
+                    "schema":"MambaBiNtCopyPlanSiblingsIntegratedAutoV1",
+                    "cell":cell.name,
+                    "shape":[cell.m,cell.out,cell.reduction],
+                    "symbols":[TRANSPOSE,FIXED],
+                    "modules":["TriadScalar","Fixed"],
+                    "eager_graph_equal":true,
+                    "exact_oracle":"generic_exact_f32",
+                    "launch_digest":format!("{:02x?}",evidence.launch_digest()),
+                })
+            );
+        }
+        drop(ctx);
+        quiet.verify_post_cohort("nt-copyplan-siblings-integrated/post")?;
         Ok(())
     }
 }

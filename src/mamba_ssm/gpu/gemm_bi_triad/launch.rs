@@ -2031,6 +2031,8 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
@@ -2050,6 +2052,8 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -2091,6 +2095,8 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified => (25, 0, 0),
         ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified => (26, 0, 0),
         ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified => (38, 0, 0),
+        ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified => (39, 0, 0),
+        ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified => (40, 0, 0),
         ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified => (27, 0, 0),
         ScalarDispatchPlan::NtPrismVectorQualified => (30, 0, 0),
         ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => (29, 0, 0),
@@ -2144,6 +2150,8 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 1)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 1) => ScalarArgumentLayout {
@@ -2153,6 +2161,8 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 0)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 0) => {
@@ -2684,6 +2694,8 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => {
@@ -2694,7 +2706,12 @@ fn scalar_physical_nodes(
                         16,
                         super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
                     )
-                } else if plan == ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified {
+                } else if matches!(
+                    plan,
+                    ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+                        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+                        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+                ) {
                     ("gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1", 32, 0)
                 } else {
                     (
@@ -3690,6 +3707,8 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
@@ -8688,6 +8707,8 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -8752,8 +8773,12 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
             ldb: checked_dims.k_i32,
             ldc: checked_dims.k_i32,
         };
-        let uses_fixed_copyplan =
-            scalar_plan == ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        let uses_fixed_copyplan = matches!(
+            scalar_plan,
+            ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
+                | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
+                | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+        );
         let m64_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
                 checked_grid_product(
@@ -14136,6 +14161,74 @@ mod prepared_f32_launch_tests {
             nodes[0].launch.arguments_digest,
             nodes[1].launch.arguments_digest
         );
+    }
+
+    #[test]
+    fn scalar_nt_fixed_copyplan_siblings_preserve_two_node_identity_and_geometry() {
+        for (dims, plan, tag, scratch, transpose_grid, fixed_grid) in [
+            (
+                (2_048, 768, 3_072),
+                ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified,
+                39,
+                2_359_296,
+                (96, 24, 1),
+                (384, 1, 1),
+            ),
+            (
+                (4_621, 384, 1_928),
+                ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified,
+                40,
+                740_352,
+                (61, 12, 1),
+                (438, 1, 1),
+            ),
+        ] {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+            };
+            let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
+            assert_eq!(scalar_plan_fields(plan), (tag, 0, 0));
+            assert!(scalar_plan_requires_zero_beta(plan));
+            assert!(plan.needs_transpose_scratch());
+            assert!(!plan.needs_split_scratch());
+            assert_eq!(
+                scalar_transpose_scratch_elements(request, plan).unwrap(),
+                Some(scratch)
+            );
+
+            let raw_nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+            let prepared_nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+            assert_eq!(prepared_nodes, raw_nodes, "raw/prepared plan {plan:?}");
+            assert_eq!(raw_nodes.len(), 2);
+            assert_eq!(raw_nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+            assert_eq!(raw_nodes[0].launch.grid_dim, transpose_grid);
+            assert_eq!(raw_nodes[0].launch.block_dim, (32, 16, 1));
+            assert_eq!(raw_nodes[0].launch.shared_mem_bytes, 0);
+            assert_eq!(
+                raw_nodes[1].symbol,
+                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
+            );
+            assert_eq!(raw_nodes[1].launch.grid_dim, fixed_grid);
+            assert_eq!(raw_nodes[1].launch.block_dim, (128, 1, 1));
+            assert_eq!(raw_nodes[1].launch.shared_mem_bytes, 0);
+            assert_eq!(
+                (raw_nodes[1].tile, raw_nodes[1].bk, raw_nodes[1].stages),
+                ((64, 64), 32, 2)
+            );
+            assert_eq!(
+                scalar_route_contract(raw_nodes[0].symbol).0,
+                PhysicalGemmBackend::ScalarFmaV1
+            );
+            assert_eq!(
+                scalar_route_contract(raw_nodes[1].symbol).0,
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            );
+            assert_ne!(
+                raw_nodes[0].launch.arguments_digest,
+                raw_nodes[1].launch.arguments_digest
+            );
+        }
     }
 
     #[test]

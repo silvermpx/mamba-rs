@@ -4956,6 +4956,141 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     },
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScalarTransposeQualificationIdentity {
+    nvrtc_version: (i32, i32),
+    compile_key: [u8; 32],
+    artifact_digest: [u8; 32],
+    source_digest: [u8; 32],
+    header_manifest_digest: [u8; 32],
+    nvrtc_library_domain: [u8; 32],
+}
+
+impl ScalarTransposeQualificationIdentity {
+    fn matches(self, facts: ScalarLaunchFacts) -> bool {
+        facts.scalar_artifact.module_kind == ModuleKind::TriadScalar
+            && facts.scalar_artifact.artifact_kind == ArtifactKind::Ptx
+            && facts.scalar_artifact.compile_key == self.compile_key
+            && facts.scalar_artifact.artifact_digest == self.artifact_digest
+            && facts.scalar_compiler.source_digest == self.source_digest
+            && facts.scalar_compiler.invocation_digest == self.compile_key
+            && facts.scalar_compiler.header_manifest_digest == self.header_manifest_digest
+            && facts.scalar_compiler.target.as_str() == "sm_89"
+            && facts.scalar_compiler.nvrtc_version == self.nvrtc_version
+            && facts.scalar_compiler.nvrtc_library_domain == self.nvrtc_library_domain
+            && facts.scalar_compiler.nvrtc_library_known
+            && facts.scalar_compiler.output_kind == ArtifactKind::Ptx
+            && facts.scalar_compiler.composer_revision == COMPOSER_REVISION
+            && facts.scalar_compiler.compiler_revision == COMPILER_REVISION
+            && facts.scalar_compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
+            && facts.scalar_compiler.schedule_revision == SCHEDULE_REVISION
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NtFixedCopyPlanComposedQualificationIdentity {
+    scalar: ScalarTransposeQualificationIdentity,
+    fixed: FixedCopyPlanQualificationIdentity,
+}
+
+impl NtFixedCopyPlanComposedQualificationIdentity {
+    fn matches(self, facts: ScalarLaunchFacts) -> bool {
+        self.scalar.nvrtc_version == self.fixed.nvrtc_version
+            && self.scalar.matches(facts)
+            && self.fixed.matches(facts)
+    }
+}
+
+const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
+    46, 194, 80, 187, 109, 173, 186, 103, 14, 36, 85, 42, 153, 57, 180, 195, 8, 171, 74, 15, 240,
+    195, 225, 30, 138, 195, 124, 98, 177, 254, 209, 98,
+];
+
+/// Frozen whole-pipeline identities for the portable transpose followed by
+/// the Fixed CopyPlan kernel. Each entry binds both modules to the same live
+/// toolkit domain; a Fixed-only match is intentionally insufficient.
+const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
+    &[NtFixedCopyPlanComposedQualificationIdentity] = &[
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: ScalarTransposeQualificationIdentity {
+            nvrtc_version: (12, 8),
+            compile_key: [
+                218, 93, 171, 239, 245, 85, 112, 209, 251, 108, 164, 58, 29, 74, 138, 167, 162,
+                169, 210, 94, 251, 100, 54, 237, 127, 3, 196, 162, 138, 115, 217, 134,
+            ],
+            artifact_digest: [
+                92, 168, 107, 194, 225, 189, 85, 72, 151, 126, 12, 24, 208, 40, 121, 21, 226, 125,
+                87, 34, 111, 28, 195, 221, 15, 95, 218, 241, 90, 84, 157, 184,
+            ],
+            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+            header_manifest_digest: [
+                241, 78, 18, 144, 40, 231, 99, 194, 47, 184, 123, 148, 74, 200, 185, 15, 38, 61,
+                71, 64, 96, 253, 93, 173, 112, 170, 225, 113, 55, 243, 150, 98,
+            ],
+            nvrtc_library_domain: [
+                38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+                146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+            ],
+        },
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[0],
+    },
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: ScalarTransposeQualificationIdentity {
+            nvrtc_version: (13, 0),
+            compile_key: [
+                206, 237, 166, 233, 213, 92, 253, 22, 109, 175, 214, 56, 169, 5, 93, 175, 138, 27,
+                176, 68, 245, 115, 195, 52, 158, 20, 123, 255, 3, 184, 254, 123,
+            ],
+            artifact_digest: [
+                158, 235, 36, 113, 138, 235, 196, 161, 29, 14, 221, 218, 237, 115, 180, 105, 154,
+                140, 173, 141, 227, 203, 125, 83, 182, 204, 201, 230, 183, 47, 33, 102,
+            ],
+            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+            header_manifest_digest: [
+                218, 132, 133, 168, 193, 166, 58, 16, 16, 132, 51, 202, 204, 220, 86, 29, 124, 184,
+                98, 49, 143, 210, 204, 118, 60, 75, 184, 194, 160, 117, 177, 189,
+            ],
+            nvrtc_library_domain: [
+                112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241,
+                16, 238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+            ],
+        },
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[1],
+    },
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: ScalarTransposeQualificationIdentity {
+            nvrtc_version: (13, 2),
+            compile_key: [
+                130, 46, 191, 13, 218, 125, 207, 156, 79, 92, 90, 34, 19, 136, 77, 222, 66, 171,
+                69, 245, 207, 35, 132, 121, 168, 24, 86, 4, 44, 48, 43, 124,
+            ],
+            artifact_digest: [
+                114, 41, 222, 66, 227, 86, 38, 17, 254, 69, 16, 146, 195, 169, 45, 84, 14, 41, 8,
+                146, 11, 31, 186, 196, 154, 55, 207, 232, 30, 104, 32, 150,
+            ],
+            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+            header_manifest_digest: [
+                201, 169, 120, 47, 158, 22, 143, 115, 22, 184, 222, 18, 121, 145, 103, 223, 49,
+                196, 251, 190, 249, 43, 13, 107, 144, 9, 12, 61, 128, 110, 254, 147,
+            ],
+            nvrtc_library_domain: [
+                208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40,
+                234, 34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
+            ],
+        },
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[2],
+    },
+];
+
+fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability == (8, 9)
+        && facts.multiprocessor_count == 142
+        && NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS
+            .iter()
+            .copied()
+            .any(|identity| identity.matches(facts))
+}
+
 fn qualified_fixed_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && facts.multiprocessor_count == 142
@@ -4999,6 +5134,24 @@ const NT_D768_OUT_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     lda: 768,
     ldb: 768,
     ldc: 1536,
+};
+
+const NT_D768_IN_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+    m: 2048,
+    k: 768,
+    n: 3072,
+    lda: 3072,
+    ldb: 3072,
+    ldc: 768,
+};
+
+const NT_PRISM_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+    m: 4621,
+    k: 384,
+    n: 1928,
+    lda: 1928,
+    ldb: 1928,
+    ldc: 384,
 };
 
 fn qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts: ScalarLaunchFacts) -> bool {
@@ -5266,6 +5419,22 @@ pub(super) fn scalar_launch_plan(
     {
         return Ok(ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified);
     }
+    if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
+        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
+        && request.shape == NT_D768_IN_FIXED_COPYPLAN_SM89_CELL
+        && qualified_nt_d768_transpose_m64n64_operands(operands)
+    {
+        return Ok(ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified);
+    }
+    if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
+        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
+        && request.shape == NT_PRISM_FIXED_COPYPLAN_SM89_CELL
+        && qualified_nt_d768_transpose_m64n64_operands(operands)
+    {
+        return Ok(ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified);
+    }
     if fallback
         == (ScalarDispatchPlan::NtSplitKMain {
             n_main: 2_048,
@@ -5419,6 +5588,8 @@ pub(super) enum ScalarDispatchPlan {
     NtD768TransposeM64N64Qualified,
     NtD768OutTransposeM64N64Qualified,
     NtD768OutSm89FixedCopyPlanQualified,
+    NtD768InSm89FixedCopyPlanQualified,
+    NtPrismSm89FixedCopyPlanQualified,
     NtLargeDeepTransposeM64N64Qualified,
     NtPrismVectorQualified,
     NtD128OutTransposeM64N64Qualified,
@@ -5450,6 +5621,8 @@ impl ScalarDispatchPlan {
                 | Self::NtD768TransposeM64N64Qualified
                 | Self::NtD768OutTransposeM64N64Qualified
                 | Self::NtD768OutSm89FixedCopyPlanQualified
+                | Self::NtD768InSm89FixedCopyPlanQualified
+                | Self::NtPrismSm89FixedCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
                 | Self::NtPrismVectorQualified
                 | Self::NtD128OutTransposeM64N64Qualified
@@ -5784,8 +5957,8 @@ pub(super) fn nt_routes_to_big(
 #[cfg(test)]
 mod scalar_wave_policy_tests {
     use super::{
-        FIXED_COPYPLAN_EVIDENCE_COHORTS, ScalarDispatchPlan, ScalarLaunchFacts,
-        scalar_dispatch_plan, scalar_launch_plan,
+        FIXED_COPYPLAN_EVIDENCE_COHORTS, NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
+        ScalarDispatchPlan, ScalarLaunchFacts, scalar_dispatch_plan, scalar_launch_plan,
     };
     use crate::mamba_ssm::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::mamba_ssm::gpu::kernel_identity::{
@@ -5936,6 +6109,32 @@ mod scalar_wave_policy_tests {
             compute_capability: (8, 9),
             multiprocessor_count: RTX_6000_ADA_SMS,
         }
+    }
+
+    fn nt_fixed_copyplan_sibling_facts(index: usize) -> ScalarLaunchFacts {
+        let identity = NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS[index];
+        let mut facts = fixed_copyplan_facts(index);
+        facts.scalar_artifact = ArtifactIdentity {
+            module_kind: ModuleKind::TriadScalar,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: identity.scalar.compile_key,
+            artifact_digest: identity.scalar.artifact_digest,
+        };
+        facts.scalar_compiler = CompilerIdentity {
+            source_digest: identity.scalar.source_digest,
+            invocation_digest: identity.scalar.compile_key,
+            header_manifest_digest: identity.scalar.header_manifest_digest,
+            target: CudaTarget::new("sm_89").unwrap(),
+            nvrtc_version: identity.scalar.nvrtc_version,
+            nvrtc_library_domain: identity.scalar.nvrtc_library_domain,
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        facts
     }
 
     #[test]
@@ -6907,6 +7106,265 @@ mod scalar_wave_policy_tests {
             scalar_launch_plan(absent, request, operands).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: false }
         );
+    }
+
+    #[test]
+    fn nt_fixed_copyplan_sibling_selector_admits_only_the_two_retained_cells() {
+        let operands = nn_qualified_operands();
+        let cells = [
+            (
+                (2_048, 768, 3_072),
+                "NtD768InSm89FixedCopyPlanQualified",
+                ScalarDispatchPlan::NtFinal { slim: false },
+            ),
+            (
+                (4_621, 384, 1_928),
+                "NtPrismSm89FixedCopyPlanQualified",
+                ScalarDispatchPlan::NtFinal { slim: true },
+            ),
+        ];
+        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS.len() {
+            let facts = nt_fixed_copyplan_sibling_facts(cohort);
+            for (dims, selected, fallback) in cells {
+                let request = F32TriadRequest {
+                    op: ResolvedGemmOp::Nt,
+                    shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+                };
+                assert_eq!(
+                    scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap(),
+                    fallback,
+                    "cohort {cohort} cell {dims:?} prior plan"
+                );
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        scalar_launch_plan(facts, request, operands).unwrap()
+                    ),
+                    selected,
+                    "cohort {cohort} cell {dims:?} retained route"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nt_fixed_copyplan_sibling_selector_fails_closed_on_contract_mutations() {
+        let facts = nt_fixed_copyplan_sibling_facts(2);
+        let operands = nn_qualified_operands();
+        for (dims, selected, fallback) in [
+            (
+                (2_048, 768, 3_072),
+                "NtD768InSm89FixedCopyPlanQualified",
+                ScalarDispatchPlan::NtFinal { slim: false },
+            ),
+            (
+                (4_621, 384, 1_928),
+                "NtPrismSm89FixedCopyPlanQualified",
+                ScalarDispatchPlan::NtFinal { slim: true },
+            ),
+        ] {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+            };
+            let dimensions = [request.shape.m, request.shape.k, request.shape.n];
+            for axis in 0..3 {
+                for delta in [-1_isize, 1] {
+                    let mut neighbor = dimensions;
+                    neighbor[axis] = neighbor[axis].checked_add_signed(delta).unwrap();
+                    let neighbor = F32TriadRequest {
+                        op: ResolvedGemmOp::Nt,
+                        shape: F32TriadShape::contiguous(
+                            ResolvedGemmOp::Nt,
+                            (neighbor[0], neighbor[1], neighbor[2]),
+                        ),
+                    };
+                    assert_ne!(
+                        format!(
+                            "{:?}",
+                            scalar_launch_plan(facts, neighbor, operands).unwrap()
+                        ),
+                        selected,
+                        "shape neighbor {neighbor:?}"
+                    );
+                }
+            }
+            for shape in [
+                F32TriadShape {
+                    lda: request.shape.lda + 1,
+                    ..request.shape
+                },
+                F32TriadShape {
+                    ldb: request.shape.ldb + 1,
+                    ..request.shape
+                },
+                F32TriadShape {
+                    ldc: request.shape.ldc + 1,
+                    ..request.shape
+                },
+            ] {
+                assert_ne!(
+                    format!(
+                        "{:?}",
+                        scalar_launch_plan(
+                            facts,
+                            F32TriadRequest {
+                                op: ResolvedGemmOp::Nt,
+                                shape,
+                            },
+                            operands,
+                        )
+                        .unwrap()
+                    ),
+                    selected,
+                    "stride mutation {shape:?}"
+                );
+            }
+            for mutation in [
+                F32TriadOperands {
+                    alpha: -1.0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    beta: -0.0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    beta: 1.0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    bias: Some(0x4000),
+                    ..operands
+                },
+                F32TriadOperands {
+                    output: 0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    output: operands.output + 4,
+                    ..operands
+                },
+                F32TriadOperands { a: 0, ..operands },
+                F32TriadOperands {
+                    a: operands.a + 4,
+                    ..operands
+                },
+                F32TriadOperands { b: 0, ..operands },
+                F32TriadOperands {
+                    b: operands.b + 4,
+                    ..operands
+                },
+            ] {
+                assert_eq!(
+                    scalar_launch_plan(facts, request, mutation).unwrap(),
+                    fallback,
+                    "operand mutation {mutation:?}"
+                );
+            }
+
+            let mut environment_mutations = Vec::new();
+            let mut mutation = facts;
+            mutation.compute_capability = (9, 0);
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.multiprocessor_count = 141;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_copyplan_loaded = false;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.nvrtc_version = (13, 1);
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.source_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.invocation_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.header_manifest_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.nvrtc_library_domain[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_artifact.compile_key[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_artifact.artifact_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_artifact.module_kind = ModuleKind::TriadScalar;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_artifact.artifact_kind = ArtifactKind::Cubin;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.target = CudaTarget::new("compute_89").unwrap();
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.nvrtc_library_known = false;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.fixed_compiler.output_kind = ArtifactKind::Cubin;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_artifact.module_kind = ModuleKind::TriadSm80;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_artifact.artifact_kind = ArtifactKind::Cubin;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_artifact.compile_key[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_artifact.artifact_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.source_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.invocation_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.header_manifest_digest[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.nvrtc_library_domain[0] ^= 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.nvrtc_version = (13, 1);
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.target = CudaTarget::new("compute_89").unwrap();
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.nvrtc_library_known = false;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.output_kind = ArtifactKind::Cubin;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.composer_revision = COMPOSER_REVISION + 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.compiler_revision = COMPILER_REVISION + 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.numeric_abi_revision = NUMERIC_ABI_REVISION + 1;
+            environment_mutations.push(mutation);
+            mutation = facts;
+            mutation.scalar_compiler.schedule_revision = SCHEDULE_REVISION + 1;
+            environment_mutations.push(mutation);
+            for mutation in environment_mutations {
+                assert_eq!(
+                    scalar_launch_plan(mutation, request, operands).unwrap(),
+                    fallback,
+                    "identity mutation {mutation:?}"
+                );
+            }
+        }
     }
 
     #[test]
