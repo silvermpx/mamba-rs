@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad TF32 NT canonical-Prism K8-regpipe stop: the
+linear-grid222 scheduling candidate double-buffers only A and bounds B lifetime
+to one n-atom. Exact target/tails/exception/K0/eager/graph/guards pass;
+candidate and retained both use98regs/local0/shared49152/occupancy2. It is
+stable parity/slightly slower at once3 p50`1.00129-1.00169`, worst p95
+`1.00446`, so stop before once7/Fast and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-tf32-nt-prism-k8-regpipe-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad F16 TN target-only exact-entry stop: combining
 2D mapping, direct full-tile staging and paired epilogue in a no-fallback entry
 cuts resources125->102 registers and SASS text to.396x while preserving
