@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 F16 NN B-x4 stop: the test-only d768-in Fixed-S3 candidate
+fuses four literal B `ldmatrix.x2.trans` loads into two x4 loads. It passes
+target/M/N/K-tail/exception/K0/eager/graph/guard exactness and improves
+registers188->168 with local0/shared98304/occupancy1. It nevertheless loses
+the frozen retained S3 kernel in every once3 stratum: eager p50
+`1.01072-1.01119`, graph p50 `1.01277-1.01278`, worst p95 `1.01314`.
+Stop before once7/Fast, keep S3 and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-half-nn-s3-bx4-20260909/report.md`.
+
 Latest 2026-09-09 exact-F32 TN direct dual-chunk stop: the test-only one-node
 direct row-major-X candidate passes both raw-plane and final target/tail/
 exception/nonunit/K0/eager/graph/20-op exact gates. Its raw/fused kernels use
