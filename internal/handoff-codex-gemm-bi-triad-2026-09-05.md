@@ -18,6 +18,16 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+NEW 2026-09-09 TF32 NT d768-out retained-best: the test-only stage-sliced
+A-ldmatrix candidate interleaves four bounded next-stage copy slices before
+ascending K8 MMA issues. Exact target/aligned+misaligned-tail/exception/K0,
+guards and eager/graph pass; resources stay98regs/local0/shared49152/occupancy2.
+It beats the prior A-only ldmatrix in all once7 strata by1.28–1.47% (p50
+`0.98526-0.98610`, worst p95 `0.98717`). cuBLAS Fast is still
+`1.41169-1.41969x` faster, so preserve for joint integration but do not count a
+Fast win. Evidence:
+`internal/perf/ada-triad-tf32-nt-a-ldmatrix-sliced-20260909/report.md`.
+
 Latest 2026-09-09 F16 NN B-x4 stop: the test-only d768-in Fixed-S3 candidate
 fuses four literal B `ldmatrix.x2.trans` loads into two x4 loads. It passes
 target/M/N/K-tail/exception/K0/eager/graph/guard exactness and improves
