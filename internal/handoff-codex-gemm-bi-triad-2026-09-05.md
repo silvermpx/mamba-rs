@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 exact-F32 TN direct dual-chunk stop: the test-only one-node
+direct row-major-X candidate passes both raw-plane and final target/tail/
+exception/nonunit/K0/eager/graph/20-op exact gates. Its raw/fused kernels use
+151/168regs, local0, shared32768, occupancy3 with clean SASS. The comparator is
+the actual two-node transpose+dual-chunk retained-best. Candidate/retained p50
+is1.1618-1.1652 and worst p95 is1.1661, so stop before Fast and keep the
+transpose+CopyPlan retained kernel. Evidence:
+`internal/perf/ada-triad-f32-tn-direct-dual-chunk-20260909/report.md`.
+
 Latest 2026-09-09 half-NT GROUP_M8 stop: changing only the F16 d768-out
 M64N128/S3 CTA raster from row-major to grouped traversal preserves exact full,
 ragged-group, M/N/K-tail, exceptional, K0, eager/graph and guard bits. Resources
