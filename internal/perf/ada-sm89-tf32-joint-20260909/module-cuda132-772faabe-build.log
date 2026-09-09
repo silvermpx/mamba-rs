@@ -1,0 +1,5 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-tf32-joint-module.yAtdDV)
+    Finished `release` profile [optimized] target(s) in 54.21s
+  Executable unittests src/lib.rs (target/release/deps/mamba_rs-960e25fc26c77255)
+  Executable tests/gemm_bi_sm89_tf32_joint_module_qualification.rs (target/release/deps/gemm_bi_sm89_tf32_joint_module_qualification-6e6513236cc57186)
+  Executable tests/kernel_identity.rs (target/release/deps/kernel_identity-2d04f68ee4f95590)

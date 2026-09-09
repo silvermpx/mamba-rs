@@ -52,6 +52,9 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   Module-only wiring now compiles on Ada/CUDA13.2 and passes seven focused
   composition, ABI/resource-validator and artifact-identity tests. Live module
   loading and the five-cell launch/selector layer remain pending.
+- [x] TF32 joint module live CUDA13.2 loading/ABI/resources: all five symbols
+  bound with local0 and no exclusions; 1/1 module test passes. Five-cell
+  selector/launch integration and the combined admission batch remain open.
 - [ ] Remaining half improvements beyond the eleven Fast-winning cells:
   F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells. Establish
   the missing actual-AUTO comparisons before selecting the final cell map.
