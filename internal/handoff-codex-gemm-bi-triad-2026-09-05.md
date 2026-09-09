@@ -2380,3 +2380,12 @@ is still `2.4007–2.4052x` p50, so this is not a Fast win. An initial invalid
 harness run forwarded batch zero and was rejected before timing; a new native
 regression pins the real fixture batch. Retain for joint dispatcher integration.
 Frozen evidence: `internal/perf/ada-triad-f32-tn-direct-prism-bk16-20260909/`.
+
+F16 NT d768-out `(2048,1536,768)` now has a strict cuBLAS Fast winner. The
+M96N128/BK64/S3 candidate's3x4 warp mapping reduces staged traffic9.77%,
+registers127->120, shared98,304->86,016 and LDGSTS18->15 while keeping64 HMMA.
+All exact/resource/guard gates pass. It beats retained M64N192 by6.5–6.8% p50
+with worst p95.93716, then beats Fast in all once7 strata: p50.89811-.91410,
+worst p95.92069. Retain for joint integration; discovery did not change the
+production dispatcher. The strict Ada Triad Fast-win count is now10/60.
+Frozen evidence: `internal/perf/ada-triad-f16-nt-m96n128-s3-20260909/`.

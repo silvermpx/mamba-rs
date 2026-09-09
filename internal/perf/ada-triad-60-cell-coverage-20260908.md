@@ -7,8 +7,8 @@ claim or release qualification. Five shapes are `i128=(1024,128,512)`,
 
 > **Scope correction:** this matrix tracks logical Triad workload/candidate
 > evidence, not production-Triad physical-route ownership or admission. Of the
-> nine `Y` cells, five use Fixed NN kernels with the five-argument Fixed ABI and
-> four use test-only NT adapters; zero are already integrated production-Triad
+> ten `Y` cells, five use Fixed NN kernels with the five-argument Fixed ABI and
+> five use test-only NT adapters; zero are already integrated production-Triad
 > replacements. The authoritative historical inventory of the public AUTO
 > paths is the [current21 production-route smoke](ada-triad-current21-20260906/smoke-inventory.md),
 > which records production Triad physical routes for all 60 cells.
@@ -16,8 +16,8 @@ claim or release qualification. Five shapes are `i128=(1024,128,512)`,
 | `Y` candidate ownership | Cells | Physical status |
 | --- | ---: | --- |
 | Fixed NN, F16/BF16 | 5 | Existing Fixed five-argument holder, not a production-Triad admission |
-| Test-only NT adapter, F16/BF16 | 4 | Test-only seven-argument symbol, not a production-Triad admission |
-| Integrated production-Triad replacement | 0 | None of the nine `Y` candidates is integrated yet |
+| Test-only NT adapter, F16/BF16 | 5 | Test-only seven-argument symbol, not a production-Triad admission |
+| Integrated production-Triad replacement | 0 | None of the ten `Y` candidates is integrated yet |
 
 Legend: **Y** = strict paired cuBLAS Fast win in every eager/graph x ABBA/BAAB
 p50+p95 stratum; **N** = explicit paired Fast evidence exists but strict win
@@ -36,17 +36,19 @@ they do not encode kernel source family, ABI or dispatcher admission.
 | TF32 NT | U | U | N | N | N |
 | F16 NN | U | U | N | **Y** | **Y** |
 | F16 TN | N | N | N | N | N |
-| F16 NT | U | U | **Y** | N | **Y** |
+| F16 NT | U | U | **Y** | **Y** | **Y** |
 | BF16 NN | U | U | **Y** | **Y** | **Y** |
 | BF16 TN | N | N | N | N | N |
 | BF16 NT | U | U | **Y** | N | **Y** |
 
-Totals: **9 Y**, **34 N**, **17 U**. The three exact-F32 NN `N*` rows have
+Totals: **10 Y**, **33 N**, **17 U**. The three exact-F32 NN `N*` rows have
 valid paired no-win evidence but their candidate timing is provisional because
 the original wrapper retained an exclusive Fixed holder; rerun the repaired
 holder-lifetime wrapper before any admission claim.
 
-The latest half-TN sibling screen converts four former U cells (F16/BF16 x
+The F16 NT d768-out M96N128/BK64/S3 candidate is now a strict Fast winner in
+all four once7 strata, moving that cell from N to Y. The latest half-TN sibling
+screen converts four former U cells (F16/BF16 x
 o768/P) to N. BF16 o768 gains1.6–1.8% over retained compact but remains slower
 than Fast; the other three stop. TF32 NT o768/P now have A-only retained-best
 improvements of9.4–10.0% over actual AUTO, but remain N because Fast is still
@@ -62,7 +64,7 @@ Fast evidence and therefore close from U to N.
 
 ## Highest-value next work
 
-1. Integrate and jointly qualify the nine strict winners plus all distinct
+1. Integrate and jointly qualify the ten strict winners plus all distinct
    retained-best improvements; do not delete routes used by other shapes/GPUs.
 2. Resolve exact-F32 blind spots: NN i128/o128, NT i128/o128 and paired Fast for
    NT o768. For TN i768/o768/P, preserve each selected SplitM partition and its
