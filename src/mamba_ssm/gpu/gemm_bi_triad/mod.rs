@@ -44,6 +44,7 @@ mod qualification;
 mod sm89_finalist_source;
 mod sm89_exact_f32_source;
 mod sm89_half_source;
+mod sm89_tf32_joint_source;
 #[cfg(test)]
 mod training_pipeline_tests;
 
@@ -116,4 +117,15 @@ pub use sm89_exact_f32_source::{
     D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL,
     SM89_EXACT_F32_KERNEL_SPECS, Sm89ExactF32DualChunkParams, Sm89ExactF32KernelKind,
     Sm89ExactF32KernelSpec, Sm89ExactF32TnRoute,
+};
+#[doc(hidden)]
+pub use sm89_tf32_joint_source::{
+    GEMM_DRIVER_ABI as SM89_TF32_JOINT_GEMM_DRIVER_ABI,
+    GEMM_TERMINAL_ARGUMENT as SM89_TF32_JOINT_GEMM_TERMINAL_ARGUMENT,
+    NN_ADD_HALF_DIRECT_N96_SYMBOL, NN_ADD_HALF_N96_SYMBOL, SM89_TF32_JOINT_KERNEL_SPECS,
+    SM89_TF32_JOINT_SYMBOLS, Sm89Tf32JointAbiParameter, Sm89Tf32JointGemmParams,
+    Sm89Tf32JointKernelKind, Sm89Tf32JointKernelSpec, Sm89Tf32JointTransposeParams,
+    TN_PRE_RNA_M64N64_SYMBOL, TN_PRE_RNA_N96_SYMBOL, TN_PRE_RNA_TRANSPOSE_SYMBOL,
+    TRANSPOSE_DRIVER_ABI as SM89_TF32_JOINT_TRANSPOSE_DRIVER_ABI,
+    TRANSPOSE_TERMINAL_ARGUMENT as SM89_TF32_JOINT_TRANSPOSE_TERMINAL_ARGUMENT,
 };

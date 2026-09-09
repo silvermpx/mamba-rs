@@ -670,12 +670,16 @@ impl MambaKernels {
             sm89_half_rejection,
             sm89_exact_f32,
             sm89_exact_f32_rejection,
+            sm89_tf32_joint,
+            sm89_tf32_joint_rejection,
             specialized,
         ) = if let Some(artifacts) = sm120_artifacts {
             (
                 artifacts.fixed,
                 artifacts.scalar,
                 artifacts.sm80,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -715,6 +719,15 @@ impl MambaKernels {
                 } else {
                     (None, None)
                 };
+            let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
+                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                    match compile(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint) {
+                        Ok(module) => (Some(module), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
+                };
             let specialized = match (arch, device_cc) {
                 ("sm_90a", Some((9, 0))) => compile(super::kernel_identity::ModuleKind::TriadSm90a)
                     .ok()
@@ -739,6 +752,8 @@ impl MambaKernels {
                 sm89_half_rejection,
                 sm89_exact_f32,
                 sm89_exact_f32_rejection,
+                sm89_tf32_joint,
+                sm89_tf32_joint_rejection,
                 specialized,
             )
         };
@@ -782,6 +797,8 @@ impl MambaKernels {
             sm89_half_rejection,
             sm89_exact_f32,
             sm89_exact_f32_rejection,
+            sm89_tf32_joint,
+            sm89_tf32_joint_rejection,
             specialized,
         )?;
         // A rejected TF32 module used to be recorded and never shown: the
@@ -872,6 +889,35 @@ impl MambaKernels {
             super::diagnostics::warn_once(once, || {
                 format!(
                     "Ada exact-F32 Triad symbol {} is excluded while its siblings remain available: {}",
+                    exclusion.symbol, exclusion.reason
+                )
+            });
+        }
+        if let Some(reason) = triad.sm89_tf32_joint_rejection() {
+            static TF32_JOINT_MODULE: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&TF32_JOINT_MODULE, || {
+                format!(
+                    "the optional Ada TF32 joint module is not bound ({reason}); the existing deterministic TF32 kernels remain available"
+                )
+            });
+        }
+        for exclusion in triad.sm89_tf32_joint_exclusions() {
+            static TRANSPOSE: std::sync::Once = std::sync::Once::new();
+            static TN_N96: std::sync::Once = std::sync::Once::new();
+            static TN_M64N64: std::sync::Once = std::sync::Once::new();
+            static NN_N96: std::sync::Once = std::sync::Once::new();
+            static NN_N96_BASELINE: std::sync::Once = std::sync::Once::new();
+            let once = match exclusion.symbol {
+                super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL => &TRANSPOSE,
+                super::gemm_bi_triad::TN_PRE_RNA_N96_SYMBOL => &TN_N96,
+                super::gemm_bi_triad::TN_PRE_RNA_M64N64_SYMBOL => &TN_M64N64,
+                super::gemm_bi_triad::NN_ADD_HALF_DIRECT_N96_SYMBOL => &NN_N96,
+                super::gemm_bi_triad::NN_ADD_HALF_N96_SYMBOL => &NN_N96_BASELINE,
+                _ => continue,
+            };
+            super::diagnostics::warn_once(once, || {
+                format!(
+                    "Ada TF32 joint symbol {} is excluded while its siblings remain available: {}",
                     exclusion.symbol, exclusion.reason
                 )
             });
@@ -1383,6 +1429,35 @@ impl MambaKernels {
     #[doc(hidden)]
     pub fn triad_sm89_exact_f32_function(&self, symbol: &str) -> Option<&CudaFunction> {
         self.triad.sm89_exact_f32_function(symbol)
+    }
+
+    pub fn triad_sm89_tf32_joint_compiler_identity(
+        &self,
+    ) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.triad.sm89_tf32_joint_compiler_identity()
+    }
+
+    pub fn triad_sm89_tf32_joint_artifact_identity(
+        &self,
+    ) -> Option<super::kernel_identity::ArtifactIdentity> {
+        self.triad.artifact_set_identity().sm89_tf32_joint
+    }
+
+    pub fn triad_sm89_tf32_joint_rejection(&self) -> Option<&str> {
+        self.triad.sm89_tf32_joint_rejection()
+    }
+
+    pub fn triad_sm89_tf32_joint_exclusions(&self) -> Vec<(&'static str, &str)> {
+        self.triad
+            .sm89_tf32_joint_exclusions()
+            .iter()
+            .map(|excluded| (excluded.symbol, excluded.reason.as_str()))
+            .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn triad_sm89_tf32_joint_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.triad.sm89_tf32_joint_function(symbol)
     }
 
     pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {

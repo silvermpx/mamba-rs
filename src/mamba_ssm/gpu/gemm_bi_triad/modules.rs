@@ -514,6 +514,8 @@ pub(crate) struct CompiledModule {
     sm89_half_driver_abi: Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     sm89_exact_f32_driver_abi:
         Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
+    sm89_tf32_joint_driver_abi:
+        Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -701,6 +703,8 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let sm89_tf32_joint_abi =
+            census_sm89_tf32_joint_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let fixed_half_abi =
             census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
@@ -768,6 +772,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             tf32_driver_abi,
             sm89_half_abi,
             sm89_exact_f32_abi,
+            sm89_tf32_joint_abi,
             fixed_half_abi,
             fixed_half_swizzle_abi,
             fixed_half_s3_abi,
@@ -787,6 +792,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_driver_abi,
         sm89_half_driver_abi,
         sm89_exact_f32_driver_abi,
+        sm89_tf32_joint_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
@@ -826,6 +832,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let sm89_exact_f32_abi = census_sm89_exact_f32_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let sm89_tf32_joint_abi = census_sm89_tf32_joint_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -950,6 +962,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 tf32_driver_abi,
                 sm89_half_abi,
                 sm89_exact_f32_abi,
+                sm89_tf32_joint_abi,
                 fixed_half_abi,
                 fixed_half_swizzle_abi,
                 fixed_half_s3_abi,
@@ -995,6 +1008,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_driver_abi,
         sm89_half_driver_abi,
         sm89_exact_f32_driver_abi,
+        sm89_tf32_joint_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
@@ -1563,6 +1577,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm89ExactF32 requires exact target sm_89, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm89Tf32Joint && arch != "sm_89" {
+        return Err(format!(
+            "TriadSm89Tf32Joint requires exact target sm_89, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
         return Err(format!(
             "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, or compute_110f/a target, got {arch}"
@@ -1840,6 +1859,133 @@ fn validate_sm89_exact_f32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    use super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
+
+    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
+        return Err("TriadSm89Tf32Joint requires exact sm_89 source and PTX targets".into());
+    }
+    let expected = super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect::<BTreeSet<_>>();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(
+            "TriadSm89Tf32Joint PTX inventory is incomplete, duplicated, or foreign".into(),
+        );
+    }
+
+    let parsed = parse_ptx(ptx)?;
+    for spec in super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{} has no PTX parameter list", spec.symbol))?;
+        let declarations = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect::<Vec<_>>();
+        let abi_valid = match spec.kind {
+            Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => {
+                declarations.len() == 3
+                    && declarations[..2]
+                        .iter()
+                        .all(|line| line.starts_with(".param .u64 "))
+                    && declarations[2].starts_with(".param .align 4 .b8 ")
+                    && declarations[2].contains("[12]")
+            }
+            _ => {
+                declarations.len() == 5
+                    && declarations[..4]
+                        .iter()
+                        .all(|line| line.starts_with(".param .u64 "))
+                    && declarations[4].starts_with(".param .align 4 .b8 ")
+                    && declarations[4].contains("[32]")
+            }
+        };
+        if !abi_valid {
+            return Err(format!(
+                "{} has the wrong static PTX parameter ABI",
+                spec.symbol
+            ));
+        }
+
+        match spec.kind {
+            Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint transpose",
+                    entry,
+                    &["cvt.rna.tf32.f32"],
+                )?;
+                if ptx_has_unquoted_token(&entry.body, |token| {
+                    token.starts_with("mma.") || token.starts_with("cp.async.")
+                }) {
+                    return Err(format!(
+                        "{} transpose contains a foreign GEMM instruction",
+                        spec.symbol
+                    ));
+                }
+            }
+            Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint pre-RNA GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global.L2::128B",
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+            }
+            Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3
+            | Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint add-half GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global.L2::128B",
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+                if ptx_has_unquoted_token(&entry.body, |token| token == "cvt.rna.tf32.f32") {
+                    return Err(format!(
+                        "{} add-half route unexpectedly uses pre-RNA conversion",
+                        spec.symbol
+                    ));
+                }
+            }
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token.starts_with("wgmma.")
+                || token.starts_with("tcgen05.")
+                || token.starts_with("cp.async.bulk.tensor.")
+        }) {
+            return Err(format!(
+                "TriadSm89Tf32Joint {} contains a forbidden instruction family",
+                spec.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     match module_kind {
         ModuleKind::Fixed => {
@@ -1867,6 +2013,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         ModuleKind::TriadSm89Finalist => validate_sm89_finalist_ptx(arch, ptx),
         ModuleKind::TriadSm89Half => validate_sm89_half_ptx(arch, ptx),
         ModuleKind::TriadSm89ExactF32 => validate_sm89_exact_f32_ptx(arch, ptx),
+        ModuleKind::TriadSm89Tf32Joint => validate_sm89_tf32_joint_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
@@ -2593,6 +2740,90 @@ fn census_sm89_exact_f32_driver_abi(
         if census.insert(spec.symbol, abi).is_some() {
             return Err(format!(
                 "duplicate TriadSm89ExactF32 ABI symbol {}",
+                spec.symbol
+            ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn validate_sm89_tf32_joint_driver_abi(
+    spec: &super::sm89_tf32_joint_source::Sm89Tf32JointKernelSpec,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    let extent = spec
+        .abi_parameters
+        .last()
+        .map(|parameter| parameter.offset + parameter.size)
+        .unwrap_or_default();
+    if abi.parameter_count() != spec.abi_parameters.len()
+        || extent != spec.abi_parameter_bytes
+        || spec.terminal_argument as usize != spec.abi_parameters.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(spec.abi_parameters.iter())
+            .all(|(actual, expected)| {
+                actual.offset() == expected.offset as usize
+                    && actual.size() == expected.size as usize
+            })
+    {
+        return Err(format!(
+            "{} has the wrong live Driver parameter ABI",
+            spec.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn census_sm89_tf32_joint_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String> {
+    if kind != ModuleKind::TriadSm89Tf32Joint {
+        return Ok(BTreeMap::new());
+    }
+    if arch != "sm_89" {
+        return Err("TriadSm89Tf32Joint Driver ABI census requires exact sm_89".into());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for spec in &super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
+        let abi = (|| {
+            let function = unsafe {
+                cudarc::driver::result::module::get_function(
+                    module.raw(),
+                    CString::new(spec.symbol).unwrap(),
+                )
+            }
+            .map_err(|error| {
+                format!(
+                    "load TriadSm89Tf32Joint/{} for Driver ABI: {error:?}",
+                    spec.symbol
+                )
+            })?;
+            let abi = query_driver_parameter_abi(
+                spec.symbol,
+                spec.abi_parameters.len(),
+                |index, offset, size| unsafe { get(function, index, offset, size) },
+            )?;
+            validate_sm89_tf32_joint_driver_abi(spec, &abi)?;
+            Ok(abi)
+        })();
+        if census.insert(spec.symbol, abi).is_some() {
+            return Err(format!(
+                "duplicate TriadSm89Tf32Joint ABI symbol {}",
                 spec.symbol
             ));
         }
@@ -7321,6 +7552,24 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         super::sm89_exact_f32_source::validate_source()?;
         return super::sm89_exact_f32_source::compose_source();
     }
+    if kind == ModuleKind::TriadSm89Tf32Joint {
+        validate_module_target(kind, arch)?;
+        let owner_digest = FramedSha256::bytes(super::sm89_tf32_joint_source::SOURCE.as_bytes());
+        if crate::mamba_ssm::gpu::kernel_identity::digest_hex(&owner_digest)
+            != super::sm89_tf32_joint_source::SOURCE_SHA256
+        {
+            return Err("TriadSm89Tf32Joint CUDA owner SHA-256 changed".into());
+        }
+        let primitive_digest =
+            FramedSha256::bytes(super::sm89_tf32_joint_source::PRIMITIVES.as_bytes());
+        if crate::mamba_ssm::gpu::kernel_identity::digest_hex(&primitive_digest)
+            != super::sm89_tf32_joint_source::PRIMITIVES_SHA256
+        {
+            return Err("TriadSm89Tf32Joint primitive SHA-256 changed".into());
+        }
+        super::sm89_tf32_joint_source::validate_source()?;
+        return super::sm89_tf32_joint_source::compose_source();
+    }
     let base = module_fragments(kind)?;
     if kind == ModuleKind::Fixed && fixed_sm89_half_composed(arch) {
         let mut fragments = base.to_vec();
@@ -7941,6 +8190,176 @@ fn load_sm89_exact_f32_functions(
     Ok((functions, exclusions))
 }
 
+fn retain_sm89_tf32_joint_symbol<T>(
+    functions: &mut HashMap<&'static str, T>,
+    exclusions: &mut Vec<Tf32SymbolExclusion>,
+    symbol: &'static str,
+    loaded: Result<T, String>,
+) -> Result<(), String> {
+    match loaded {
+        Ok(function) => {
+            if functions.insert(symbol, function).is_some() {
+                return Err(format!("duplicate TriadSm89Tf32Joint function {symbol}"));
+            }
+        }
+        Err(reason) => exclusions.push(Tf32SymbolExclusion { symbol, reason }),
+    }
+    Ok(())
+}
+
+fn sm89_tf32_joint_abi_for_symbol<'a>(
+    census: &'a BTreeMap<&'static str, Result<Tf32DriverAbi, String>>,
+    symbol: &str,
+) -> Result<&'a Tf32DriverAbi, String> {
+    census
+        .get(symbol)
+        .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sm89Tf32JointResourceFacts {
+    local_bytes: u32,
+    registers: u32,
+    static_shared_bytes: u32,
+    max_threads: i32,
+    occupancy: u32,
+}
+
+fn validate_sm89_tf32_joint_resources(
+    spec: &super::sm89_tf32_joint_source::Sm89Tf32JointKernelSpec,
+    facts: Sm89Tf32JointResourceFacts,
+) -> Result<(), String> {
+    if facts.static_shared_bytes != spec.static_shared_bytes {
+        return Err(format!(
+            "{} uses {} static shared bytes, expected {}",
+            spec.symbol, facts.static_shared_bytes, spec.static_shared_bytes
+        ));
+    }
+    tf32_symbol_admission(
+        spec.symbol,
+        facts.local_bytes,
+        facts.registers,
+        spec.register_cap,
+        facts.max_threads,
+        i32::try_from(spec.minimum_max_threads)
+            .map_err(|_| format!("{} max-thread floor exceeds i32::MAX", spec.symbol))?,
+    )?;
+    if let Some(gate) = spec.minimum_active_blocks
+        && facts.occupancy < gate
+    {
+        return Err(format!(
+            "{} occupancy {} misses its {}-CTA gate",
+            spec.symbol, facts.occupancy, gate
+        ));
+    }
+    Ok(())
+}
+
+fn load_sm89_tf32_joint_functions(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> Result<
+    (
+        HashMap<&'static str, CudaFunction>,
+        Vec<Tf32SymbolExclusion>,
+    ),
+    String,
+> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm89Tf32Joint
+        || module.compiler_identity.target.as_str() != "sm_89"
+        || ctx
+            .compute_capability()
+            .map_err(|error| format!("query TriadSm89Tf32Joint CC: {error:?}"))?
+            != (8, 9)
+    {
+        return Err("TriadSm89Tf32Joint requires an exact sm_89/CC8.9 binding".into());
+    }
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query TriadSm89Tf32Joint opt-in shared memory: {error:?}"))?;
+    let optin_shared = u32::try_from(optin_shared)
+        .map_err(|_| format!("negative TriadSm89Tf32Joint opt-in shared memory {optin_shared}"))?;
+    let abi = module
+        .sm89_tf32_joint_driver_abi
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let mut functions = HashMap::new();
+    let mut exclusions = Vec::new();
+    for spec in &super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
+        let loaded = (|| {
+            validate_sm89_tf32_joint_driver_abi(
+                spec,
+                sm89_tf32_joint_abi_for_symbol(abi, spec.symbol)?,
+            )?;
+            if optin_shared < spec.dynamic_shared_bytes {
+                return Err(format!(
+                    "{} needs {} dynamic shared bytes, device exposes {optin_shared}",
+                    spec.symbol, spec.dynamic_shared_bytes
+                ));
+            }
+            let function =
+                load_function(&module.module, ModuleKind::TriadSm89Tf32Joint, spec.symbol)?;
+            if spec.dynamic_shared_bytes != 0 {
+                set_dynamic_shared(
+                    &function,
+                    spec.symbol,
+                    i32::try_from(spec.dynamic_shared_bytes)
+                        .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?,
+                )?;
+            }
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative local memory", spec.symbol))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|error| format!("query {} registers: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative register count", spec.symbol))?;
+            let static_shared_bytes =
+                u32::try_from(function.shared_size_bytes().map_err(|error| {
+                    format!("query {} static shared memory: {error:?}", spec.symbol)
+                })?)
+                .map_err(|_| format!("{} returned negative static shared memory", spec.symbol))?;
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    spec.block.0 * spec.block.1 * spec.block.2,
+                    spec.dynamic_shared_bytes as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+            validate_sm89_tf32_joint_resources(
+                spec,
+                Sm89Tf32JointResourceFacts {
+                    local_bytes,
+                    registers,
+                    static_shared_bytes,
+                    max_threads,
+                    occupancy,
+                },
+            )?;
+            Ok(function)
+        })();
+        retain_sm89_tf32_joint_symbol(&mut functions, &mut exclusions, spec.symbol, loaded)?;
+    }
+    if functions.len() + exclusions.len()
+        != super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS.len()
+    {
+        return Err("TriadSm89Tf32Joint lost a symbol while applying resource gates".into());
+    }
+    Ok((functions, exclusions))
+}
+
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
     allocation_domain: super::contract::AllocationDomain,
@@ -7951,6 +8370,7 @@ pub struct GemmBiKernels {
     finalist_compiler_identity: Option<CompilerIdentity>,
     sm89_half_compiler_identity: Option<CompilerIdentity>,
     sm89_exact_f32_compiler_identity: Option<CompilerIdentity>,
+    sm89_tf32_joint_compiler_identity: Option<CompilerIdentity>,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
     f32_triad_availability: super::contract::F32TriadAvailability,
@@ -7962,11 +8382,14 @@ pub struct GemmBiKernels {
     sm89_half_exclusions: Vec<Tf32SymbolExclusion>,
     sm89_exact_f32_functions: HashMap<&'static str, CudaFunction>,
     sm89_exact_f32_exclusions: Vec<Tf32SymbolExclusion>,
+    sm89_tf32_joint_functions: HashMap<&'static str, CudaFunction>,
+    sm89_tf32_joint_exclusions: Vec<Tf32SymbolExclusion>,
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
     portable_tf32_rejection: Option<String>,
     finalist_tf32_rejection: Option<String>,
     sm89_half_rejection: Option<String>,
     sm89_exact_f32_rejection: Option<String>,
+    sm89_tf32_joint_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
     tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
@@ -8053,6 +8476,8 @@ impl GemmBiKernels {
         sm89_half_compile_rejection: Option<String>,
         sm89_exact_f32: Option<CompiledModule>,
         sm89_exact_f32_compile_rejection: Option<String>,
+        sm89_tf32_joint: Option<CompiledModule>,
+        sm89_tf32_joint_compile_rejection: Option<String>,
         specialized: Option<QualifiedSpecializedModule>,
     ) -> Result<Self, String> {
         let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
@@ -8105,6 +8530,15 @@ impl GemmBiKernels {
         }
         if let Some(sm89_exact_f32) = sm89_exact_f32.as_ref() {
             artifacts.push(sm89_exact_f32.artifact_identity);
+        }
+        if sm89_tf32_joint.is_some() && specialized.is_some() {
+            return Err(
+                "SM89 TF32 joint and architecture-specialized triad modules are mutually exclusive"
+                    .into(),
+            );
+        }
+        if let Some(sm89_tf32_joint) = sm89_tf32_joint.as_ref() {
+            artifacts.push(sm89_tf32_joint.artifact_identity);
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
@@ -8248,6 +8682,18 @@ impl GemmBiKernels {
                 },
                 None => (HashMap::new(), Vec::new()),
             };
+        let mut sm89_tf32_joint_rejection = sm89_tf32_joint_compile_rejection;
+        let (sm89_tf32_joint_functions, sm89_tf32_joint_exclusions) = match sm89_tf32_joint.as_ref()
+        {
+            Some(module) => match load_sm89_tf32_joint_functions(ctx, module) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    sm89_tf32_joint_rejection = Some(error);
+                    (HashMap::new(), Vec::new())
+                }
+            },
+            None => (HashMap::new(), Vec::new()),
+        };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
         let load_half_dynsmem = |base: &str, bytes: i32| {
@@ -8332,6 +8778,9 @@ impl GemmBiKernels {
         if let Some(sm89_exact_f32) = sm89_exact_f32.as_ref() {
             anchors.push(sm89_exact_f32.module.clone());
         }
+        if let Some(sm89_tf32_joint) = sm89_tf32_joint.as_ref() {
+            anchors.push(sm89_tf32_joint.module.clone());
+        }
         if let Some(specialized) = specialized.as_ref() {
             anchors.push(specialized.module.module.clone());
         }
@@ -8348,6 +8797,9 @@ impl GemmBiKernels {
             sm89_exact_f32_compiler_identity: sm89_exact_f32
                 .as_ref()
                 .map(|module| module.compiler_identity),
+            sm89_tf32_joint_compiler_identity: sm89_tf32_joint
+                .as_ref()
+                .map(|module| module.compiler_identity),
             specialized_compiler_identity: specialized
                 .as_ref()
                 .map(|specialized| specialized.module.compiler_identity),
@@ -8361,12 +8813,15 @@ impl GemmBiKernels {
             sm89_half_exclusions,
             sm89_exact_f32_functions,
             sm89_exact_f32_exclusions,
+            sm89_tf32_joint_functions,
+            sm89_tf32_joint_exclusions,
             tf32_excluded_symbols,
             specialized_tf32_functions,
             portable_tf32_rejection,
             finalist_tf32_rejection,
             sm89_half_rejection,
             sm89_exact_f32_rejection,
+            sm89_tf32_joint_rejection,
             specialized_tf32_rejection,
             specialized_functions,
             sm120_target,
@@ -8495,6 +8950,14 @@ impl GemmBiKernels {
         &self.sm89_exact_f32_exclusions
     }
 
+    pub(crate) fn sm89_tf32_joint_rejection(&self) -> Option<&str> {
+        self.sm89_tf32_joint_rejection.as_deref()
+    }
+
+    pub(crate) fn sm89_tf32_joint_exclusions(&self) -> &[Tf32SymbolExclusion] {
+        &self.sm89_tf32_joint_exclusions
+    }
+
     /// Why the portable SM80 TF32 routes are not bound, if they are not.
     pub(crate) fn portable_tf32_rejection(&self) -> Option<&str> {
         self.portable_tf32_rejection.as_deref()
@@ -8583,6 +9046,18 @@ impl GemmBiKernels {
         super::sm89_exact_f32_source::kernel_spec(symbol)?;
         self.sm89_exact_f32_compiler_identity()?;
         self.sm89_exact_f32_functions.get(symbol)
+    }
+
+    pub fn sm89_tf32_joint_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .sm89_tf32_joint
+            .and(self.sm89_tf32_joint_compiler_identity)
+    }
+
+    pub fn sm89_tf32_joint_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        super::sm89_tf32_joint_source::kernel_spec(symbol)?;
+        self.sm89_tf32_joint_compiler_identity()?;
+        self.sm89_tf32_joint_functions.get(symbol)
     }
 
     pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -10338,6 +10813,233 @@ mod tests {
         assert_eq!(
             exclusions[0].symbol,
             super::super::sm89_exact_f32_source::D768_OUT_RAW_SYMBOL
+        );
+    }
+
+    fn sm89_tf32_joint_test_entry(
+        spec: super::super::sm89_tf32_joint_source::Sm89Tf32JointKernelSpec,
+    ) -> String {
+        use super::super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
+
+        let parameters = match spec.kind {
+            Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => {
+                ".param .u64 p0,\n.param .u64 p1,\n.param .align 4 .b8 p2[12]"
+            }
+            _ => {
+                ".param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .u64 p3,\n.param .align 4 .b8 p4[32]"
+            }
+        };
+        let body = match spec.kind {
+            Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => "cvt.rna.tf32.f32 %r0, %f0;\n",
+            Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3 => {
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
+            Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3
+            | Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3 => {
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
+        };
+        format!(
+            ".visible .entry {}(\n{}\n)\n{{\n.reg .b32 %r<8>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n{}ret;\n}}\n",
+            spec.symbol, parameters, body
+        )
+    }
+
+    fn sm89_tf32_joint_test_ptx() -> String {
+        super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
+            .iter()
+            .fold(
+                String::from(".version 8.5\n.target sm_89\n.address_size 64\n"),
+                |mut ptx, &spec| {
+                    ptx.push_str(&sm89_tf32_joint_test_entry(spec));
+                    ptx
+                },
+            )
+    }
+
+    #[test]
+    fn sm89_tf32_joint_composition_is_isolated_and_exact_target_only() {
+        assert!(
+            super::super::contract::tf32_route_specs(ModuleKind::TriadSm89Tf32Joint).is_empty()
+        );
+        let source = compose_module_source_for(ModuleKind::TriadSm89Tf32Joint, "sm_89").unwrap();
+        assert_eq!(
+            super::module_source_digest(ModuleKind::TriadSm89Tf32Joint, "sm_89").unwrap(),
+            crate::mamba_ssm::gpu::kernel_identity::FramedSha256::bytes(source.as_bytes())
+        );
+        assert!(source.starts_with(super::super::sm89_tf32_joint_source::PRIMITIVES));
+        assert_eq!(
+            super::super::sm89_tf32_joint_source::export_inventory(&source).unwrap(),
+            super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_SYMBOLS
+        );
+        assert!(
+            super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
+                .iter()
+                .all(|spec| source.matches(spec.symbol).count() == 1)
+        );
+        assert!(compose_module_source_for(ModuleKind::TriadSm89Tf32Joint, "compute_89").is_err());
+    }
+
+    #[test]
+    fn sm89_tf32_joint_validator_accepts_only_five_typed_entries() {
+        let baseline = sm89_tf32_joint_test_ptx();
+        super::validate_sm89_tf32_joint_ptx("sm_89", &baseline).unwrap();
+        assert!(super::validate_sm89_tf32_joint_ptx("compute_89", &baseline).is_err());
+        assert!(
+            super::validate_sm89_tf32_joint_ptx(
+                "sm_89",
+                &baseline.replace(".target sm_89", ".target sm_80")
+            )
+            .is_err()
+        );
+        for &spec in &super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
+            let entry = sm89_tf32_joint_test_entry(spec);
+            assert!(
+                super::validate_sm89_tf32_joint_ptx("sm_89", &baseline.replacen(&entry, "", 1))
+                    .is_err(),
+                "accepted missing {}",
+                spec.symbol
+            );
+            assert!(
+                super::validate_sm89_tf32_joint_ptx("sm_89", &(baseline.clone() + &entry)).is_err(),
+                "accepted duplicate {}",
+                spec.symbol
+            );
+        }
+        for foreign in [
+            ".visible .entry gemm_bi_tn_sm89_tf32_foreign() { ret; }\n",
+            ".visible .entry unrelated_callable_export() { ret; }\n",
+        ] {
+            assert!(
+                super::validate_sm89_tf32_joint_ptx("sm_89", &(baseline.clone() + foreign))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_tf32_joint_validator_rejects_route_specific_drift() {
+        use super::super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
+
+        let baseline = sm89_tf32_joint_test_ptx();
+        for &spec in &super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
+            let entry = sm89_tf32_joint_test_entry(spec);
+            let wrong_abi_entry = entry.replacen(".param .u64 p0", ".param .u32 p0", 1);
+            assert!(
+                super::validate_sm89_tf32_joint_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &wrong_abi_entry, 1)
+                )
+                .is_err(),
+                "accepted ABI drift for {}",
+                spec.symbol
+            );
+            let required = match spec.kind {
+                Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => "cvt.rna.tf32.f32",
+                _ => "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+            };
+            let missing = entry.replacen(required, "missing.required.instruction", 1);
+            assert!(
+                super::validate_sm89_tf32_joint_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &missing, 1)
+                )
+                .is_err(),
+                "accepted missing {required} for {}",
+                spec.symbol
+            );
+            let forbidden = entry.replacen("ret;", "atom.global.add.f32 %f0;\nret;", 1);
+            assert!(
+                super::validate_sm89_tf32_joint_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &forbidden, 1)
+                )
+                .is_err(),
+                "accepted atomic instruction for {}",
+                spec.symbol
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_tf32_joint_driver_abi_and_resources_are_per_symbol() {
+        let mut functions = HashMap::new();
+        let mut exclusions = Vec::new();
+        for (index, spec) in super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
+            .iter()
+            .enumerate()
+        {
+            let layout = spec
+                .abi_parameters
+                .iter()
+                .map(|parameter| (parameter.offset as usize, parameter.size as usize))
+                .collect();
+            let abi = Tf32DriverAbi::checked(spec.abi_parameters.len(), layout).unwrap();
+            super::validate_sm89_tf32_joint_driver_abi(spec, &abi).unwrap();
+            let mut wrong = abi.clone();
+            wrong.parameters[0].size = 4;
+            assert!(super::validate_sm89_tf32_joint_driver_abi(spec, &wrong).is_err());
+
+            let valid = super::Sm89Tf32JointResourceFacts {
+                local_bytes: 0,
+                registers: spec.register_cap,
+                static_shared_bytes: spec.static_shared_bytes,
+                max_threads: spec.minimum_max_threads as i32,
+                occupancy: spec.minimum_active_blocks.unwrap_or(0),
+            };
+            super::validate_sm89_tf32_joint_resources(spec, valid).unwrap();
+            for invalid in [
+                super::Sm89Tf32JointResourceFacts {
+                    local_bytes: 4,
+                    ..valid
+                },
+                super::Sm89Tf32JointResourceFacts {
+                    registers: spec.register_cap + 1,
+                    ..valid
+                },
+                super::Sm89Tf32JointResourceFacts {
+                    static_shared_bytes: spec.static_shared_bytes + 4,
+                    ..valid
+                },
+                super::Sm89Tf32JointResourceFacts {
+                    max_threads: spec.minimum_max_threads as i32 - 1,
+                    ..valid
+                },
+            ] {
+                assert!(super::validate_sm89_tf32_joint_resources(spec, invalid).is_err());
+            }
+            if let Some(gate) = spec.minimum_active_blocks {
+                assert!(
+                    super::validate_sm89_tf32_joint_resources(
+                        spec,
+                        super::Sm89Tf32JointResourceFacts {
+                            occupancy: gate - 1,
+                            ..valid
+                        }
+                    )
+                    .is_err()
+                );
+            }
+
+            let loaded = if index == 3 {
+                Err("resource gate failed".to_string())
+            } else {
+                Ok(index as u8)
+            };
+            super::retain_sm89_tf32_joint_symbol(
+                &mut functions,
+                &mut exclusions,
+                spec.symbol,
+                loaded,
+            )
+            .unwrap();
+        }
+        assert_eq!(functions.len(), 4);
+        assert_eq!(exclusions.len(), 1);
+        assert_eq!(
+            exclusions[0].symbol,
+            super::super::sm89_tf32_joint_source::TN_PRE_RNA_M64N64_SYMBOL
         );
     }
 

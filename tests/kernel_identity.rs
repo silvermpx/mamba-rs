@@ -55,6 +55,7 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
     assert_eq!(ModuleKind::TriadSm89Half as u8, 9);
     assert_eq!(ModuleKind::TriadSm89ExactF32 as u8, 10);
+    assert_eq!(ModuleKind::TriadSm89Tf32Joint as u8, 11);
 }
 
 #[test]
@@ -375,39 +376,51 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
 }
 
 #[test]
-fn artifact_set_tracks_all_three_sm89_optional_modules_in_canonical_order() {
+fn artifact_set_tracks_all_four_sm89_optional_modules_in_canonical_order() {
     let fixed = artifact(ModuleKind::Fixed, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
     let sm80 = artifact(ModuleKind::TriadSm80, 5);
     let finalist = artifact(ModuleKind::TriadSm89Finalist, 7);
     let half = artifact(ModuleKind::TriadSm89Half, 9);
     let exact = artifact(ModuleKind::TriadSm89ExactF32, 11);
+    let joint = artifact(ModuleKind::TriadSm89Tf32Joint, 13);
 
-    let all = build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact]).unwrap();
-    assert_eq!(all.module_count, 6);
+    let all = build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, joint]).unwrap();
+    assert_eq!(all.module_count, 7);
     assert_eq!(all.specialized, Some(finalist));
     assert_eq!(all.sm89_half, Some(half));
     assert_eq!(all.sm89_exact_f32, Some(exact));
+    assert_eq!(all.sm89_tf32_joint, Some(joint));
 
     let half_only = build_artifact_set(&[fixed, scalar, sm80, half]).unwrap();
     assert_eq!(half_only.module_count, 4);
     assert_eq!(half_only.specialized, None);
     assert_eq!(half_only.sm89_half, Some(half));
     assert_eq!(half_only.sm89_exact_f32, None);
+    assert_eq!(half_only.sm89_tf32_joint, None);
 
     for artifacts in [
-        vec![fixed, scalar, sm80, exact],
-        vec![fixed, scalar, sm80, finalist, exact],
-        vec![fixed, scalar, sm80, half, exact],
+        vec![fixed, scalar, sm80, joint],
+        vec![fixed, scalar, sm80, exact, joint],
+        vec![fixed, scalar, sm80, finalist, exact, joint],
+        vec![fixed, scalar, sm80, half, exact, joint],
     ] {
         let set = build_artifact_set(&artifacts).unwrap();
-        assert_eq!(set.sm89_exact_f32, Some(exact));
+        assert_eq!(set.sm89_tf32_joint, Some(joint));
     }
 
     let changed_exact = artifact(ModuleKind::TriadSm89ExactF32, 13);
     assert_ne!(
         all.ordered_digest,
-        build_artifact_set(&[fixed, scalar, sm80, finalist, half, changed_exact])
+        build_artifact_set(&[fixed, scalar, sm80, finalist, half, changed_exact, joint])
+            .unwrap()
+            .ordered_digest
+    );
+
+    let changed_joint = artifact(ModuleKind::TriadSm89Tf32Joint, 15);
+    assert_ne!(
+        all.ordered_digest,
+        build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, changed_joint])
             .unwrap()
             .ordered_digest
     );
@@ -416,6 +429,8 @@ fn artifact_set_tracks_all_three_sm89_optional_modules_in_canonical_order() {
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, half]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, finalist]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, exact]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, exact]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, joint]).is_err());
     assert!(
         build_artifact_set(&[
             fixed,

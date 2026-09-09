@@ -3022,6 +3022,7 @@ pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
         | ModuleKind::TriadScalar
         | ModuleKind::TriadSm89Half
         | ModuleKind::TriadSm89ExactF32
+        | ModuleKind::TriadSm89Tf32Joint
         | ModuleKind::Mamba3Combined => &[],
     }
 }

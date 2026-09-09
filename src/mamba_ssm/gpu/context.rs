@@ -1168,6 +1168,9 @@ impl GpuCtx {
             ModuleKind::TriadSm89ExactF32 => artifacts
                 .sm89_exact_f32
                 .zip(self.kernels.triad_sm89_exact_f32_compiler_identity()),
+            ModuleKind::TriadSm89Tf32Joint => artifacts
+                .sm89_tf32_joint
+                .zip(self.kernels.triad_sm89_tf32_joint_compiler_identity()),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
                 .kernels
                 .artifact_set_identity()
@@ -1188,6 +1191,7 @@ impl GpuCtx {
             ModuleKind::TriadSm89Finalist => availability.finalist,
             ModuleKind::TriadSm89Half => None,
             ModuleKind::TriadSm89ExactF32 => None,
+            ModuleKind::TriadSm89Tf32Joint => None,
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 availability.specialized
             }

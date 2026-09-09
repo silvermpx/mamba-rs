@@ -49,6 +49,9 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   from the four-cell plan; joint source now has five exports. Add the required
   frozen alignment helper. All five-body/source contracts pass 28/28.
 - [ ] TF32 joint module, NN/TN routes, transform/scratch ownership and admission.
+  Module-only wiring now compiles on Ada/CUDA13.2 and passes seven focused
+  composition, ABI/resource-validator and artifact-identity tests. Live module
+  loading and the five-cell launch/selector layer remain pending.
 - [ ] Remaining half improvements beyond the eleven Fast-winning cells:
   F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells. Establish
   the missing actual-AUTO comparisons before selecting the final cell map.
