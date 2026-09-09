@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 F16 NT N192 near-miss stop: widening d768-out M64N128/S3 to
+M64N192/12warps/grid256 passes target/tails/exception/K0/eager/graph/guard
+exactness and resources127regs/local0/shared98304/occupancy1. It is faster in
+every once3 observation: eager p50 `0.98646-0.98753`, graph ABBA `0.98941`.
+Graph BAAB narrowly misses the strict gate at p50 `0.990066`, p95 `0.990735`.
+Stop before once7/Fast, keep N128/S3 and do not retry unchanged. Evidence:
+`internal/perf/ada-triad-half-nt-m64n192-s3-20260909/report.md`.
+
 Latest 2026-09-09 TF32 NN N96 full-domain compile stop: the Prism candidate
 uses unpredicated three-operand cp.async on full CTAs and the direct-float2
 parent on edges/tails. A bounded common-MMA refinement reduces the initial

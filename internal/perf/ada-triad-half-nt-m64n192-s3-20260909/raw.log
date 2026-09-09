@@ -1,0 +1,31 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_half_nt_m64n192_s3_d768_out_discovery.rs (/root/half-nt-n192-target-20260909/release/deps/gemm_bi_half_nt_m64n192_s3_d768_out_discovery-7a5cde569ec96dc5)
+
+running 1 test
+test cuda_suite::ada_f16_nt_m64n192_bk64_s3_d768_out_scout_once7 ... GPU quiet gate half-nt-m64n192-s3/pre-context: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=48MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+GPU quiet gate half-nt-m64n192-s3/cohort: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=534MiB sm_clock=1800MHz temperature=41C pstate=P2; quiet_samples=5
+{"schema":"MambaBiHalfNtM64N192S3ResourceV1","arm":"m64n192_bk64_s3","registers":127,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":98304,"active_ctas":1,"required_active_ctas":1}
+{"schema":"MambaBiHalfNtM64N192S3ResourceV1","arm":"measured_m64n128_bk64_s3","registers":119,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":73728,"active_ctas":1,"required_active_ctas":1}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"d768_out","shape":[2048,1536,768],"alpha":1,"exceptional":false,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":3145728}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"m_tail_negative_alpha","shape":[67,192,64],"alpha":-0.75,"exceptional":false,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":12864}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"k_out_tail","shape":[64,197,64],"alpha":1,"exceptional":false,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":12608}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"reduction_tail","shape":[64,192,69],"alpha":1,"exceptional":false,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":12288}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"exceptional_full_tile","shape":[64,192,64],"alpha":1,"exceptional":true,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":12288}
+{"schema":"MambaBiHalfNtM64N192S3BitsV1","case":"k0","shape":[64,192,0],"alpha":1,"exceptional":false,"candidate_vs_measured_s3_exact":true,"eager_graph_repeats":3,"words":12288}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"ABBA","window":0,"operations":20,"raw_us":[39.16800022125244, 39.68000113964081, 39.68000113964081, 39.11679983139038],"ratio":0.9864515852349025}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"ABBA","window":1,"operations":20,"raw_us":[39.16800022125244, 39.68000113964081, 39.73119854927063, 39.16800022125244],"ratio":0.9864603575991978}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"ABBA","window":2,"operations":20,"raw_us":[39.16800022125244, 39.68000113964081, 39.68000113964081, 39.16800022125244],"ratio":0.9870967514192717}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"BAAB","window":0,"operations":20,"raw_us":[39.64479863643646, 39.11679983139038, 39.16800022125244, 39.62880074977875],"ratio":0.9875267511349519}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"BAAB","window":1,"operations":20,"raw_us":[39.68000113964081, 39.16800022125244, 39.17759954929352, 39.62880074977875],"ratio":0.9878550413582519}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"eager","order":"BAAB","window":2,"operations":20,"raw_us":[39.62880074977875, 39.11679983139038, 39.16800022125244, 39.68000113964081],"ratio":0.987088421305311}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"ABBA","window":0,"operations":20,"raw_us":[38.24639916419983, 38.655999302864075, 38.655999302864075, 38.24639916419983],"ratio":0.9894039697317074}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"ABBA","window":1,"operations":20,"raw_us":[38.29759955406189, 38.655999302864075, 38.707199692726135, 38.24639916419983],"ratio":0.9894109823796817}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"ABBA","window":2,"operations":20,"raw_us":[38.24639916419983, 38.707199692726135, 38.655999302864075, 38.29759955406189],"ratio":0.9894109823796817}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"BAAB","window":0,"operations":20,"raw_us":[38.655999302864075, 38.24639916419983, 38.29759955406189, 38.655999302864075],"ratio":0.9900662264419907}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"BAAB","window":1,"operations":20,"raw_us":[38.655999302864075, 38.24639916419983, 38.24639916419983, 38.655999302864075],"ratio":0.9894039697317074}
+{"schema":"MambaBiHalfNtM64N192S3TimingV1","phase":"scout_once3","comparator":"measured_m64n128_bk64_s3","path":"graph","order":"BAAB","window":2,"operations":20,"raw_us":[38.707199692726135, 38.29759955406189, 38.34879994392395, 38.655999302864075],"ratio":0.9907346192128736}
+{"schema":"MambaBiHalfNtM64N192S3ScoutDecisionV1","shape":[2048,1536,768],"strata":[[0.9864603575991978, 0.9870967514192717], [0.9875267511349519, 0.9878550413582519], [0.9894109823796817, 0.9894109823796817], [0.9900662264419907, 0.9907346192128736]],"strict_p50_p95_lt_0_99":false,"decision":"stop_no_once7"}
+GPU quiet gate half-nt-m64n192-s3/post: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=546MiB sm_clock=1800MHz temperature=41C pstate=P2; quiet_samples=5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 107.05s
