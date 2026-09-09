@@ -159,7 +159,11 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
             ));
         }
     }
-    for forbidden in ["_test_", "gemm_bi_nn_fixed_sm89_tc128_s3_v1_"] {
+    for forbidden in [
+        "_test_",
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_",
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_",
+    ] {
         if SOURCE.contains(forbidden) {
             return Err(format!(
                 "TriadSm89Half source retained non-production marker {forbidden}"
@@ -185,7 +189,7 @@ mod tests {
                 .len(),
             3
         );
-        assert_eq!(source.matches("extern \"C\" __global__").count(), 6);
+        assert!(!source.contains("gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_"));
     }
 
     #[test]

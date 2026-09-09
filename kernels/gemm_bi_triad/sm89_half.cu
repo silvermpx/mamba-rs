@@ -61,8 +61,7 @@ __device__ __forceinline__ float2 pair_to_f2(const __half* p) {
 // Every scalar and cp.async staging path uses the SAME tested layout helper.
 // Actual GPU output, sanitizer and speed qualification remain required.
 // Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.
-// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and
-// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.
+// Provider helpers are composed here without their legacy Fixed exports.
 // Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once
@@ -455,20 +454,6 @@ static __device__ __forceinline__ void kernel(
 
 } // namespace sm89_half_nn_s3_support
 
-#define SM89_FHS_EXPORT(TYPE, SUFFIX)                                      \
-extern "C" __global__ __launch_bounds__(256, 1)                            \
-void gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_##SUFFIX(                      \
-    TYPE* __restrict__ C, const TYPE* __restrict__ A,                       \
-    const TYPE* __restrict__ B, const float* __restrict__ bias,             \
-    Sm89HalfNnS3Params params) {                                    \
-    sm89_half_nn_s3_support::kernel<TYPE>(C, A, B, bias, params.alpha,      \
-        params.beta, params.m, params.n, params.k, params.lda, params.ldb,   \
-        params.ldc);                                                         \
-}
-SM89_FHS_EXPORT(__nv_bfloat16, bf16)
-SM89_FHS_EXPORT(__half, f16)
-#undef SM89_FHS_EXPORT
-
 // Ada homogeneous-half CTA128x128/BK64/S3. The two-stage provider above
 // supplies unchanged layout, fragment, arithmetic and epilogue helpers.
 namespace sm89_half_nn_s3 {
@@ -634,8 +619,7 @@ void gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16(
 // Every scalar and cp.async staging path uses the SAME tested layout helper.
 // Actual GPU output, sanitizer and speed qualification remain required.
 // Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.
-// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and
-// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.
+// Provider helpers are composed here without their legacy Fixed exports.
 // Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once
@@ -1200,8 +1184,7 @@ SM89_HALF_NT_S3_EXPORT(__half, f16)
 // Every scalar and cp.async staging path uses the SAME tested layout helper.
 // Actual GPU output, sanitizer and speed qualification remain required.
 // Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.
-// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and
-// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.
+// Provider helpers are composed here without their legacy Fixed exports.
 // Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once

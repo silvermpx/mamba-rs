@@ -811,6 +811,29 @@ impl MambaKernels {
                 )
             });
         }
+        if let Some(reason) = triad.sm89_half_rejection() {
+            static HALF_MODULE: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&HALF_MODULE, || {
+                format!(
+                    "the optional Ada half-Triad module is not bound ({reason}); the existing typed kernels remain available"
+                )
+            });
+        }
+        let half_excluded = triad.sm89_half_exclusions();
+        if !half_excluded.is_empty() {
+            static HALF_EXCLUDED: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&HALF_EXCLUDED, || {
+                format!(
+                    "{} Ada half-Triad symbol(s) failed resource admission while their siblings remain bound: {}",
+                    half_excluded.len(),
+                    half_excluded
+                        .iter()
+                        .map(|exclusion| format!("{}: {}", exclusion.symbol, exclusion.reason))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            });
+        }
         let module = fixed.module;
 
         let get = |name: &str| -> Result<CudaFunction, String> {
