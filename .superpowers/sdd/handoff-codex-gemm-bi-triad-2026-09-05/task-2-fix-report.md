@@ -19,7 +19,7 @@ before executing them. It now also binds a separate retained SM80 Tile128
 forced route in an independent context, seeds both routes identically, compares
 the special eager and graph output bits against that retained oracle, and
 checks exact A/B snapshots after both phases. Both candidates also retain their
-red-zone validation. No GPU execution was performed in this fix.
+red-zone validation.
 
 Selector negative coverage additionally mutates `ldb`, `ldc`, composer,
 compiler, numeric, and schedule revisions individually.
@@ -69,3 +69,23 @@ cargo test --features cuda,cudarc/fallback-latest \
 The live harness must bind all 11 actual-AUTO cells to `TriadSm89Half`, bind
 each independent oracle to `TriadSm80`'s retained Tile128 symbol, and pass exact
 eager/graph/oracle bits, immutable A/B snapshots, and both red-zone checks.
+
+## Live Ada qualification completed
+
+Commit `42896072564a0559de0fd65934a4830c7f6d12c0` was archived into the
+isolated remote snapshot `/root/mamba-sm89-half-phase2c.y3ePay`. Local and
+remote SHA-256 values matched for `blas.rs`, `modules.rs`, the live harness,
+and the unchanged `sm89_half.cu` source. Immediately before every live test,
+the RTX 6000 Ada had no compute process, five consecutive 0% compute / 0%
+memory-utilization samples, and 48,463 MiB free.
+
+| CUDA | Result | AUTO cells | Symbols | Exclusions | Exactness and safety |
+|---|---|---:|---:|---:|---|
+| 12.8 | PASS | 11/11 | 6/6 | 0 | eager = graph = independent Tile128 oracle; A/B unchanged; guards pass |
+| 13.0 | PASS | 11/11 | 6/6 | 0 | eager = graph = independent Tile128 oracle; A/B unchanged; guards pass |
+| 13.2 | PASS | 11/11 | 6/6 | 0 | eager = graph = independent Tile128 oracle; A/B unchanged; guards pass |
+
+Observed per-toolkit register counts were NN 182/182/188, NT-Bxor
+168/168/167, and NT-M96 114/114/120 for CUDA 12.8/13.0/13.2 respectively.
+Every symbol reported zero local memory and one active CTA at its sealed
+dynamic shared-memory size.

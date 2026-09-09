@@ -1,5 +1,15 @@
 # Handoff: the deterministic GEMM triad (gemm_bi_triad) — state on 2026-09-05
 
+Latest 2026-09-09 production integration checkpoint: commit `42896072` fixes
+SM89-half prepared-graph admission, makes NN graph marshalling use the same
+four-pointer plus 32-byte bundle ABI as eager/CUDA, and isolates Driver ABI
+failure per symbol. Independent review approved it. The exact commit then
+passed the ignored live actual-AUTO harness on RTX 6000 Ada under CUDA 12.8,
+13.0 and 13.2: 11/11 AUTO cells bound `TriadSm89Half`, all 6 symbols loaded,
+0 exclusions, eager and graph bits matched an independent retained SM80
+Tile128 oracle, A/B were unchanged, and all red zones passed. Detailed record:
+`.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/task-2-fix-report.md`.
+
 RELEASE 0.7.0 INTEGRATION CRITERION, clarified by the user on 2026-09-09:
 production `Deterministic` routing must select the fastest fully qualified
 retained implementation currently available for every covered cell. A route
