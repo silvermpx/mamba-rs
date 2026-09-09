@@ -2500,6 +2500,16 @@ of retained and fail the strict1% gate. Stop before once7/Fast. Evidence:
 `internal/perf/ada-triad-bf16-tn-packed-raster-d768-in-20260909/`. This freezes
 the current discovery shortlist; proceed to joint production-AUTO assembly.
 
+The first production-AUTO assembly batch is now qualified on Ada CUDA13.2.
+Exact-F32 NN d768-in, d768-out and Prism select the Fixed CopyPlan symbol and
+beat the former generic exact route by about 1.33--1.46x across eager/graph and
+both timing orders. Exact-F32 NT d768-out selects the explicit
+transpose-plus-Fixed two-node pipeline, is bit-exact in eager and graph, and
+beats the generic exact NT route by 1.82--1.87x p50. The NN Fast-TF32 vendor
+comparison remains 1.82--2.50x faster than this exact route; the contracts are
+reported separately. Evidence:
+`internal/perf/ada-triad-exact-f32-fixed-copyplan-auto-20260909/report.md`.
+
 ## Owner-requested v0.7.0 pre-release finalization contract
 
 Defer this phase until the current kernel discovery is frozen and the selected

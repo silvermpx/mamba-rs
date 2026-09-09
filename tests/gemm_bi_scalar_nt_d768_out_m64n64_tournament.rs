@@ -179,6 +179,68 @@ fn ada_retain_decision(strata: &[[f64; 2]]) -> bool {
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdaIntegratedAutoNodeContract {
+    symbol: &'static str,
+    module: &'static str,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    dynamic_shared: u32,
+}
+
+const ADA_INTEGRATED_AUTO_CONTRACT: [AdaIntegratedAutoNodeContract; 2] = [
+    AdaIntegratedAutoNodeContract {
+        symbol: "gemm_bi_transpose_f32_32x16_d768_v1",
+        module: "TriadScalar",
+        grid: (24, 48, 1),
+        block: (32, 16, 1),
+        dynamic_shared: 0,
+    },
+    AdaIntegratedAutoNodeContract {
+        symbol: FIXED_COPYPLAN_SYMBOL,
+        module: "Fixed",
+        grid: (768, 1, 1),
+        block: (128, 1, 1),
+        dynamic_shared: 0,
+    },
+];
+
+fn validate_ada_integrated_auto_contract(
+    nodes: &[AdaIntegratedAutoNodeContract],
+) -> Result<(), String> {
+    if nodes == ADA_INTEGRATED_AUTO_CONTRACT {
+        Ok(())
+    } else {
+        Err(format!(
+            "integrated NT AUTO physical contract changed: actual={nodes:?} expected={ADA_INTEGRATED_AUTO_CONTRACT:?}"
+        ))
+    }
+}
+
+#[test]
+fn integrated_auto_contract_rejects_node_count_order_module_and_geometry_mutations() {
+    let expected = ADA_INTEGRATED_AUTO_CONTRACT;
+    validate_ada_integrated_auto_contract(&expected).unwrap();
+    assert!(validate_ada_integrated_auto_contract(&expected[..1]).is_err());
+
+    let mut mutated = expected;
+    mutated.swap(0, 1);
+    assert!(validate_ada_integrated_auto_contract(&mutated).is_err());
+    for mutation in [
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[0].module = "Fixed",
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[0].grid.0 += 1,
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[0].block.1 -= 1,
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[1].module = "TriadScalar",
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[1].grid.0 -= 1,
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[1].block.0 -= 1,
+        |nodes: &mut [AdaIntegratedAutoNodeContract; 2]| nodes[1].dynamic_shared = 32_768,
+    ] {
+        let mut nodes = expected;
+        mutation(&mut nodes);
+        assert!(validate_ada_integrated_auto_contract(&nodes).is_err());
+    }
+}
+
 #[test]
 fn ada_once7_decision_uses_raw_order_and_requires_both_percentiles_below_point99() {
     let abba = ada_candidate_over_auto([10.0, 8.0, 8.0, 10.0], AdaBracketOrder::Abba);
@@ -262,16 +324,18 @@ mod cuda_tournament {
     use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
     use mamba_rs::mamba_ssm::gpu::kernel_identity::{
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
-        CudaTarget, ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION,
+        CudaTarget, ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, ResolvedNumericContract,
+        SCHEDULE_REVISION,
     };
     use sha2::{Digest as _, Sha256};
 
     use super::common::gpu_quiet::QuietGpu;
     use super::{
-        AdaBracketOrder, FIXED_COPYPLAN_SYMBOL, NnParams, PRODUCTION_TRANSPOSE_SOURCE, TEST_SOURCE,
-        TRANSPOSE_32X16, ada_candidate_over_auto, ada_composed_reference_local_bytes,
-        ada_copyplan_contract, ada_discovery_toolkit_supported, ada_percentile,
-        ada_retain_decision, fixed_full_mantissa, validate_ada_copyplan_contract,
+        AdaBracketOrder, AdaIntegratedAutoNodeContract, FIXED_COPYPLAN_SYMBOL, NnParams,
+        PRODUCTION_TRANSPOSE_SOURCE, TEST_SOURCE, TRANSPOSE_32X16, ada_candidate_over_auto,
+        ada_composed_reference_local_bytes, ada_copyplan_contract, ada_discovery_toolkit_supported,
+        ada_percentile, ada_retain_decision, fixed_full_mantissa,
+        validate_ada_copyplan_contract, validate_ada_integrated_auto_contract,
     };
 
     const DIMS: (usize, usize, usize) = (2_048, 1_536, 768);
@@ -296,6 +360,7 @@ mod cuda_tournament {
     const PARITY_MAX_P95: f64 = 1.03;
     const ADA_WINDOWS: usize = 7;
     const ADA_WARMUPS: usize = 4;
+    const ADA_INTEGRATED_WINDOWS: usize = 21;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Arm {
@@ -533,6 +598,23 @@ mod cuda_tournament {
             })
         }
 
+        fn new_origin_zero(
+            stream: &Arc<CudaStream>,
+            values: Vec<f32>,
+            guard: u32,
+        ) -> Result<Self, String> {
+            let len = values.len();
+            let mut expected = values;
+            expected.resize(len + GUARD, f32::from_bits(guard));
+            Ok(Self {
+                buffer: GpuBuffer::from_cpu(stream, &expected)?,
+                expected,
+                offset: 0,
+                len,
+                guard,
+            })
+        }
+
         fn ptr(&self, stream: &Arc<CudaStream>) -> u64 {
             self.buffer.raw_ptr_at(stream, self.offset)
         }
@@ -598,6 +680,68 @@ mod cuda_tournament {
         production_output: GpuBuffer,
         production_output_seed: Vec<f32>,
         params: NnParams,
+    }
+
+    // The public F32 facade owns C and A and receives an origin-zero B pointer.
+    // Trailing guards keep every active public allocation at byte offset zero.
+    struct PublicAutoFixture {
+        output: GuardedBuffer,
+        a: GuardedBuffer,
+        b: GuardedBuffer,
+    }
+
+    impl PublicAutoFixture {
+        fn new(
+            ctx: &GpuCtx,
+            output_words: &[u32],
+            a_words: &[u32],
+            b_words: &[u32],
+        ) -> Result<Self, String> {
+            let make = |words: &[u32], guard| {
+                GuardedBuffer::new_origin_zero(
+                    &ctx.stream,
+                    words.iter().copied().map(f32::from_bits).collect(),
+                    guard,
+                )
+            };
+            Ok(Self {
+                output: make(output_words, OUTPUT_GUARD)?,
+                a: make(a_words, INPUT_GUARD)?,
+                b: make(b_words, INPUT_GUARD)?,
+            })
+        }
+
+        fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+            self.output.reset(&ctx.stream)?;
+            self.a.reset(&ctx.stream)?;
+            self.b.reset(&ctx.stream)
+        }
+
+        fn launch(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+            gpu_gemm_bi_backward_dx_raw(
+                ctx,
+                &mut self.output.buffer,
+                &self.a.buffer,
+                self.b.ptr(&ctx.stream),
+                DIMS.0,
+                DIMS.1,
+                DIMS.2,
+            )
+        }
+
+        fn validate(&self, ctx: &GpuCtx, expected: &[u32]) -> Result<(), String> {
+            if self
+                .output
+                .active_bits(&ctx.stream, "integrated public AUTO")?
+                != expected
+            {
+                return Err("integrated public AUTO output differs from exact generic NT".into());
+            }
+            self.a
+                .validate_unchanged(&ctx.stream, "integrated public AUTO A")?;
+            self.b
+                .validate_unchanged(&ctx.stream, "integrated public AUTO B")
+        }
     }
 
     fn compose_source() -> String {
@@ -1644,6 +1788,190 @@ mod cuda_tournament {
         Ok(())
     }
 
+    fn validate_ada_integrated_auto_preflight(runtime: &Runtime) -> Result<(), String> {
+        let request = PhysicalQualificationRequest::contiguous(
+            ResolvedGemmOp::Nt,
+            DIMS,
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        );
+        {
+            let qualified = qualify_physical_launch(&runtime.ctx, request)?;
+            let evidence = qualified.evidence();
+            let nodes = evidence.nodes();
+            let contracts = nodes
+                .iter()
+                .map(|node| AdaIntegratedAutoNodeContract {
+                    symbol: node.symbol,
+                    module: match node.module_kind {
+                        ModuleKind::TriadScalar => "TriadScalar",
+                        ModuleKind::Fixed => "Fixed",
+                        _ => "other",
+                    },
+                    grid: node.launch.grid_dim,
+                    block: node.launch.block_dim,
+                    dynamic_shared: node.launch.shared_mem_bytes,
+                })
+                .collect::<Vec<_>>();
+            validate_ada_integrated_auto_contract(&contracts)?;
+            if !evidence.eager_graph_equal()
+                || evidence.launch_count() != 2
+                || evidence.launch_digest() == [0; 32]
+                || evidence.route_identity().tuning_table_revision != 45
+                || evidence.route_identity().schedule_set_revision != SCHEDULE_REVISION
+                || evidence.route_identity().artifacts.fixed.module_kind != ModuleKind::Fixed
+                || evidence.route_identity().artifacts.fixed.artifact_digest == [0; 32]
+            {
+                return Err(format!(
+                    "integrated NT AUTO qualification identity changed: {evidence:?}"
+                ));
+            }
+            for (index, node) in nodes.iter().enumerate() {
+                if node.logical_op != ResolvedGemmOp::Nt
+                    || node.shape != DIMS
+                    || node.strides != (768, 768, 1_536)
+                    || node.launch.arguments_digest == [0; 32]
+                    || (index == 1
+                        && (node.tile != Some((64, 64))
+                            || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)))
+                {
+                    return Err(format!(
+                        "integrated NT AUTO qualification node {index} changed: {node:?}"
+                    ));
+                }
+            }
+            if nodes[0].launch.arguments_digest == nodes[1].launch.arguments_digest {
+                return Err("integrated NT AUTO qualification argument digests collided".into());
+            }
+            qualified.validate_red_zones(&runtime.ctx)?;
+        }
+        println!(
+            "{{\"schema\":\"MambaBiScalarNtIntegratedAutoPreflightV1\",\"shape\":[2048,1536,768],\"symbols\":[\"{PROMOTED_TRANSPOSE}\",\"{FIXED_COPYPLAN_SYMBOL}\"],\"modules\":[\"TriadScalar\",\"Fixed\"],\"qualified_holder_dropped_before_public_work\":true,\"tuning_revision\":45,\"schedule_revision\":{SCHEDULE_REVISION}}}"
+        );
+        Ok(())
+    }
+
+    unsafe fn read_graph_argument<T: Copy>(
+        params: &sys::CUDA_KERNEL_NODE_PARAMS,
+        index: usize,
+        expected_offset: usize,
+    ) -> Result<T, String> {
+        let mut offset = 0;
+        let mut size = 0;
+        cuda_ok(
+            unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+            "public AUTO graph parameter info",
+        )?;
+        if (offset, size) != (expected_offset, size_of::<T>()) || params.kernelParams.is_null() {
+            return Err(format!(
+                "public AUTO graph argument {index} ABI changed: offset={offset} size={size}"
+            ));
+        }
+        let storage = unsafe { *params.kernelParams.add(index) };
+        if storage.is_null() {
+            return Err(format!(
+                "public AUTO graph argument {index} storage is null"
+            ));
+        }
+        Ok(unsafe { std::ptr::read_unaligned(storage.cast::<T>()) })
+    }
+
+    unsafe fn graph_params_and_symbol(
+        node: sys::CUgraphNode,
+    ) -> Result<(String, sys::CUDA_KERNEL_NODE_PARAMS), String> {
+        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        cuda_ok(
+            unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) },
+            "public AUTO graph kernel params",
+        )?;
+        let mut name = std::ptr::null();
+        cuda_ok(
+            unsafe { sys::cuFuncGetName(&mut name, params.func) },
+            "public AUTO graph symbol",
+        )?;
+        if name.is_null() {
+            return Err("public AUTO graph symbol is null".into());
+        }
+        Ok((
+            unsafe { CStr::from_ptr(name) }
+                .to_str()
+                .map_err(|error| format!("public AUTO graph symbol is not UTF-8: {error}"))?
+                .to_owned(),
+            params,
+        ))
+    }
+
+    fn validate_integrated_public_graph(
+        runtime: &Runtime,
+        graph: &CudaGraph,
+        fixture: &PublicAutoFixture,
+    ) -> Result<(), String> {
+        graph_candidate_identity_with_transpose16(
+            graph,
+            Arm::Transpose16FixedCopyPlan,
+            PROMOTED_TRANSPOSE,
+        )?;
+        let raw = graph.cu_graph();
+        let mut node_count = 2;
+        let mut nodes = [std::ptr::null_mut(); 2];
+        cuda_ok(
+            unsafe { sys::cuGraphGetNodes(raw, nodes.as_mut_ptr(), &mut node_count) },
+            "public AUTO graph nodes",
+        )?;
+        let mut queried = nodes
+            .into_iter()
+            .map(|node| unsafe { graph_params_and_symbol(node) })
+            .collect::<Result<Vec<_>, _>>()?;
+        let fixed_index = queried
+            .iter()
+            .position(|(symbol, _)| symbol == FIXED_COPYPLAN_SYMBOL)
+            .ok_or("integrated public AUTO graph omitted Fixed CopyPlan")?;
+        let (_, fixed) = queried.swap_remove(fixed_index);
+        let (transpose_symbol, transpose) = queried
+            .pop()
+            .ok_or("integrated public AUTO graph omitted transpose")?;
+        if transpose_symbol != PROMOTED_TRANSPOSE {
+            return Err(format!(
+                "integrated public AUTO graph transpose changed to {transpose_symbol}"
+            ));
+        }
+
+        let output = fixture.output.ptr(&runtime.ctx.stream);
+        let a = fixture.a.ptr(&runtime.ctx.stream);
+        let b = fixture.b.ptr(&runtime.ctx.stream);
+        let scratch = unsafe { read_graph_argument::<u64>(&transpose, 0, 0) }?;
+        if scratch == 0
+            || unsafe { read_graph_argument::<u64>(&transpose, 1, 8) }? != b
+            || unsafe { read_graph_argument::<i32>(&transpose, 2, 16) }? != 1_536
+            || unsafe { read_graph_argument::<i32>(&transpose, 3, 20) }? != 768
+            || unsafe { read_graph_argument::<u64>(&fixed, 0, 0) }? != output
+            || unsafe { read_graph_argument::<u64>(&fixed, 1, 8) }? != a
+            || unsafe { read_graph_argument::<u64>(&fixed, 2, 16) }? != scratch
+            || unsafe { read_graph_argument::<u64>(&fixed, 3, 24) }? != 0
+        {
+            return Err("integrated public AUTO graph pointer/scalar bindings changed".into());
+        }
+        let params = unsafe { read_graph_argument::<NnParams>(&fixed, 4, 32) }?;
+        if params.alpha.to_bits() != 1.0_f32.to_bits()
+            || params.beta.to_bits() != 0
+            || (
+                params.m, params.n, params.k, params.lda, params.ldb, params.ldc,
+            ) != (2_048, 1_536, 768, 768, 1_536, 1_536)
+        {
+            return Err("integrated public AUTO Fixed parameter bundle changed".into());
+        }
+        let mut offset = 0;
+        let mut size = 0;
+        if unsafe { sys::cuFuncGetParamInfo(fixed.func, 5, &mut offset, &mut size) }
+            != sys::CUresult::CUDA_ERROR_INVALID_VALUE
+        {
+            return Err("integrated public AUTO Fixed ABI accepted a sixth argument".into());
+        }
+        println!(
+            "{{\"schema\":\"MambaBiScalarNtIntegratedPublicGraphV1\",\"shape\":[2048,1536,768],\"symbols\":[\"{PROMOTED_TRANSPOSE}\",\"{FIXED_COPYPLAN_SYMBOL}\"],\"modules\":[\"TriadScalar\",\"Fixed\"],\"node_configs\":[[[24,48,1],[32,16,1],0],[[768,1,1],[128,1,1],0]],\"public_buffer_origin\":0,\"scratch_pointer_shared_between_nodes\":true,\"argument_values_exact\":true}}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn candidate_identity_gate_rejects_count_order_zero_and_collisions() {
         let transpose = CandidateNodeIdentity {
@@ -2501,6 +2829,92 @@ mod cuda_tournament {
         Ok(actual)
     }
 
+    fn capture_integrated_public_auto(
+        runtime: &Runtime,
+        fixture: &mut PublicAutoFixture,
+        expected: &[u32],
+    ) -> Result<CudaGraph, String> {
+        // Prepared public routes bind exact owning-buffer pointers. Warm the
+        // same fixture immediately before capture, after the qualifier lease
+        // has already been dropped.
+        fixture.reset(&runtime.ctx)?;
+        fixture.launch(&runtime.ctx)?;
+        runtime
+            .ctx
+            .stream
+            .synchronize()
+            .map_err(|error| format!("integrated public AUTO warmup sync: {error:?}"))?;
+        fixture.validate(&runtime.ctx, expected)?;
+        fixture.reset(&runtime.ctx)?;
+        unsafe { capture_into_graph(&runtime.ctx.stream, || fixture.launch(&runtime.ctx)) }
+    }
+
+    fn prepare_integrated_auto_comparison(
+        runtime: &Runtime,
+    ) -> Result<(Fixture, PublicAutoFixture, CudaGraph, CudaGraph, Vec<u32>), String> {
+        validate_ada_fixed_copyplan_environment(&runtime.ctx)?;
+        validate_ada_copyplan_contract(ada_copyplan_contract())?;
+        check_ada_resources(&runtime.generic_nt, 256, 0, NT_SHARED, 0)?;
+        check_ada_resources(
+            candidate_inner_kernel(runtime, Arm::Transpose16FixedCopyPlan)?,
+            128,
+            32_768,
+            0,
+            0,
+        )?;
+        check_ada_resources(&runtime.transpose16, 512, TRANSPOSE_STATIC_SHARED, 0, 0)?;
+
+        // The qualifier's lease is scoped to this call and dropped before
+        // any fixture allocation, generic launch, or public entrypoint use.
+        validate_ada_integrated_auto_preflight(runtime)?;
+
+        let mut direct = new_ada_fixture(runtime)?;
+        let a_words = direct.a.expected_active_bits();
+        let b_words = direct.b.expected_active_bits();
+        let output_words = direct
+            .production_output_seed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+        let generic_graph = capture_arm(runtime, &mut direct, Arm::GenericNt)?;
+        let golden = check_ada_observation(
+            runtime,
+            &mut direct,
+            Arm::GenericNt,
+            &generic_graph,
+            AdaPath::Eager,
+            None,
+        )?;
+        let mut public = PublicAutoFixture::new(&runtime.ctx, &output_words, &a_words, &b_words)?;
+        let public_graph = capture_integrated_public_auto(runtime, &mut public, &golden)?;
+        validate_integrated_public_graph(runtime, &public_graph, &public)?;
+        for path in [AdaPath::Eager, AdaPath::Graph] {
+            for repeat in 0..2 {
+                measure_integrated_public_auto(runtime, &mut public, &public_graph, path, &golden)?;
+                let generic = check_ada_observation(
+                    runtime,
+                    &mut direct,
+                    Arm::GenericNt,
+                    &generic_graph,
+                    path,
+                    Some(&golden),
+                )?;
+                println!(
+                    "{{\"schema\":\"MambaBiScalarNtIntegratedAutoBitsV1\",\"shape\":[2048,1536,768],\"path\":\"{}\",\"repeat\":{repeat},\"actual_auto_symbols\":[\"{PROMOTED_TRANSPOSE}\",\"{FIXED_COPYPLAN_SYMBOL}\"],\"generic_symbol\":\"{GENERIC_NT_SYMBOL}\",\"words\":{},\"digest\":\"{:02x?}\"}}",
+                    path.name(),
+                    generic.len(),
+                    <[u8; 32]>::from(Sha256::digest(
+                        generic
+                            .iter()
+                            .flat_map(|word| word.to_le_bytes())
+                            .collect::<Vec<_>>()
+                    )),
+                );
+            }
+        }
+        Ok((direct, public, generic_graph, public_graph, golden))
+    }
+
     fn prepare_ada_pair(
         runtime: &Runtime,
     ) -> Result<(Fixture, CudaGraph, CudaGraph, Vec<u32>), String> {
@@ -2661,6 +3075,44 @@ mod cuda_tournament {
         Ok(elapsed_us)
     }
 
+    fn measure_integrated_public_auto(
+        runtime: &Runtime,
+        fixture: &mut PublicAutoFixture,
+        graph: &CudaGraph,
+        path: AdaPath,
+        expected: &[u32],
+    ) -> Result<f64, String> {
+        fixture.reset(&runtime.ctx)?;
+        let start = runtime
+            .ctx
+            .stream
+            .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+            .map_err(|error| format!("integrated public AUTO start: {error:?}"))?;
+        match path {
+            AdaPath::Eager => fixture.launch(&runtime.ctx)?,
+            AdaPath::Graph => graph
+                .launch()
+                .map_err(|error| format!("integrated public AUTO graph: {error:?}"))?,
+        }
+        let end = runtime
+            .ctx
+            .stream
+            .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+            .map_err(|error| format!("integrated public AUTO end: {error:?}"))?;
+        let elapsed_us = f64::from(
+            start
+                .elapsed_ms(&end)
+                .map_err(|error| format!("integrated public AUTO elapsed: {error:?}"))?,
+        ) * 1_000.0;
+        if !elapsed_us.is_finite() || elapsed_us <= 0.0 {
+            return Err(format!(
+                "invalid integrated public AUTO sample {elapsed_us}"
+            ));
+        }
+        fixture.validate(&runtime.ctx, expected)?;
+        Ok(elapsed_us)
+    }
+
     fn json_raw_observations(observations: &[[f64; 4]]) -> String {
         format!(
             "[{}]",
@@ -2767,6 +3219,123 @@ mod cuda_tournament {
             );
         }
         Ok([p50, p95])
+    }
+
+    fn screen_integrated_auto_stratum(
+        runtime: &Runtime,
+        direct: &mut Fixture,
+        public: &mut PublicAutoFixture,
+        generic_graph: &CudaGraph,
+        public_graph: &CudaGraph,
+        expected: &[u32],
+        path: AdaPath,
+        order: AdaBracketOrder,
+    ) -> Result<[f64; 2], String> {
+        for _ in 0..ADA_WARMUPS {
+            measure_integrated_public_auto(runtime, public, public_graph, path, expected)?;
+            measure_ada_observation(
+                runtime,
+                direct,
+                Arm::GenericNt,
+                generic_graph,
+                path,
+                expected,
+            )?;
+        }
+        let actual_auto_first = match order {
+            AdaBracketOrder::Abba => [false, true, true, false],
+            AdaBracketOrder::Baab => [true, false, false, true],
+        };
+        let mut raw_observations = Vec::with_capacity(ADA_INTEGRATED_WINDOWS);
+        let mut ratios = Vec::with_capacity(ADA_INTEGRATED_WINDOWS);
+        for _ in 0..ADA_INTEGRATED_WINDOWS {
+            let mut raw = [0.0; 4];
+            for (index, is_actual_auto) in actual_auto_first.into_iter().enumerate() {
+                raw[index] = if is_actual_auto {
+                    measure_integrated_public_auto(runtime, public, public_graph, path, expected)?
+                } else {
+                    measure_ada_observation(
+                        runtime,
+                        direct,
+                        Arm::GenericNt,
+                        generic_graph,
+                        path,
+                        expected,
+                    )?
+                };
+            }
+            ratios.push(ada_candidate_over_auto(raw, order));
+            raw_observations.push(raw);
+        }
+        let p50 = ada_percentile(&ratios, 0.50).ok_or("invalid integrated AUTO p50")?;
+        let p95 = ada_percentile(&ratios, 0.95).ok_or("invalid integrated AUTO p95")?;
+        let order_name = match order {
+            AdaBracketOrder::Abba => "ABBA",
+            AdaBracketOrder::Baab => "BAAB",
+        };
+        println!(
+            "{{\"schema\":\"MambaBiScalarNtIntegratedAutoScreenV1\",\"op\":\"NT\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"candidate\":\"actual_public_auto\",\"candidate_symbols\":[\"{PROMOTED_TRANSPOSE}\",\"{FIXED_COPYPLAN_SYMBOL}\"],\"candidate_modules\":[\"TriadScalar\",\"Fixed\"],\"comparator\":\"test_composed_generic_exact\",\"comparator_symbol\":\"{GENERIC_NT_SYMBOL}\",\"path\":\"{}\",\"order\":\"{order_name}\",\"windows\":{ADA_INTEGRATED_WINDOWS},\"warmup_brackets\":{ADA_WARMUPS},\"logical_pipelines_per_observation\":1,\"actual_auto_nodes_per_observation\":2,\"generic_nodes_per_observation\":1,\"raw_observations_us\":{},\"ratio_direction\":\"actual_auto_over_generic_exact\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
+            path.name(),
+            json_raw_observations(&raw_observations),
+        );
+        Ok([p50, p95])
+    }
+
+    #[test]
+    #[ignore = "requires integrated Ada CopyPlan AUTO on CUDA12.8/13.0/13.2; actual public AUTO/generic once21"]
+    fn ada_d768_out_integrated_fixed_copyplan_actual_auto_once21() -> Result<(), String> {
+        assert!(
+            !cfg!(debug_assertions),
+            "integrated AUTO proof requires --release"
+        );
+        let quiet = QuietGpu::for_cuda_ordinal(0)?;
+        let _pre = quiet.require_pre_context("scalar-nt-d768-out-integrated-auto/pre-context")?;
+        let runtime = new_ada_copyplan_runtime()?;
+        let _cohort = quiet.require_cohort("scalar-nt-d768-out-integrated-auto/cohort")?;
+        let (mut direct, mut public, generic_graph, public_graph, golden) =
+            prepare_integrated_auto_comparison(&runtime)?;
+        let mut strata = Vec::with_capacity(4);
+        for path in [AdaPath::Eager, AdaPath::Graph] {
+            for order in [AdaBracketOrder::Abba, AdaBracketOrder::Baab] {
+                strata.push(screen_integrated_auto_stratum(
+                    &runtime,
+                    &mut direct,
+                    &mut public,
+                    &generic_graph,
+                    &public_graph,
+                    &golden,
+                    path,
+                    order,
+                )?);
+            }
+        }
+        let retain = ada_retain_decision(&strata);
+        let strata_json = format!(
+            "[{}]",
+            strata
+                .iter()
+                .map(|[p50, p95]| format!("[{p50:.9},{p95:.9}]"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        println!(
+            "{{\"schema\":\"MambaBiScalarNtIntegratedAutoDecisionV1\",\"op\":\"NT\",\"cell\":\"d768_out_proj\",\"shape\":[2048,1536,768],\"actual_auto_symbols\":[\"{PROMOTED_TRANSPOSE}\",\"{FIXED_COPYPLAN_SYMBOL}\"],\"actual_auto_modules\":[\"TriadScalar\",\"Fixed\"],\"comparator\":\"test_composed_generic_exact\",\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{strata_json},\"ratio_direction\":\"actual_auto_over_generic_exact\",\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false,\"fast_comparator_included\":false}}",
+            if retain {
+                "integrated_auto_pass"
+            } else {
+                "integrated_auto_regression"
+            },
+        );
+        drop(direct);
+        drop(public);
+        drop(generic_graph);
+        drop(public_graph);
+        drop(runtime);
+        quiet.verify_post_cohort("scalar-nt-d768-out-integrated-auto/post")?;
+        if !retain {
+            return Err("integrated NT actual AUTO failed one or more <0.99 generic strata".into());
+        }
+        Ok(())
     }
 
     #[test]

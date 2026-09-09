@@ -1,6 +1,5 @@
 const PRODUCTION_SYMBOL: &str = "gemm_bi_nn_m64n64_bk16_s2_v1";
 const FIXED_COPYPLAN_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
-#[cfg(feature = "cuda")]
 const GENERIC_SYMBOL: &str = "gemm_bi_nn";
 const PRODUCTION_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/scalar_nn_m64n64.cu");
 const TEST_SOURCE: &str = include_str!("gemm_bi_scalar_nn_m64n64_qualification.rs");
@@ -75,6 +74,69 @@ fn copyplan_epilogue_supported(alpha: f32, beta: f32, has_bias: bool) -> bool {
 
 fn ada_live_toolkit_supported(cc: (u32, u32), sms: u32, nvrtc: (i32, i32)) -> bool {
     cc == (8, 9) && sms == 142 && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveCopyPlanStage {
+    Discovery,
+    Integrated,
+}
+
+impl LiveCopyPlanStage {
+    fn expected_auto_symbol(self) -> &'static str {
+        match self {
+            Self::Discovery => GENERIC_SYMBOL,
+            Self::Integrated => FIXED_COPYPLAN_SYMBOL,
+        }
+    }
+
+    fn windows(self) -> usize {
+        match self {
+            Self::Discovery => 7,
+            Self::Integrated => 21,
+        }
+    }
+}
+
+#[test]
+fn integrated_copyplan_must_use_actual_fixed_auto_and_confirmation_windows() {
+    assert_eq!(
+        LiveCopyPlanStage::Discovery.expected_auto_symbol(),
+        GENERIC_SYMBOL
+    );
+    assert_eq!(LiveCopyPlanStage::Discovery.windows(), 7);
+    assert_eq!(
+        LiveCopyPlanStage::Integrated.expected_auto_symbol(),
+        FIXED_COPYPLAN_SYMBOL
+    );
+    assert_eq!(LiveCopyPlanStage::Integrated.windows(), 21);
+}
+
+#[test]
+fn live_comparison_releases_the_qualified_lease_before_other_cuda_work() {
+    let (_, body) = TEST_SOURCE
+        .split_once("\n    fn run_live_copyplan_comparison(stage:")
+        .unwrap();
+    let (_, lease_body) = body
+        .split_once("let mut auto = qualify_physical_launch(")
+        .unwrap();
+    let (isolated_preflight, released) = lease_body
+        .split_once("drop(auto);")
+        .expect("the qualification lease must end before comparative timing");
+    for unrelated in [
+        "live_fast_launch(",
+        "reset_ada_observation(",
+        "check_ada_pair(",
+    ] {
+        assert!(
+            !isolated_preflight.contains(unrelated),
+            "unrelated CUDA work inside lease: {unrelated}"
+        );
+    }
+    assert!(released.contains("PublicAutoFixture::new("));
+    assert!(released.contains("validate_public_auto_graph("));
+    assert!(!released.contains("auto.measure_eager_window_ms("));
+    assert!(!released.contains("auto.measure_graph_window_ms("));
 }
 
 #[test]
@@ -316,10 +378,10 @@ mod cuda_qualification {
     use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
     use super::{
-        AdaShortScreenCell, FIXED_COPYPLAN_SYMBOL, GENERIC_SYMBOL, PRODUCTION_SYMBOL,
-        ada_candidate_shared, ada_copyplan_screen_cells, ada_live_toolkit_supported,
-        ada_short_screen_cells, ada_short_screen_retains, compose_cuda_source,
-        copyplan_epilogue_supported, fixed_full_mantissa,
+        AdaShortScreenCell, FIXED_COPYPLAN_SYMBOL, GENERIC_SYMBOL, LiveCopyPlanStage,
+        PRODUCTION_SYMBOL, ada_candidate_shared, ada_copyplan_screen_cells,
+        ada_live_toolkit_supported, ada_short_screen_cells, ada_short_screen_retains,
+        compose_cuda_source, copyplan_epilogue_supported, fixed_full_mantissa,
     };
 
     const GUARD_ELEMENTS: usize = 32;
@@ -1607,7 +1669,8 @@ mod cuda_qualification {
         let beta = 0.0_f32;
         let dtype = mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32.cuda_data_type();
         // Row-major C=A*B is column-major C^T=B^T*A^T. Explicit FAST_TF32,
-        // never PEDANTIC; no context policy mutation while AUTO is qualified.
+        // never PEDANTIC. Comparative timing starts after the exclusive
+        // qualification holder has been dropped.
         unsafe {
             result::gemm_ex(
                 *ctx.blas.handle(),
@@ -1632,6 +1695,214 @@ mod cuda_qualification {
             )
         }
         .map_err(|error| format!("explicit FAST_TF32 NN: {error:?}"))
+    }
+
+    // Public F32 entry points take owning buffers, not interior pointer views.
+    // Use active origin zero and trailing guards, matching the qualifier's
+    // allocation model. The direct arms keep their existing two-sided guards.
+    struct PublicAutoFixture {
+        output: GuardedBuffer,
+        a: GuardedBuffer,
+        b: GuardedBuffer,
+        case: Case,
+    }
+
+    impl PublicAutoFixture {
+        fn new(ctx: &GpuCtx, case: Case, c: &[u32], a: &[u32], b: &[u32]) -> Result<Self, String> {
+            let make = |words: &[u32], guard_bits| {
+                let mut expected: Vec<f32> = words.iter().copied().map(f32::from_bits).collect();
+                expected.resize(words.len() + GUARD_ELEMENTS, f32::from_bits(guard_bits));
+                Ok::<_, String>(GuardedBuffer {
+                    buffer: GpuBuffer::from_cpu(&ctx.stream, &expected)?,
+                    expected,
+                    active_offset: 0,
+                    active_len: words.len(),
+                    guard_bits,
+                })
+            };
+            Ok(Self {
+                output: make(c, OUTPUT_GUARD_BITS)?,
+                a: make(a, INPUT_GUARD_BITS)?,
+                b: make(b, INPUT_GUARD_BITS)?,
+                case,
+            })
+        }
+
+        fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+            self.output.reset(&ctx.stream)?;
+            self.a.reset(&ctx.stream)?;
+            self.b.reset(&ctx.stream)
+        }
+
+        fn launch(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+            mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
+                ctx,
+                &mut self.output.buffer,
+                &self.a.buffer,
+                self.b.ptr(&ctx.stream),
+                None,
+                self.case.dims,
+            )
+        }
+
+        fn validate(&self, ctx: &GpuCtx, golden: &[u32]) -> Result<(), String> {
+            if self.output.active_bits(&ctx.stream, "public AUTO")? != golden {
+                return Err("public AUTO output differs from the exact reference".into());
+            }
+            self.a.validate_unchanged(&ctx.stream, "public AUTO A")?;
+            self.b.validate_unchanged(&ctx.stream, "public AUTO B")
+        }
+
+        fn measure(
+            &mut self,
+            ctx: &GpuCtx,
+            graph: &CudaGraph,
+            path: AdaPath,
+            golden: &[u32],
+        ) -> Result<f64, String> {
+            self.reset(ctx)?;
+            let start = ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|e| format!("public AUTO start: {e:?}"))?;
+            match path {
+                AdaPath::Eager => self.launch(ctx)?,
+                AdaPath::Graph => graph
+                    .launch()
+                    .map_err(|e| format!("public AUTO graph: {e:?}"))?,
+            }
+            let end = ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|e| format!("public AUTO end: {e:?}"))?;
+            let us = f64::from(
+                start
+                    .elapsed_ms(&end)
+                    .map_err(|e| format!("public AUTO elapsed: {e:?}"))?,
+            ) * 1_000.0;
+            self.validate(ctx, golden)?;
+            if !us.is_finite() || us <= 0.0 {
+                return Err("invalid public AUTO timing".into());
+            }
+            Ok(us)
+        }
+    }
+
+    fn validate_public_auto_graph(
+        ctx: &GpuCtx,
+        graph: &CudaGraph,
+        fixture: &PublicAutoFixture,
+        stage: LiveCopyPlanStage,
+        expected: mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedKernelLaunch,
+    ) -> Result<(), String> {
+        use std::ffi::CStr;
+        let mut count = 0;
+        let mut node = std::ptr::null_mut();
+        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        unsafe {
+            if sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count)
+                != sys::CUresult::CUDA_SUCCESS
+                || count != 1
+            {
+                return Err(format!("public AUTO graph node count {count}"));
+            }
+            if sys::cuGraphGetNodes(graph.cu_graph(), &mut node, &mut count)
+                != sys::CUresult::CUDA_SUCCESS
+                || sys::cuGraphKernelNodeGetParams_v2(node, &mut params)
+                    != sys::CUresult::CUDA_SUCCESS
+            {
+                return Err("public AUTO graph node query failed".into());
+            }
+            let mut name = std::ptr::null();
+            if sys::cuFuncGetName(&mut name, params.func) != sys::CUresult::CUDA_SUCCESS
+                || name.is_null()
+            {
+                return Err("public AUTO graph symbol query failed".into());
+            }
+            if CStr::from_ptr(name).to_bytes() != stage.expected_auto_symbol().as_bytes()
+                || (params.gridDimX, params.gridDimY, params.gridDimZ) != expected.grid_dim
+                || (params.blockDimX, params.blockDimY, params.blockDimZ) != expected.block_dim
+                || params.sharedMemBytes != expected.shared_mem_bytes
+                || params.kernelParams.is_null()
+            {
+                return Err(
+                    "public AUTO graph differs from the independently qualified plan".into(),
+                );
+            }
+            for (index, pointer) in [
+                fixture.output.ptr(&ctx.stream),
+                fixture.a.ptr(&ctx.stream),
+                fixture.b.ptr(&ctx.stream),
+                0,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut offset = 0;
+                let mut size = 0;
+                if sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size)
+                    != sys::CUresult::CUDA_SUCCESS
+                    || offset != index * 8
+                    || size != 8
+                {
+                    return Err(format!("public AUTO pointer ABI {index} changed"));
+                }
+                let value = *params.kernelParams.add(index);
+                if value.is_null() || std::ptr::read_unaligned(value.cast::<u64>()) != pointer {
+                    return Err(format!("public AUTO pointer binding {index} changed"));
+                }
+            }
+            let (m, k, n) = fixture.case.dims;
+            let words = [
+                1.0_f32.to_bits(),
+                0,
+                m as u32,
+                n as u32,
+                k as u32,
+                k as u32,
+                n as u32,
+                n as u32,
+            ];
+            let bundled = stage == LiveCopyPlanStage::Integrated;
+            for (word_index, expected_word) in words.into_iter().enumerate() {
+                let index = if bundled { 4 } else { 4 + word_index };
+                let mut offset = 0;
+                let mut size = 0;
+                if sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size)
+                    != sys::CUresult::CUDA_SUCCESS
+                    || (offset, size)
+                        != if bundled {
+                            (32, 32)
+                        } else {
+                            (32 + word_index * 4, 4)
+                        }
+                {
+                    return Err(format!("public AUTO scalar ABI {index} changed"));
+                }
+                let value = *params.kernelParams.add(index);
+                if value.is_null()
+                    || std::ptr::read_unaligned(value.cast::<u32>().add(if bundled {
+                        word_index
+                    } else {
+                        0
+                    })) != expected_word
+                {
+                    return Err(format!("public AUTO scalar binding {word_index} changed"));
+                }
+            }
+            let mut offset = 0;
+            let mut size = 0;
+            if sys::cuFuncGetParamInfo(
+                params.func,
+                if bundled { 5 } else { 12 },
+                &mut offset,
+                &mut size,
+            ) != sys::CUresult::CUDA_ERROR_INVALID_VALUE
+            {
+                return Err("public AUTO graph accepted an unexpected terminal argument".into());
+            }
+        }
+        Ok(())
     }
 
     fn live_fast_observation(
@@ -1678,13 +1949,38 @@ mod cuda_qualification {
     #[test]
     #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Fixed/AUTO/Fast comparison"]
     fn ada_live_fixed_copyplan_vs_auto_and_fast_three_cell_once7() -> Result<(), String> {
+        run_live_copyplan_comparison(LiveCopyPlanStage::Discovery)
+    }
+
+    #[test]
+    #[ignore = "requires integrated Ada CopyPlan AUTO on CUDA12.8/13.0/13.2; actual AUTO/generic/Fast once21"]
+    fn ada_integrated_copyplan_auto_three_cell_once21() -> Result<(), String> {
+        run_live_copyplan_comparison(LiveCopyPlanStage::Integrated)
+    }
+
+    fn run_live_copyplan_comparison(stage: LiveCopyPlanStage) -> Result<(), String> {
         use cudarc::cublas::sys as blas;
         use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
             PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
         };
-        use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp};
+        use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+            ModuleKind, ResolvedGemmOp, ResolvedNumericContract,
+        };
         use serde_json::json;
 
+        let integrated = stage == LiveCopyPlanStage::Integrated;
+        let windows = stage.windows();
+        let mut integrated_generic_pass = true;
+        let screen_schema = if integrated {
+            "MambaBiIntegratedCopyPlanScreenV1"
+        } else {
+            "MambaBiLiveCopyPlanScreenV1"
+        };
+        let decision_schema = if integrated {
+            "MambaBiIntegratedCopyPlanDecisionV1"
+        } else {
+            "MambaBiLiveCopyPlanDecisionV1"
+        };
         assert!(!cfg!(debug_assertions), "live comparison requires release");
         if std::env::var("NVIDIA_TF32_OVERRIDE").ok().as_deref() == Some("0") {
             return Err("FAST_TF32 is disabled by NVIDIA_TF32_OVERRIDE".into());
@@ -1753,7 +2049,7 @@ mod cuda_qualification {
         println!(
             "{}",
             json!({"schema":"MambaBiLiveCopyPlanBindingV1", "symbol":FIXED_COPYPLAN_SYMBOL,
-            "module":"Fixed", "compiler":format!("{compiler:?}"), "artifact":format!("{artifact:?}"),
+            "module":"Fixed", "stage":format!("{stage:?}"), "compiler":format!("{compiler:?}"), "artifact":format!("{artifact:?}"),
             "fast_compute":"CUBLAS_COMPUTE_32F_FAST_TF32", "fast_math":format!("{math:?}"), "fast_algorithm":"CUBLAS_GEMM_DEFAULT"})
         );
         // A different compiled module is a new bit domain: repeat bounded tail
@@ -1782,7 +2078,7 @@ mod cuda_qualification {
                 bias: false,
                 cpu_oracle: false,
             };
-            let (candidate, _, candidate_graph, _, mut fixture, golden) =
+            let (candidate, generic, candidate_graph, generic_graph, mut fixture, golden) =
                 check_ada_pair(&runtime, case, FIXED_COPYPLAN_SYMBOL)?;
             let words = |buffer: &GuardedBuffer| {
                 buffer.expected[buffer.active_offset..buffer.active_offset + buffer.active_len]
@@ -1802,16 +2098,73 @@ mod cuda_qualification {
             let evidence = auto.evidence();
             if !evidence.eager_graph_equal()
                 || evidence.launch_count() != 1
-                || evidence.single_launch_symbol() != Some(GENERIC_SYMBOL)
-                || evidence.uniform_module_kind() != Some(ModuleKind::TriadScalar)
+                || evidence.single_launch_symbol() != Some(stage.expected_auto_symbol())
+                || evidence.uniform_module_kind()
+                    != Some(if integrated {
+                        ModuleKind::Fixed
+                    } else {
+                        ModuleKind::TriadScalar
+                    })
                 || evidence.launch_digest() == [0; 32]
             {
                 return Err(format!("live NN AUTO identity changed: {evidence:?}"));
             }
+            if integrated {
+                let node = &evidence.nodes()[0];
+                let expected_grid = (cell.dims.0.div_ceil(64) * cell.dims.2.div_ceil(64)) as u32;
+                if node.shape != cell.dims
+                    || node.tile != Some((64, 64))
+                    || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+                    || node.launch.block_dim != (128, 1, 1)
+                    || node.launch.grid_dim != (expected_grid, 1, 1)
+                    || node.launch.shared_mem_bytes != 0
+                    || node.launch.arguments_digest == [0; 32]
+                {
+                    return Err(format!(
+                        "integrated CopyPlan AUTO physical node mismatch: {node:?}"
+                    ));
+                }
+            }
             println!(
                 "{}",
-                json!({"schema":"MambaBiLiveCopyPlanAutoIdentityV1", "cell":cell.id,
+                json!({"schema":"MambaBiLiveCopyPlanAutoIdentityV1", "cell":cell.id,"stage":format!("{stage:?}"),
                 "shape":cell.dims, "evidence":format!("{evidence:?}")})
+            );
+            let qualified_launch = evidence.nodes()[0].launch;
+            // The holder owns an exclusive policy lease: only its own CUDA
+            // operations may run until it is dropped. Check exact inputs here
+            // in isolation, then independently capture the real public API.
+            for path in [AdaPath::Eager, AdaPath::Graph] {
+                for _ in 0..2 {
+                    auto.upload_exact_unbiased_f32_words(&ctx, &c_words, &a_words, &b_words)?;
+                    match path {
+                        AdaPath::Eager => auto.measure_eager_window_ms(&ctx, 1)?,
+                        AdaPath::Graph => auto.measure_graph_window_ms(&ctx, 1)?,
+                    };
+                    if auto.f32_output_bits(&ctx)? != golden
+                        || auto.f32_operand_bits(&ctx)? != (a_words.clone(), b_words.clone())
+                    {
+                        return Err(
+                            "isolated qualified AUTO differs from the exact reference".into()
+                        );
+                    }
+                    auto.validate_red_zones(&ctx)?;
+                }
+            }
+            drop(auto);
+            let mut auto = PublicAutoFixture::new(&ctx, case, &c_words, &a_words, &b_words)?;
+            auto.reset(&ctx)?;
+            auto.launch(&ctx)?;
+            auto.validate(&ctx, &golden)?;
+            auto.reset(&ctx)?;
+            let auto_graph = unsafe { capture_into_graph(&ctx.stream, || auto.launch(&ctx)) }?;
+            validate_public_auto_graph(&ctx, &auto_graph, &auto, stage, qualified_launch)?;
+            println!(
+                "{}",
+                json!({"schema":"MambaBiPublicAutoIsolationV1", "cell":cell.id,
+                "qualified_holder_dropped":true,"public_graph_matches_qualified_launch":true,
+                "public_entrypoint":"gpu_gemm_bi_forward_raw","public_buffer_origin":0,
+                "public_guards":"trailing","direct_guards":"leading+trailing"})
             );
             reset_ada_observation(&runtime, &mut fixture, Arm::Generic)?;
             live_fast_launch(&runtime, &ctx, &fixture)?;
@@ -1844,22 +2197,14 @@ mod cuda_qualification {
                         path,
                         &fast_bits,
                     )?;
-                    auto.upload_exact_unbiased_f32_words(&ctx, &c_words, &a_words, &b_words)?;
-                    match path {
-                        AdaPath::Eager => auto.measure_eager_window_ms(&ctx, 1)?,
-                        AdaPath::Graph => auto.measure_graph_window_ms(&ctx, 1)?,
-                    };
-                    if auto.f32_output_bits(&ctx)? != golden
-                        || auto.f32_operand_bits(&ctx)? != (a_words.clone(), b_words.clone())
-                    {
-                        return Err("live AUTO differs from generic exact or mutates inputs".into());
-                    }
-                    auto.validate_red_zones(&ctx)?;
+                    auto.measure(&ctx, &auto_graph, path, &golden)?;
                 }
             }
             for fast in [false, true] {
                 let comparator = if fast {
                     "cublas_fast_tf32"
+                } else if integrated {
+                    "test_composed_generic_exact"
                 } else {
                     "actual_auto"
                 };
@@ -1872,10 +2217,17 @@ mod cuda_qualification {
                         };
                         let mut raw = Vec::new();
                         let mut ratios = Vec::new();
-                        for bracket in 0..(ADA_WARMUPS + ADA_WINDOWS) {
+                        for bracket in 0..(ADA_WARMUPS + windows) {
                             let mut observation = [0.0; 4];
                             for (index, is_candidate) in arms.into_iter().enumerate() {
-                                observation[index] = if is_candidate {
+                                let measure_auto = if integrated {
+                                    is_candidate
+                                } else {
+                                    !is_candidate && !fast
+                                };
+                                observation[index] = if measure_auto {
+                                    auto.measure(&ctx, &auto_graph, path, &golden)?
+                                } else if is_candidate {
                                     measure_ada_observation(
                                         &runtime,
                                         &candidate,
@@ -1895,23 +2247,15 @@ mod cuda_qualification {
                                         &fast_bits,
                                     )?
                                 } else {
-                                    auto.upload_exact_unbiased_f32_words(
-                                        &ctx, &c_words, &a_words, &b_words,
-                                    )?;
-                                    let ms = match path {
-                                        AdaPath::Eager => auto.measure_eager_window_ms(&ctx, 1)?,
-                                        AdaPath::Graph => auto.measure_graph_window_ms(&ctx, 1)?,
-                                    };
-                                    if auto.f32_output_bits(&ctx)? != golden
-                                        || auto.f32_operand_bits(&ctx)?
-                                            != (a_words.clone(), b_words.clone())
-                                    {
-                                        return Err(
-                                            "AUTO output/input bits changed after timing".into()
-                                        );
-                                    }
-                                    auto.validate_red_zones(&ctx)?;
-                                    ms * 1_000.0
+                                    measure_ada_observation(
+                                        &runtime,
+                                        &generic,
+                                        &generic_graph,
+                                        &mut fixture,
+                                        Arm::Generic,
+                                        path,
+                                        &golden,
+                                    )?
                                 };
                             }
                             if observation.iter().any(|us| !us.is_finite() || *us <= 0.0) {
@@ -1935,28 +2279,39 @@ mod cuda_qualification {
                             }
                         }
                         ratios.sort_by(f64::total_cmp);
-                        let pair = [ratios[3], ratios[6]];
+                        let pair = [percentile(&ratios, 0.50), percentile(&ratios, 0.95)];
                         strata.push(pair);
                         println!(
                             "{}",
-                            json!({"schema":"MambaBiLiveCopyPlanScreenV1", "cell":cell.id,"shape":cell.dims,
+                            json!({"schema":screen_schema, "cell":cell.id,"shape":cell.dims,"stage":format!("{stage:?}"),
+                            "candidate_path":if integrated { "public_auto_with_separate_qualified_preflight" } else { "direct_fixed_holder" },
                             "candidate_symbol":FIXED_COPYPLAN_SYMBOL,"candidate_module":"Fixed","comparator":comparator,
-                            "path":path.name(),"order":order.name(),"candidate_first":arms[0],"windows":ADA_WINDOWS,
+                            "path":path.name(),"order":order.name(),"candidate_first":arms[0],"windows":windows,
                             "warmup_brackets":ADA_WARMUPS,"logical_gemms_per_observation":1,"reseed_scope":"C+A+B",
                             "raw_observations_us":raw,"ratio_direction":"candidate_over_reference","ratio_p50":pair[0],"ratio_p95":pair[1]})
                         );
                     }
                 }
+                let retain = ada_short_screen_retains(&strata);
+                if integrated && !fast {
+                    integrated_generic_pass &= retain;
+                }
                 println!(
                     "{}",
-                    json!({"schema":"MambaBiLiveCopyPlanDecisionV1","cell":cell.id,"comparator":comparator,
-                    "strata":strata,"retain":ada_short_screen_retains(&strata),"promotion":false})
+                    json!({"schema":decision_schema,"cell":cell.id,"comparator":comparator,
+                    "strata":strata,"retain":retain,"promotion":false,"actual_auto_integrated":integrated})
                 );
             }
         }
         drop(ctx);
         drop(runtime);
         quiet.verify_post_cohort("live-copyplan-auto-fast/post")?;
+        if !integrated_generic_pass {
+            return Err(
+                "integrated CopyPlan AUTO lost one or more generic-reference confirmation strata"
+                    .into(),
+            );
+        }
         Ok(())
     }
 

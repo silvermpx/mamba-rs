@@ -2886,7 +2886,12 @@ pub enum PhysicalGemmBackend {
     Sm120TmaMmaTf32RnaStreamKV1 = 19,
     Sm120TmaFmaExactV1 = 20,
     Sm89MmaTf32Compact8V1 = 21,
+    ScalarFmaSm89FixedCopyPlanV1 = 22,
 }
+
+/// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
+/// Fixed CopyPlan kernel. This must not invalidate unrelated tuning-45 routes.
+pub(crate) const SM89_FIXED_COPYPLAN_ROUTE_REVISION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -5027,6 +5032,7 @@ mod physical_launch_tests {
         );
         assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8V1 as u8, 21);
+        assert_eq!(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 as u8, 22);
     }
 
     #[test]

@@ -1234,29 +1234,7 @@ impl GpuCtx {
                 "{label}: captured Triad numeric contract is unavailable under the live GEMM policy"
             ));
         }
-        let expected_module = match route.backend {
-            PhysicalGemmBackend::ScalarFmaV1
-            | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
-            | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
-            | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
-            | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
-            PhysicalGemmBackend::Sm80Mma16V1
-            | PhysicalGemmBackend::MmaTf32RnaV1
-            | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
-            | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
-            | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
-            PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
-            PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
-                ModuleKind::TriadSm90a
-            }
-            PhysicalGemmBackend::Sm100Tcgen05V1 | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => {
-                ModuleKind::TriadSm100
-            }
-            PhysicalGemmBackend::Sm120TmaMma16V1
-            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1
-            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1
-            | PhysicalGemmBackend::Sm120TmaFmaExactV1 => ModuleKind::TriadSm120,
-        };
+        let expected_module = expected_route_module(route.backend);
         if route.module_kind != expected_module || route.artifact.module_kind != expected_module {
             return Err(format!(
                 "{label}: captured physical backend no longer matches its module binding"
@@ -1619,11 +1597,42 @@ fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) 
     }
 }
 
+const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
+    match backend {
+        PhysicalGemmBackend::ScalarFmaV1
+        | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
+        | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
+        | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
+        | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
+        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => ModuleKind::Fixed,
+        PhysicalGemmBackend::Sm80Mma16V1
+        | PhysicalGemmBackend::MmaTf32RnaV1
+        | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
+        | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
+        | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
+        PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
+        PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
+            ModuleKind::TriadSm90a
+        }
+        PhysicalGemmBackend::Sm100Tcgen05V1 | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => {
+            ModuleKind::TriadSm100
+        }
+        PhysicalGemmBackend::Sm120TmaMma16V1
+        | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1
+        | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1
+        | PhysicalGemmBackend::Sm120TmaFmaExactV1 => ModuleKind::TriadSm120,
+    }
+}
+
 fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
-    if backend == PhysicalGemmBackend::Sm89MmaTf32Compact8V1 {
-        super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
-    } else {
-        generic
+    match backend {
+        PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => {
+            super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
+        }
+        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => {
+            super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
+        }
+        _ => generic,
     }
 }
 
@@ -1635,6 +1644,7 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
             | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
             | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
             | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1
+            | PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
             | PhysicalGemmBackend::Sm120TmaFmaExactV1
     )
 }
@@ -1642,14 +1652,16 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
 #[cfg(test)]
 mod tests {
     use super::{
-        BiGemmFamily, F32TriadPolicy, bi_gemm_family_from_result, expected_route_schedule_revision,
-        expected_route_tuning_revision, f32_triad_policy_from_result, m1_mixed_graph_max_dim,
-        scalar_backend_supports_logical_f32, tier_flag_from_result,
-        validate_multiprocessor_identity,
+        BiGemmFamily, F32TriadPolicy, bi_gemm_family_from_result, expected_route_module,
+        expected_route_schedule_revision, expected_route_tuning_revision,
+        f32_triad_policy_from_result, m1_mixed_graph_max_dim, scalar_backend_supports_logical_f32,
+        tier_flag_from_result, validate_multiprocessor_identity,
     };
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
-    use crate::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, SCHEDULE_REVISION};
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ModuleKind, PhysicalGemmBackend, SCHEDULE_REVISION,
+    };
     #[cfg(unix)]
     use std::ffi::OsString;
 
@@ -1718,6 +1730,33 @@ mod tests {
     }
 
     #[test]
+    fn sm89_fixed_copyplan_routes_use_a_private_revision_without_moving_global_45() {
+        let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
+        let copyplan = expected_route_tuning_revision(
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+            generic,
+        );
+        assert_eq!(
+            copyplan,
+            crate::mamba_ssm::gpu::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
+        );
+        assert_ne!(copyplan, 0);
+        assert_ne!(copyplan, 2);
+        assert_eq!(
+            expected_route_tuning_revision(PhysicalGemmBackend::ScalarFmaV1, generic),
+            45
+        );
+        assert_eq!(
+            expected_route_module(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1),
+            ModuleKind::Fixed
+        );
+        assert_eq!(
+            expected_route_module(PhysicalGemmBackend::ScalarFmaV1),
+            ModuleKind::TriadScalar
+        );
+    }
+
+    #[test]
     fn logical_f32_accepts_only_scalar_triad_backends() {
         for backend in [
             PhysicalGemmBackend::ScalarFmaV1,
@@ -1725,6 +1764,7 @@ mod tests {
             PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
             PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
             PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
             PhysicalGemmBackend::Sm120TmaFmaExactV1,
         ] {
             assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");

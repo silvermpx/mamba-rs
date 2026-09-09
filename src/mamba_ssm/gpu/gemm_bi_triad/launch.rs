@@ -12,10 +12,10 @@ use crate::mamba_ssm::gpu::kernel_identity::{
     ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
     ResolvedInstructionShape, ResolvedKernelLaunch, ResolvedNumericContract,
     ResolvedOperandConversion, ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch,
-    SCHEDULE_REVISION, Sha256Digest, TUNING_TABLE_REVISION, build_resolved_gemm_launch_set,
-    build_zero_reduction_route_identity, enqueue_prepared_physical_launch,
-    enqueue_with_physical_observation, prepare_recording_physical_observer,
-    resolve_physical_launch_observation,
+    SCHEDULE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION,
+    build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
+    enqueue_prepared_physical_launch, enqueue_with_physical_observation,
+    prepare_recording_physical_observer, resolve_physical_launch_observation,
 };
 use cudarc::driver::{
     CudaFunction, CudaStream, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg,
@@ -2030,6 +2030,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::TnSplitM { .. } => 2,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
@@ -2045,8 +2046,10 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NnSplitKThin
             | ScalarDispatchPlan::NnSplitKSlim { .. }
             | ScalarDispatchPlan::NnM32N64SplitK32Qualified
+            | ScalarDispatchPlan::NnSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
+            | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -2067,6 +2070,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnSplitKSlim { chunks } => (7, chunks as u64, 0),
         ScalarDispatchPlan::NnM32N64SplitK32Qualified => (36, 0, 0),
         ScalarDispatchPlan::NnM64N64Qualified => (24, 0, 0),
+        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified => (37, 0, 0),
         ScalarDispatchPlan::NnFinal { slim } => (8, u64::from(slim), 0),
         ScalarDispatchPlan::TnGemv => (9, 0, 0),
         ScalarDispatchPlan::TnNarrow => (10, 0, 0),
@@ -2086,6 +2090,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NtM2N16SplitK32Qualified => (31, 0, 0),
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified => (25, 0, 0),
         ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified => (26, 0, 0),
+        ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified => (38, 0, 0),
         ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified => (27, 0, 0),
         ScalarDispatchPlan::NtPrismVectorQualified => (30, 0, 0),
         ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => (29, 0, 0),
@@ -2126,7 +2131,11 @@ fn scalar_argument_layout(
             null_pointer_mask: 0b11000 | (bias_null << 2),
             ..ScalarArgumentLayout::default()
         },
-        (ScalarDispatchPlan::NnM64N64Qualified, _) => ScalarArgumentLayout {
+        (
+            ScalarDispatchPlan::NnM64N64Qualified
+            | ScalarDispatchPlan::NnSm89FixedCopyPlanQualified,
+            _,
+        ) => ScalarArgumentLayout {
             null_pointer_mask: bias_null << 3,
             ..ScalarArgumentLayout::default()
         },
@@ -2134,6 +2143,7 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::TnM16N16SplitM16Qualified, _) => ScalarArgumentLayout::default(),
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 1)
+        | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 1)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 1) => ScalarArgumentLayout {
@@ -2142,6 +2152,7 @@ fn scalar_argument_layout(
         },
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 0)
+        | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 0)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 0) => {
@@ -2458,6 +2469,22 @@ fn scalar_physical_nodes(
                 super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
             ),
         ),
+        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified => push_scalar_node(
+            &mut nodes,
+            context,
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+            (64, 64),
+            (32, 2),
+            cfg(
+                (
+                    checked_grid_product(m.div_ceil(64), n.div_ceil(64), 1)?,
+                    1,
+                    1,
+                ),
+                (128, 1, 1),
+                0,
+            ),
+        ),
         ScalarDispatchPlan::NnFinal { slim } => {
             let bn = if slim { 64 } else { 128 };
             push_scalar_node(
@@ -2656,14 +2683,26 @@ fn scalar_physical_nodes(
         ),
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => {
-            let m64_symbol = if plan == ScalarDispatchPlan::NtPrismVectorQualified {
-                "gemm_bi_nn_prism_m64n64_bk16_s2_v1"
-            } else {
-                "gemm_bi_nn_m64n64_bk16_s2_v1"
-            };
+            let (m64_symbol, bk, shared_mem_bytes) =
+                if plan == ScalarDispatchPlan::NtPrismVectorQualified {
+                    (
+                        "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+                        16,
+                        super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+                    )
+                } else if plan == ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified {
+                    ("gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1", 32, 0)
+                } else {
+                    (
+                        "gemm_bi_nn_m64n64_bk16_s2_v1",
+                        16,
+                        super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+                    )
+                };
             push_scalar_node(
                 &mut nodes,
                 context,
@@ -2677,7 +2716,7 @@ fn scalar_physical_nodes(
                 context,
                 m64_symbol,
                 (64, 64),
-                (16, 2),
+                (bk, 2),
                 cfg(
                     (
                         checked_grid_product(m.div_ceil(64), k.div_ceil(64), 1)?,
@@ -2685,7 +2724,7 @@ fn scalar_physical_nodes(
                         1,
                     ),
                     (128, 1, 1),
-                    super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+                    shared_mem_bytes,
                 ),
             );
         }
@@ -2867,6 +2906,13 @@ fn scalar_route_contract(
     ResolvedNumericContract,
     ResolvedOutputOwnership,
 ) {
+    if symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" {
+        return (
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+            ResolvedNumericContract::ScalarFmaV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        );
+    }
     if matches!(
         symbol,
         "gemm_bi_nn_splitk32_partial"
@@ -2921,13 +2967,28 @@ fn scalar_resolved_routes(
     nodes: &[ScalarNodeSpec],
 ) -> Result<Box<[ResolvedGemmRoute]>, String> {
     let context = ctx.gemm_route();
-    let compiler = ctx.kernels.triad_scalar_compiler_identity();
     let mut routes = Vec::new();
     routes
         .try_reserve_exact(nodes.len())
         .map_err(|error| format!("reserve scalar route plan: {error}"))?;
     for node in nodes {
         let (backend, numeric_contract, ownership) = scalar_route_contract(node.symbol);
+        let (module_kind, artifact, compiler, tuning_table_revision) =
+            if backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 {
+                (
+                    ModuleKind::Fixed,
+                    context.artifacts.fixed,
+                    ctx.kernels.compiler_identity(),
+                    SM89_FIXED_COPYPLAN_ROUTE_REVISION,
+                )
+            } else {
+                (
+                    ModuleKind::TriadScalar,
+                    context.artifacts.triad_scalar,
+                    ctx.kernels.triad_scalar_compiler_identity(),
+                    TUNING_TABLE_REVISION,
+                )
+            };
         routes.push(ResolvedGemmRoute {
             op: request.op,
             dtype: PolicyDtype::F32,
@@ -2938,9 +2999,9 @@ fn scalar_resolved_routes(
             operand_conversion: ResolvedOperandConversion::None,
             ownership,
             symbol: node.symbol,
-            module_kind: ModuleKind::TriadScalar,
+            module_kind,
             target: compiler.target,
-            artifact: context.artifacts.triad_scalar,
+            artifact,
             compiler,
             device: context.device,
             device_caps: context.device_caps,
@@ -2954,7 +3015,7 @@ fn scalar_resolved_routes(
             tensor_map_revision: 0,
             tensor_maps_digest: [0; 32],
             resources_digest,
-            tuning_table_revision: TUNING_TABLE_REVISION,
+            tuning_table_revision,
             schedule_revision: SCHEDULE_REVISION,
         });
     }
@@ -3628,6 +3689,7 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtSplitKSlim { .. }
         | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
@@ -3649,6 +3711,9 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
     ScalarLaunchFacts {
         scalar_artifact: kernels.artifact_set_identity().triad_scalar,
         scalar_compiler: kernels.triad_scalar_compiler_identity(),
+        fixed_artifact: kernels.artifact_set_identity().fixed,
+        fixed_compiler: kernels.compiler_identity(),
+        fixed_copyplan_loaded: kernels.fixed_sm89_f32_n64_copyplan.is_some(),
         compute_capability: kernels.triad_scalar_compute_capability(),
         multiprocessor_count: kernels.multiprocessor_count(),
     }
@@ -7941,6 +8006,52 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
         return Ok(());
     }
 
+    if matches!(
+        scalar_plan,
+        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified
+    ) {
+        let params = SgbNnM64N64Params {
+            alpha,
+            beta,
+            m: checked_dims.m_i32,
+            n: checked_dims.n_i32,
+            k: checked_dims.k_i32,
+            lda: lda_i,
+            ldb: checked_dims.n_i32,
+            ldc: checked_dims.n_i32,
+        };
+        let total_tiles = checked_tile_grid(checked_dims.m_u32, 64, checked_dims.n_u32, 64)?;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (total_tiles, 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let function = kernels
+            .fixed_sm89_f32_n64_copyplan
+            .as_ref()
+            .ok_or_else(|| "qualified Fixed CopyPlan kernel is unavailable".to_string())?;
+        let mut builder = scalar_launch_builder(stream, function, &control);
+        builder.arg_buffer_mut(y);
+        builder.arg(&x_ptr);
+        builder.arg(&w_ptr);
+        builder.arg(&bias_ptr);
+        builder.arg(&params);
+        enqueue_scalar_forward(
+            &mut control,
+            request,
+            actual_operands,
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+            cfg,
+            &mut builder,
+        )
+        .map_err(|error| {
+            error.with_driver_context(format_args!(
+                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1 forward"
+            ))
+        })?;
+        return Ok(());
+    }
+
     if matches!(scalar_plan, ScalarDispatchPlan::NnM64N64Qualified) {
         let params = SgbNnM64N64Params {
             alpha,
@@ -8576,6 +8687,7 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
         scalar_plan,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
+            | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -8640,6 +8752,8 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
             ldb: checked_dims.k_i32,
             ldc: checked_dims.k_i32,
         };
+        let uses_fixed_copyplan =
+            scalar_plan == ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
         let m64_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
                 checked_grid_product(
@@ -8651,22 +8765,33 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
                 1,
             ),
             block_dim: (128, 1, 1),
-            shared_mem_bytes: super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+            shared_mem_bytes: if uses_fixed_copyplan {
+                0
+            } else {
+                super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES
+            },
         };
         let bias = 0_u64;
         let dy_ptr = dy.raw_ptr(stream);
-        let (m64_function, m64_symbol) =
-            if scalar_plan == ScalarDispatchPlan::NtPrismVectorQualified {
-                (
-                    &kernels.gemm_bi_nn_prism_m64n64_bk16_s2_v1,
-                    "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-                )
-            } else {
-                (
-                    &kernels.gemm_bi_nn_m64n64_bk16_s2_v1,
-                    "gemm_bi_nn_m64n64_bk16_s2_v1",
-                )
-            };
+        let (m64_function, m64_symbol) = if uses_fixed_copyplan {
+            (
+                kernels
+                    .fixed_sm89_f32_n64_copyplan
+                    .as_ref()
+                    .ok_or_else(|| "qualified Fixed CopyPlan kernel is unavailable".to_string())?,
+                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+            )
+        } else if scalar_plan == ScalarDispatchPlan::NtPrismVectorQualified {
+            (
+                &kernels.gemm_bi_nn_prism_m64n64_bk16_s2_v1,
+                "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+            )
+        } else {
+            (
+                &kernels.gemm_bi_nn_m64n64_bk16_s2_v1,
+                "gemm_bi_nn_m64n64_bk16_s2_v1",
+            )
+        };
         let mut m64 = scalar_launch_builder(stream, m64_function, &control);
         m64.arg_buffer_mut(dx);
         m64.arg(&dy_ptr);
@@ -12983,6 +13108,36 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
+    fn scalar_nn_fixed_copyplan_plan_has_a_distinct_fixed_physical_identity() {
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (2_048, 1_536, 768)),
+        };
+        let operands = scalar_test_operands(ResolvedGemmOp::Nn, 1.0);
+        let plan = ScalarDispatchPlan::NnSm89FixedCopyPlanQualified;
+        assert_eq!(scalar_plan_fields(plan), (37, 0, 0));
+        assert!(scalar_plan_requires_zero_beta(plan));
+        let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].symbol, "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1");
+        assert_eq!(nodes[0].tile, (64, 64));
+        assert_eq!((nodes[0].bk, nodes[0].stages), (32, 2));
+        assert_eq!(nodes[0].launch.grid_dim, (384, 1, 1));
+        assert_eq!(nodes[0].launch.block_dim, (128, 1, 1));
+        assert_eq!(nodes[0].launch.shared_mem_bytes, 0);
+        assert_eq!(
+            scalar_route_contract(nodes[0].symbol),
+            (
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+                ResolvedNumericContract::ScalarFmaV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            )
+        );
+        let layout = scalar_argument_layout(request, operands, plan, 0);
+        assert_eq!(layout.null_pointer_mask, 1 << 3);
+    }
+
+    #[test]
     fn scalar_nn_m32n64_splitk32_plan_has_two_exact_ordered_nodes() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nn,
@@ -13654,6 +13809,58 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
+    fn scalar_nt_d768_out_fixed_copyplan_preserves_outer_and_inner_geometry() {
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
+        };
+        let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
+        let plan = ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        assert_eq!(
+            (request.shape.m, request.shape.k, request.shape.n),
+            (2_048, 1_536, 768),
+            "frozen outer NT evidence dimensions"
+        );
+        assert_eq!(
+            (request.shape.m, request.shape.n, request.shape.k),
+            (2_048, 768, 1_536),
+            "inner NN M/K/N after the physical transpose"
+        );
+        assert_eq!((request.shape.m, request.shape.k), (2_048, 1_536));
+        assert_eq!(scalar_plan_fields(plan), (38, 0, 0));
+        assert!(scalar_plan_requires_zero_beta(plan));
+        assert_eq!(
+            scalar_transpose_scratch_elements(request, plan).unwrap(),
+            Some(1_179_648)
+        );
+        let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+        assert_eq!(nodes[0].launch.grid_dim, (24, 48, 1));
+        assert_eq!(nodes[0].launch.block_dim, (32, 16, 1));
+        assert_eq!(nodes[1].symbol, "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1");
+        assert_eq!(nodes[1].launch.grid_dim, (768, 1, 1));
+        assert_eq!(nodes[1].launch.block_dim, (128, 1, 1));
+        assert_eq!(nodes[1].launch.shared_mem_bytes, 0);
+        assert_eq!(
+            (nodes[1].tile, nodes[1].bk, nodes[1].stages),
+            ((64, 64), 32, 2)
+        );
+        assert_eq!(
+            scalar_route_contract(nodes[0].symbol).0,
+            PhysicalGemmBackend::ScalarFmaV1
+        );
+        assert_eq!(
+            scalar_route_contract(nodes[1].symbol).0,
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+        );
+        assert_ne!(
+            nodes[0].launch.arguments_digest,
+            nodes[1].launch.arguments_digest
+        );
+    }
+
+    #[test]
     fn scalar_node_identity_distinguishes_equal_symbol_sequences() {
         let left = scalar_fixture(ResolvedGemmOp::Nn, (32, 64, 128));
         let right = scalar_fixture(ResolvedGemmOp::Nn, (32, 96, 128));
@@ -14171,6 +14378,14 @@ mod prepared_f32_launch_tests {
                 artifact_digest: [5; 32],
             },
             scalar_compiler: compiler,
+            fixed_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Fixed,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: [0; 32],
+                artifact_digest: [0; 32],
+            },
+            fixed_compiler: compiler,
+            fixed_copyplan_loaded: false,
             compute_capability: (12, 0),
             multiprocessor_count: 170,
         }
