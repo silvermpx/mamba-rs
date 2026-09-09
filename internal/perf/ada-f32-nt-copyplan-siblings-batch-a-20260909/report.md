@@ -42,7 +42,7 @@ once7 strata per cell, all recorded p50 and p95 ratios were:
 
 | toolkit | d768-in candidate/prior AUTO | Prism candidate/prior AUTO | log |
 | --- | ---: | ---: | --- |
-| CUDA12.8 | `.33606–.33777` | `.79681–.79937` | `/root/logs/exact-nt-prequal-f04584c8-cuda128.log` |
+| CUDA12.8 | `.33633–.33777` | `.79681–.79937` | `/root/logs/exact-nt-prequal-f04584c8-cuda128.log` |
 | CUDA13.0 | `.33651–.33786` | `.79631–.79859` | `/root/logs/exact-nt-prequal-f04584c8-cuda130.log` |
 | CUDA13.2 | `.43148–.43328` | `.86942–.87176` | `/root/logs/exact-nt-prequal-f04584c8-cuda132.log` |
 
@@ -51,6 +51,19 @@ pipeline retained-best improvements over the prior actual AUTO, not cuBLAS
 Fast wins. Fixed and `TriadScalar` compiler/artifact identities are the exact
 same-domain rows frozen in `dispatch.rs`; no identity was synthesized from a
 different target.
+
+Raw receipts are also preserved locally under `evidence/`. Independent replay
+recomputed all 48 strata, 240 paired brackets and 960 observations across the
+three logs, reproduced every p50/p95 to within `1e-12`, and confirmed every
+admission ratio below `.99`. The CUDA12.8 table minimum above is corrected to
+the once7-only minimum; the earlier minimum included once3.
+
+- [CUDA12.8](evidence/exact-nt-prequal-f04584c8-cuda128.log), SHA-256
+  `222295856a719a1d6958d8c0ec0222ce03bcb35f6309f985a21047cc27b22aaa`
+- [CUDA13.0](evidence/exact-nt-prequal-f04584c8-cuda130.log), SHA-256
+  `b6de82ffedbd4838398cfac0d3257f59181d44af6189498d164713b4a969a06f`
+- [CUDA13.2](evidence/exact-nt-prequal-f04584c8-cuda132.log), SHA-256
+  `0ee5b5dd3014809d1bdbb384214263b95f523f6196451fe3f837b7ba30541e62`
 
 The ignored historical
 `ada_f32_nt_copyplan_siblings_pre_admission_qualification` remains as the
@@ -75,6 +88,27 @@ follow-up for each frozen toolkit. It requires:
   exactness or promotion claim.
 
 No GPU or post-admission timing was run while preparing this admission commit.
+
+### CUDA13.2 actual AUTO result
+
+The exact `fadf5250` snapshot subsequently passed the post-admission test on
+Ada/CUDA13.2: 1 passed, 0 failed. Both cells selected the admitted two-node
+route, passed actual eager/prepared identity and exactness, edge cases, A/B
+immutability and red zones. All 16 once21 strata were independently replayed
+from 336 brackets / 1,344 observations.
+
+| Cell | AUTO / forced generic exact p50 | Worst p95 | AUTO / Fast p50 |
+| --- | --- | --- | --- |
+| d768-in | `.43204–.43318` | `.43350` | `2.36147–2.36382` |
+| Prism | `.73645–.73814` | `.73861` | `3.91622–3.92822` |
+
+The forced generic comparator is `gemm_bi_nt` for both cells. Prism's previous
+actual AUTO was `gemm_bi_nt_slim`, so this table is a different denominator
+from the pre-admission table and must not be described as another improvement
+over the previous AUTO. Fast has a distinct numerical contract.
+
+[Raw CUDA13.2 receipt](evidence/exact-nt-admitted-fadf5250-cuda132.log).
+CUDA12.8/13.0 actual-AUTO follow-ups remain pending at this checkpoint.
 
 ## TDD and host verification
 

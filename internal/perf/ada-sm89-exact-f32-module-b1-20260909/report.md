@@ -40,7 +40,7 @@ tensor-core/TMA instruction family. The live loader additionally enforces
 local0, exact static shared memory, register caps, maximum block size and
 occupancy gates before exposing a function.
 
-## Verification
+## Host verification
 
 All verification in this phase was host/native; no GPU kernel was launched.
 
@@ -58,3 +58,28 @@ each selected CUDA 12.8/13.0/13.2 environment on an exclusive SM89 device. It
 compiles and binds the isolated artifact, requires all three symbols to pass
 ABI/resource gates, and emits identity plus per-symbol resource JSON. It does
 not launch a kernel or claim AUTO route admission.
+
+## Live module qualification
+
+The exact `0184db89` snapshot subsequently passed on RTX 6000 Ada under
+CUDA 12.8, 13.0 and 13.2. Each run bound all three exports with no ABI/resource
+exclusions. This verifies module loading, not execution or AUTO admission;
+the B2 route integration supplies those checks.
+
+| CUDA | Registers, in/out/Prism | Local bytes | Active CTAs, in/out/Prism | Result |
+| --- | --- | --- | --- | --- |
+| 12.8 | 161 / 107 / 107 | 0 / 0 / 0 | 3 / 4 / 4 | 1 passed |
+| 13.0 | 161 / 107 / 107 | 0 / 0 / 0 | 3 / 4 / 4 | 1 passed |
+| 13.2 | 163 / 107 / 107 | 0 / 0 / 0 | 3 / 4 / 4 | 1 passed |
+
+Each log contains the full compiler, artifact, header, driver and toolkit
+library identities. The source digest is
+`b83eea55e9cced220366c8160934340f8e4f4a59f007d632dbbcbb24dd2a503c`.
+Raw logs copied from Ada and their SHA-256 values:
+
+- [CUDA 12.8](evidence/exact-tn-module-0184db89-cuda128.log):
+  `5664bcdd2a5836d57f247e88fa960799d80116ead47e076bed5e7f0d4b02f638`
+- [CUDA 13.0](evidence/exact-tn-module-0184db89-cuda130.log):
+  `ad7bbd62db1f9ef83032f16bad2124b204cab3061fc88bc5831325733519d4af`
+- [CUDA 13.2](evidence/exact-tn-module-0184db89-cuda132.log):
+  `6f94e6c947a3ad4e8a8e60f50eeba65f564a1d852770f3649015fad04eee8211`
