@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/gemm_bi_sm89_exact_f32_tn_selector_qualification.rs (target/release/deps/gemm_bi_sm89_exact_f32_tn_selector_qualification-ec69db2ff94d2666)
+
+running 1 test
+test sm89_exact_f32_large_tn_forced_correctness_and_actual_auto_admission ... {"schema":"MambaTriadSm89ExactF32TnQualificationV1","route":"D768InDualChunkFused","dims":[2048,768,3072],"forced_symbols":["gemm_bi_transpose_f32_32x16_d768_v1", "gemm_bi_tn_sm89_f32_n64_dual_chunk_fused_finalize_v1"],"actual_auto_symbols":["gemm_bi_tn_splitm_partial_aligned", "gemm_bi_splitm_reduce"],"expect_auto":false,"exact":true,"eager_graph_equal":true,"guards":true}
+{"schema":"MambaTriadSm89ExactF32TnQualificationV1","route":"D768OutDirectBk16","dims":[2048,1536,768],"forced_symbols":["gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1", "gemm_bi_splitm_reduce"],"actual_auto_symbols":["gemm_bi_tn_splitm_partial_aligned", "gemm_bi_splitm_reduce"],"expect_auto":false,"exact":true,"eager_graph_equal":true,"guards":true}
+{"schema":"MambaTriadSm89ExactF32TnQualificationV1","route":"PrismDirectBk16","dims":[4621,384,1928],"forced_symbols":["gemm_bi_tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1", "gemm_bi_splitm_reduce"],"actual_auto_symbols":["gemm_bi_tn_splitm_partial_aligned", "gemm_bi_splitm_reduce"],"expect_auto":false,"exact":true,"eager_graph_equal":true,"guards":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 112.36s
+

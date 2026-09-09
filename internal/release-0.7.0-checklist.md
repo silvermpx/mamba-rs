@@ -35,7 +35,10 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   once21. The independent native receipt regression covers all three toolkits.
 - [x] Three large exact-F32 TN source bodies and optional module
   (`04defc80`, `0184db89`); all three toolkit module checks pass (`36d81318`).
-- [ ] Large exact-F32 TN: eager/prepared routes, forced qualification, admission.
+- [x] Large exact-F32 TN eager/prepared wiring (`f76f81f4`); CUDA13.2 focused
+  smoke passes for all three routes against actual prior AUTO, with exact
+  eager/graph bits and guards. Cohorts remain empty pending final qualification.
+- [ ] Large exact-F32 TN combined qualification and admission.
 - [ ] Exact-F32 TN d128-in/out direct-fold retained candidates: production
   source, route and focused qualification.
 - [x] Four-cell TF32 joint source frozen (`560169d5`).

@@ -57,3 +57,26 @@ All verification ran as native macOS host compilation/tests with CUDA feature
 types enabled (`CUDARC_CUDA_VERSION=13000`) against a temporary source copy;
 no CUDA driver context or GPU kernel was used. The copy is necessary because
 the local workspace Cargo shim builds only committed snapshots.
+
+## Root live CUDA13.2 wiring check
+
+The immutable `f76f81f490df81692e072157d4122c7dde337a79` source was archived to
+`/root/mamba-exact-tn-b2.oOORVG` on Ada and compiled with CUDA13.2,
+`--release --no-default-features --features 'cuda,cudarc/cuda-13000'`,
+`CUDARC_CUDA_VERSION=13000`, and kernel caches disabled. The exact test name
+was checked from `--list`. Five consecutive preflight samples were
+`0% compute, 0% memory utilization, 48463 MiB free`.
+
+With `MAMBA_SM89_EXACT_F32_EXPECT_AUTO=0`, the live test passed in 112.36 s:
+1 passed, 0 failed. All three cells reported the expected forced two-node
+symbol sequence, eager/graph bit equality, equality against the actual prior
+AUTO and passing red zones. The prior AUTO for each remained
+`gemm_bi_tn_splitm_partial_aligned` followed by `gemm_bi_splitm_reduce`.
+
+This is a focused production-wiring smoke, not admission or a new performance
+result. Exceptional-value, repeat/accumulation and paired performance gates
+remain in the assembled qualification batch; the AUTO cohorts stay empty.
+
+- [Live receipt](exact-tn-b2-f76f81f4-cuda132.log), SHA-256
+  `3181a841ee4f8b84a7535a1daf63524a26c54da7d12c272cdcd0b73799f0e1c4`.
+- [CUDA host build receipt](exact-tn-b2-f76f81f4-cuda132-build.log).
