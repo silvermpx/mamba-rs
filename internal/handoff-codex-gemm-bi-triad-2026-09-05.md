@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad F16 TN full-tile `.cg` stop: changing only the
+two exact-target16B cp.async sites from L1+L2 `.ca` to L2-only `.cg` preserves
+exact target/tails/exception/K0/eager/graph/guards and resources118regs/local0/
+shared32768/occupancy3, but loses retained by15.95–16.29% across once3. Stop
+before once7/Fast; L1 locality is valuable and this cache-hint mechanism must
+not be retried unchanged. Evidence:
+`internal/perf/ada-triad-half-tn-full-tile-cg-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad TF32 NT canonical-Prism K8-regpipe stop: the
 linear-grid222 scheduling candidate double-buffers only A and bounds B lifetime
 to one n-atom. Exact target/tails/exception/K0/eager/graph/guards pass;

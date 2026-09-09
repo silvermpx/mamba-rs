@@ -1,0 +1,10 @@
+external preflight x5: memory.used=48MiB memory.free=48463MiB gpu.util=0% memory.util=0%; no compute PID
+internal pre: gpu_util=0% memory_util=0% used=48MiB quiet_samples=5
+compile: candidate_source_sha=e741b0c515db5505288b9b6fa08a4802803a890417d23bdb0e1b926d3def4fc6 candidate_ptx_sha=098bfe86f2d8cf6d3f3a05147406ffd99ee074306130ef3ea3ff69bf4afe12c4 candidate_cubin_sha=89457fe95a1df841604277df89c42b6b843082ba5bb79e50dc66a8db6539fa43 candidate_sass_sha=38e080b57cab15025253f7c8a4ee4b06d28c36d8d5890ca093b26c34a94a195b
+resources candidate: regs=118 local=0 static_shared=32768 block=128 occupancy=3
+resources retained: regs=125 local=0 static_shared=32768 block=128 occupancy=3
+SASS candidate: HMMA=32 LDSM=24 LDGSTS=48 text_ratio=1.196491
+exact: target PASS; aligned tail PASS; misaligned tail PASS; exceptional PASS; K0 PASS; eager/graph repeats, 20-op, guards and inputs PASS
+once3 candidate/retained [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[1.1621933984,1.1628725145],[1.1605091759,1.1610642103],[1.1595400074,1.1597755969],[1.1598227983,1.1605559007]]
+decision=stop_no_retry once7=false fast=false
+internal post: gpu_util=0% memory_util=0% used=578MiB quiet_samples=5
