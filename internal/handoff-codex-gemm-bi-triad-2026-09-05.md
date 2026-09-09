@@ -2446,3 +2446,22 @@ two. Once7 wins are14.9–15.0% eager and13.1–13.2% graph; resources are
 107regs/local0/16KiB/occupancy4. Fast remains2.35–2.36x faster. Retain for joint
 integration. Evidence:
 `internal/perf/ada-triad-f32-tn-direct-d768-out-bk16-20260909/`.
+
+Four bounded follow-ups completed after that winner. BF16 TN d768-out
+M64N96/BK64/S2 reaches118regs/local0/49,152B/occupancy2 and passes all exact
+gates, but loses retained0.55–0.91% p50 (worst p951.01569), so it stops once3.
+Exact-F32 TN d768-in direct BK16 raw+production reducer is exact at107regs/
+16KiB/occupancy4, but loses the retained transpose+dual-fused pipeline
+10.8–11.1%; the d768-out direct win does not transfer to the wider-output
+d768-in cell. Evidence:
+`internal/perf/ada-triad-bf16-tn-m64n96-regpipe-vec2-20260909/` and
+`internal/perf/ada-triad-f32-tn-direct-d768-in-bk16-20260909/`.
+
+Two source-backed TF32 NN M96N96/S2 lifetime refinements also stop. On-demand
+copy-address recomputation worsens registers137->140 and stops before exact/
+timing. Replacing two fragment banks with one issue-scoped bank succeeds at
+125regs/local0/49,152B/occupancy2 and passes full/tail/exception/K0 eager+graph
+bits, but loses retained direct N96 by0.77–1.71% p50, worst p951.01951. Stop
+both mechanisms unchanged; no once7/Fast ran. Evidence:
+`internal/perf/ada-triad-tf32-nn-m96n96-s2-copy-lifetime-prism-20260909/` and
+`internal/perf/ada-triad-tf32-nn-m96n96-s2-single-fragment-prism-20260909/`.

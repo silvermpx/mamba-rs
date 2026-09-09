@@ -56,6 +56,18 @@ an average speedup or claim that the remaining cells are finished.
 The current strict Y/N/U inventory is maintained in the
 [60-cell coverage audit](ada-triad-60-cell-coverage-20260908.md).
 
+Latest bounded follow-ups on2026-09-09 do not add a winner. BF16 TN d768-out
+M64N96 reaches118regs and equal resident warps but loses retained0.55–0.91%
+at p50. Exact-F32 TN d768-in direct BK16 raw+reducer is exact at107regs/
+occupancy4 but loses the retained transpose+dual-fused pipeline10.8–11.1%.
+For TF32 NN Prism, on-demand copy-address computation worsens M96N96/S2 to
+140regs; a separate single-fragment refinement reaches125regs/occupancy2 and
+passes exact, but loses direct N96 by0.77–1.71% p50. All timing candidates stop
+at once3 before Fast. Evidence: [BF16 TN M64N96](ada-triad-bf16-tn-m64n96-regpipe-vec2-20260909/report.md),
+[exact-F32 d768-in direct](ada-triad-f32-tn-direct-d768-in-bk16-20260909/report.md),
+[TF32 copy lifetime](ada-triad-tf32-nn-m96n96-s2-copy-lifetime-prism-20260909/report.md),
+[TF32 single fragment](ada-triad-tf32-nn-m96n96-s2-single-fragment-prism-20260909/report.md).
+
 ## Integration and cleanup boundary
 
 - Selected half NN uses the existing Fixed S3 holder; NT B-XOR and new TN
