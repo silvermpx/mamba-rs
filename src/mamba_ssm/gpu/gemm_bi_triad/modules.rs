@@ -1666,11 +1666,19 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         } else {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
-        require_ptx_entry_tokens(
-            "TriadSm89Half",
-            entry,
-            &["cp.async.cg.shared.global", "ldmatrix.sync.aligned", mma],
-        )?;
+        let loads = match spec.route {
+            super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
+            | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ],
+        };
+        require_ptx_entry_tokens("TriadSm89Half", entry, &["cp.async.cg.shared.global", mma])?;
+        require_ptx_entry_tokens("TriadSm89Half", entry, &loads)?;
         if ptx_has_unquoted_token(&entry.body, |token| {
             token.starts_with("atom.")
                 || token.starts_with("atom::")
@@ -9471,6 +9479,91 @@ mod tests {
                 reason: "registers 168 exceed cap 167".into(),
             }]
         );
+    }
+
+    fn sm89_half_validator_test_loads(
+        route: super::super::sm89_half_source::Sm89HalfRoute,
+    ) -> [&'static str; 2] {
+        use super::super::sm89_half_source::Sm89HalfRoute;
+
+        match route {
+            Sm89HalfRoute::NnM128N128Bk64S3 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ],
+        }
+    }
+
+    fn sm89_half_validator_test_entry(
+        spec: super::super::sm89_half_source::Sm89HalfKernelSpec,
+    ) -> String {
+        let [a_load, b_load] = sm89_half_validator_test_loads(spec.route);
+        let mma = match spec.dtype {
+            crate::mamba_ssm::gpu::dtype::WeightDtype::Bf16 => {
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+            }
+            crate::mamba_ssm::gpu::dtype::WeightDtype::F16 => {
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+            }
+            crate::mamba_ssm::gpu::dtype::WeightDtype::F32 => unreachable!(),
+        };
+        format!(
+            ".visible .entry {}() {{\n\
+             .reg .b32 %r<8>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<8>;\n\
+             cp.async.cg.shared.global [%r0], [%rd0], 16;\n\
+             {a_load} {{%r0,%r1,%r2,%r3}}, [%r4];\n\
+             {b_load} {{%r4,%r5}}, [%r6];\n\
+             {mma} {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
+             ret;\n}}\n",
+            spec.symbol,
+        )
+    }
+
+    fn sm89_half_validator_test_ptx() -> String {
+        super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS
+            .iter()
+            .fold(
+                String::from(".version 8.5\n.target sm_89\n.address_size 64\n"),
+                |mut ptx, &spec| {
+                    ptx.push_str(&sm89_half_validator_test_entry(spec));
+                    ptx
+                },
+            )
+    }
+
+    #[test]
+    fn sm89_half_validator_accepts_exact_route_specific_ldmatrix_pairs() {
+        super::validate_sm89_half_ptx("sm_89", &sm89_half_validator_test_ptx())
+            .expect("the six exact route-specific half entries must validate");
+    }
+
+    #[test]
+    fn sm89_half_validator_rejects_either_missing_ldmatrix_form_per_route() {
+        use super::super::sm89_half_source::Sm89HalfRoute;
+        use crate::mamba_ssm::gpu::dtype::WeightDtype;
+
+        let baseline = sm89_half_validator_test_ptx();
+        for route in [
+            Sm89HalfRoute::NnM128N128Bk64S3,
+            Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+            Sm89HalfRoute::NtM96N128Bk64S3,
+        ] {
+            let spec = *super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS
+                .iter()
+                .find(|spec| spec.route == route && spec.dtype == WeightDtype::F16)
+                .unwrap();
+            let entry = sm89_half_validator_test_entry(spec);
+            for required in sm89_half_validator_test_loads(route) {
+                let malformed_entry = entry.replacen(required, "not_the_required_ldmatrix", 1);
+                let malformed = baseline.replacen(&entry, &malformed_entry, 1);
+                super::validate_sm89_half_ptx("sm_89", &malformed)
+                    .expect_err(&format!("{route:?} must reject when {required} is absent"));
+            }
+        }
     }
 
     #[test]
