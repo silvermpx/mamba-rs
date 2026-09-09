@@ -93,6 +93,23 @@ fn sealed_validator_rejects_discovery_markers_and_inventory_mutations() {
         1,
     );
     assert!(production::validate_source_text(&duplicate).is_err());
+
+    let prism_unit = production::source_unit(&source, production::PRISM_RAW_SYMBOL).unwrap();
+    let missing = source.replacen(prism_unit, "", 1);
+    assert!(production::validate_source_text(&missing).is_err());
+
+    for extra in [
+        "gemm_bi_tn_sm89_f32_foreign_v1",
+        "gemm_bi_tn_sm89_f32_d128_m16n16_v1",
+    ] {
+        let mutated = format!(
+            "{source}\nextern \"C\" __global__ void {extra}(float* output) {{ output[0] = 0.0f; }}\n"
+        );
+        assert!(
+            production::validate_source_text(&mutated).is_err(),
+            "accepted extra production-looking export {extra}"
+        );
+    }
 }
 
 #[test]
@@ -154,6 +171,18 @@ fn source_specs_pin_shape_partition_abi_and_resource_contracts() {
             abi_parameter_count: 7,
             abi_parameter_bytes: 40,
         }
+    );
+}
+
+#[test]
+fn dual_chunk_host_bundle_matches_the_by_value_driver_abi() {
+    assert_eq!(
+        std::mem::size_of::<production::Sm89ExactF32DualChunkParams>(),
+        32
+    );
+    assert_eq!(
+        std::mem::align_of::<production::Sm89ExactF32DualChunkParams>(),
+        4
     );
 }
 

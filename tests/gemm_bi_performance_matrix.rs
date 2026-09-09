@@ -2929,6 +2929,7 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::TriadSm80 => "triad_sm80",
         ModuleKind::TriadSm89Finalist => "triad_sm89_finalist",
         ModuleKind::TriadSm89Half => "triad_sm89_half",
+        ModuleKind::TriadSm89ExactF32 => "triad_sm89_exact_f32",
         ModuleKind::TriadSm90a => "triad_sm90a",
         ModuleKind::TriadSm100 => "triad_sm100",
         ModuleKind::TriadSm120 => "triad_sm120",
@@ -10090,6 +10091,10 @@ mod sm89_nt_finalist_once21 {
             .artifacts
             .sm89_half
             .map_or_else(|| "null".to_owned(), artifact);
+        let sm89_exact_f32 = identity
+            .artifacts
+            .sm89_exact_f32
+            .map_or_else(|| "null".to_owned(), artifact);
         let accepted_target = identity.device_caps.accepted_target.map_or_else(
             || "null".to_owned(),
             |target| format!("\"{}\"", target.as_str()),
@@ -10106,7 +10111,7 @@ mod sm89_nt_finalist_once21 {
                 "\"numeric_abi_revision\":{},\"schedule_revision\":{}}},",
                 "\"artifacts\":{{\"module_count\":{},\"ordered_digest\":\"{}\",",
                 "\"fixed\":{},\"triad_scalar\":{},\"triad_sm80\":{},",
-                "\"specialized\":{},\"sm89_half\":{}}},\"policy_revision\":{},",
+                "\"specialized\":{},\"sm89_half\":{},\"sm89_exact_f32\":{}}},\"policy_revision\":{},",
                 "\"policy_hash\":\"{}\",\"device\":{{\"cc\":[{},{}],",
                 "\"multiprocessors\":{},\"target\":\"{}\",",
                 "\"driver_api_version\":{},\"driver_build_sources\":{},",
@@ -10139,6 +10144,7 @@ mod sm89_nt_finalist_once21 {
             artifact(identity.artifacts.triad_sm80),
             specialized,
             sm89_half,
+            sm89_exact_f32,
             identity.policy_revision,
             digest_hex(&identity.policy_hash),
             identity.device.compute_capability.0,

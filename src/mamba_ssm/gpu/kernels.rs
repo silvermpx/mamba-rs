@@ -668,12 +668,16 @@ impl MambaKernels {
             finalist_rejection,
             sm89_half,
             sm89_half_rejection,
+            sm89_exact_f32,
+            sm89_exact_f32_rejection,
             specialized,
         ) = if let Some(artifacts) = sm120_artifacts {
             (
                 artifacts.fixed,
                 artifacts.scalar,
                 artifacts.sm80,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -702,6 +706,15 @@ impl MambaKernels {
                 } else {
                     (None, None)
                 };
+            let (sm89_exact_f32, sm89_exact_f32_rejection) =
+                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                    match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32) {
+                        Ok(module) => (Some(module), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
+                };
             let specialized = match (arch, device_cc) {
                 ("sm_90a", Some((9, 0))) => compile(super::kernel_identity::ModuleKind::TriadSm90a)
                     .ok()
@@ -724,6 +737,8 @@ impl MambaKernels {
                 finalist_rejection,
                 sm89_half,
                 sm89_half_rejection,
+                sm89_exact_f32,
+                sm89_exact_f32_rejection,
                 specialized,
             )
         };
@@ -765,6 +780,8 @@ impl MambaKernels {
             finalist_rejection,
             sm89_half,
             sm89_half_rejection,
+            sm89_exact_f32,
+            sm89_exact_f32_rejection,
             specialized,
         )?;
         // A rejected TF32 module used to be recorded and never shown: the
@@ -831,6 +848,31 @@ impl MambaKernels {
                         .map(|exclusion| format!("{}: {}", exclusion.symbol, exclusion.reason))
                         .collect::<Vec<_>>()
                         .join("; ")
+                )
+            });
+        }
+        if let Some(reason) = triad.sm89_exact_f32_rejection() {
+            static EXACT_F32_MODULE: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&EXACT_F32_MODULE, || {
+                format!(
+                    "the optional Ada exact-F32 Triad module is not bound ({reason}); the existing exact kernels remain available"
+                )
+            });
+        }
+        for exclusion in triad.sm89_exact_f32_exclusions() {
+            static D768_IN: std::sync::Once = std::sync::Once::new();
+            static D768_OUT: std::sync::Once = std::sync::Once::new();
+            static PRISM: std::sync::Once = std::sync::Once::new();
+            let once = match exclusion.symbol {
+                super::gemm_bi_triad::D768_IN_FUSED_SYMBOL => &D768_IN,
+                super::gemm_bi_triad::D768_OUT_RAW_SYMBOL => &D768_OUT,
+                super::gemm_bi_triad::PRISM_RAW_SYMBOL => &PRISM,
+                _ => continue,
+            };
+            super::diagnostics::warn_once(once, || {
+                format!(
+                    "Ada exact-F32 Triad symbol {} is excluded while its siblings remain available: {}",
+                    exclusion.symbol, exclusion.reason
                 )
             });
         }
@@ -1312,6 +1354,35 @@ impl MambaKernels {
         dtype: super::dtype::WeightDtype,
     ) -> Option<&CudaFunction> {
         self.triad.sm89_half_function(route, dtype)
+    }
+
+    pub fn triad_sm89_exact_f32_compiler_identity(
+        &self,
+    ) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.triad.sm89_exact_f32_compiler_identity()
+    }
+
+    pub fn triad_sm89_exact_f32_artifact_identity(
+        &self,
+    ) -> Option<super::kernel_identity::ArtifactIdentity> {
+        self.triad.artifact_set_identity().sm89_exact_f32
+    }
+
+    pub fn triad_sm89_exact_f32_rejection(&self) -> Option<&str> {
+        self.triad.sm89_exact_f32_rejection()
+    }
+
+    pub fn triad_sm89_exact_f32_exclusions(&self) -> Vec<(&'static str, &str)> {
+        self.triad
+            .sm89_exact_f32_exclusions()
+            .iter()
+            .map(|excluded| (excluded.symbol, excluded.reason.as_str()))
+            .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn triad_sm89_exact_f32_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.triad.sm89_exact_f32_function(symbol)
     }
 
     pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {

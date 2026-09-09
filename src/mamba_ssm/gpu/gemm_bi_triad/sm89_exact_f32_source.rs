@@ -5,6 +5,10 @@ pub const OWNER_TEMPLATE: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89_exact_f32.cu");
 
 pub const OWNER_SHA256: &str = "cdcb768216699f41553e73492a32d92717c62889a4a329ca1990360b361541c7";
+pub const OWNER_SHA256_BYTES: [u8; 32] = [
+    0xcd, 0xcb, 0x76, 0x82, 0x16, 0x69, 0x9f, 0x41, 0x55, 0x3e, 0x73, 0x49, 0x2a, 0x32, 0xd9, 0x27,
+    0x17, 0xc6, 0x28, 0x89, 0xa4, 0xa3, 0x29, 0xca, 0x19, 0x90, 0x36, 0x0b, 0x36, 0x15, 0x41, 0xc7,
+];
 
 pub const D768_IN_FUSED_SYMBOL: &str = "gemm_bi_tn_sm89_f32_n64_dual_chunk_fused_finalize_v1";
 pub const D768_OUT_RAW_SYMBOL: &str = "gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1";
@@ -22,6 +26,22 @@ pub enum Sm89ExactF32KernelKind {
     DirectSplitMRaw,
     DualChunkFusedFinalize,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct Sm89ExactF32DualChunkParams {
+    pub alpha: f32,
+    pub m: i32,
+    pub n: i32,
+    pub k0: i32,
+    pub k1: i32,
+    pub lda: i32,
+    pub ldb: i32,
+    pub ldc: i32,
+}
+
+const _: () = assert!(std::mem::size_of::<Sm89ExactF32DualChunkParams>() == 32);
+const _: () = assert!(std::mem::align_of::<Sm89ExactF32DualChunkParams>() == 4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm89ExactF32KernelSpec {
@@ -87,6 +107,12 @@ pub const SM89_EXACT_F32_KERNEL_SPECS: [Sm89ExactF32KernelSpec; 3] = [
         abi_parameter_bytes: 40,
     },
 ];
+
+pub fn kernel_spec(symbol: &str) -> Option<&'static Sm89ExactF32KernelSpec> {
+    SM89_EXACT_F32_KERNEL_SPECS
+        .iter()
+        .find(|spec| spec.symbol == symbol)
+}
 
 fn section<'a>(source: &'a str, begin: &str, end: &str) -> Result<&'a str, String> {
     let begin_at = source
@@ -202,6 +228,13 @@ pub fn validate_source() -> Result<(), String> {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return Err("SM89 exact-F32 owner SHA-256 freeze is not lowercase hex".into());
+    }
+    let encoded_bytes = OWNER_SHA256_BYTES
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if encoded_bytes != OWNER_SHA256 {
+        return Err("SM89 exact-F32 owner SHA-256 text/byte freezes disagree".into());
     }
     validate_source_text(&compose_source()?)
 }

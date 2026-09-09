@@ -304,7 +304,8 @@ fn cache_entries(
 fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     let expected_count = 3
         + usize::from(artifacts.specialized.is_some())
-        + usize::from(artifacts.sm89_half.is_some());
+        + usize::from(artifacts.sm89_half.is_some())
+        + usize::from(artifacts.sm89_exact_f32.is_some());
     assert_eq!(
         usize::from(artifacts.module_count),
         expected_count,
@@ -320,6 +321,9 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     }
     if let Some(sm89_half) = artifacts.sm89_half {
         active.push(sm89_half);
+    }
+    if let Some(sm89_exact_f32) = artifacts.sm89_exact_f32 {
+        active.push(sm89_exact_f32);
     }
     let kinds: std::collections::HashSet<_> =
         active.iter().map(|artifact| artifact.module_kind).collect();

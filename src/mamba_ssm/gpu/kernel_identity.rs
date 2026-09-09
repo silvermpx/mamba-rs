@@ -608,6 +608,9 @@ pub enum ModuleKind {
     /// Fixed and the TF32 finalist so every loaded module has an independent
     /// artifact identity.
     TriadSm89Half = 9,
+    /// Exact-F32 SM89 TN finalists. This optional module is independent from
+    /// both the deterministic-TF32 finalist and the half-precision finalist.
+    TriadSm89ExactF32 = 10,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -627,11 +630,12 @@ pub struct ArtifactSetIdentity {
     pub triad_sm80: ArtifactIdentity,
     pub specialized: Option<ArtifactIdentity>,
     pub sm89_half: Option<ArtifactIdentity>,
+    pub sm89_exact_f32: Option<ArtifactIdentity>,
 }
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
-    if !(3..=5).contains(&artifacts.len()) {
-        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional architecture-specialized module, and one optional SM89 half module".into());
+    if !(3..=6).contains(&artifacts.len()) {
+        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional architecture-specialized module, one optional SM89 half module, and one optional SM89 exact-F32 module".into());
     }
     if artifacts[0].module_kind != ModuleKind::Fixed
         || artifacts[1].module_kind != ModuleKind::TriadScalar
@@ -643,26 +647,41 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     }
     let mut specialized = None;
     let mut sm89_half = None;
-    if let Some(artifact) = artifacts.get(3).copied() {
-        match artifact.module_kind {
-            ModuleKind::TriadSm89Half => sm89_half = Some(artifact),
+    let mut sm89_exact_f32 = None;
+    let mut cursor = 3;
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && matches!(
+            artifact.module_kind,
             ModuleKind::TriadSm89Finalist
-            | ModuleKind::TriadSm90a
-            | ModuleKind::TriadSm100
-            | ModuleKind::TriadSm120 => specialized = Some(artifact),
-            _ => return Err("fourth artifact must be a supported specialized triad module".into()),
-        }
+                | ModuleKind::TriadSm90a
+                | ModuleKind::TriadSm100
+                | ModuleKind::TriadSm120
+        )
+    {
+        specialized = Some(artifact);
+        cursor += 1;
     }
-    if let Some(artifact) = artifacts.get(4).copied() {
-        if !matches!(specialized, Some(value) if value.module_kind == ModuleKind::TriadSm89Finalist)
-            || artifact.module_kind != ModuleKind::TriadSm89Half
-        {
-            return Err(
-                "fifth artifact is only valid for TriadSm89Finalist followed by TriadSm89Half"
-                    .into(),
-            );
-        }
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::TriadSm89Half
+    {
         sm89_half = Some(artifact);
+        cursor += 1;
+    }
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::TriadSm89ExactF32
+    {
+        sm89_exact_f32 = Some(artifact);
+        cursor += 1;
+    }
+    if cursor != artifacts.len() {
+        return Err("optional artifacts must be ordered as architecture-specialized, SM89 half, then SM89 exact-F32".into());
+    }
+    if specialized.is_some_and(|artifact| artifact.module_kind != ModuleKind::TriadSm89Finalist)
+        && (sm89_half.is_some() || sm89_exact_f32.is_some())
+    {
+        return Err(
+            "SM89 half or exact-F32 artifacts cannot follow a non-SM89 specialized module".into(),
+        );
     }
     let module_count = u8::try_from(artifacts.len())
         .map_err(|_| "artifact set contains more than 255 modules".to_string())?;
@@ -690,6 +709,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         triad_sm80: artifacts[2],
         specialized,
         sm89_half,
+        sm89_exact_f32,
     })
 }
 
