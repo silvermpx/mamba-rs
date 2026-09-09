@@ -1,0 +1,22 @@
+FLOTILLA-JOB: id=01a0840d-e0be-7163-bd42-db123ab70e3c worker=ada
+   Compiling mamba-rs v0.6.9 (/home/flotilla/.local/state/flotilla/work/gemm-bi-triad-sm80-915fb0b19265)
+    Finished `release` profile [optimized] target(s) in 36.78s
+     Running tests/gemm_bi_tf32_nn_n96_full_domain_cpasync_prism_discovery.rs (target/release/deps/gemm_bi_tf32_nn_n96_full_domain_cpasync_prism_discovery-e677eb3051241db0)
+
+running 1 test
+test cuda_suite::cuda132_compile_only_full_domain_cpasync_resources_and_sass ... {"dynamic_shared_bytes":86016,"forbidden":false,"hmma":48,"ldgsts":21,"registers":124,"schema":"MambaBiTriadTf32NnN96FullDomainCpasyncSassV1","spill_load_bytes":0,"spill_store_bytes":0,"stack_bytes":0,"static_shared_bytes":0,"symbol":"gemm_bi_nn_triad_sm89_add_half_tf32_direct_epilogue_exp_m128n96_bk32_s3","target":"sm_89","text_bytes":47616}
+{"dynamic_shared_bytes":86016,"forbidden":false,"hmma":48,"ldgsts":42,"registers":131,"schema":"MambaBiTriadTf32NnN96FullDomainCpasyncSassV1","spill_load_bytes":0,"spill_store_bytes":0,"stack_bytes":0,"static_shared_bytes":0,"symbol":"gemm_bi_nn_triad_sm89_add_half_tf32_direct_epilogue_full_domain_cpasync_exp_m128n96_bk32_s3","target":"sm_89","text_bytes":49536}
+{"candidate_text_bytes":49536,"hmma_ratio":1.0,"ldgsts_ratio":2.0,"register_limit":128,"retained_text_bytes":47616,"schema":"MambaBiTriadTf32NnN96FullDomainCpasyncCompileDecisionV1","text_ratio":1.0403225806451613,"text_ratio_max":1.2,"timing_started":false}
+Error: "compile-only stop: text=1.0403, HMMA=1.0000, LDGSTS=2.0000, regs=131, shared=0, stack=0, spills=0/0, forbidden=false"
+FAILED
+
+failures:
+
+failures:
+    cuda_suite::cuda132_compile_only_full_domain_cpasync_resources_and_sass
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 41 filtered out; finished in 2.05s
+
+error: test failed, to rerun pass `--test gemm_bi_tf32_nn_n96_full_domain_cpasync_prism_discovery`
+FLOTILLA-OK: exit=101 worker=ada tree=d6f7d2df wall=39.5s
+flotilla: cargo ran on ada (linux) - no pin matches this command and no `platform` key - any platform, the fleet default

@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 TF32 NN N96 full-domain compile stop: the Prism candidate
+uses unpredicated three-operand cp.async on full CTAs and the direct-float2
+parent on edges/tails. A bounded common-MMA refinement reduces the initial
+136regs/HMMA96 form to131regs/HMMA48, with local/static/stack/spills0,
+shared ABI86016 and text ratio1.0403. It still exceeds the declared128-reg cap,
+so stop before GPU/exact/timing/Fast and keep direct-float2. Evidence:
+`internal/perf/ada-triad-tf32-nn-n96-full-domain-20260909/report.md`.
+
 Latest 2026-09-09 F16 TN stage-sliced stop: interleaving four next-tile A+B
 cp.async slices with the retained M64N64/BK64/S2 regpipe+vec2 K16 groups passes
 target/tails/exception/K0/eager/graph/20-op/guard exactness. Resources improve
