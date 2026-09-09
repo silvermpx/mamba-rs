@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad TF32 TN sibling retained wins: the unchanged
+A-only transpose-RNA N96 d768-out recipe also wins d768-in by7.3–7.4% (once7
+p50`.92643-.92708`, worst p95`.93225`) and canonical Prism by7.3–7.7%
+(p50`.92294-.92703`, worst p95`.94311`). Exact target/tail/exception/K0/
+eager/graph/scratch/guards pass. Fast still leads by26–27% in and88% Prism.
+One common recipe is now retained-best for all three large TF32 TN cells; keep
+for joint integration. Evidence:
+`internal/perf/ada-triad-tf32-tn-transpose-rna-n96-siblings-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad TF32 TN d768-out joint A+B RNA stop: after
 resource-only137-reg and96-reg/288B-local iterations, explicit static n-atom
 scopes reach114regs/local0. Exact target/tail/exception/K0/eager/graph/scratch/

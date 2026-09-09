@@ -1,0 +1,15 @@
+external preflight x5: memory.used=48MiB memory.free=48463MiB gpu.util=0% memory.util=0%; no compute PID
+internal pre: gpu_util=0% memory_util=0% used=48MiB quiet_samples=5
+resources candidate/retained GEMM: regs=127/128 local=0/0 dynamic_shared=86016 occupancy=1/1
+resources candidate/retained transpose: regs=26/26 local=0/0 static_shared=4224/4224
+identity candidate_source_sha=3ee1e8986c3d1fb998aef408f14add2203d71bbd6f8521f08500ac972f2d2f65 candidate_ptx_sha=57808541ffcf29b65c0bdecb14c85e9a6e185f84da39167c4c5d3cf8df313ee6 retained_source_sha=303801f92790331a1e4ffa3eb26036f7f2148da30fafa14ce50833dfe3117fd3 retained_ptx_sha=273722a7022e615096fa61f2740f0a916d518517bec1dcbe234c82b1ecced963
+shared exact: full finite/exception PASS; tail finite/exception PASS; K0 PASS
+d768-in exact target eager/graph/scratch/guards PASS
+d768-in once7 candidate/retained: [[.9270270602,.9321703933],[.9270833502,.9322493195],[.9264305127,.9289617630],[.9264305127,.9289617630]]
+d768-in once7 candidate/Fast: [[1.2617188263,1.2739266429],[1.2610294153,1.2702951698],[1.2676580326,1.2819548977],[1.2629630352,1.2723880670]]
+d768-in decision=retain_candidate_fast_miss
+canonical-Prism exact target eager/graph/scratch/guards PASS
+canonical-Prism once7 candidate/retained: [[.9270302699,.9431078730],[.9229356411,.9355178571],[.9259482215,.9317362788],[.9253339414,.9282757548]]
+canonical-Prism once7 candidate/Fast: [[1.8840734136,1.9391754663],[1.8853846364,1.9267348759],[1.8775725883,1.9026480646],[1.8809885235,1.9120963448]]
+canonical-Prism decision=retain_candidate_fast_miss
+internal post per cell: gpu_util=0% memory_util=0% used<=630MiB quiet_samples=5
