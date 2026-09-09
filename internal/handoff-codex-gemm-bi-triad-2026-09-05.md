@@ -18,6 +18,16 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 half-NT M64N128/S2 stop: the test-only F16 d768-out
+two-stage ping-pong candidate reduces registers119->106, dynamic shared
+73,728->49,152 bytes and raises occupancy1->2 while preserving exact target,
+negative-alpha tail, exceptional, K0, eager/graph, guards and20-op bits. It
+nevertheless loses measured M64N128/S3 in every paired once7 stratum: eager
+p50 is1.0427-1.0452 and graph p50 is1.0620-1.0672, with worst p95 1.0771.
+The strict retained gate failed, so cuBLAS Fast was not launched. Stop this
+mechanism, do not run BF16/siblings, and keep S3. Evidence:
+`internal/perf/ada-triad-half-nt-m64n128-s2-20260909/report.md`.
+
 Latest 2026-09-09 half-TN WS5 stop: the SM89 TC64/BK64/S2 five-warp
 producer/consumer candidate passes F16 d768-in exact eager/graph bits, guards
 and resources (92 regs, local0, static shared32800, occupancy3), with PTX proof
