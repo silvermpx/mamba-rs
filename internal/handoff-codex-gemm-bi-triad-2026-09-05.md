@@ -18,6 +18,14 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Research no-go 2026-09-09 for the remaining TF32 TN d768-out Fast gap:
+A-only RNA still needs8.1–9.3% for a strict Fast win. M128N192/S3 would require
+122,880B shared, above Ada's per-block limit; S2 fits but would need to beat the
+already17.3%-slower N128 by21.6%, while analogous F16 N128->N192 gains only
+1.25–1.35%. Direct epilogue/no-barrier are measured sub-.4%, A+B RNA loses,
+and direct N96 loses graph badly. Do not build this blind wide-tile sweep; next
+evidence-backed sibling is BF16 NT d768-out M64N192/S3.
+
 Latest 2026-09-09 actual-Triad F16 NT d768-out M64N192 full-domain stop: a
 target-only literal-shape entry reduces registers127->118 with local0,
 shared98304/occupancy1 and unchanged64HMMA/18LDGSTS. Exact target/tails/
