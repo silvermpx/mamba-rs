@@ -18,6 +18,15 @@ free-memory floor is met. With user models resident, require five consecutive
 samples at no more than 1% compute and memory utilization. Never stop or unload
 the user's processes; if the gate fails, defer the GPU run.
 
+Latest 2026-09-09 actual-Triad TF32 TN d768-out joint A+B RNA stop: after
+resource-only137-reg and96-reg/288B-local iterations, explicit static n-atom
+scopes reach114regs/local0. Exact target/tail/exception/K0/eager/graph/scratch/
+guards pass, but the whole two-node pipeline loses the new A-only RNA retained
+winner by1.6–2.2% at p50, worst p95`1.03226`. Extra B scratch traffic costs
+more than removed conversions. Stop before once7/Fast; keep A-only RNA and do
+not retry A+B unchanged. Evidence:
+`internal/perf/ada-triad-tf32-tn-transpose-ab-rna-n96-d768-out-20260909/report.md`.
+
 Latest 2026-09-09 actual-Triad F16 TN full-tile `.cg` stop: changing only the
 two exact-target16B cp.async sites from L1+L2 `.ca` to L2-only `.cg` preserves
 exact target/tails/exception/K0/eager/graph/guards and resources118regs/local0/

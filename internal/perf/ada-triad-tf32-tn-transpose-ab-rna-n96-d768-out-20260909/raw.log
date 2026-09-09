@@ -1,0 +1,13 @@
+iteration1 resource STOP: candidate regs=137 local=0 dynamic_shared=86016 occupancy=1; retained regs=127; cap=128
+iteration2 resource STOP: candidate regs=96 local=288B/thread dynamic_shared=86016 occupancy=1
+final external preflight x5: memory.used=48MiB memory.free=48463MiB gpu.util=0% memory.util=0%; no compute PID
+final internal pre: gpu_util=0% memory_util=0% used=48MiB quiet_samples=5
+final candidate GEMM: regs=114 local=0 dynamic_shared=86016 occupancy=1
+retained A-only GEMM: regs=127 local=0 dynamic_shared=86016 occupancy=1
+candidate preprocess: regs=28 local=0 static_shared=4224
+retained transpose: regs=26 local=0 static_shared=4224
+identity candidate_source_sha=4c85dc3022262b10342996fd8aaf638c814c2c4b8497b01ff7d33e2ab6b0d5ec candidate_ptx_sha=a42a6ab45af0f11bbd5aaa94d634223fa33787badc3846cd4bc574bfbfa7db15 retained_source_sha=3ee1e8986c3d1fb998aef408f14add2203d71bbd6f8521f08500ac972f2d2f65 retained_ptx_sha=57808541ffcf29b65c0bdecb14c85e9a6e185f84da39167c4c5d3cf8df313ee6
+exact: full finite/exception PASS; tail finite/exception PASS; K0 PASS; target eager/graph/scratch/guards PASS
+once3 candidate/A-only-retained [eager_ABBA,eager_BAAB,graph_ABBA,graph_BAAB]: [[1.0215053831,1.0268817288],[1.0223454041,1.0322580746],[1.0161290373,1.0162162213],[1.0217391373,1.0271739216]]
+decision=stop_after_once3 retained_win=false once7=false fast=false
+internal post: gpu_util=0% memory_util=0% used=598MiB quiet_samples=5
