@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-final-models.RkKI65)
+    Finished `release` profile [optimized] target(s) in 39.13s
+  Executable tests/f32_training_graph_parity.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/f32_training_graph_parity-9288343250fb887f)
