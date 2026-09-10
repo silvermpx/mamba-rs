@@ -3895,6 +3895,9 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     let mut expected = PORTABLE.to_vec();
     if arch == "sm_89" {
         expected.push(FIXED_SM89_RNA_WIDE);
+        // The N96 finalist is exported by the same module and carries its
+        // own contract checks in assert_fixed_sm89_finalist_ptx.
+        expected.push(FIXED_SM89_RNA_N96);
     }
     if owns_sm120 {
         expected.extend(SM120);
@@ -3911,6 +3914,9 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
         "{arch} Fixed TF32 export inventory"
     );
     for symbol in expected {
+        if symbol == FIXED_SM89_RNA_N96 {
+            continue;
+        }
         let entry = parsed.entry(symbol);
         assert_compile_gate_entry_tokens(
             "Fixed TF32",

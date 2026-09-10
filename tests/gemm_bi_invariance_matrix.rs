@@ -465,6 +465,9 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     let (dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    // Tensor cores are permitted by default since 0.7.0; this arm declares
+    // the scalar tier's buckets, so it must switch them off explicitly.
+    ctx.set_bi_tensor_cores(false);
     // Declared per (K, N) under the 128-row prefix comparison, one
     // table per arch. Re-record (do not hand-edit) on change.
     const DECLARED: &ArchTables<'static> = &[(
