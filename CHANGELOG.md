@@ -146,11 +146,12 @@ the next release's work.
   `GpuMambaBackbone::new_with_mode` and `new_with_dtype_and_mode`,
   `GpuMamba3Backbone::new_with_mode` and `new_with_dtype_and_mode`,
   `GpuMambaLM::from_hf_with_mode`, `from_hf_with_dtype_and_mode` and
-  `from_hf_with_dtype_batch_and_mode`, `GpuMamba3LM::from_weights_with_mode`,
-  `from_weights_with_dtype_and_mode` and `Mamba3LmBuild::build_with_mode`,
-  `MambaTrainer::new_with_dtype_and_mode` and `new_full_with_mode`,
-  `Mamba3Trainer::new_with_dtype_and_mode` and `new_full_with_mode`, and
-  `new_with_mode` on the four inference engines. The plain constructors read
+  `from_hf_with_dtype_batch_and_mode`, `GpuMamba3LM::from_weights_with_mode`
+  and `Mamba3LmBuild::build_with_mode`, `MambaTrainer::new_full_with_mode`
+  and `Mamba3Trainer::new_full_with_mode`, and `new_with_mode` on the four
+  inference engines. `TrainSessionCfg::new(input_dim, batch, seq_len)` gives
+  the default optimizer settings of `new_with_dtype`, so the explicit-mode
+  path of a trainer stays one call. The plain constructors read
   `MAMBA_RS_GEMM_MODE` (`deterministic`, `cublas-fast`, `cublas-pedantic`)
   and default to `Deterministic`; the explicit ones ignore the GEMM
   environment.

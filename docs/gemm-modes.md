@@ -50,9 +50,10 @@ GEMM environment variables entirely.
 | `GpuMambaBackbone::new`, `new_with_dtype` | `GpuMambaBackbone::new_with_mode`, `new_with_dtype_and_mode` |
 | `GpuMamba3Backbone::new`, `new_with_dtype` | `GpuMamba3Backbone::new_with_mode`, `new_with_dtype_and_mode` |
 | `GpuMambaLM::from_hf`, `from_hf_with_dtype`, `from_hf_with_dtype_batch` | `GpuMambaLM::from_hf_with_mode`, `from_hf_with_dtype_and_mode`, `from_hf_with_dtype_batch_and_mode` |
-| `GpuMamba3LM::from_weights`, `from_weights_with_dtype`, `Mamba3LmBuild::build` | `GpuMamba3LM::from_weights_with_mode`, `from_weights_with_dtype_and_mode`, `build_with_mode` |
-| `MambaTrainer::new_with_dtype`, `new_full` | `MambaTrainer::new_with_dtype_and_mode`, `new_full_with_mode` |
-| `Mamba3Trainer::new_with_dtype`, `new_full` | `Mamba3Trainer::new_with_dtype_and_mode`, `new_full_with_mode` |
+| `GpuMamba3LM::from_weights`, `Mamba3LmBuild::build` | `GpuMamba3LM::from_weights_with_mode`, `build_with_mode` |
+| `GpuMamba3LM::from_weights_with_dtype` | `Mamba3LmBuild { dtype, batch: 1, .. }.build_with_mode(mode)` |
+| `MambaTrainer::new_full`, `Mamba3Trainer::new_full` | `MambaTrainer::new_full_with_mode`, `Mamba3Trainer::new_full_with_mode` |
+| `MambaTrainer::new_with_dtype`, `Mamba3Trainer::new_with_dtype` | `new_full_with_mode` with `TrainSessionCfg::new(input_dim, batch, seq_len)`, which carries the same default optimizer settings |
 
 ```rust
 use mamba_rs::gpu::inference::GpuMambaBackbone;

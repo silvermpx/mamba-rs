@@ -81,8 +81,9 @@ impl Mamba3Trainer {
     ///
     /// `dtype` controls storage independently of GEMM mode. Missing selectors
     /// use Deterministic + Triad; invalid or conflicting selectors are errors.
-    /// See [`Self::new_full`] for explicit optimizer settings and [`Self::ctx`]
-    /// to inspect the route that graph capture binds.
+    /// See [`Self::new_full`] for explicit optimizer settings, and
+    /// [`Self::new_full_with_mode`] with [`TrainSessionCfg::new`] to pick the
+    /// GEMM mode explicitly. [`Self::ctx`] shows the route graph capture binds.
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -96,46 +97,8 @@ impl Mamba3Trainer {
             gpu_ordinal,
             cpu_weights,
             cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr: 1e-3,
-                weight_decay: 1e-2,
-            },
+            TrainSessionCfg::new(input_dim, batch, seq_len),
             dtype,
-        )
-    }
-
-    /// Construct an M3 trainer with default Adam settings and an explicit
-    /// GEMM execution mode.
-    ///
-    /// The storage `dtype` and the `mode` are independent choices; the GEMM
-    /// environment variables are ignored, as in [`Self::new_full_with_mode`],
-    /// which this shortcut calls with the default optimizer settings.
-    pub fn new_with_dtype_and_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &Mamba3Weights,
-        cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        Self::new_full_with_mode(
-            gpu_ordinal,
-            cpu_weights,
-            cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr: 1e-3,
-                weight_decay: 1e-2,
-            },
-            dtype,
-            mode,
         )
     }
 

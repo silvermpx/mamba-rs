@@ -139,6 +139,22 @@ pub struct TrainSessionCfg {
     pub weight_decay: f32,
 }
 
+impl TrainSessionCfg {
+    /// Session settings with the default optimizer: AdamW at learning
+    /// rate 1e-3 and weight decay 1e-2, the values the `new_with_dtype`
+    /// constructors use. Pass the result to `new_full_with_mode` to pick
+    /// the GEMM mode explicitly without spelling out the optimizer.
+    pub fn new(input_dim: usize, batch: usize, seq_len: usize) -> Self {
+        Self {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-3,
+            weight_decay: 1e-2,
+        }
+    }
+}
+
 /// Per-step metrics returned by [`MambaTrainer::step`].
 #[derive(Debug, Clone)]
 pub struct StepMetrics {
@@ -281,8 +297,9 @@ impl MambaTrainer {
     ///
     /// `dtype` controls storage independently of GEMM mode. Missing selectors
     /// use Deterministic + Triad; invalid or conflicting selectors are errors.
-    /// See [`Self::new_full`] for explicit optimizer settings and [`Self::ctx`]
-    /// to inspect the route that graph capture binds.
+    /// See [`Self::new_full`] for explicit optimizer settings, and
+    /// [`Self::new_full_with_mode`] with [`TrainSessionCfg::new`] to pick the
+    /// GEMM mode explicitly. [`Self::ctx`] shows the route graph capture binds.
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -296,46 +313,8 @@ impl MambaTrainer {
             gpu_ordinal,
             cpu_weights,
             cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr: 1e-3,
-                weight_decay: 1e-2,
-            },
+            TrainSessionCfg::new(input_dim, batch, seq_len),
             dtype,
-        )
-    }
-
-    /// Construct a trainer with default Adam settings and an explicit GEMM
-    /// execution mode.
-    ///
-    /// The storage `dtype` and the `mode` are independent choices; the GEMM
-    /// environment variables are ignored, as in [`Self::new_full_with_mode`],
-    /// which this shortcut calls with the default optimizer settings.
-    pub fn new_with_dtype_and_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        Self::new_full_with_mode(
-            gpu_ordinal,
-            cpu_weights,
-            cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr: 1e-3,
-                weight_decay: 1e-2,
-            },
-            dtype,
-            mode,
         )
     }
 
