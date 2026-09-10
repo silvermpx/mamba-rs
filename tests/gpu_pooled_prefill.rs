@@ -9,7 +9,7 @@
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, PinnedHostBuf};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
 use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
@@ -186,8 +186,15 @@ fn pinned_staging_is_byte_transparent() {
 /// eager output bitwise, and 100 replays of the same page are all stable.
 #[test]
 fn pooled_graph_replays_bitwise() {
+    for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
+        pooled_graph_replays_bitwise_for_family(family);
+    }
+}
+
+fn pooled_graph_replays_bitwise_for_family(family: BiGemmFamily) {
     let t = 333usize;
     let mut r = rig(t);
+    r.ctx.set_bi_gemm_family(family);
     let dm = r.dims.d_model;
     // Eager reference.
     let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();

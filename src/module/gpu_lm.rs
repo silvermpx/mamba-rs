@@ -11,6 +11,7 @@ use crate::mamba_ssm::gpu::blas::{
     gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::mamba_ssm::gpu::context::GemmMode;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
 
@@ -119,9 +120,11 @@ pub struct GpuMambaLM {
 }
 
 impl GpuMambaLM {
-    /// CUDA context of the underlying backbone — e.g. to enable
-    /// `set_batch_invariant(true)` before generation when bit-stable
-    /// logits across batch sizes are required.
+    /// CUDA context of the underlying backbone.
+    ///
+    /// Inspect the selected execution policy with `ctx().gemm_mode()` and
+    /// `ctx().bi_gemm_family()`. Storage precision is reported separately by
+    /// [`Self::dtype`]. Graph capture binds the complete context route.
     pub fn ctx(&self) -> &crate::mamba_ssm::gpu::context::GpuCtx {
         self.backbone.ctx()
     }
@@ -139,6 +142,20 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
     }
 
+    /// Load an HF model with f32 storage, batch 1, and an explicit GEMM mode.
+    ///
+    /// GEMM mode, custom precision/tensor-core controls, and family selectors
+    /// in the environment are ignored. `MAMBA_RS_ARCH_RUNG` remains the
+    /// separate first-use Inference policy. Loading, validation, CUDA setup,
+    /// upload, and allocation failures are returned.
+    pub fn from_hf_with_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, WeightDtype::F32, 1, Some(mode))
+    }
+
     /// Load HF model with explicit storage dtype, batch=1.
     pub fn from_hf_with_dtype(
         dir: &Path,
@@ -146,6 +163,21 @@ impl GpuMambaLM {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, dtype, 1)
+    }
+
+    /// Load an HF model with explicit storage dtype and GEMM mode, batch 1.
+    ///
+    /// Storage precision and GEMM execution are independent. The explicit
+    /// lane ignores GEMM mode, custom precision/tensor-core controls, and
+    /// family selectors in the environment; `MAMBA_RS_ARCH_RUNG` remains a
+    /// separate first-use policy. Errors match [`Self::from_hf_with_dtype`].
+    pub fn from_hf_with_dtype_and_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, 1, Some(mode))
     }
 
     /// Load HF model with explicit dtype and batch size.
@@ -159,6 +191,34 @@ impl GpuMambaLM {
         dtype: WeightDtype,
         batch: usize,
     ) -> Result<Self, String> {
+        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, batch, None)
+    }
+
+    /// Load an HF model with explicit storage dtype, batch size, and GEMM mode.
+    ///
+    /// `dtype` controls storage and `mode` independently controls GEMM
+    /// execution. GEMM environment selectors are bypassed except that
+    /// `MAMBA_RS_ARCH_RUNG` remains the separate first-use Inference policy.
+    /// Invalid checkpoints, model configuration, batch-dependent allocation,
+    /// CUDA setup, or upload failures are returned. Graph capture remains tied
+    /// to the complete selected route.
+    pub fn from_hf_with_dtype_batch_and_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        batch: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, batch, Some(mode))
+    }
+
+    fn from_hf_with_dtype_batch_inner(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        batch: usize,
+        mode: Option<GemmMode>,
+    ) -> Result<Self, String> {
         let HfModel {
             backbone: cpu_backbone,
             embed,
@@ -169,14 +229,25 @@ impl GpuMambaLM {
         } = load_hf(dir)?;
 
         let cfg = *cpu_backbone.config();
-        let backbone = GpuMambaBackbone::new_with_dtype(
-            gpu_ordinal,
-            cpu_backbone.weights(),
-            cfg,
-            d_model,
-            batch,
-            dtype,
-        )?;
+        let backbone = match mode {
+            Some(mode) => GpuMambaBackbone::new_with_dtype_and_mode(
+                gpu_ordinal,
+                cpu_backbone.weights(),
+                cfg,
+                d_model,
+                batch,
+                dtype,
+                mode,
+            )?,
+            None => GpuMambaBackbone::new_with_dtype(
+                gpu_ordinal,
+                cpu_backbone.weights(),
+                cfg,
+                d_model,
+                batch,
+                dtype,
+            )?,
+        };
         let stream = backbone.stream();
 
         // Pad the untied lm_head to `vocab_size_padded` columns so the

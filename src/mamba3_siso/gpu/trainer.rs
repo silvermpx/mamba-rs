@@ -14,13 +14,17 @@ use crate::mamba_ssm::gpu::adamw::{
     step_multi,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::GpuCtx;
+use crate::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::mamba_ssm::gpu::grad_clip::{
     GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, scale_grads,
 };
-use crate::mamba_ssm::gpu::graph_capture::capture_into_graph_with_gemm_plan;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
+};
 use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
@@ -45,18 +49,6 @@ use crate::mamba3_siso::gpu::training_graph::{
 use crate::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use crate::mamba3_siso::weights::Mamba3Weights;
-
-fn with_validated_launch(
-    ctx: &GpuCtx,
-    plan: Option<&CapturedGemmGraphPlan>,
-    label: &str,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    match plan {
-        Some(plan) => plan.with_validated_launch(ctx, label, launch),
-        None => launch(),
-    }
-}
 
 /// CPU-side snapshot of the four carried Mamba-3 recurrences (SSM, K,
 /// V, RoPE angle) for TBPTT-style window handoff on the sequential
@@ -116,6 +108,37 @@ impl Mamba3Trainer {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
+        Self::new_full_inner(gpu_ordinal, cpu_weights, cfg, session, dtype, None)
+    }
+
+    /// Construct an M3 trainer with an explicit GEMM execution mode.
+    ///
+    /// `dtype` selects weight/activation storage while `mode` independently
+    /// selects deterministic custom GEMMs or cuBLAS. GEMM mode, custom
+    /// precision/tensor-core controls, and family selectors in the environment
+    /// are ignored, and the context stores [`BiGemmFamily::Triad`]. Existing
+    /// configuration, launch-capacity, explicit f32 input-projection, M3
+    /// state-cap, CUDA, upload, and allocation errors are preserved. Captured
+    /// graphs remain bound to the complete construction route.
+    pub fn new_full_with_mode(
+        gpu_ordinal: usize,
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        session: TrainSessionCfg,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_full_inner(gpu_ordinal, cpu_weights, cfg, session, dtype, Some(mode))
+    }
+
+    fn new_full_inner(
+        gpu_ordinal: usize,
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        session: TrainSessionCfg,
+        dtype: WeightDtype,
+        mode: Option<GemmMode>,
+    ) -> Result<Self, String> {
         // hoisted here so BOTH branches get it -
         // the f32 branch never validated, un-guarding the shfl width and
         // n_angles preconditions its kernels rely on.
@@ -145,10 +168,11 @@ impl Mamba3Trainer {
                     cpu_weights,
                     cfg,
                     session,
+                    mode,
                 )?))
             }
             WeightDtype::Bf16 | WeightDtype::F16 => Trainer3Inner::Mixed(Box::new(
-                Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype)?,
+                Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype, mode)?,
             )),
         };
         Ok(Self { inner })
@@ -714,6 +738,7 @@ pub(crate) struct Mamba3TrainerMixed {
     graph_f16: Option<cudarc::driver::CudaGraph>,
     prepared_f16_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     captured_f16_gemm_plan: Option<CapturedGemmGraphPlan>,
+    has_gemm_work: bool,
     /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
     /// Pointer-stability snapshots for the f16 graph.
@@ -742,6 +767,7 @@ impl Mamba3TrainerMixed {
         cfg: Mamba3Config,
         session: TrainSessionCfg,
         dtype: WeightDtype,
+        mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         cfg.validate()?;
         let TrainSessionCfg {
@@ -759,7 +785,14 @@ impl Mamba3TrainerMixed {
         let device = GpuDevice::new(gpu_ordinal)?;
         // Trainer entry point: the documented tier selection is the
         // MAMBA_RS_* environment (the benches' contract).
-        let ctx = GpuCtx::new_from_env(&device)?;
+        let ctx = match mode {
+            Some(mode) => {
+                GpuCtx::new_with_state_cap_mode_and_family(&device, 64, mode, BiGemmFamily::Triad)?
+            }
+            None => {
+                GpuCtx::new_from_env_with_state_cap_and_family(&device, 64, BiGemmFamily::Triad)?
+            }
+        };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),
@@ -849,6 +882,8 @@ impl Mamba3TrainerMixed {
         let clip_partials = alloc_partials(&ctx.stream)?;
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
         let initial_gemm_route = ctx.gemm_route();
+        let has_gemm_work =
+            dims.bt() != 0 && (weights.compute.input_proj_w.len_elems() != 0 || dims.n_layers != 0);
 
         Ok(Self {
             ctx,
@@ -883,6 +918,7 @@ impl Mamba3TrainerMixed {
             graph_f16: None,
             prepared_f16_gemm_manifest: None,
             captured_f16_gemm_plan: None,
+            has_gemm_work,
             unscale_factor,
             captured_f16_bias_ptr: 0,
             captured_f16_unscale_ptr: 0,
@@ -1020,6 +1056,10 @@ impl Mamba3TrainerMixed {
 
     fn eager_f16_forward_backward(&mut self) -> Result<(), String> {
         self.presize_prepared_gemm_scratch()?;
+        let has_gemm_work = self.has_gemm_work;
+        if has_gemm_work {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
         let Self {
             ctx,
             m3k,
@@ -1156,8 +1196,9 @@ impl Mamba3TrainerMixed {
                     .into());
             }
 
-            with_validated_launch(
+            with_validated_gemm_graph_launch(
                 &self.ctx,
+                self.has_gemm_work,
                 self.captured_f16_gemm_plan.as_ref(),
                 "M3 f16 training graph replay",
                 || {
@@ -1343,6 +1384,12 @@ impl Mamba3TrainerMixed {
                 })
             }
         }?;
+        require_deterministic_gemm_graph_plan(
+            &self.ctx,
+            self.has_gemm_work,
+            captured_f16_gemm_plan.as_ref(),
+            "M3 f16 training graph capture",
+        )?;
         self.graph_f16 = Some(g);
         self.captured_f16_gemm_plan = captured_f16_gemm_plan;
         self.captured_f16_bias_ptr = snap_bias;
@@ -1429,6 +1476,10 @@ impl Mamba3TrainerMixed {
 
     fn step_eager(&mut self) -> Result<(), String> {
         self.presize_prepared_gemm_scratch()?;
+        let has_gemm_work = self.has_gemm_work;
+        if has_gemm_work {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
         let Self {
             ctx,
             m3k,
@@ -1832,6 +1883,7 @@ pub(crate) struct Mamba3TrainerF32 {
     angle_states: GpuBuffer,
     graph: Option<GpuMamba3F32TrainingStepGraph>,
     prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
+    has_gemm_work: bool,
     /// Route that produced the saved split-forward activations.
     split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
@@ -1856,6 +1908,7 @@ impl Mamba3TrainerF32 {
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
         session: TrainSessionCfg,
+        mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         let TrainSessionCfg {
             input_dim,
@@ -1867,7 +1920,14 @@ impl Mamba3TrainerF32 {
         let device = GpuDevice::new(gpu_ordinal)?;
         // Trainer entry point: the documented tier selection is the
         // MAMBA_RS_* environment (the benches' contract).
-        let ctx = GpuCtx::new_from_env(&device)?;
+        let ctx = match mode {
+            Some(mode) => {
+                GpuCtx::new_with_state_cap_mode_and_family(&device, 64, mode, BiGemmFamily::Triad)?
+            }
+            None => {
+                GpuCtx::new_from_env_with_state_cap_and_family(&device, 64, BiGemmFamily::Triad)?
+            }
+        };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),
@@ -1936,6 +1996,7 @@ impl Mamba3TrainerF32 {
         let clip_partials = alloc_partials(&ctx.stream)?;
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
 
+        let has_gemm_work = dims.batch != 0 && dims.seq_len != 0;
         Ok(Self {
             ctx,
             m3k,
@@ -1957,6 +2018,7 @@ impl Mamba3TrainerF32 {
             angle_states,
             graph: None,
             prepared_gemm_manifest: None,
+            has_gemm_work,
             split_forward_route: None,
             grads_dirty: false,
             clip_partials,
@@ -2113,6 +2175,10 @@ impl Mamba3TrainerF32 {
     }
 
     fn step_eager(&mut self) -> Result<(), String> {
+        let has_gemm_work = self.has_gemm_work;
+        if has_gemm_work {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
         let Self {
             ctx,
             m3k,

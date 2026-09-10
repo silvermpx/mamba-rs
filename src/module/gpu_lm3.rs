@@ -15,6 +15,7 @@ use crate::mamba_ssm::gpu::blas::{
     gpu_gemm_typed_forward_raw, presize_tied_lm_head_scratch,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::inference::GpuMamba3Backbone;
@@ -77,6 +78,15 @@ pub struct GpuMamba3LM {
 }
 
 impl GpuMamba3LM {
+    /// CUDA context shared by the M3 backbone and language-model projections.
+    ///
+    /// Inspect GEMM execution with [`GpuCtx::gemm_mode`] and the deterministic
+    /// role family with [`GpuCtx::bi_gemm_family`]. Storage precision remains
+    /// a separate choice available through [`Self::dtype`].
+    pub fn ctx(&self) -> &GpuCtx {
+        self.backbone.ctx()
+    }
+
     /// Borrow the most recent logits for batch slot `b`. Returns
     /// `[vocab_size]`. Valid after [`Self::generate`] /
     /// [`Self::generate_streaming`] / [`Self::generate_batch`] returns.
@@ -130,6 +140,36 @@ impl GpuMamba3LM {
         })
     }
 
+    /// F32 construction shortcut with an explicit GEMM mode.
+    ///
+    /// GEMM mode, custom precision/tensor-core controls, and family selectors
+    /// in the environment are ignored; `MAMBA_RS_ARCH_RUNG` remains the
+    /// separate first-use Inference policy. Configuration, projection, CUDA,
+    /// upload, and allocation failures are returned.
+    pub fn from_weights_with_mode(
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+        gpu_ordinal: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::build_with_mode(
+            Mamba3LmBuild {
+                cpu_weights,
+                cfg,
+                embed,
+                lm_head,
+                vocab_size,
+                gpu_ordinal,
+                dtype: WeightDtype::F32,
+                batch: 1,
+            },
+            mode,
+        )
+    }
+
     /// Batch=1 dtype-aware construction.
     pub fn from_weights_with_dtype(
         cpu_weights: &Mamba3Weights,
@@ -158,6 +198,22 @@ impl GpuMamba3LM {
     /// untied): `[d_model * vocab_size]`. Tied lm_head → pass `None` and the
     /// embed table is reused as the tied projection matrix.
     pub fn build(args: Mamba3LmBuild<'_>) -> Result<Self, String> {
+        Self::build_inner(args, None)
+    }
+
+    /// Full M3 LM construction with an explicit GEMM mode.
+    ///
+    /// Fields in `args` control model data, storage dtype, and batch; `mode`
+    /// independently controls GEMM execution. GEMM mode, custom precision/
+    /// tensor-core controls, and family selectors in the environment are
+    /// ignored, while `MAMBA_RS_ARCH_RUNG` remains a separate first-use
+    /// Inference policy. Existing input-projection, shape, CUDA, upload, and
+    /// allocation errors are preserved, and captured graphs bind the route.
+    pub fn build_with_mode(args: Mamba3LmBuild<'_>, mode: GemmMode) -> Result<Self, String> {
+        Self::build_inner(args, Some(mode))
+    }
+
+    fn build_inner(args: Mamba3LmBuild<'_>, mode: Option<GemmMode>) -> Result<Self, String> {
         let Mamba3LmBuild {
             cpu_weights,
             cfg,
@@ -196,8 +252,25 @@ impl GpuMamba3LM {
             ));
         }
 
-        let backbone =
-            GpuMamba3Backbone::new_with_dtype(gpu_ordinal, &weights, cfg, d_model, batch, dtype)?;
+        let backbone = match mode {
+            Some(mode) => GpuMamba3Backbone::new_with_dtype_and_mode(
+                gpu_ordinal,
+                &weights,
+                cfg,
+                d_model,
+                batch,
+                dtype,
+                mode,
+            )?,
+            None => GpuMamba3Backbone::new_with_dtype(
+                gpu_ordinal,
+                &weights,
+                cfg,
+                d_model,
+                batch,
+                dtype,
+            )?,
+        };
         let stream = backbone.stream();
 
         // Pad untied lm_head to `vocab_size_padded` rows so the untied GEMM

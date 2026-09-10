@@ -4781,7 +4781,7 @@ fn physical_graph_package_covers_all_prepared_triad_route_shapes() {
 
 #[test]
 fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
-    let direct_holders = [
+    let remaining_holders = [
         (
             "M1 f32 training",
             TRAINING_GRAPH_SOURCE,
@@ -4817,38 +4817,6 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
             "capture",
             &["replay"][..],
         ),
-    ];
-    for (label, source, holder, capture, replays) in direct_holders {
-        let structure = source_mask(struct_scope_for_type(source, holder));
-        assert!(
-            structure.contains("Option<CapturedGemmGraphPlan>") && structure.contains("GemmRoute"),
-            "{label} must store a physical plan beside its existing route snapshot"
-        );
-        let capture = source_mask(method_scope_for_type(source, holder, capture));
-        assert_code_contains_all(
-            &capture,
-            &[
-                "capture_into_graph_with_gemm_plan",
-                "require_f32_triad_graph_plan",
-            ],
-            &format!("{label} scoped capture"),
-        );
-        for replay in replays {
-            let replay = source_mask(method_scope_for_type(source, holder, replay));
-            assert!(
-                replay.contains("with_validated_launch")
-                    || replay.contains("launch_captured_graph")
-                    || replay.contains("launch_mixed_native_graph"),
-                "{label}::{replay} must reach the scoped validated launch"
-            );
-            assert!(
-                graph_launches_are_guarded(&replay),
-                "{label}::{replay} may not launch outside the validated closure"
-            );
-        }
-    }
-
-    let conditional_holders = [
         (
             "M1 bf16 training",
             TRAINING_GRAPH_SOURCE,
@@ -4878,31 +4846,122 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
             &["step_f16"][..],
         ),
     ];
-    for (label, source, holder, capture, replays) in conditional_holders {
+    assert_eq!(remaining_holders.len(), 9, "remaining owner census");
+    for (label, source, holder, capture, replays) in remaining_holders {
         let structure = source_mask(struct_scope_for_type(source, holder));
-        assert!(
-            structure.contains("Option<CapturedGemmGraphPlan>") && structure.contains("GemmRoute"),
-            "{label} must retain route and optional physical plan storage"
+        assert_code_contains_all(
+            &structure,
+            &[
+                "Option<CapturedGemmGraphPlan>",
+                "GemmRoute",
+                "has_gemm_work",
+            ],
+            &format!("{label} retained graph contract"),
         );
         let capture = source_mask(method_scope_for_type(source, holder, capture));
         assert_code_contains_all(
             &capture,
-            &["capture_into_graph_with_gemm_plan"],
+            &[
+                "capture_into_graph_with_gemm_plan",
+                "require_deterministic_gemm_graph_plan",
+                "has_gemm_work",
+            ],
             &format!("{label} scoped capture"),
         );
-        assert!(!capture.contains("require_f32_triad_graph_plan"));
+        assert!(
+            !capture.contains("require_f32_triad_graph_plan"),
+            "{label} must not retain the F32/Triad-only admission guard"
+        );
+        assert!(
+            capture.find("capture_into_graph_with_gemm_plan").unwrap()
+                < capture
+                    .find("require_deterministic_gemm_graph_plan")
+                    .unwrap(),
+            "{label} must validate the completed capture's deterministic GEMM coverage"
+        );
         for replay in replays {
             let replay = source_mask(method_scope_for_type(source, holder, replay));
-            assert!(
-                replay.contains("with_validated_launch")
-                    || replay.contains("launch_mixed_native_graph"),
-                "{label}::{replay} must reach scoped validation"
+            assert_code_contains_all(
+                &replay,
+                &["with_validated_gemm_graph_launch", "has_gemm_work"],
+                &format!("{label}::{replay} shared replay guard"),
             );
             assert!(
                 graph_launches_are_guarded(&replay),
                 "{label}::{replay} may not launch outside the validated closure"
             );
         }
+    }
+
+    let recorder_owners = [
+        (
+            "M1 pooled prefill",
+            PREFILL_SOURCE,
+            "PrefillPooledGraph",
+            "capture",
+        ),
+        (
+            "M3 prefill",
+            MAMBA3_PREFILL_SOURCE,
+            "Mamba3Prefill",
+            "run_full",
+        ),
+        (
+            "M1 mixed f16 trainer",
+            TRAINER_SOURCE,
+            "MambaTrainerMixed",
+            "eager_f16_forward_backward",
+        ),
+        (
+            "M1 mixed bf16 trainer",
+            TRAINER_SOURCE,
+            "MambaTrainerMixed",
+            "step_eager",
+        ),
+        (
+            "M1 f32 trainer",
+            TRAINER_SOURCE,
+            "MambaTrainerF32",
+            "step_eager",
+        ),
+        (
+            "M3 mixed f16 trainer",
+            MAMBA3_TRAINER_SOURCE,
+            "Mamba3TrainerMixed",
+            "eager_f16_forward_backward",
+        ),
+        (
+            "M3 mixed bf16 trainer",
+            MAMBA3_TRAINER_SOURCE,
+            "Mamba3TrainerMixed",
+            "step_eager",
+        ),
+        (
+            "M3 f32 trainer",
+            MAMBA3_TRAINER_SOURCE,
+            "Mamba3TrainerF32",
+            "step_eager",
+        ),
+    ];
+    for (label, source, owner, method) in recorder_owners {
+        let recorder = source_mask(method_scope_for_type(source, owner, method));
+        assert_code_contains_all(
+            &recorder,
+            &[
+                "has_gemm_work",
+                "if has_gemm_work",
+                "prepare_inference_arch_rung",
+                "record_eager_gemm_manifest",
+            ],
+            &format!("{label} eager recorder preparation"),
+        );
+        assert!(
+            recorder.find("if has_gemm_work").unwrap()
+                < recorder.find("prepare_inference_arch_rung").unwrap()
+                && recorder.find("prepare_inference_arch_rung").unwrap()
+                    < recorder.find("record_eager_gemm_manifest").unwrap(),
+            "{label} must prepare the selected Inference rung conditionally before recording"
+        );
     }
 
     let decode_holders = [

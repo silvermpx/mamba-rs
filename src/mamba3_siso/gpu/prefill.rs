@@ -29,26 +29,16 @@ use crate::mamba_ssm::gpu::blas::TypedPtr;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::mamba_ssm::gpu::graph_capture::{
-    capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan,
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
 };
 use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
-
-fn with_validated_launch(
-    ctx: &GpuCtx,
-    plan: Option<&CapturedGemmGraphPlan>,
-    label: &str,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    match plan {
-        Some(plan) => plan.with_validated_launch(ctx, label, launch),
-        None => launch(),
-    }
-}
 
 /// Chunk-pipeline intermediates the prefill needs beyond the no-save layer
 /// scratch: per-window buffers consumed inside F6 and released to the next
@@ -250,10 +240,26 @@ impl Mamba3Prefill {
         states: GpuMamba3StateBufs<'_>,
         outputs: Mamba3PrefillOutputs<'_>,
     ) -> Result<(), String> {
+        self.validate_run_dims(run.dims)?;
+        let has_gemm_work = run.dims.bt() != 0 && (!run.identity_proj || run.dims.n_layers != 0);
+        if has_gemm_work {
+            prepare_inference_arch_rung(run.ctx)?;
+        }
         let manifest = run
             .ctx
             .record_eager_gemm_manifest(|| self.run_full_body(run, states, outputs))?;
         self.eager_gemm_manifest = Some(manifest);
+        Ok(())
+    }
+
+    fn validate_run_dims(&self, dims: &GpuMamba3Dims) -> Result<(), String> {
+        if *dims != self.sized_for {
+            return Err(format!(
+                "prefill executor was sized for {:?} but run was asked for {:?} — \
+                 allocate a prefill for the shape you run",
+                self.sized_for, dims
+            ));
+        }
         Ok(())
     }
 
@@ -277,12 +283,7 @@ impl Mamba3Prefill {
             identity_proj,
             carry_state,
         } = *run;
-        if *dims != self.sized_for {
-            return Err(format!(
-                "prefill executor was sized for {:?} but run was asked for {:?} —                  allocate a prefill for the shape you run",
-                self.sized_for, dims
-            ));
-        }
+        self.validate_run_dims(dims)?;
         if weights.bulk_dtype() != self.dtype {
             return Err(format!(
                 "prefill executor dtype {:?} != weights bulk dtype {:?} — \
@@ -1256,6 +1257,7 @@ pub struct Mamba3PrefillGraph {
     ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
@@ -1298,6 +1300,7 @@ impl Mamba3PrefillGraph {
         let last_hidden_ptr = last_hidden.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let has_gemm_work = run.dims.bt() != 0 && (!run.identity_proj || run.dims.n_layers != 0);
         let module_identity = run.kernels.module_identity.clone();
         let manifest = prefill.eager_gemm_manifest.ok_or_else(|| {
             "m3 prefill graph capture requires a successful eager run".to_string()
@@ -1318,9 +1321,9 @@ impl Mamba3PrefillGraph {
                 )
             })
         }?;
-        require_f32_triad_graph_plan(
+        require_deterministic_gemm_graph_plan(
             run.ctx,
-            weights_dtype == WeightDtype::F32,
+            has_gemm_work,
             captured_gemm_plan.as_ref(),
             "m3 prefill graph capture",
         )?;
@@ -1330,6 +1333,7 @@ impl Mamba3PrefillGraph {
             ctx_resources: run.ctx.resource_anchor(),
             _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            has_gemm_work,
             captured_gemm_plan,
             captured_ctx_token: run.ctx.instance_token(),
             captured_stream_token: run.ctx.stream_token(),
@@ -1419,8 +1423,9 @@ impl Mamba3PrefillGraph {
                     .to_string(),
             );
         }
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             ctx,
+            self.has_gemm_work,
             self.captured_gemm_plan.as_ref(),
             "m3 prefill graph replay",
             || {
@@ -1451,6 +1456,7 @@ pub struct Mamba3PrefillPooledGraph {
     ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
@@ -1502,6 +1508,7 @@ impl Mamba3PrefillPooledGraph {
         let pooled_ptr = pooled_sum.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let has_gemm_work = run.dims.bt() != 0 && (!run.identity_proj || run.dims.n_layers != 0);
         let module_identity = run.kernels.module_identity.clone();
         let manifest = prefill.eager_gemm_manifest.ok_or_else(|| {
             "m3 pooled prefill graph capture requires a successful eager run".to_string()
@@ -1522,9 +1529,9 @@ impl Mamba3PrefillPooledGraph {
                 )
             })
         }?;
-        require_f32_triad_graph_plan(
+        require_deterministic_gemm_graph_plan(
             run.ctx,
-            weights_dtype == WeightDtype::F32,
+            has_gemm_work,
             captured_gemm_plan.as_ref(),
             "m3 pooled prefill graph capture",
         )?;
@@ -1534,6 +1541,7 @@ impl Mamba3PrefillPooledGraph {
             ctx_resources: run.ctx.resource_anchor(),
             _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            has_gemm_work,
             captured_gemm_plan,
             captured_ctx_token: run.ctx.instance_token(),
             captured_stream_token: run.ctx.stream_token(),
@@ -1619,8 +1627,9 @@ impl Mamba3PrefillPooledGraph {
                     .to_string(),
             );
         }
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             ctx,
+            self.has_gemm_work,
             self.captured_gemm_plan.as_ref(),
             "m3 pooled prefill graph replay",
             || {

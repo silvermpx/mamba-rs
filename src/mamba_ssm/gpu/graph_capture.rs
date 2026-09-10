@@ -296,27 +296,6 @@ pub(crate) fn require_deterministic_gemm_graph_plan(
     Ok(())
 }
 
-// Prefill/training owners still use their pre-existing F32/Triad admission
-// contract. Decode capture and replay use the complete deterministic guard
-// above; migrating these other owners is a separate task.
-pub(crate) fn require_f32_triad_graph_plan(
-    ctx: &GpuCtx,
-    logical_f32: bool,
-    plan: Option<&CapturedGemmGraphPlan>,
-    label: &str,
-) -> Result<(), String> {
-    if ctx.batch_invariant()
-        && ctx.bi_gemm_family() == super::context::BiGemmFamily::Triad
-        && logical_f32
-        && plan.is_none()
-    {
-        return Err(format!(
-            "{label}: logical-f32 Triad graph captured no resolved GEMM route"
-        ));
-    }
-    Ok(())
-}
-
 /// Validate context health and the GEMM-only inventory before submitting a
 /// graph. Callers retain their logical-route and fixed-buffer checks.
 pub(crate) fn with_validated_gemm_graph_launch(

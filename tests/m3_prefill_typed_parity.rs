@@ -22,7 +22,7 @@
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
@@ -235,6 +235,12 @@ fn typed_prefill_matches_mixed_trainer_forward() {
 /// different weights container.
 #[test]
 fn typed_pooled_graph_replay_and_container_guard() {
+    for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
+        typed_pooled_graph_replay_and_container_guard_for_family(family);
+    }
+}
+
+fn typed_pooled_graph_replay_and_container_guard_for_family(family: BiGemmFamily) {
     let dtype = WeightDtype::Bf16;
     let cfg = tiny_cfg();
     let input_dim = 24usize;
@@ -243,6 +249,7 @@ fn typed_pooled_graph_replay_and_container_guard() {
     let w = Mamba3Weights::init(&cfg, input_dim, 0xB16_B00B);
     let device = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&device).expect("ctx");
+    ctx.set_bi_gemm_family(family);
     let arch = GpuDevice::nvrtc_arch(device.compute_capability);
     let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");
     let dims = gpu_dims(&cfg, input_dim, 1, seq_len);

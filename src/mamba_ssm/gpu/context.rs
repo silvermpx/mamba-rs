@@ -76,6 +76,16 @@ struct ResolvedGemmEnv {
     half_policy: HalfTriadPolicy,
 }
 
+fn explicit_gemm_config(mode: GemmMode, family: BiGemmFamily) -> ResolvedGemmEnv {
+    ResolvedGemmEnv {
+        mode,
+        family,
+        tensor_cores: true,
+        f32_policy: F32TriadPolicy::ExactScalarFmaV1,
+        half_policy: HalfTriadPolicy::TiledParityV1,
+    }
+}
+
 fn env_value_is_present(value: &Result<String, std::env::VarError>) -> bool {
     !matches!(value, Err(std::env::VarError::NotPresent))
 }
@@ -661,8 +671,7 @@ impl GpuCtx {
     /// and validated before GPU resources are constructed. Invalid,
     /// conflicting, or non-Unicode values return an error.
     pub fn new_from_env(device: &GpuDevice) -> Result<Self, String> {
-        let config = resolve_gemm_env(GemmEnvValues::read(), BiGemmFamily::Triad)?;
-        Self::new_with_state_cap_and_config(device, 64, config)
+        Self::new_from_env_with_state_cap_and_family(device, 64, BiGemmFamily::Triad)
     }
 
     /// [`Self::new_from_env`] with an explicit kernel state capacity.
@@ -673,8 +682,7 @@ impl GpuCtx {
         device: &GpuDevice,
         state_cap: usize,
     ) -> Result<Self, String> {
-        let config = resolve_gemm_env(GemmEnvValues::read(), BiGemmFamily::Triad)?;
-        Self::new_with_state_cap_and_config(device, state_cap, config)
+        Self::new_from_env_with_state_cap_and_family(device, state_cap, BiGemmFamily::Triad)
     }
 
     /// Create a GPU context whose kernels are compiled with the given
@@ -696,17 +704,25 @@ impl GpuCtx {
         state_cap: usize,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_with_state_cap_and_config(
-            device,
-            state_cap,
-            ResolvedGemmEnv {
-                mode,
-                tensor_cores: true,
-                family: BiGemmFamily::Triad,
-                f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-                half_policy: HalfTriadPolicy::TiledParityV1,
-            },
-        )
+        Self::new_with_state_cap_mode_and_family(device, state_cap, mode, BiGemmFamily::Triad)
+    }
+
+    pub(crate) fn new_from_env_with_state_cap_and_family(
+        device: &GpuDevice,
+        state_cap: usize,
+        default_family: BiGemmFamily,
+    ) -> Result<Self, String> {
+        let config = resolve_gemm_env(GemmEnvValues::read(), default_family)?;
+        Self::new_with_state_cap_and_config(device, state_cap, config)
+    }
+
+    pub(crate) fn new_with_state_cap_mode_and_family(
+        device: &GpuDevice,
+        state_cap: usize,
+        mode: GemmMode,
+        family: BiGemmFamily,
+    ) -> Result<Self, String> {
+        Self::new_with_state_cap_and_config(device, state_cap, explicit_gemm_config(mode, family))
     }
 
     fn new_with_state_cap_and_config(
@@ -2148,11 +2164,11 @@ mod tests {
     }
 
     use super::{
-        BiGemmFamily, F32TriadPolicy, GemmEnvValues, GemmMode, HalfTriadPolicy,
+        BiGemmFamily, F32TriadPolicy, GemmEnvValues, GemmMode, HalfTriadPolicy, ResolvedGemmEnv,
         bi_gemm_family_from_result, expected_route_module, expected_route_schedule_revision,
-        expected_route_tuning_revision, f32_triad_policy_from_result, m1_mixed_graph_max_dim,
-        resolve_gemm_env, scalar_backend_supports_logical_f32, tier_flag_from_result,
-        validate_multiprocessor_identity,
+        expected_route_tuning_revision, explicit_gemm_config, f32_triad_policy_from_result,
+        m1_mixed_graph_max_dim, resolve_gemm_env, scalar_backend_supports_logical_f32,
+        tier_flag_from_result, validate_multiprocessor_identity,
     };
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
@@ -2440,6 +2456,28 @@ mod tests {
             .expect_err("non-Unicode family names must fail");
             assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
             assert!(error.contains("only inference or triad"), "{error}");
+        }
+    }
+
+    #[test]
+    fn explicit_gemm_config_preserves_mode_role_and_numeric_defaults() {
+        for mode in [
+            GemmMode::Deterministic,
+            GemmMode::CublasFast,
+            GemmMode::CublasPedantic,
+        ] {
+            for family in [BiGemmFamily::Inference, BiGemmFamily::Triad] {
+                assert_eq!(
+                    explicit_gemm_config(mode, family),
+                    ResolvedGemmEnv {
+                        mode,
+                        family,
+                        tensor_cores: true,
+                        f32_policy: F32TriadPolicy::ExactScalarFmaV1,
+                        half_policy: HalfTriadPolicy::TiledParityV1,
+                    }
+                );
+            }
         }
     }
 

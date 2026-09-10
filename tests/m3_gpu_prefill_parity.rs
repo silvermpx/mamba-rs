@@ -6,7 +6,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
@@ -361,11 +361,18 @@ fn gpu_prefill_then_decode_handoff() {
 /// device).
 #[test]
 fn gpu_prefill_graph_replay_is_bitwise() {
+    for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
+        gpu_prefill_graph_replay_is_bitwise_for_family(family);
+    }
+}
+
+fn gpu_prefill_graph_replay_is_bitwise_for_family(family: BiGemmFamily) {
     use mamba_rs::mamba3_siso::gpu::prefill::Mamba3PrefillGraph;
 
     let cfg = tiny_cfg();
     let w = identity_weights(&cfg, 33);
     let rig = rig();
+    rig.ctx.set_bi_gemm_family(family);
     let seq_len = 192usize;
     let dims = gpu_dims(&cfg, 1, seq_len);
     let input = det_input(seq_len * cfg.d_model, 55);

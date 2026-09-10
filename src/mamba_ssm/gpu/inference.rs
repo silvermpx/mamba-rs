@@ -7,7 +7,7 @@
 
 use super::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
 use super::buffers::{DtypedBuf, GpuBuffer};
-use super::context::GpuCtx;
+use super::context::{BiGemmFamily, GemmMode, GpuCtx};
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
 use super::forward::GpuMambaDims;
@@ -841,12 +841,52 @@ impl GpuMambaInference {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
+        Self::new_inner(device, cpu_weights, cfg, input_dim, batch, None)
+    }
+
+    /// Create an inference engine with an explicit GEMM execution mode.
+    ///
+    /// The weights remain f32; `mode` independently selects deterministic
+    /// custom GEMMs or a cuBLAS mode. GEMM mode, custom precision/tensor-core
+    /// controls, and family selectors from the environment are ignored, and
+    /// the stored deterministic family is [`BiGemmFamily::Inference`].
+    /// `MAMBA_RS_ARCH_RUNG` remains a separate first-use process policy for
+    /// the Inference architecture rung. Invalid model configuration, kernel
+    /// compilation, allocation, upload, or vendor setup returns an error.
+    pub fn new_with_mode(
+        device: &GpuDevice,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_inner(device, cpu_weights, cfg, input_dim, batch, Some(mode))
+    }
+
+    fn new_inner(
+        device: &GpuDevice,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        mode: Option<GemmMode>,
+    ) -> Result<Self, String> {
         cfg.validate()?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        // The engine honours the same GEMM route flags as a training context:
-        // a deterministic family asked for in the environment serves the
-        // inference projections too, instead of being read and dropped.
-        let ctx = GpuCtx::new_from_env_with_state_cap(device, state_cap)?;
+        let ctx = match mode {
+            Some(mode) => GpuCtx::new_with_state_cap_mode_and_family(
+                device,
+                state_cap,
+                mode,
+                BiGemmFamily::Inference,
+            )?,
+            None => GpuCtx::new_from_env_with_state_cap_and_family(
+                device,
+                state_cap,
+                BiGemmFamily::Inference,
+            )?,
+        };
 
         let weights = GpuMambaWeights::from_cpu(&ctx.stream, cpu_weights, &cfg)?;
 
@@ -1525,10 +1565,55 @@ impl GpuMambaInferenceMixed {
         batch: usize,
         bulk_dtype: WeightDtype,
     ) -> Result<Self, String> {
+        Self::new_inner(device, cpu_weights, cfg, input_dim, batch, bulk_dtype, None)
+    }
+
+    /// Create a mixed-storage inference engine with an explicit GEMM mode.
+    ///
+    /// `bulk_dtype` chooses bf16/f16 storage; `mode` separately controls GEMM
+    /// execution. GEMM mode, custom precision/tensor-core controls, and family
+    /// selectors in the environment are ignored. The retained f32 engine owns
+    /// the single Inference-role context. `MAMBA_RS_ARCH_RUNG` remains a
+    /// separate first-use process policy. Construction preserves the same
+    /// validation, upload, and allocation errors as [`Self::new`].
+    pub fn new_with_mode(
+        device: &GpuDevice,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        bulk_dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_inner(
+            device,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            bulk_dtype,
+            Some(mode),
+        )
+    }
+
+    fn new_inner(
+        device: &GpuDevice,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        bulk_dtype: WeightDtype,
+        mode: Option<GemmMode>,
+    ) -> Result<Self, String> {
         cfg.validate()?;
         // Create f32 engine first (builds ctx, kernels, a_neg_all via CPU upload path).
         // We'll then discard its `weights` flat buffer and replace with mixed arena.
-        let engine = GpuMambaInference::new(device, cpu_weights, cfg, input_dim, batch)?;
+        let engine = match mode {
+            Some(mode) => {
+                GpuMambaInference::new_with_mode(device, cpu_weights, cfg, input_dim, batch, mode)?
+            }
+            None => GpuMambaInference::new(device, cpu_weights, cfg, input_dim, batch)?,
+        };
         let mixed_weights =
             GpuMambaMixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, &cfg, bulk_dtype)?;
 
@@ -2375,7 +2460,12 @@ pub struct GpuMambaBackbone {
 }
 
 impl GpuMambaBackbone {
-    /// Create an f32 GPU backbone (equivalent to `new_with_dtype(F32)`).
+    /// Create an f32 GPU backbone using the GEMM environment.
+    ///
+    /// Missing mode/family settings select Deterministic and the Inference
+    /// family. Explicit environment values and conflicts retain their strict
+    /// parser behavior. Storage remains f32; inspect the resolved execution
+    /// policy with [`Self::ctx`].
     pub fn new(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -2393,6 +2483,33 @@ impl GpuMambaBackbone {
         )
     }
 
+    /// Create an f32 GPU backbone with an explicit GEMM execution mode.
+    ///
+    /// The mode is independent of f32 weight storage. GEMM mode, custom
+    /// precision/tensor-core controls, and family selectors in the environment
+    /// are ignored; the context stores the Inference family even in vendor
+    /// modes. `MAMBA_RS_ARCH_RUNG` remains a separate first-use process policy.
+    /// Model validation, CUDA setup, upload, and allocation failures are
+    /// returned. Captured graphs still require an unchanged complete GEMM route.
+    pub fn new_with_mode(
+        gpu_ordinal: usize,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_with_dtype_and_mode(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            WeightDtype::F32,
+            mode,
+        )
+    }
+
     /// Create a GPU backbone with explicit storage dtype.
     ///
     /// - `WeightDtype::F32`: native f32 (highest accuracy, 4 bytes/weight)
@@ -2407,23 +2524,85 @@ impl GpuMambaBackbone {
         batch: usize,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
+        Self::new_with_dtype_inner(gpu_ordinal, cpu_weights, cfg, input_dim, batch, dtype, None)
+    }
+
+    /// Create a GPU backbone with explicit storage dtype and GEMM mode.
+    ///
+    /// `dtype` controls weight/activation storage; `mode` controls GEMM
+    /// execution and does not change that storage choice. GEMM mode, custom
+    /// precision/tensor-core controls, and family selectors in the environment
+    /// are ignored, while `MAMBA_RS_ARCH_RUNG` remains a separate first-use
+    /// Inference policy. The context stores [`BiGemmFamily::Inference`].
+    /// Invalid configuration, dtype-specific setup, CUDA, upload, or allocation
+    /// failures are returned; graph replay requires the construction route.
+    pub fn new_with_dtype_and_mode(
+        gpu_ordinal: usize,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_with_dtype_inner(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            dtype,
+            Some(mode),
+        )
+    }
+
+    fn new_with_dtype_inner(
+        gpu_ordinal: usize,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
+        mode: Option<GemmMode>,
+    ) -> Result<Self, String> {
         let device = GpuDevice::new(gpu_ordinal)?;
         let (engine, state, scratch) = match dtype {
             WeightDtype::F32 => {
-                let e = GpuMambaInference::new(&device, cpu_weights, cfg, input_dim, batch)?;
+                let e = match mode {
+                    Some(mode) => GpuMambaInference::new_with_mode(
+                        &device,
+                        cpu_weights,
+                        cfg,
+                        input_dim,
+                        batch,
+                        mode,
+                    )?,
+                    None => GpuMambaInference::new(&device, cpu_weights, cfg, input_dim, batch)?,
+                };
                 let s = e.alloc_state()?;
                 let sc = BackboneScratch::F32(e.alloc_scratch()?);
                 (BackboneEngine::F32(Box::new(e)), s, sc)
             }
             WeightDtype::Bf16 | WeightDtype::F16 => {
-                let e = GpuMambaInferenceMixed::new(
-                    &device,
-                    cpu_weights,
-                    cfg,
-                    input_dim,
-                    batch,
-                    dtype,
-                )?;
+                let e = match mode {
+                    Some(mode) => GpuMambaInferenceMixed::new_with_mode(
+                        &device,
+                        cpu_weights,
+                        cfg,
+                        input_dim,
+                        batch,
+                        dtype,
+                        mode,
+                    )?,
+                    None => GpuMambaInferenceMixed::new(
+                        &device,
+                        cpu_weights,
+                        cfg,
+                        input_dim,
+                        batch,
+                        dtype,
+                    )?,
+                };
                 let s = e.alloc_state()?;
                 let sc = BackboneScratch::Mixed(e.alloc_mixed_scratch()?);
                 (BackboneEngine::Mixed(Box::new(e)), s, sc)

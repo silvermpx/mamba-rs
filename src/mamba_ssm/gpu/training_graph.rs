@@ -60,7 +60,8 @@ use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_mixed,
 };
 use crate::mamba_ssm::gpu::graph_capture::{
-    capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan,
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
 };
 use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::grid_1d;
@@ -68,18 +69,6 @@ use crate::mamba_ssm::gpu::weights::{
     GpuMambaGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights,
 };
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
-
-fn with_validated_launch(
-    ctx: &GpuCtx,
-    plan: Option<&CapturedGemmGraphPlan>,
-    label: &str,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    match plan {
-        Some(plan) => plan.with_validated_launch(ctx, label, launch),
-        None => launch(),
-    }
-}
 
 /// Capture-side variant of the trainer's `recompute_a_neg_all` helper.
 /// Launches `exp_negate` per layer from `master_layers[l].a_log` into
@@ -211,6 +200,7 @@ pub struct GpuMambaTrainingStepGraph {
     captured_bi_upcast_ptrs: [u64; 3],
     // Complete GEMM route captured with the graph.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
@@ -318,6 +308,9 @@ impl GpuMambaTrainingStepGraph {
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
         let route_capacity = manifest.route_capacity;
+        let has_gemm_work = batch != 0
+            && seq_len != 0
+            && (train_w.compute.input_proj_w.len_elems() != 0 || cfg.n_layers != 0);
 
         ctx.freeze_graph_scratch();
         let (graph, captured_gemm_plan) = unsafe {
@@ -368,6 +361,12 @@ impl GpuMambaTrainingStepGraph {
                 Ok(())
             })
         }?;
+        require_deterministic_gemm_graph_plan(
+            ctx,
+            has_gemm_work,
+            captured_gemm_plan.as_ref(),
+            "M1 bf16 training graph capture",
+        )?;
 
         Ok(Self {
             graph,
@@ -395,6 +394,7 @@ impl GpuMambaTrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            has_gemm_work,
             captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
@@ -520,8 +520,9 @@ impl GpuMambaTrainingStepGraph {
             self.captured_gemm_flags,
             "training_graph replay: GEMM route changed since capture; re-capture instead"
         );
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             ctx,
+            self.has_gemm_work,
             self.captured_gemm_plan.as_ref(),
             "training_graph replay",
             || {
@@ -615,6 +616,7 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_weights_norm_f_ptr: u64,
     // The trainer checks this route before replay.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
@@ -672,6 +674,7 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
         let route_capacity = manifest.route_capacity;
+        let has_gemm_work = batch != 0 && seq_len != 0;
 
         let cfg_local = *cfg;
         let (graph, captured_gemm_plan) = unsafe {
@@ -712,9 +715,9 @@ impl GpuMambaF32TrainingStepGraph {
                 Ok(())
             })
         }?;
-        require_f32_triad_graph_plan(
+        require_deterministic_gemm_graph_plan(
             ctx,
-            true,
+            has_gemm_work,
             captured_gemm_plan.as_ref(),
             "M1 f32 training graph capture",
         )?;
@@ -741,6 +744,7 @@ impl GpuMambaF32TrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            has_gemm_work,
             captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
@@ -838,8 +842,9 @@ impl GpuMambaF32TrainingStepGraph {
             self.captured_weights_norm_f_ptr,
             "f32 training_graph replay: norm_f_weight pointer changed since capture"
         );
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             ctx,
+            self.has_gemm_work,
             self.captured_gemm_plan.as_ref(),
             "f32 training_graph replay",
             || {
