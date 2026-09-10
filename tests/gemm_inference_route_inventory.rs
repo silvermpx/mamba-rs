@@ -185,7 +185,7 @@ fn deterministic_inference_direct_empty_output_has_no_terminal_record() {
             ptr: 0,
             dtype: output_dtype,
         };
-        for shape in [(0, 37, 96), (3, 37, 0)] {
+        for shape in [(0, 37, 96), (3, 37, 0), (0, 64, 96), (3, 64, 0)] {
             let trace = ctx
                 .record_eager_gemm_trace(|| {
                     inference_forward(&ctx, output, input, input, None, shape).map(|_| ())

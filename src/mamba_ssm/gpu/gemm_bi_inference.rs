@@ -4094,6 +4094,110 @@ fn loaded_arch_rung(ctx: &GpuCtx) -> Option<InferenceTile> {
     }
 }
 
+fn inference_arch_rung_for_request(
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    loaded: Option<InferenceTile>,
+    enabled: impl FnOnce(InferenceTile) -> Result<bool, String>,
+) -> Result<Option<InferenceTile>, String> {
+    if shape.m == 0 || shape.n == 0 {
+        return Ok(None);
+    }
+    let aligned = shape.k.is_multiple_of(8)
+        && shape.n.is_multiple_of(8)
+        && operands.x.ptr.is_multiple_of(16)
+        && operands.w.ptr.is_multiple_of(16);
+    if let Some(tile) = loaded
+        && aligned
+        && enabled(tile)?
+    {
+        Ok(Some(tile))
+    } else {
+        Ok(None)
+    }
+}
+
+#[test]
+fn inference_arch_rung_decision_skips_cold_probe_for_aligned_empty_output() {
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let null = TypedPtr { ptr: 0, dtype };
+        let operands = InferenceFwdOperands {
+            c: null,
+            x: null,
+            w: null,
+            bias_ptr: None,
+        };
+        for tile in [InferenceTile::Sm90Wgmma, InferenceTile::Sm100Tcgen] {
+            for (recording, capturing) in
+                [(true, false), (false, true), (true, true), (false, false)]
+            {
+                let mut preparation_calls = 0;
+                let mut probe_calls = 0;
+                let result = inference_arch_rung_for_request(
+                    operands,
+                    InferenceShape { m: 0, k: 64, n: 96 },
+                    Some(tile),
+                    |_| {
+                        preparation_calls += 1;
+                        require_arch_rung_prepared(true, recording, capturing)?;
+                        probe_calls += 1;
+                        Ok(true)
+                    },
+                );
+                assert_eq!(
+                    result,
+                    Ok(None),
+                    "empty output must bypass architecture preparation: {dtype:?} {tile:?} recording={recording} capturing={capturing}"
+                );
+                assert_eq!(preparation_calls, 0);
+                assert_eq!(probe_calls, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn inference_arch_rung_decision_preserves_nonempty_cold_guard_and_probe_verdict() {
+    let ptr = TypedPtr {
+        ptr: 16,
+        dtype: WeightDtype::Bf16,
+    };
+    let operands = InferenceFwdOperands {
+        c: ptr,
+        x: ptr,
+        w: ptr,
+        bias_ptr: None,
+    };
+    for tile in [InferenceTile::Sm90Wgmma, InferenceTile::Sm100Tcgen] {
+        for (cold, recording, capturing, verdict) in [
+            (true, false, false, true),
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, false, true, true),
+            (false, true, true, true),
+        ] {
+            let mut probe_calls = 0;
+            let result = inference_arch_rung_for_request(
+                operands,
+                InferenceShape { m: 3, k: 64, n: 96 },
+                Some(tile),
+                |_| {
+                    require_arch_rung_prepared(cold, recording, capturing)?;
+                    probe_calls += 1;
+                    Ok(verdict)
+                },
+            );
+            if cold && (recording || capturing) {
+                assert!(result.is_err());
+                assert_eq!(probe_calls, 0);
+            } else {
+                assert_eq!(result, Ok(verdict.then_some(tile)));
+                assert_eq!(probe_calls, 1);
+            }
+        }
+    }
+}
+
 #[test]
 fn cold_architecture_probe_is_rejected_before_recording_or_capture() {
     for (cold, recording, capturing, accepted) in [
@@ -4819,14 +4923,10 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         return Ok(InferenceTile::Sm120Half(tile));
     }
     if homogeneous_half && n_out >= 32 {
-        let aligned = n_in.is_multiple_of(8)
-            && n_out.is_multiple_of(8)
-            && x.ptr.is_multiple_of(16)
-            && w.ptr.is_multiple_of(16);
-        let arch_tile = loaded_arch_rung(ctx);
-        if let Some(tile) = arch_tile
-            && aligned
-            && arch_rung_enabled(ctx, tile, O::ENABLED || ctx.gemm_route_recording_active()?)?
+        if let Some(tile) =
+            inference_arch_rung_for_request(operands, shape, loaded_arch_rung(ctx), |tile| {
+                arch_rung_enabled(ctx, tile, O::ENABLED || ctx.gemm_route_recording_active()?)
+            })?
         {
             launch_ladder(ctx, tile, c.dtype, &args, observer)?;
             return Ok(tile);
