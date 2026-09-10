@@ -203,6 +203,38 @@ mod live {
         Graph,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AdmissionMode {
+        PreAdmission,
+        PostAdmission,
+    }
+
+    impl AdmissionMode {
+        fn require(self) -> Result<(), String> {
+            let expected = match self {
+                Self::PreAdmission => "0",
+                Self::PostAdmission => "1",
+            };
+            if std::env::var("MAMBA_SM89_EXACT_F32_EXPECT_AUTO")
+                .ok()
+                .as_deref()
+                != Some(expected)
+            {
+                return Err(format!(
+                    "{self:?} requires MAMBA_SM89_EXACT_F32_EXPECT_AUTO={expected}"
+                ));
+            }
+            Ok(())
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::PreAdmission => "pre_admission",
+                Self::PostAdmission => "post_admission",
+            }
+        }
+    }
+
     fn runtime() -> Result<GpuCtx, String> {
         let device = GpuDevice::new(0)?;
         let ctx = GpuCtx::new(&device)?;
@@ -316,7 +348,7 @@ mod live {
         Ok(())
     }
 
-    fn require_forced_identity(
+    fn require_large_tn_identity(
         ctx: &GpuCtx,
         launch: &QualifiedPhysicalLaunch<'_>,
         case: Case,
@@ -582,7 +614,7 @@ mod live {
             1.0,
         );
         let mut forced = qualify_physical_launch(forced_ctx, forced_request)?;
-        require_forced_identity(forced_ctx, &forced, case)?;
+        require_large_tn_identity(forced_ctx, &forced, case)?;
         exercise_path(
             forced_ctx,
             &mut forced,
@@ -717,7 +749,7 @@ mod live {
                     1.0,
                 ),
             )?;
-            require_forced_identity(forced_ctx, &forced, case)?;
+            require_large_tn_identity(forced_ctx, &forced, case)?;
             require_prior_auto_identity(auto_ctx, &auto, case)?;
             for (path_name, path) in [("eager", TimedPath::Eager), ("graph", TimedPath::Graph)] {
                 for (order_name, candidate_first) in [("ABBA", true), ("BAAB", false)] {
@@ -842,15 +874,9 @@ mod live {
 
     #[test]
     #[ignore = "requires an exclusive SM89 GPU; root is the sole GPU owner"]
-    fn sm89_exact_f32_large_tn_forced_correctness_and_actual_auto_admission() -> Result<(), String>
-    {
-        if std::env::var("MAMBA_SM89_EXACT_F32_EXPECT_AUTO")
-            .ok()
-            .as_deref()
-            != Some("0")
-        {
-            return Err("B2 pre-admission requires MAMBA_SM89_EXACT_F32_EXPECT_AUTO=0".into());
-        }
+    fn sm89_exact_f32_large_tn_pre_admission_forced_vs_prior_actual_auto() -> Result<(), String> {
+        let mode = AdmissionMode::PreAdmission;
+        mode.require()?;
         let forced_ctx = runtime()?;
         let auto_ctx = runtime()?;
         require_module_abi_resources(&forced_ctx)?;
@@ -887,11 +913,75 @@ mod live {
             "{}",
             json!({
                 "schema":"MambaTriadSm89ExactF32B2AdmissionReceiptV1",
+                "mode":mode.label(),
                 "screen":format!("{:?}",receipt.screen),
                 "fast_labelled":receipt.fast_labelled,
                 "auto_admitted":false
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive SM89 GPU; root is the sole GPU owner"]
+    fn sm89_exact_f32_large_tn_post_admission_actual_auto_exactness() -> Result<(), String> {
+        let mode = AdmissionMode::PostAdmission;
+        mode.require()?;
+        let ctx = runtime()?;
+        require_module_abi_resources(&ctx)?;
+
+        for case in CASES {
+            let oracle = run_raw_probe(&ctx, case.route, case.target, 1.0, false)?;
+            if oracle.compared_output_words != case.target.dims.1 * case.target.dims.2
+                || oracle.guarded_allocations != 7
+                || oracle.guarded_elements == 0
+            {
+                return Err(format!(
+                    "{:?} post-admission raw oracle census changed",
+                    case.route
+                ));
+            }
+            let words = raw_seed_words(case.target, false)?;
+            let mut auto = qualify_physical_launch(
+                &ctx,
+                request(
+                    PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                    case.target.dims,
+                    1.0,
+                ),
+            )?;
+            require_large_tn_identity(&ctx, &auto, case)?;
+            exercise_path(
+                &ctx,
+                &mut auto,
+                &words,
+                TimedPath::Eager,
+                &oracle.output_bits,
+                false,
+            )?;
+            exercise_path(
+                &ctx,
+                &mut auto,
+                &words,
+                TimedPath::Graph,
+                &oracle.output_bits,
+                false,
+            )?;
+            println!(
+                "{}",
+                json!({
+                    "schema":"MambaTriadSm89ExactF32PostAdmissionAutoV1",
+                    "mode":mode.label(),
+                    "route":format!("{:?}",case.route),
+                    "dims":case.target.dims,
+                    "eager_graph_identity_exact":true,
+                    "repeated_bits_exact":true,
+                    "guards_exact":true,
+                    "inputs_immutable":true,
+                    "auto_admitted":true
+                })
+            );
+        }
         Ok(())
     }
 }

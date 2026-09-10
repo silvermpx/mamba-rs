@@ -1,0 +1,19 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-tf32-final-assembly.l2QJgB)
+error[E0433]: cannot find type `CudaTarget` in this scope
+     --> src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs:368:17
+      |
+  368 |                 CudaTarget::new("sm_90").unwrap();
+      |                 ^^^^^^^^^^ use of undeclared type `CudaTarget`
+      |
+note: enum `crate::gpu::gemm_bi_triad::modules::tests::CudaTarget` exists but is inaccessible
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11542:5
+      |
+11542 |     enum CudaTarget {
+      |     ^^^^^^^^^^^^^^^ not accessible
+help: consider importing this struct
+      |
+   32 +     use crate::gpu::kernel_identity::CudaTarget;
+      |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `mamba-rs` (lib test) due to 1 previous error

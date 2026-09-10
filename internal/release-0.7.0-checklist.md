@@ -37,13 +37,17 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   (`04defc80`, `0184db89`); all three toolkit module checks pass (`36d81318`).
 - [x] Large exact-F32 TN eager/prepared wiring (`f76f81f4`); CUDA13.2 focused
   smoke passes for all three routes against actual prior AUTO, with exact
-  eager/graph bits and guards. Cohorts remain empty pending final qualification.
-- [ ] Large exact-F32 TN combined qualification and admission.
+  eager/graph bits and guards. Cohorts were left empty at that checkpoint.
+- [x] Large exact-F32 TN combined qualification and admission: all three known
+  CUDA12.8/13.0/13.2 cohorts enabled; actual AUTO passes all three routes on
+  every toolkit, with exact eager/graph bits, guards and immutable inputs.
+  Lower-toolkit pre-admission once3/once7 shows ~22–24% lower time than prior
+  AUTO. Report: `internal/perf/ada-large-tn-admission-20260910/report.md`.
 - [x] Large exact-F32 TN expanded CUDA13.2 check: all three production forced
   routes pass full/tail/exceptional/K0/non-unit raw oracles, repeated bits,
   eager/prepared identity, guards and paired once3/once7 versus actual AUTO.
-  Raw replay matches all 24 screens/480 observations. AUTO remains unadmitted
-  pending the combined supported-toolkit phase; no fresh Fast arm was run.
+  Raw replay matches all 24 screens/480 observations. This valid receipt was
+  reused for the completed supported-toolkit phase; no fresh Fast arm was run.
 - [x] Exact-F32 TN d128-in/out source-only promotion (`7d390fa7`), with
   normalized retained-body parity and exactly two exports; 13 native checks pass.
 - [ ] Exact-F32 TN d128-in/out module, routes and focused qualification.

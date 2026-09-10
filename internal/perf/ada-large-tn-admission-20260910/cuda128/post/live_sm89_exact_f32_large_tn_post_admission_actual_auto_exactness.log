@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running tests/gemm_bi_sm89_exact_f32_tn_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda128-20260910/release/deps/gemm_bi_sm89_exact_f32_tn_selector_qualification-c486f03b27746cab)
+
+running 1 test
+test live::sm89_exact_f32_large_tn_post_admission_actual_auto_exactness ... {"abi_bytes":56,"abi_parameters":4,"local_bytes":0,"occupancy":3,"registers":161,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":32768,"symbol":"gemm_bi_tn_sm89_f32_n64_dual_chunk_fused_finalize_v1"}
+{"abi_bytes":40,"abi_parameters":7,"local_bytes":0,"occupancy":4,"registers":107,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":16384,"symbol":"gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1"}
+{"abi_bytes":40,"abi_parameters":7,"local_bytes":0,"occupancy":4,"registers":107,"schema":"MambaTriadSm89ExactF32B2ResourceV1","static_shared_bytes":16384,"symbol":"gemm_bi_tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1"}
+{"auto_admitted":true,"dims":[2048,768,3072],"eager_graph_identity_exact":true,"guards_exact":true,"inputs_immutable":true,"mode":"post_admission","repeated_bits_exact":true,"route":"D768InDualChunkFused","schema":"MambaTriadSm89ExactF32PostAdmissionAutoV1"}
+{"auto_admitted":true,"dims":[2048,1536,768],"eager_graph_identity_exact":true,"guards_exact":true,"inputs_immutable":true,"mode":"post_admission","repeated_bits_exact":true,"route":"D768OutDirectBk16","schema":"MambaTriadSm89ExactF32PostAdmissionAutoV1"}
+{"auto_admitted":true,"dims":[4621,384,1928],"eager_graph_identity_exact":true,"guards_exact":true,"inputs_immutable":true,"mode":"post_admission","repeated_bits_exact":true,"route":"PrismDirectBk16","schema":"MambaTriadSm89ExactF32PostAdmissionAutoV1"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 5.63s
+
