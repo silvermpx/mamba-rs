@@ -1,10 +1,10 @@
 [package]
 name = "mamba-rs"
-version = "0.6.9"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.97"
 authors = ["silvermpx"]
-description = "Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration. Inference and training (BPTT through SSM state, AdamW), CPU + GPU paths, custom CUDA kernels, CUDA Graph capture, f32 / bf16 / f16. Opt-in deterministic training (bit-identical runs, batch-invariant inference) with a tensor-core tier that beats cuBLAS on LLM-sized models."
+description = "Mamba SSM and Mamba-3 SISO in Rust with optional CUDA acceleration: inference and training (BPTT through the SSM state, AdamW) on CPU and GPU, custom NVRTC-compiled kernels, CUDA Graph capture, f32 / bf16 / f16 storage, deterministic batch-invariant GEMMs by default with explicit cuBLAS Fast and Pedantic modes."
 homepage = "https://github.com/silvermpx/mamba-rs"
 documentation = "https://docs.rs/mamba-rs"
 license = "MIT OR Apache-2.0"
@@ -244,33 +244,33 @@ path = "tests/gemm_bi_determinism.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_bridge"
-path = "tests/gemm_bi_fixed_bridge.rs"
+name = "gemm_bi_inference_bridge"
+path = "tests/gemm_bi_inference_bridge.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_correctness"
-path = "tests/gemm_bi_fixed_correctness.rs"
+name = "gemm_bi_inference_correctness"
+path = "tests/gemm_bi_inference_correctness.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_sm120_exact_n64"
-path = "tests/gemm_bi_fixed_sm120_exact_n64.rs"
+name = "gemm_bi_inference_sm120_exact_n64"
+path = "tests/gemm_bi_inference_sm120_exact_n64.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_sm120_sliced"
-path = "tests/gemm_bi_fixed_sm120_sliced.rs"
+name = "gemm_bi_inference_sm120_sliced"
+path = "tests/gemm_bi_inference_sm120_sliced.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_sm89_exact_n64"
-path = "tests/gemm_bi_fixed_sm89_exact_n64.rs"
+name = "gemm_bi_inference_sm89_exact_n64"
+path = "tests/gemm_bi_inference_sm89_exact_n64.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_sm89_pipeline"
-path = "tests/gemm_bi_fixed_sm89_pipeline.rs"
+name = "gemm_bi_inference_sm89_pipeline"
+path = "tests/gemm_bi_inference_sm89_pipeline.rs"
 required-features = ["cuda"]
 
 [[test]]
@@ -777,23 +777,23 @@ path = "tools/qualification/gemm_bi_contract_census.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_half_m64n128_qualification"
-path = "tools/qualification/gemm_bi_fixed_half_m64n128_qualification.rs"
+name = "gemm_bi_inference_half_m64n128_qualification"
+path = "tools/qualification/gemm_bi_inference_half_m64n128_qualification.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_performance"
-path = "tools/qualification/gemm_bi_fixed_performance.rs"
+name = "gemm_bi_inference_performance"
+path = "tools/qualification/gemm_bi_inference_performance.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_sm120_performance"
-path = "tools/qualification/gemm_bi_fixed_sm120_performance.rs"
+name = "gemm_bi_inference_sm120_performance"
+path = "tools/qualification/gemm_bi_inference_sm120_performance.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]
-name = "gemm_bi_fixed_tf32_m64n128_qualification"
-path = "tools/qualification/gemm_bi_fixed_tf32_m64n128_qualification.rs"
+name = "gemm_bi_inference_tf32_m64n128_qualification"
+path = "tools/qualification/gemm_bi_inference_tf32_m64n128_qualification.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]

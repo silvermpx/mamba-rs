@@ -6,6 +6,7 @@
 
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::context::{F32TriadPolicy, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::weights::MambaWeights;
@@ -61,59 +62,85 @@ fn bench_gemm_bi_vs_tf32() {
         let input = det(n, 1, 1.0);
         let dtemp = det(n, 2, 0.1);
 
-        let time_mode = |invariant: bool, tc: bool, dtype: WeightDtype| -> f64 {
-            let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
-            if dtype != WeightDtype::F32 {
-                // The mixed-precision pipeline requires an identity input_proj.
-                cpu.input_proj_w.clear();
-                cpu.input_proj_b.clear();
-            }
-            for lw in cpu.layers.iter_mut() {
-                lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
-            }
-            let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
-            tr.ctx()
-                .set_gemm_mode(if invariant {
-                    GemmMode::Deterministic
-                } else {
-                    GemmMode::CublasFast
-                })
-                .unwrap();
-            tr.ctx().set_bi_tensor_cores(tc);
-            for _ in 0..3 {
-                tr.step(&input, &dtemp).expect("warmup");
-            }
-            let iters = 20;
-            let start = Instant::now();
-            for _ in 0..iters {
-                tr.step(&input, &dtemp).expect("step");
-            }
-            start.elapsed().as_secs_f64() / iters as f64
-        };
+        // `tf32` opts the f32 products into the deterministic TF32 kernels where
+        // a measured route exists; `streamk` opts the half weight gradient into
+        // the measured stream-K kernels. Both are 0.7.0 settings with no
+        // counterpart in the previous release.
+        let time_mode =
+            |mode: GemmMode, tc: bool, tf32: bool, streamk: bool, dtype: WeightDtype| -> f64 {
+                let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
+                if dtype != WeightDtype::F32 {
+                    // The mixed-precision pipeline requires an identity input_proj.
+                    cpu.input_proj_w.clear();
+                    cpu.input_proj_b.clear();
+                }
+                for lw in cpu.layers.iter_mut() {
+                    lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+                }
+                let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
+                tr.ctx().set_gemm_mode(mode).unwrap();
+                tr.ctx().set_bi_tensor_cores(tc);
+                if mode == GemmMode::Deterministic {
+                    tr.ctx().set_f32_triad_policy(if tf32 {
+                        F32TriadPolicy::AllowDeterministicTf32V1
+                    } else {
+                        F32TriadPolicy::ExactScalarFmaV1
+                    });
+                    tr.ctx().set_half_triad_policy(if streamk {
+                        HalfTriadPolicy::AllowStreamKFixedOrderV1
+                    } else {
+                        HalfTriadPolicy::TiledParityV1
+                    });
+                }
+                for _ in 0..3 {
+                    tr.step(&input, &dtemp).expect("warmup");
+                }
+                let iters = 20;
+                let start = Instant::now();
+                for _ in 0..iters {
+                    tr.step(&input, &dtemp).expect("step");
+                }
+                start.elapsed().as_secs_f64() / iters as f64
+            };
 
         for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            // flag-off baseline: cuBLAS TF32 for f32, cuBLAS GemmEx
-            // PEDANTIC (f32 accumulate, no tensor cores) for bf16/f16.
-            let baseline = if dt == WeightDtype::F32 {
-                "cuBLAS-TF32"
-            } else {
-                "cuBLAS-PEDANTIC"
-            };
-            let t_blas = time_mode(false, false, dt);
-            let t_bi = time_mode(true, false, dt);
+            // Both vendor comparators, then the deterministic routes.
+            let t_fast = time_mode(GemmMode::CublasFast, false, false, false, dt);
+            let t_pedantic = time_mode(GemmMode::CublasPedantic, false, false, false, dt);
+            let t_bi = time_mode(GemmMode::Deterministic, false, false, false, dt);
             eprintln!(
-                "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | gemm_bi {:.3} ms/step | ratio {:.2}x",
-                t_blas * 1e3,
+                "[{label} {dt:?}] B={b} T={t}: cuBLAS-Fast {:.3} ms/step | cuBLAS-Pedantic {:.3} ms/step | deterministic scalar {:.3} ms/step | vs Fast {:.2}x | vs Pedantic {:.2}x",
+                t_fast * 1e3,
+                t_pedantic * 1e3,
                 t_bi * 1e3,
-                t_bi / t_blas
+                t_bi / t_fast,
+                t_bi / t_pedantic
             );
-            if dt != WeightDtype::F32 {
-                let t_tc = time_mode(true, true, dt);
+            if dt == WeightDtype::F32 {
+                let t_tf32 = time_mode(GemmMode::Deterministic, true, true, false, dt);
                 eprintln!(
-                    "[{label} {dt:?}] B={b} T={t}: gemm_bi+TC {:.3} ms/step | vs {baseline} {:.2}x | vs scalar bi {:.2}x",
+                    "[{label} {dt:?}] B={b} T={t}: deterministic TF32 {:.3} ms/step | vs Fast {:.2}x | vs Pedantic {:.2}x | vs scalar {:.2}x",
+                    t_tf32 * 1e3,
+                    t_tf32 / t_fast,
+                    t_tf32 / t_pedantic,
+                    t_tf32 / t_bi
+                );
+            } else {
+                let t_tc = time_mode(GemmMode::Deterministic, true, false, false, dt);
+                eprintln!(
+                    "[{label} {dt:?}] B={b} T={t}: deterministic+TC {:.3} ms/step | vs Fast {:.2}x | vs Pedantic {:.2}x | vs scalar {:.2}x",
                     t_tc * 1e3,
-                    t_tc / t_blas,
+                    t_tc / t_fast,
+                    t_tc / t_pedantic,
                     t_tc / t_bi
+                );
+                let t_sk = time_mode(GemmMode::Deterministic, true, false, true, dt);
+                eprintln!(
+                    "[{label} {dt:?}] B={b} T={t}: deterministic+TC streamk {:.3} ms/step | vs Fast {:.2}x | vs Pedantic {:.2}x | vs TC tiled {:.2}x",
+                    t_sk * 1e3,
+                    t_sk / t_fast,
+                    t_sk / t_pedantic,
+                    t_sk / t_tc
                 );
             }
         }

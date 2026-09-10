@@ -95,11 +95,18 @@ All four carry through `forward_mamba3_backbone_prefill` (the
 full-sequence batched-SGEMM CPU forward, no activation tape) exactly as
 through `mamba3_step`, so prefill-then-decode is seamless.
 
-GEMM routes: the M3 forward - trainer and inference prefill alike -
-calls the context-carrying dispatcher, so `set_batch_invariant` and
-`set_bi_gemm_family` steer it. The prefill's pooled output is
-per-sample (`[B * d_model]`), each sample summed over its own rows, so
-batching a prefill does not move a sample's bits.
+GEMM routes: the Mamba-3 trainer, the inference prefill and the decode
+step all multiply through the context, so the context's `GemmMode`
+applies to all of them: `Deterministic` by default (a model context uses
+the Inference kernels, a trainer the Triad kernels) or one of the two
+cuBLAS modes. The tied half-input LM heads keep f32 logits. The prefill's
+pooled output is per sample (`[B * d_model]`), each sample summed over its
+own rows, so batching a prefill does not change a sample's bits. The modes
+are described in [gemm-modes.md](gemm-modes.md).
+
+There is no public Mamba-3 SISO checkpoint; the GPU and CPU paths are
+exercised with synthetic weights from `Mamba3Weights::init` and with
+models trained in this crate.
 
 ## Weight Layout
 
@@ -118,7 +125,7 @@ batching a prefill does not move a sample's bits.
 
 Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_angles`.
 
-## CUDA Kernels (47 total)
+## CUDA kernels
 
 | File | Kernels | Purpose |
 |------|---------|---------|
@@ -128,20 +135,21 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 | norms.cu | 3 | RMSNorm forward/backward |
 | elementwise.cu | 5 | Residual, fill, gather, vec ops |
 
-## Chunked-scan statelessness (contract)
+## Chunked scan and carried state (contract)
 
-The chunked parallel scan is stateless BY CONSTRUCTION: chunk 0 always
-starts from a zero SSM state, the `initial_states` plumbing of the
-reference SSD implementation is not implemented, and the state written
-back by `m3_writeback_parallel_states` is consumed by nothing today.
-Consequences a consumer must respect:
+The chunked parallel scan carries state in one direction only. The GPU
+prompt prefill carries all four recurrent states from one window into the
+next through the trapezoidal boundary fold, so a long prompt can be run in
+several windows and decoded from the result. The training path does not:
+every training window starts from a zero state, and the state a window
+writes back is not consumed by the next one. Consequences a consumer must
+respect:
 
-- `reset_state()` before a chunked training window is a no-op by design —
+- `reset_state()` before a chunked training window is a no-op by design;
   the window never sees a nonzero incoming state either way.
-- Packing multiple documents into one row is NOT masked: without a
-  `seq_idx` boundary mechanism the scan would bleed state across document
-  boundaries inside a window. Train one document (or one padded page) per
-  row, as the shipped trainers do.
-- TBPTT-style carry across windows is not available on the chunked path.
-  Triggers to implement `initial_states`/`seq_idx` (deferred): an M3
-  consumer that needs cross-window carry or packed rows.
+- Packing several documents into one row is not masked, on this path or in
+  the reference implementation: the scan would carry state across the
+  document boundary inside a window. Train one document (or one padded
+  page) per row, as the shipped trainers do.
+- Carrying state across training windows (truncated BPTT) is not
+  available: the backward of the boundary fold is not implemented.

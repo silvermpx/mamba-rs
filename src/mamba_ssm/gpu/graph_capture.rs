@@ -386,15 +386,39 @@ pub(crate) mod model_gemm_guard_tests {
                 6 => routes[0].tensor_maps_digest[0] ^= 1,
                 _ => unreachable!(),
             }
-            let invalid =
-                CapturedGemmGraphPlan::new(plan.context, plan.launches, routes.into_boxed_slice());
+            // Every mutation moves the routes away from the recorded launch
+            // digest, so the plan cannot even be built with it.
+            assert!(
+                CapturedGemmGraphPlan::new(
+                    plan.context,
+                    plan.launches,
+                    routes.clone().into_boxed_slice()
+                )
+                .is_err(),
+                "mutation {change} must not build a plan under the recorded digest"
+            );
+            // A plan whose digest matches the mutated routes is internally
+            // consistent; the ones that name a route the live policy cannot
+            // serve must still be refused at replay, before any work runs.
+            let launches =
+                crate::mamba_ssm::gpu::kernel_identity::build_resolved_gemm_launch_set(&routes)
+                    .unwrap();
+            let rebuilt =
+                CapturedGemmGraphPlan::new(plan.context, launches, routes.into_boxed_slice())
+                    .unwrap();
+            let policy_visible = matches!(change, 2 | 3 | 4);
             let result =
-                with_validated_gemm_graph_launch(ctx, true, Some(&invalid), "tampered", || {
+                with_validated_gemm_graph_launch(ctx, true, Some(&rebuilt), "tampered", || {
                     calls.set(calls.get() + 1);
                     Ok(())
                 });
-            assert!(result.is_err(), "mutation {change} must fail");
-            assert_eq!(calls.get(), 1, "mutation {change} submitted work");
+            if policy_visible {
+                assert!(result.is_err(), "mutation {change} must fail at replay");
+                assert_eq!(calls.get(), 1, "mutation {change} submitted work");
+            } else {
+                assert!(result.is_ok(), "mutation {change} is a consistent plan");
+                calls.set(1);
+            }
         }
         let family = ctx.bi_gemm_family();
         ctx.set_bi_gemm_family(if family == BiGemmFamily::Inference {

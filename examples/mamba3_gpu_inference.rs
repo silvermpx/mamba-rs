@@ -3,10 +3,15 @@
 //! ```bash
 //! cargo run --example mamba3_gpu_inference --features cuda
 //! ```
+//!
+//! The backbone is built with an explicit `GemmMode`; a model context uses
+//! the Inference family of deterministic kernels in that mode. The no-mode
+//! constructor reads `MAMBA_RS_GEMM_MODE` and defaults to Deterministic.
 
 fn main() {
     #[cfg(feature = "cuda")]
     {
+        use mamba_rs::mamba_ssm::gpu::GemmMode;
         use mamba_rs::mamba3_siso::config::Mamba3Config;
         use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
         use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -24,14 +29,20 @@ fn main() {
             cfg.d_state,
         );
 
-        // Create GPU backbone (uploads weights, compiles 47 CUDA kernels)
-        let mut gpu = GpuMamba3Backbone::new(
+        // Create the GPU backbone (uploads weights, compiles the kernels)
+        // with f32 storage and the deterministic GEMM mode.
+        let mut gpu = GpuMamba3Backbone::new_with_mode(
             0, // GPU device 0
-            &weights, cfg, input_dim, 1, // batch = 1
+            &weights,
+            cfg,
+            input_dim,
+            1, // batch = 1
+            GemmMode::Deterministic,
         )
         .expect("GPU init failed");
+        println!("mode {:?}", gpu.ctx().gemm_mode());
 
-        // Optional: capture CUDA Graph for ~1.6x speedup
+        // Optional: capture the step as one CUDA Graph.
         gpu.capture_graph().expect("graph capture failed");
         println!("CUDA Graph captured");
 

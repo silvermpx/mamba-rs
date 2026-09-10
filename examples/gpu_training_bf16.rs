@@ -5,17 +5,17 @@
 //! ```
 //!
 //! Runs a short synthetic training loop through [`MambaTrainer`], exercising
-//! the full training stack: bf16 master→compute shadow with f32 master
-//! AdamW, batch-invariant GEMM for numerical stability, CUDA Graph capture
-//! of the complete forward + backward + optimizer step, and pointer-
-//! stability invariants on replay.
+//! the full training stack: bf16 compute shadow with f32 master AdamW, the
+//! deterministic GEMM mode on the Triad family (a trainer context), CUDA
+//! Graph capture of the complete forward + backward + optimizer step, and
+//! pointer-stability invariants on replay.
 //!
 //! The workload is intentionally synthetic (random input / d_temporal)
 //! because the crate doesn't ship an LM-head loss kernel. What the
 //! example demonstrates:
 //!   * API ergonomics: construct → warm up → capture → loop
 //!   * Weights actually update (non-trivial AdamW steps)
-//!   * Captured-graph replay is meaningfully faster than eager dispatch
+//!   * Captured-graph replay and eager dispatch are both timed and printed
 //!   * `snapshot_master()` round-trips the weight set for checkpointing
 
 #[cfg(not(feature = "cuda"))]
@@ -29,6 +29,7 @@ mod cuda_example {
     use std::time::Instant;
 
     use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
@@ -86,7 +87,9 @@ mod cuda_example {
         // training with an actual loss would pick lr based on the problem.
         let lr = 1e-6_f32;
         let wd = 1e-3_f32;
-        let mut trainer = MambaTrainer::new_full(
+        // Explicit storage dtype and GEMM mode; `new_full` would read
+        // MAMBA_RS_GEMM_MODE instead and default to Deterministic.
+        let mut trainer = MambaTrainer::new_full_with_mode(
             0,
             &cpu,
             cfg,
@@ -98,7 +101,13 @@ mod cuda_example {
                 weight_decay: wd,
             },
             WeightDtype::Bf16,
+            GemmMode::Deterministic,
         )?;
+        println!(
+            "mode {:?}, family {:?}",
+            trainer.ctx().gemm_mode(),
+            trainer.ctx().bi_gemm_family()
+        );
 
         // --- Sanity: weights should be finite at init ---
         {
@@ -115,7 +124,7 @@ mod cuda_example {
             );
         }
 
-        // --- Warmup (eager, lets cuBLAS select kernels) ---
+        // --- Warmup (eager: compiles and prepares the selected routes) ---
         for s in 0..warmup_steps {
             let m = trainer.step(
                 &det(n, 0xA0 + s as u32, 0.01),

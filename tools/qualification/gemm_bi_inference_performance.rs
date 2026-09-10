@@ -557,7 +557,8 @@ mod ada_s3_pair {
         }
         let artifact = ctx.kernels.artifact_set_identity().fixed;
         let source_hash = digest_hex(
-            &Sha256::digest(std::fs::read("tests/gemm_bi_fixed_performance.rs").unwrap()).into(),
+            &Sha256::digest(std::fs::read("tests/gemm_bi_inference_performance.rs").unwrap())
+                .into(),
         );
         let binary_hash = digest_hex(
             &Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()).into(),

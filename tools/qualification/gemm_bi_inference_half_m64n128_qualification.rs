@@ -28,7 +28,7 @@ use sha2::{Digest as _, Sha256};
 
 const OUTPUT_ENV: &str = "MAMBA_RS_FIXED_HALF_M64N128_JSONL";
 const SCHEMA: &str = "MambaBiFixedHalfM64N128QualificationV1";
-const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_fixed_half_m64n128_qualification.rs");
+const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_inference_half_m64n128_qualification.rs");
 const RUST_DISPATCH_SOURCE: &str = include_str!("../../src/mamba_ssm/gpu/gemm_bi_inference.rs");
 const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm120_tma.cu");
 const CANDIDATE_TILE: InferenceSm120HalfTile = InferenceSm120HalfTile::M64N128Bk64S2;
@@ -356,7 +356,7 @@ impl RunMetadata {
         let identity = device.identity();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let qualification_source_sha256 = verify_compiled_source(
-            &manifest.join("tests/gemm_bi_fixed_half_m64n128_qualification.rs"),
+            &manifest.join("tests/gemm_bi_inference_half_m64n128_qualification.rs"),
             QUALIFICATION_SOURCE,
         )?;
         let rust_dispatch_source_sha256 = verify_compiled_source(
@@ -2179,7 +2179,7 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         for (path, compiled) in [
             (
-                manifest.join("tests/gemm_bi_fixed_half_m64n128_qualification.rs"),
+                manifest.join("tests/gemm_bi_inference_half_m64n128_qualification.rs"),
                 QUALIFICATION_SOURCE,
             ),
             (

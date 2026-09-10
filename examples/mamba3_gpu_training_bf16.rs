@@ -4,10 +4,11 @@
 //! cargo run --release --example mamba3_gpu_training_bf16 --features cuda
 //! ```
 //!
-//! Mamba-3 analogue of `gpu_training_bf16.rs`. Uses [`Mamba3Trainer`] to
-//! run the full forward + backward + AdamW + master→compute sync per step,
-//! captures the whole thing as one CUDA Graph, and reports eager-vs-graph
-//! timing on a synthetic workload.
+//! Mamba-3 analogue of `gpu_training_bf16.rs`. Uses [`Mamba3Trainer`] with
+//! an explicit deterministic GEMM mode (Triad family) to run the full
+//! forward + backward + AdamW + master-to-compute sync per step, captures
+//! the whole thing as one CUDA Graph, and prints the eager and graph step
+//! times it measures on its own synthetic workload.
 
 #[cfg(not(feature = "cuda"))]
 fn main() {
@@ -19,6 +20,7 @@ fn main() {
 mod cuda_example {
     use std::time::Instant;
 
+    use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
@@ -79,7 +81,7 @@ mod cuda_example {
         // Modest lr for synthetic-gradient stability (see gpu_training_bf16.rs).
         let lr = 1e-5_f32;
         let wd = 1e-2_f32;
-        let mut trainer = Mamba3Trainer::new_full(
+        let mut trainer = Mamba3Trainer::new_full_with_mode(
             0,
             &cpu,
             cfg,
@@ -91,7 +93,13 @@ mod cuda_example {
                 weight_decay: wd,
             },
             WeightDtype::Bf16,
+            GemmMode::Deterministic,
         )?;
+        println!(
+            "mode {:?}, family {:?}",
+            trainer.ctx().gemm_mode(),
+            trainer.ctx().bi_gemm_family()
+        );
 
         // Warmup eager.
         for s in 0..warmup_steps {

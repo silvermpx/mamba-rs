@@ -1945,7 +1945,7 @@ fn run_checked() -> Result<(), String> {
         "\"timed_corpus\":\"signed_representable\",\"source\":\"actual_loaded_production_NVRTC\",\"standalone_evidence_reused\":false,\"accuracy_exceptions_are_not_all_element_tolerance_success\":true"),
         identity,quoted(&preflight),initial_resources,protocol.cells,protocol.biases,protocol.paths,protocol.windows,
         quoted(&format!("{:x}",Sha256::digest(include_bytes!("fixed_sm89_exact_n64_admission.rs")))),
-        quoted(&format!("{:x}",Sha256::digest(include_bytes!("../gemm_bi_fixed_performance.rs"))))))?;
+        quoted(&format!("{:x}",Sha256::digest(include_bytes!("../gemm_bi_inference_performance.rs"))))))?;
     single_term_preflight(&ctx, &mut evidence, poison_red)?;
     let mut records = 0;
     // All five cells remain numerical/graph controls, even when only a subset

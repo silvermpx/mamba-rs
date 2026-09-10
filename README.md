@@ -1,218 +1,169 @@
 # mamba-rs
 
-Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration.
-Inference and training for both, with custom CUDA kernels.
+Mamba SSM and Mamba-3 SISO in Rust, on the CPU and on NVIDIA GPUs.
+Inference and training for both architectures, with the crate's own CUDA
+kernels compiled at run time through NVRTC. No Python, no C++ build step,
+no framework dependency; the GPU path links only the CUDA driver API and
+cuBLAS.
 
-Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
+## What's new in 0.7.0
+
+0.7.0 is a performance release built around new deterministic GEMM
+kernels, and the deterministic kernels are now the default.
+
+- **Every GPU context has a `GemmMode`.** `Deterministic` (the default)
+  runs the crate's own kernels and never calls cuBLAS; `CublasFast` and
+  `CublasPedantic` select cuBLAS explicitly. In the deterministic mode the
+  same inputs give the same bits run after run, from an eager launch and
+  from a captured graph, and for serving the same bits for a row at any
+  batch size. To keep the exact numbers 0.6.9 produced, construct with
+  `GemmMode::CublasPedantic`.
+- **New deterministic training kernels** (the Triad family: forward, weight
+  gradient and input gradient) and **new deterministic serving kernels**
+  (the Inference family, formerly `Fixed`), measured kernel by kernel on an
+  RTX 6000 Ada and an RTX 5090 against cuBLAS Fast and cuBLAS Pedantic, and
+  against the 0.6.9 kernels: on the large training and serving shapes the
+  new kernels are 1.25 to 1.40 times faster on average, single kernels up
+  to 3 times.
+- **Deterministic TF32**, a new precision setting for f32: the products run
+  on the tensor cores in TF32 with one fixed rounding and a fixed
+  summation order, the accumulation stays f32, and the bits are
+  reproducible like the rest of the deterministic mode. 0.6.9 had no such
+  setting. Stream-K weight-gradient kernels are a second new opt-in.
+- **Explicit-mode constructors** beside every environment-reading one, and
+  a recorded numeric route on every captured graph.
+
+The full list is in [CHANGELOG.md](CHANGELOG.md); the mode guide is
+[docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
+[docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
+
+What comes next: the scan, convolution and norm kernels around the GEMMs
+are the next target, the GEMM kernels keep moving toward cuBLAS Fast in
+the 0.7.x releases, and the architectures on the portable kernels today
+(SM80, SM86, Hopper, datacenter Blackwell, CC 12.1) get measured kernels
+in later releases.
 
 ## Features
 
-- **Two architectures** — Mamba SSM (Gu & Dao, 2023) and Mamba-3 SISO (Lahoti
-  et al., ICLR 2026).
-- **CPU + GPU** — both paths exposed, with a cross-path parity test on shared
+- Mamba SSM (Gu and Dao, 2023) and Mamba-3 SISO (Lahoti et al., 2026).
+- CPU and GPU paths for both, with cross-path parity tests on shared
   weights.
-- **Inference + training** — full backward pass with BPTT through the
-  recurrent SSM state; AdamW optimizer; CUDA Graph capture for both.
-- **f32 / bf16 / f16** — a single `WeightDtype` selector at construction.
-  Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
-  storage dtype.
-- **Deterministic inference & training (opt-in)** — `MAMBA_RS_BATCH_INVARIANT=1`
-  / `ctx.set_batch_invariant(true)` routes the forward, dW and dX GEMMs and
-  the M<128 typed decode matvec through custom deterministic kernels:
-  inference logits are bit-identical across batch sizes (KL ≈ 1e-11), and
-  f32 / bf16 / f16 training is bit-identical across runs. Default path is
-  cuBLAS for maximum throughput. Scope note: the tied LM heads and the
-  no-context `*_blas` twins take no context and stay on cuBLAS regardless
-  of the flag; every path that carries a `GpuCtx` — including the M3
-  engine, prefill and inference alike — follows it.
-- **Two batch-invariant families, selectable** — `ctx.set_bi_gemm_family()`
-  / `MAMBA_RS_BI_GEMM_FAMILY=triad|inference` picks which family serves the
-  forward while the flag above is on. `Triad` (`kernels/gemm_bi_triad/`,
-  default) is the multi-tile dispatcher: it carries all three operand
-  layouts, so it is the only family that can serve a backward, and its
-  invariance holds across every M inside one dispatch bucket. `Inference`
-  (`kernels/gemm_bi_inference/`) is the forward serving family: a ladder of
-  bit-identical tiles (16-row thin, 64, 128, and a wide 128×256
-  fragment-reuse tile) with `SPLIT_K=1` everywhere, batch-invariant BY
-  CONSTRUCTION — the K-reduction for `C[i,j]` reads only `A[i,:]` and
-  `B[:,j]`, every rung produces the same bits per element, so tile choice
-  is pure scheduling and no bucket boundary exists to cross. The family is part of the numeric route
-  (`ctx.gemm_route()`) and a flip after a CUDA-graph capture is refused at
-  replay like any tier flip. The legacy environment spelling `fixed` remains
-  accepted as a compatibility alias for `inference`.
-- **Fast typed deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
-  / `ctx.set_bi_tensor_cores(true)` on top of the flag above selects the
-  fastest qualified typed route: usually mma.sync tensor-core kernels, with
-  measured scalar fallbacks where they win. On SM89, automatic BF16/F16 NN
-  uses the exact scalar Split-K route only when N=128 and the scalar plan is
-  `NnSplitKThinTail` with K>=511 or `NnSplitKThin` with K>=1024; forced tile
-  requests and every other architecture remain unchanged. On CC12.0, automatic
-  SM120 routing is deliberately narrower: an immutable 18-cell BF16/F16 table
-  covers the qualified NN, TN and NT hot shapes with route-sealed BK32 or BK64
-  TMA/MMA16 schedules. CC12.1 and every non-cell decline to the existing
-  portable ladder. Each SM120 output has one owner, follows one fixed ascending
-  K16 MMA chain, and uses no numerical atomics or Split-K reduction. It stays
-  fully deterministic, freezes the selected numeric contract and physical
-  schedule in the route identity, and reaches at-or-near cuBLAS parity even on
-  d128/d256 models and **faster than cuBLAS** from d_model ≥ 768
-  (0.70× of PEDANTIC per step at d1536 bf16). A qualified SM120 CUDA Graph
-  route must first run eagerly to prepare its tensor maps and cache entry;
-  capture fails closed on a missing, stale or untracked allocation epoch rather
-  than allocating, retuning or silently changing routes inside capture.
-- **Deterministic F32 policy** — `MAMBA_RS_BI_F32_POLICY=exact|tf32` or
-  `ctx.set_f32_triad_policy(...)` controls the batch-invariant F32 route.
-  `exact` is the default scalar `__fmaf_rn` contract. `tf32` permits only a
-  frozen qualified deterministic TF32 route; it does not force one, and an
-  unsupported or unmeasured cell remains on exact scalar FMA. TF32 has a
-  different reduction contract from exact scalar FMA, but repeated eager and
-  graph launches of the same frozen route are bit-identical.
-- **Half-precision stream-K policy** — `MAMBA_RS_BI_HALF_POLICY=tiled|streamk`
-  or `ctx.set_half_triad_policy(...)` controls the batch-invariant bf16/f16
-  route. `tiled` is the default: every automatic half route reproduces the
-  forced portable tensor-core kernel bit for bit. `streamk` permits the
-  measured stream-K routes, a persistent grid that folds per-CTA partials in
-  a fixed order (a different reduction contract from the tiled body; repeated
-  eager and graph launches of the same route stay bit-identical): the
-  measured TN cells on the CC 12.x boards, and the dW reduction on SM89 when
-  the 64x64 tile grid is at most a wave and an eighth and every CTA of the
-  persistent grid holds at least 32 slabs. It does not force one: an
-  unmeasured shape, or a grid that fills the device, stays on the tiled
-  route. Requires
-  `MAMBA_RS_BI_TENSOR_CORES=1`; the flag refuses to be a silent no-op.
-- **Per-architecture tensor-core rungs** — on Hopper (`wgmma`) and
-  Blackwell (`tcgen05`) the deterministic forward ladder routes to native
-  per-architecture kernels, each a bit family of its own, guarded by a
-  first-use numeric self-check that falls back to the portable ladder
-  (and can be disabled with `MAMBA_RS_ARCH_RUNG=off`).
-- **Bring-your-own-loss training split** — `trainer.forward()` returns the
-  full `batch * seq_len * d_model` post-norm_f temporal output on the host;
-  compute ANY loss gradient in plain Rust and feed it to
-  `trainer.backward_step()` (global-norm clipping, exact gradient
-  accumulation, LR schedules via `set_lr`, reference-faithful AdamW
-  no-decay groups). Bit-identical to the fused `step()` — both compose the
-  same eager phase bodies. Same API on `Mamba3Trainer`.
-- **Full-sequence CPU prefill** — `forward_prefill` runs a whole prompt/page
-  through the training forward's batched-SGEMM pipeline (no activation
-  tape) instead of T per-step dispatches, then hands the recurrent state to
-  the step path (prefill-then-decode). Serial mode is the deterministic
-  reference; `PrefillMode::Parallel` parallelizes every phase and stays
-  bit-equal. Both architectures.
-- **GPU prompt prefill (Mamba-3)** — one-pass prompt window through the
-  chunked pipeline, leaving all four recurrent states positioned for
-  decode; continued windows apply the trapezoidal boundary fold, and a
-  captured CUDA-graph twin replays bit-identically. The LM generate
-  path switches to it automatically for long prompts.
-- **Deterministic data-parallel training (`dist`)** — one process per
-  GPU, one reduction per optimizer step over the flat gradient arena
-  (the fixed-order tier implements it as a byte-only shard exchange
-  around its fold kernel; the library tier as one collective).
-  The default fixed-order contract (ascending logical-rank fold: bits
-  independent of transport, topology, library version, and physical GPU
-  permutation) is implemented twice and cross-pinned: the emulated
-  oracle proves the contract in one process, and the transport-backed
-  house reducer runs it live — peer addends move as pure bytes (NCCL
-  send/recv/broadcast, zero library arithmetic) and every float add
-  happens in the `det_sum_ranks` kernel in program-text order. The
-  `nccl` feature also carries the explicit `NcclSum` tier (library
-  collective; run-to-run stable on a frozen box) — live-validated on
-  two RTX 5090s bit-for-bit against the oracle. The FixedOrder
-  transport path is oracle-pinned on one GPU (same kernel, same slot
-  layout over a loopback byte mover); its own live multi-GPU first
-  light rides the next validation window.
-- **Bit-continuous resume** — optimizer state (Adam moments, step,
-  update hyperparameters) and the carried recurrence export/import, so
-  a resumed run lands bit-for-bit where the unbroken run would.
-- **Large state dimensions** — per-thread state arrays are sized at JIT
-  time from the config, up to the reference implementations' own
-  maximum of 256; every generation runs the same code path at any
-  supported `d_state`.
-- **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
-  checkpoints (130m / 370m / 1.4b / 2.8b validated).
-- **Standalone** — no framework dependency. MSRV 1.97.
+- Inference and training: full backward pass through the recurrent SSM
+  state, AdamW, CUDA Graph capture for inference steps, prefill and
+  training steps.
+- f32, bf16 and f16 storage through one `WeightDtype` selector; every
+  kernel accumulates in f32.
+- Three GEMM modes, deterministic by default. See below.
+- Bring-your-own-loss training: `trainer.forward()` returns the full
+  temporal output on the host, any loss gradient computed in Rust goes into
+  `trainer.backward_step()`, bit-identical to the fused `step()`.
+- Full-sequence CPU prefill for both architectures, and a GPU prompt
+  prefill for Mamba-3 with a captured-graph twin.
+- Deterministic data-parallel training over NCCL (`dist`): one reduction
+  per optimizer step in a fixed order, so the bits do not depend on the
+  transport or the GPU permutation. The fixed-order path is pinned against
+  an in-process oracle on one GPU; the NCCL collective path was validated
+  on two RTX 5090s.
+- Bit-continuous resume: optimizer state and the carried recurrence export
+  and import, so a resumed run lands where the unbroken run would.
+- State dimensions up to 256, sized at compile time from the config.
+- HuggingFace safetensors loader for Mamba SSM checkpoints (130m, 370m,
+  1.4b and 2.8b validated).
+- MSRV 1.97.
 
 ## Cargo features
 
-| feature | what it enables | when |
+| feature | what it enables | when to use it |
 |---|---|---|
-| *(default)* | pure-Rust scalar GEMM | correctness work only — 5-20x slower |
-| `gemm-blas` | [`gemm`] crate BLAS-class CPU GEMM (+ rayon) | ANY serious CPU use |
+| *(default)* | pure-Rust scalar GEMM | correctness work only; much slower than a BLAS |
+| `gemm-blas` | the [`gemm`] crate's BLAS-class CPU GEMM (with rayon) | any serious CPU use |
 | `accelerate` | Apple Accelerate GEMM (macOS) | macOS deployments |
-| `cuda` | GPU inference + training (NVRTC-compiled kernels) | needs the CUDA toolkit |
-| `cuda-cublaslt-qualification` | adds cuBLASLt to the CUDA qualification/benchmark harness; ordinary `cuda` does not enable it | maintainer qualification only, not production route selection |
-| `hf` | safetensors/HF checkpoint loaders | LM checkpoints |
-| `cli` | `mamba-generate` binary (tokenizers + hf-hub) | text generation CLI |
+| `cuda` | GPU inference and training (NVRTC-compiled kernels) | needs the CUDA toolkit |
+| `hf` | safetensors and HuggingFace checkpoint loaders | LM checkpoints |
+| `cli` | the `mamba-generate` binary (tokenizers and hf-hub) | text generation from the command line |
 | `nccl` | data-parallel transport (pinned NCCL binding) | multi-GPU training |
+| `qualification` | the hardware and toolkit instruments under `tools/qualification/` | maintainers measuring kernels on a chosen board |
+| `cuda-cublaslt-qualification` | cuBLASLt in the vendor-comparison harness | maintainers only; production routing does not use cuBLASLt |
 
-### Typed GEMM routing and low-level SM120 APIs
+## GEMM modes
 
-Application code normally reaches the deterministic GEMM engine through the
-trainers/backbones. Direct GPU integrations should use
-`mamba_ssm::gpu::blas::gemm_bi_forward_typed`,
-`mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed` and
-`mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed`; these entries own automatic
-policy lookup and fall back without exposing tile choices to callers. The
-similarly scoped `gemm_bi_triad::*_typed_native` functions are native-bucket
-qualification hooks and may return `UNCOVERED`; they are not application APIs.
+| you want | use |
+|---|---|
+| reproducible results: the same bits run to run, eager or graph, and for serving at any batch size | `GemmMode::Deterministic` (default) |
+| the fastest vendor path, TF32 permitted for f32 | `GemmMode::CublasFast` |
+| the numbers 0.6.9 produced, or the vendor's most careful f32 accumulation as a reference | `GemmMode::CublasPedantic` |
 
-The exported SM120 route constants and the `resolve_sm120_forced`,
-`prepare_sm120_tensor_maps`, `prepare_sm120_tma_forced`,
-`launch_sm120_tma_prepared` and `validate_sm120_graph_replay` functions are
-low-level qualification and census building blocks. A forced launch neither
-adds a cell to production automatic dispatch nor relaxes its exact target,
-shape, pointer, tensor-map, context or allocation-lifetime validation. IDE and
-docs users inspecting normal CUDA code need only the `cuda` feature; enable
-`cuda-cublaslt-qualification` only when building the vendor-comparison harness.
+Storage precision and mode are separate choices: `WeightDtype` decides how
+the weights are stored, `GemmMode` decides who multiplies. Every GPU entry
+point has a plain constructor that reads `MAMBA_RS_GEMM_MODE`
+(`deterministic`, `cublas-fast`, `cublas-pedantic`; default
+`deterministic`) and a `*_with_mode` twin that takes the mode as its last
+argument and ignores the environment.
+
+```rust
+use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+
+let device = GpuDevice::new(0)?;
+let ctx = GpuCtx::new_with_mode(&device, GemmMode::Deterministic)?;
+assert_eq!(ctx.gemm_mode(), GemmMode::Deterministic);
+ctx.set_gemm_mode(GemmMode::CublasPedantic)?; // refused while a graph is being captured
+```
+
+Inside the deterministic mode a model context uses the Inference kernels
+and a trainer the Triad kernels; tensor cores, deterministic TF32 and
+stream-K are settings on the context. What each mode guarantees, what it
+does not, the environment variables and the architecture coverage are in
+[docs/gemm-modes.md](docs/gemm-modes.md).
 
 ## Use cases and API choice
 
-The crate targets two workloads. Pick the entry point that matches yours.
+### Reinforcement learning and small custom models
 
-### Reinforcement learning / small custom models
+Latency-critical, typically `d_model` up to 256, often batch 1 for actor
+rollouts. Both CPU and GPU paths apply; at these sizes the CPU step and the
+GPU step are within a factor of two of each other, so the choice depends
+on where the rest of the program lives.
 
-Latency-critical, typically `d_model ≤ 256`, often batch = 1 for actor
-rollouts. Both CPU and GPU paths are supported; CPU is competitive at
-these sizes (~87 µs/step on Ada Xeon vs 79 µs/step on RTX 6000 Ada).
+- Inference: `mamba_step` (CPU) or `GpuMambaBackbone::step` (GPU)
+- Training: `parallel_mamba_forward` and `parallel_mamba_backward` (CPU,
+  rayon-parallel over the batch) or `MambaTrainer::step` (GPU, one
+  captured graph for forward, backward, AdamW and sync)
 
-- **Inference** — `mamba_step` (CPU) or `GpuMambaBackbone::step` (GPU)
-- **Training** — `parallel_mamba_forward` / `parallel_mamba_backward`
-  (CPU, Rayon-parallel batch) or `MambaTrainer::step` (GPU, CUDA-Graph-
-  captured forward + backward + AdamW + sync)
-
-CPU training works for model sizes where GPU overhead dominates
-(`d_model ≤ 128`, `batch ≤ 8`); GPU training scales well to `batch ≥ 32`.
+CPU training is practical where GPU launch overhead dominates (`d_model`
+up to 128, batch up to 8); GPU training scales well from batch 32.
 
 ### Large language models
 
-Throughput-critical, `d_model ≥ 768`, sequence-level decoding with a
-HuggingFace checkpoint. GPU-only in practice — a 2.8b model on CPU is
-single-digit tokens/sec regardless of implementation.
+Throughput-critical, `d_model` from 768, token-by-token decoding of a
+HuggingFace checkpoint. GPU only in practice: a 2.8b model on the CPU
+decodes at single-digit tokens per second whatever the implementation.
 
-- **Inference** — `GpuMambaLM::from_hf_with_dtype` + `generate`
-- **Fine-tuning** — `MambaTrainer::new_full` accepting the HF
-  backbone weights (Mamba SSM only; no public Mamba-3 SISO checkpoint
-  exists yet)
+- Inference: `GpuMambaLM::from_hf_with_dtype` and `generate`
+- Fine-tuning: `MambaTrainer::new_full` on the HuggingFace backbone
+  weights (Mamba SSM only; no public Mamba-3 SISO checkpoint exists)
 
-The CPU `MambaLM` path compiles and runs end-to-end, but exists for
-CPU↔GPU parity testing (`tests/hf_batch_parity.rs`), not for production
-LLM serving.
+The CPU `MambaLM` path runs end to end but exists for CPU-versus-GPU
+parity tests, not for serving.
 
-### Sequence classification / embeddings / custom heads
+### Sequence classification, embeddings and custom heads
 
 Whole-sequence reads with a caller-defined loss (document classifiers,
-distillation, contrastive embedding). GPU training rides the
-forward/backward split; CPU serving rides the prefill.
+distillation, contrastive embeddings). GPU training uses the
+forward/backward split; CPU serving uses the prefill.
 
-- **Training** — `MambaTrainer::forward` + host-side loss +
+- Training: `MambaTrainer::forward`, a host-side loss,
   `MambaTrainer::backward_step` (see `examples/custom_loss.rs`)
-- **CPU serving** — `MambaBackbone::forward_prefill` /
-  `forward_mamba3_backbone_prefill` (see `examples/cpu_prefill.rs`);
-  batches of sequences via `prefill_batch` / `prefill3_batch`
+- CPU serving: `MambaBackbone::forward_prefill` and
+  `forward_mamba3_backbone_prefill` (see `examples/cpu_prefill.rs`), or
+  `prefill_batch` and `prefill3_batch` for batches of sequences
 
 ### Sharing weights across paths
 
-All paths consume the same `MambaWeights` / `Mamba3Weights` struct.
-A training run's `MambaTrainer::snapshot_master()` output loads directly
-into `GpuMambaBackbone`, `GpuMambaLM`, or the CPU `MambaBackbone` without
+All paths consume the same `MambaWeights` or `Mamba3Weights`. A training
+run's `MambaTrainer::snapshot_master()` loads directly into
+`GpuMambaBackbone`, `GpuMambaLM` or the CPU `MambaBackbone` without
 conversion.
 
 ## Quick start (CPU)
@@ -248,53 +199,64 @@ let mut output = vec![0.0f32; cfg.d_model];
 mamba3_step(&mut output, &input, &mut scratch, &weights, &mut state.layers, &cfg);
 ```
 
+Enable `gemm-blas` (or `accelerate` on macOS) for any CPU work beyond a
+correctness check.
+
 ## Quick start (GPU inference)
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.6", features = ["cuda"] }
+mamba-rs = { version = "0.7", features = ["cuda"] }
 ```
-
-`GpuMambaBackbone::new_with_dtype` and the symmetric Mamba-3 constructor take
-`WeightDtype::{F32, Bf16, F16}` — the rest of the API is unchanged.
 
 ```rust
 use mamba_rs::gpu::inference::GpuMambaBackbone;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::WeightDtype;
 
-let mut gpu = GpuMambaBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)?;
-gpu.capture_graph()?; // optional; ~2× decode speedup
+let mut gpu = GpuMambaBackbone::new_with_dtype_and_mode(
+    0, &weights, cfg, input_dim, batch, WeightDtype::Bf16, GemmMode::Deterministic,
+)?;
+gpu.capture_graph()?; // optional: one graph launch per step
 gpu.step(&input, &mut output)?;
 gpu.reset()?;
 ```
+
+`GpuMamba3Backbone` has the same constructor. `new_with_dtype` reads
+`MAMBA_RS_GEMM_MODE` instead.
 
 ### HuggingFace LM inference
 
 ```rust
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::WeightDtype;
 use std::path::Path;
 
-let mut lm = GpuMambaLM::from_hf_with_dtype(
-    Path::new("./mamba-130m-hf"), 0, WeightDtype::Bf16,
+let mut lm = GpuMambaLM::from_hf_with_dtype_and_mode(
+    Path::new("./mamba-130m-hf"), 0, WeightDtype::Bf16, GemmMode::Deterministic,
 )?;
 lm.capture_graph()?;
 let tokens = lm.generate(&[1, 2, 3, 4, 5], &SampleParams::default())?;
 ```
 
-bf16 vs f32 on all four cached `state-spaces/mamba-*-hf` checkpoints:
-15/15 greedy match, KL ≤ 1.6e-3. Batch=1 vs batch=32 on the same prompt:
-KL ≈ 2e-11 (bit-identical up to f32 roundoff of the fixed reduction tree).
+bf16 against f32 on the four `state-spaces/mamba-*-hf` checkpoints: 15 of
+15 greedy tokens match and the KL divergence of the final logits is at
+most 1.1e-3 (`tests/gpu_bf16_parity.rs`). Batch 1 against batch 32 on the
+same prompt in the deterministic mode: KL about 8e-11
+(`tests/extreme_edge_coverage.rs`), the batch invariance of the Inference
+kernels measured through a whole model; both tests need a local checkpoint
+and run with `--ignored`.
 
 ## Quick start (GPU training)
 
-`MambaTrainer` / `Mamba3Trainer` wrap the full forward + backward + AdamW +
-sync pipeline behind a single `.step()` call. One dispatch struct per
-architecture; an internal enum selects the f32 or mixed (bf16/f16) inner
-engine based on the `WeightDtype` constructor argument.
+`MambaTrainer` and `Mamba3Trainer` run forward, backward, AdamW and the
+master-weight sync behind one `step()` call. The `WeightDtype` argument
+selects the f32 or the mixed bf16/f16 engine.
 
 ```rust
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::WeightDtype;
 
@@ -305,12 +267,13 @@ let session = TrainSessionCfg {
     lr: 3e-4,
     weight_decay: 1e-2,
 };
-let mut trainer = MambaTrainer::new_full(
+let mut trainer = MambaTrainer::new_full_with_mode(
     /* gpu_ordinal */ 0,
     &cpu_weights, cfg, session,
     WeightDtype::Bf16,
+    GemmMode::Deterministic,
 )?;
-trainer.capture_graph()?; // optional; one cuGraphLaunch per step after this
+trainer.capture_graph()?; // optional; one graph launch per step after this
 
 let metrics = trainer.step(&input, &d_temporal_upstream)?;
 // metrics.step, metrics.graph_replayed, metrics.loss_scale (f16), metrics.overflow_skipped (f16)
@@ -318,9 +281,8 @@ let metrics = trainer.step(&input, &d_temporal_upstream)?;
 let master = trainer.snapshot_master()?; // CPU-side MambaWeights for checkpointing
 ```
 
-`Mamba3Trainer` mirrors the same API. f16 training activates the dynamic
-loss scaler automatically; `metrics.loss_scale` / `metrics.overflow_skipped`
-report its state each step.
+f16 training activates the dynamic loss scaler automatically;
+`metrics.loss_scale` and `metrics.overflow_skipped` report its state.
 
 ### Custom losses: the forward/backward split
 
@@ -331,19 +293,19 @@ compute it from the actual forward output:
 use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
 
 let mut temporal = vec![0.0f32; batch * seq_len * cfg.d_model];
-trainer.forward(&input, &mut temporal)?;          // full temporal readback (f32)
+trainer.forward(&input, &mut temporal)?;          // full temporal output, f32, on the host
 let d_temporal = my_loss_grad(&temporal);          // any host-side loss
 let m = trainer.backward_step(
     &d_temporal,
     BackwardOpts::default().with_clip_max_norm(1.0),
-)?;                                                // backward + clip + AdamW
+)?;                                                // backward, clipping, AdamW
 // gradient accumulation: .with_accumulate_only(true) on the non-applying
-// micro-batches (the fused step() refuses while a window is open).
+// micro-batches; the fused step() refuses while a window is open.
 ```
 
-Always eager (a caller-side loss cannot live inside a captured graph), and
-bit-identical to the fused `step()` — both compose the same phase bodies.
-See `examples/custom_loss.rs` for a complete training loop.
+The split always runs eagerly, because a caller-side loss cannot live
+inside a captured graph, and it is bit-identical to the fused `step()`.
+`examples/custom_loss.rs` is a complete training loop.
 
 ## Quick start (CPU prefill)
 
@@ -356,16 +318,15 @@ let mut state = backbone.alloc_state();
 let mut scratch = backbone.alloc_prefill_scratch(seq_len);
 let mut out = vec![0.0f32; seq_len * backbone.config().d_model];
 
-// One batched-SGEMM pass over the whole prompt instead of T step dispatches.
+// One batched GEMM pass over the whole prompt instead of T step calls.
 backbone.forward_prefill(&prompt, &mut out, &mut state, &mut scratch,
                          seq_len, PrefillMode::Parallel);
-// `out` holds the post-norm_f output at EVERY position (pooling-ready);
-// `state` is positioned after the prompt — forward_step continues from it.
+// `out` holds the post-norm output at every position; `state` is
+// positioned after the prompt, so forward_step continues from it.
 ```
 
-Enable `gemm-blas` (or `accelerate` on macOS) — the default scalar GEMM is
-a correctness fallback, not a serving configuration. Mamba-3 has the same
-surface (`forward_mamba3_backbone_prefill` + `Mamba3PrefillScratch`).
+Mamba-3 has the same surface (`forward_mamba3_backbone_prefill` and
+`Mamba3PrefillScratch`).
 
 ## Serialization
 
@@ -381,159 +342,117 @@ save_mamba3(Path::new("m3.safetensors"), &weights, &cfg, input_dim)?;
 let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 ```
 
-## Performance (RTX 6000 Ada)
+## Performance
 
-### LLM throughput — mamba-130m-hf, greedy decode, CUDA Graph, RTX 6000 Ada
+Measured on an RTX 6000 Ada (SM89, driver 595.45.04) and an RTX 5090
+(CC 12.0, driver 595.84), both on CUDA 13.2. Speedups are cuBLAS time
+divided by mamba-rs time; above 1.0 the deterministic kernel is faster.
+Exact f32 is compared with cuBLAS Pedantic, which performs the same
+arithmetic; bf16 and f16 with cuBLAS Fast on the native half-precision
+tensor-core kernels; deterministic TF32 with cuBLAS Fast TF32.
 
-| dtype | cuBLAS (default) | batch-invariant matvec | Δ |
-|-------|-----------------:|-----------------------:|--:|
-| f32   | 725 tok/s        | 686 tok/s              | −5 % |
-| bf16  | **1 029 tok/s**  | 958 tok/s              | −7 % |
-| f16   | 1 028 tok/s      | 958 tok/s              | −7 % |
+Serving kernels (the Inference family, five shapes, bias off and on,
+geometric mean, eager path):
 
-On f32 both paths run on CUDA cores (no Tensor Core route), so the gap
-is small. On bf16/f16 cuBLAS routes through Tensor Cores with f32
-accumulation and wins ~7 % on per-token latency, at the cost of M=1 vs M=N
-algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts). The
-batch-invariant path keeps `b=1` ≡ `b=N` per slot (KL ≈ 1e-11).
+| input → output | compared with | RTX 6000 Ada | RTX 5090 |
+|---|---|---:|---:|
+| BF16 → BF16 | cuBLAS Fast | 1.19× | 1.24× |
+| F16 → F16 | cuBLAS Fast | 1.17× | 1.23× |
+| BF16 → F32 | cuBLAS Fast | 0.83× | 1.29× |
+| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.90× | 1.13× |
+| F32, exact | cuBLAS Pedantic | 1.00× | 1.08× |
 
-Enable the batch-invariant path when cross-batch bit-identity matters
-(KL ≈ 1e-11 between `b=1` and `b=N` per slot): set
-`MAMBA_RS_BATCH_INVARIANT=1` or call `ctx.set_batch_invariant(true)`.
+Training kernels (the Triad family, the large shapes, geometric mean,
+eager path; the small d128 shapes are launch-bound and slower than
+cuBLAS on both boards):
 
-### Choosing a batch-invariant family
+| precision | compared with | RTX 6000 Ada | RTX 5090 |
+|---|---|---:|---:|
+| BF16 | cuBLAS Fast | 1.09× | 1.06× |
+| F16 | cuBLAS Fast | 1.10× | 1.06× |
+| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.74× | 1.08× |
+| F32, exact | cuBLAS Pedantic | 0.94× | 1.19× |
 
-```rust
-ctx.set_batch_invariant(true);                       // deterministic forward
-ctx.set_bi_gemm_family(BiGemmFamily::Inference);     // or ::Triad (default)
-```
+Whole training step on the RTX 6000 Ada, 0.7.0 against 0.6.9, same shapes
+and settings in both trees (bf16 with tensor cores, ms per step): d128
+2.35 → 2.10, d256 9.68 → 8.51, d768 22.32 → 20.30, d1536 13.21 → 13.01.
+The step is dominated by the scan and the other non-GEMM kernels, so the
+whole-step gain is smaller than the kernel gain.
 
-| | `Triad` (`gemm_bi_triad/`) | `Inference` (`gemm_bi_inference/`) |
-|---|---|---|
-| layouts | NN + TN + NT | NN only |
-| invariance | across M inside one dispatch bucket | by construction, no buckets |
-| structure | shape-routed tiles (ultra-thin, narrow-N, GEMV, split-K, Slim/Big) | bit-identical tile ladder (thin 16, 64, 128, wide 128×256), `SPLIT_K=1` |
-| dtypes | f32 / bf16 / f16, CUDA cores and Tensor Cores | f32 / bf16 / f16; Tensor Cores for bf16/f16, CUDA-core FMA tile for f32 |
-
-A backward requires `Triad`. For a forward-only serve workload the
-tensor-core ladder makes `Inference` the fast route: at a vision-classifier
-prefill shape (M = 4621 rows per page, RTX 6000 Ada) the deterministic
-bf16 page runs 10.9 ms end to end — ahead of the 11.8 ms
-non-deterministic cuBLAS f32 baseline and 1.8× the 20.0 ms deterministic
-f32 route. Both families differ from cuBLAS f32 by the same
-1.0e-4–1.8e-4 envelope, and reruns are bit-identical.
-
-### Deterministic training — cost per step (RTX 6000 Ada, `MambaTrainer`)
-
-With the batch-invariant flag on, every training GEMM (forward, dW, dX)
-runs on custom fixed-reduction-order kernels: two runs with the same
-seed/inputs produce bit-identical weights, on every dtype. The optional
-tensor-core tier keeps full determinism under its own numeric contract
-(mma.sync f32 accumulation instead of the scalar FMA chain) and turns the
-determinism overhead into a speedup on LLM-sized models:
-
-| model | dtype | cuBLAS baseline | deterministic (scalar) | deterministic + TC |
-|---|---|---:|---:|---:|
-| d768, B=8 T=256  | bf16 | 25.7 ms (PEDANTIC) | 28.5 ms (1.11×) | **21.7 ms (0.84×)** |
-| d1536, B=4 T=256 | bf16 | 17.8 ms (PEDANTIC) | 19.4 ms (1.09×) | **12.5 ms (0.70×)** |
-| d1536, B=4 T=256 | f32  | 14.1 ms (TF32)     | 21.6 ms (1.53×) | — |
-| d128 (RL), B=16 T=64 | bf16 | 2.12 ms (PEDANTIC) | 2.54 ms (1.20×) | 2.20 ms (1.04×) |
-
-```rust
-trainer.ctx().set_batch_invariant(true);   // bit-identical runs, scalar contract
-trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
-```
-
-GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
-3.7–6.3×, dW 4.0–5.6×, dX 4.5–5.4× (bf16, M=2048-class shapes). At fat
-training shapes the wide fragment-reuse tile carries the deterministic
-ladder to parity with cuBLAS's tensor-core path (143.5 vs 144.9 TFLOPS
-bf16 at 4096×768×3072) and +12% over the square tile just past a wave
-boundary. Bit-identical tiles, shape-routed, cover everything from d128
-RL models to LLM projections. Full tables and
-contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
-
-A dedicated kernel-optimization pass cut the deterministic training step 3.4×
-(d_model 384, 24 layers, B=8, T=1300, bf16, tensor-core tier:
-441 → 131.5 ms/step on an RTX 5090) and removed the O(T) scan tape
-(−12.3 GB at that shape) — stage-by-stage table in
-[Mamba SSM benchmarks](docs/mamba1-benchmarks.md) and the
-[CHANGELOG](CHANGELOG.md).
-
-### Per-step latency (default config: d_model=128, 3 layers)
-
-| | Mamba SSM | Mamba-3 SISO |
-|---|---|---|
-| GPU inference B=1 (CUDA Graph) | **79 µs** | **87 µs** |
-| GPU training fwd+bwd (T=32, tiny synthetic shape) | 1 653 µs | 1 784 µs |
-| CPU inference B=1              | 87 µs    | **65 µs** |
-| CPU training fwd+bwd (T=32)    | 14 859 µs | **3 635 µs** |
-
-Production-scale Mamba-3 training and prefill tables (multi-chunk
-sequences, 24-layer shapes) live in the detailed docs:
-[Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
-[Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md).
+The per-kernel tables for both boards, the old-versus-new kernel
+comparison, the whole-model comparison and the measurement protocol are in
+[docs/determinism-benchmarks.md](docs/determinism-benchmarks.md). The
+whole-model tables of earlier releases stay on the
+[Mamba SSM](docs/mamba1-benchmarks.md) and
+[Mamba-3 SISO](docs/mamba3-benchmarks.md) benchmark pages with their
+release, board and comparator labels.
 
 ## Testing
 
-The suite combines integration tests with in-module unit tests. CI results are
-the authoritative inventory; hand-maintained test totals are intentionally
-omitted because architecture qualification adds and retires cells over time:
+Every target is declared in `Cargo.toml` and has a lane in
+`qual/lanes.toml`; a host test keeps the two in step.
 
-- Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
-  run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance
-  parity ACROSS routes (CPU ↔ GPU, sequential ↔ parallel scan, f32 ↔
-  bf16/f16, scalar ↔ tensor-core GEMM) — different reduction orders are
-  different bit families by design
-- Gradient checks: finite-difference vs analytical on every weight tensor
-- Real checkpoints: 30-step training convergence + inference on
-  `state-spaces/mamba-130m-hf` for all three dtypes
-- Batch invariance: KL < 1e-4 across batch sizes 1 / 4 / 16 / 32 at bf16
-- Determinism: bit-identical training across runs (f32/bf16/f16, scalar
-  and tensor-core tiers), typed-GEMM bit-parity vs the f32 reference
-  across a 60-shape dispatch-gate boundary sweep
-- Long-sequence stability: 1024-token generation + T=1024 M3 training
-- CUDA Graph: replay determinism, pointer-stability assertions
+- **Regressions** (`tests/`): bit parity within a numeric route (eager and
+  graph, run and run), tolerance parity across routes (CPU and GPU, f32
+  and half, scalar and tensor-core), gradient checks, source and dispatch
+  contracts, batch invariance and determinism gates.
+  `cargo test --release --features cuda` runs the CUDA gate;
+  `cargo test --no-default-features` runs the host part on any machine.
+  Tests marked `contract` contain arms that need a checkpoint or a
+  specific board and run with `-- --ignored`; tests marked `record`
+  write evidence and never run automatically.
+- **Benches** (`benches/`): timing instruments with no verdict,
+  `cargo bench --features cuda --bench <name>`, optionally followed by
+  `-- <instrument>`.
+- **Qualification tools** (`tools/qualification/`): hardware, toolkit and
+  census instruments that need a specific board, built with
+  `--features "cuda hf qualification"` and run by name with `-- --ignored`.
 
-Run the fast suite:
-
-```sh
-cargo test --release --features cuda
-```
-
-Full suite including HuggingFace-backed tests (needs the HF cache):
-
-```sh
-cargo test --release --features "cuda hf" -- --include-ignored
-```
+`qual/run.sh <lane>` runs or lists one lane;
+[docs/release-qualification.md](docs/release-qualification.md) describes
+the release order.
 
 ## Documentation
 
-- [Mamba SSM architecture](docs/mamba1-architecture.md)
-- [Mamba-3 SISO architecture](docs/mamba3-architecture.md)
-- [Mamba SSM benchmarks](docs/mamba1-benchmarks.md)
-- [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md)
-- [Deterministic GEMM benchmarks](docs/determinism-benchmarks.md) — tiers,
-  contracts, full measurement tables (training step, tensor-core GEMM
-  level, fallback tax), reproduction commands
+For users:
+
+- [GEMM modes](docs/gemm-modes.md): the three modes, which to choose, how
+  to set them, what is guaranteed, environment variables, architecture
+  coverage
+- [GEMM benchmarks](docs/determinism-benchmarks.md): kernel-by-kernel
+  timings on both boards against cuBLAS Fast and Pedantic, the 0.6.9
+  comparison, the protocol
+- [Mamba SSM architecture](docs/mamba1-architecture.md) and
+  [benchmarks](docs/mamba1-benchmarks.md)
+- [Mamba-3 SISO architecture](docs/mamba3-architecture.md) and
+  [benchmarks](docs/mamba3-benchmarks.md)
+- Rustdoc: `GemmMode`, `GpuCtx::new_with_mode`, `GpuCtx::set_gemm_mode`
+  and the `*_with_mode` constructors carry the API contract
+
+For contributors:
+
+- [Performance playbook](docs/performance-playbook.md): how kernels are
+  measured, changed and admitted
+- [Release qualification](docs/release-qualification.md): test lanes,
+  package inspection, evidence and the release order
 
 ## Roadmap
 
 - Multi-GPU inference for models larger than one device (pipeline
-  sharding), complementing the data-parallel training that ships now.
-- Reduced-precision tiers (fp8 / int8) under the same bit-discipline
-  as the existing f32 / bf16 / f16 paths.
-- The Mamba-2 generation, living beside Mamba-1 and Mamba-3 in this
-  crate with the same determinism and testing discipline.
+  sharding), beside the data-parallel training that ships now.
+- Reduced-precision tiers (fp8, int8) under the same bit discipline as
+  the f32, bf16 and f16 paths.
+- The Mamba-2 generation beside Mamba-1 and Mamba-3, with the same
+  determinism and testing discipline.
 
 ## Citation
 
 ```bibtex
-@inproceedings{mamba,
+@article{mamba,
   title={Mamba: Linear-Time Sequence Modeling with Selective State Spaces},
   author={Gu, Albert and Dao, Tri},
-  booktitle={International Conference on Learning Representations},
-  year={2024}
+  journal={arXiv preprint arXiv:2312.00752},
+  year={2023}
 }
 
 @inproceedings{mamba3,

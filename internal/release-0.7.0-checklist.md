@@ -245,24 +245,62 @@ Select their actual supported cases and prerequisites before executing them.
   has254 test targets including the now-retained Inference route inventory.
   This is an audit, not completed cleanup; new API tests must join the final
   census. See `internal/release-test-layout-audit-20260910.md`.
-- [ ] Benchmark unchanged monolithic `main` versus final new inference/Triad
-  with one immutable harness and identical settings. Use reproducible measured
-  deltas in the changelog; do not multiply unrelated discovery ratios.
-- [ ] Refresh README, docs, API docstrings, examples and benchmark tables;
-  remove obsolete comparisons, unsupported claims and filler.
-  Plain-language audit anchors: Cargo.toml package description still promises
-  an opt-in tier that beats cuBLAS; README:422 labels vendor F32 inherently
-  nondeterministic; device.rs:231 promises approximately8x; blas.rs:3380
-  retains an obsolete throughput/dispatch narrative. Replace these with the
-  implemented contracts and explicitly scoped current measurements. Line
-  numbers are audit-time anchors, not frozen references.
-  In particular replace stale SM120 half18-cell descriptions (current source
-  has60 tiled/12 stream-K entries), do not extend CC12.0 evidence toCC12.1,
-  and distinguish measured overrides from guarded SM90a/SM100 heuristics.
-  SM120 half also interpolates within a guarded nearest-entry band; do not
-  describe either all nearby shapes as independently measured or every
-  unlisted shape as a portable fallback. Correct corresponding diagnostics.
-- [ ] Bump Cargo/manifests/lockfile and changelog consistently to 0.7.0.
+  Layout committed as c65c1c85: explicit targets (108 tests, 15 benches, 46
+  qualification tools behind the non-default feature), lane census over the
+  manifest, 96 stands plus their candidate sources and adapters archived under
+  `internal/experiments/release-0.7.0-archive/` with an index, mixed stands
+  split with the compact-finalist and scalar-NT receipt fixtures extracted,
+  shared harness as single-purpose modules, the five shipping lint allowances
+  removed by restructuring, retained callers of the deprecated setters moved
+  to `set_gemm_mode` by intent, package excludes in place. Ada packet: fmt,
+  four featured checks with zero rustc warnings, CI-form clippy, 274 host
+  tests, library/bench compiles, one CPU bench run, NCCL check, Rustdoc with
+  broken links denied, package; extracted crate holds no internal material and
+  its 275 host tests pass offline. Evidence:
+  `internal/perf/release-layout-20260910/report.md`.
+- [~] Benchmark unchanged monolithic `main` versus the release tree on the
+  RTX 6000 Ada with one adapter per lane and identical settings
+  (`internal/perf/monolith-baseline-20260910/`, `report.md`). Done: set A
+  (inference step, exact f32, Triad lane: eager equal, graph replay 20 to 30
+  percent slower on the release tree), set C (training step, all three GEMM
+  settings, 2 to 17 percent faster like for like, cuBLAS arms agree between
+  trees). Running: set B (inference step on the inference family, f32 and
+  bf16) and set D (kernel level, every op and dtype, each tree's deterministic
+  route beside its cuBLAS Fast and Pedantic arms). Open: the set A graph
+  replay slowdown was traced to the per-replay launch-set digest rebuild in
+  `CapturedGemmGraphPlan::with_validated_launch`; the digest check moved to
+  plan construction and the replay validates routes once against the live
+  identity. Re-run set A on the fixed tree to confirm before the numbers are
+  published.
+- [~] Refresh README, docs, API docstrings, examples and benchmark tables in
+  plain language. Done in the working tree: CHANGELOG 0.7.0 rewritten as a
+  performance release note (the tree's expanded 0.6.9 section was not the
+  published 0.6.9 entry and was folded into 0.7.0; the published text is
+  restored); new `docs/gemm-modes.md`; `docs/determinism-benchmarks.md` is the
+  per-kernel benchmark page for both boards against cuBLAS Fast and Pedantic;
+  README, both architecture pages, both benchmark pages, the playbook, the
+  qualification runbook, the examples, the crate docs and the GPU module docs
+  corrected per the documentation critique. Open: the old-versus-new sections
+  of the benchmark page and the changelog take the set B and set D tables when
+  the runs finish; the `gemm_bi_fixed_*` targets are renamed
+  `gemm_bi_inference_*`.
+- [x] Bump Cargo/manifests/lockfile and changelog consistently to 0.7.0.
+- [ ] Re-verify that every Inference and Triad kernel is wired: module
+  assembly, selector coverage and per-cell reachability on Ada, as a separate
+  pass before the release gate. Known open item for that pass: three
+  ignored library qualification tests
+  (`qualification::tests::{a_and_b_offsets_match_eager_and_graph_with_nonzero_operands_in_both_orders,
+  g2_half_forced_rectangular_prepares_the_exact_graph,
+  output_offset_eager_and_graph_preserve_the_leading_red_zone}`) fail on Ada
+  at `c65c1c85` and after the documentation batch alike with "native half
+  production branch unexpectedly recorded F32 routes"; they are outside the
+  lane table and were not caught by the release gate. The four
+  `sm120_scalar_nt_*` library tests are RTX 5090 only and fail on Ada by
+  design.
+- [ ] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms,
+  the dispatchers) for math and performance against `reference/mamba` and the
+  knowledge base, then re-measure the training and inference steps and update
+  the tables.
 - [ ] Complete release tests and independent final review, then merge `main`.
 - [ ] Stop before publication until the owner explicitly approves the release.
 

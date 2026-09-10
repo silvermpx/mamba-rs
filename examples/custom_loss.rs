@@ -5,7 +5,7 @@
 //! ```
 //!
 //! The fused `MambaTrainer::step(input, d_temporal)` requires the caller to
-//! already HOLD the loss gradient — but computing a loss needs the forward
+//! already hold the loss gradient, but computing a loss needs the forward
 //! activations first. The split API resolves that:
 //!
 //!   1. `forward()` — runs the training forward, returns the full
@@ -17,7 +17,9 @@
 //!      or `accumulate_only` for gradient accumulation across micro-batches).
 //!
 //! The demo trains a tiny backbone to push its mean-pooled output toward a
-//! fixed target vector (MSE) — a stand-in for any real head/loss.
+//! fixed target vector (MSE), a stand-in for any real head or loss. The
+//! trainer is built with an explicit `GemmMode::Deterministic`; the
+//! no-mode constructor reads `MAMBA_RS_GEMM_MODE` instead.
 
 #[cfg(not(feature = "cuda"))]
 fn main() {
@@ -28,6 +30,7 @@ fn main() {
 #[cfg(feature = "cuda")]
 mod cuda_example {
     use mamba_rs::MambaConfig;
+    use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
@@ -45,7 +48,9 @@ mod cuda_example {
         let n_out = batch * seq_len * dm;
 
         let weights = MambaWeights::init(&cfg, input_dim, 42);
-        let mut trainer = MambaTrainer::new_full(
+        // A trainer context runs the Triad family in the deterministic mode;
+        // the split forward/backward path below always executes eagerly.
+        let mut trainer = MambaTrainer::new_full_with_mode(
             0,
             &weights,
             cfg,
@@ -57,6 +62,7 @@ mod cuda_example {
                 weight_decay: 1e-2,
             },
             WeightDtype::Bf16,
+            GemmMode::Deterministic,
         )?;
 
         // Synthetic input and a fixed target for the mean-pooled feature.

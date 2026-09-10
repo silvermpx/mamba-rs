@@ -1,69 +1,275 @@
 # Changelog
 
-## 0.6.9 (2026-08-26)
+## 0.7.0 (2026-09-10)
 
-### Changed
+A performance release. The deterministic GEMM kernels that mamba-rs uses
+for training and for serving were rewritten, and they are now the default:
+every GPU context multiplies with the crate's own kernels unless you ask for
+cuBLAS by name. The new kernels were measured on an RTX 6000 Ada and an
+RTX 5090 against cuBLAS in both of its precision settings and against the
+kernels 0.6.9 shipped; the numbers are summarised below and given in full,
+kernel by kernel, in [docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
+Model weights, checkpoints and the CPU paths are unchanged. GPU results
+change bit for bit compared with 0.6.9 because a different kernel now
+computes them; `GemmMode::CublasPedantic` reproduces the 0.6.9 numbers.
 
-- The deterministic training GEMM triad now compiles as disjoint scalar and
-  SM80 modules under `kernels/gemm_bi_triad/`. The obsolete root monolith was
-  removed; module ownership and cache identity now fail closed per artifact.
-- CC12.0 automatic typed routing is sealed to the qualified 18-cell BF16/F16
-  NN/TN/NT table, including its measured BK32 and BK64 physical schedules.
-  CC12.1 and shapes outside the table decline to the portable deterministic
-  ladder. Qualified SM120 graph routes require eager tensor-map preparation
-  and fail closed during capture if their cache or allocation epoch is invalid.
-- The ordinary `cuda` feature no longer enables cuBLASLt. The explicit
-  `cuda-cublaslt-qualification` feature adds it only to the vendor-comparison
-  harness; production routing does not depend on cuBLASLt.
-- Low-level typed bucket probes now use the `*_typed_native` suffix, separating
-  their `UNCOVERED` qualification contract from the full-policy typed BLAS
-  entries. No legacy aliases retain the ambiguous names.
-- `GpuCtx::gemm_route` now returns the complete numeric route, including
-  backend contracts, compiler and artifact identities, and the target
-  device. Callers that only need the three policy flags can continue to
-  use the unchanged `GpuCtx::gemm_flags` compatibility accessor.
-- Persistent CUDA artifacts now require an exact compile identity: source,
-  options, target, literal header closure, and the ordered runtime/builtins
-  NVRTC library pair. Mamba-3 uses the same SHA-256 envelope and validation
-  path as Mamba-1; legacy raw Mamba-3 cache files are ignored.
-- The persistent kernel cache is enabled on Linux only. Its path must be
-  absolute, no ancestor may be group- or other-writable, and the final
-  directory and entries must be private to the effective user. Filesystem
-  operations remain anchored to verified directory descriptors.
-- Public training and prefill graph holders now bind replay to the exact
-  `GpuCtx` that captured them. Raw training graph handles are private so
-  callers cannot bypass route, context, and pointer validation.
-- The stream, kernel registry, cuBLAS workspace, and graph-visible scratch in
-  `GpuCtx` now form one immutable resource core retained by captured graphs.
-  Low-level capture methods borrowing external allocations are `unsafe`; safe
-  trainer and inference owners synchronize and destroy graphs before resources.
-- `graph_capture::capture_into_graph` is now `unsafe`: external callers must
-  keep every captured resource alive and pointer-stable through graph teardown.
-  A panic in the capture body now ends stream capture before it resumes unwinding.
+### Highlights
+
+- **Deterministic by default, with three modes.** A `GemmMode` on every GPU
+  context chooses who multiplies: `Deterministic` (the default, the crate's
+  kernels, never cuBLAS), `CublasFast` (cuBLAS with TF32 permitted) or
+  `CublasPedantic` (cuBLAS with full-f32 accumulation, the 0.6.9 default).
+  In the deterministic mode the same inputs give the same bits run after
+  run, from an eager launch and from a captured graph, and for serving the
+  same bits for a row at any batch size. See [docs/gemm-modes.md](docs/gemm-modes.md).
+- **New training kernels.** The Triad family (`kernels/gemm_bi_triad/`, the
+  forward, weight-gradient and input-gradient products) went from one
+  6655-line file to 25 files of per-architecture kernels: deterministic
+  TF32, which 0.6.9 did not have at all; measured Ada kernels for bf16 and
+  f16, exact f32 and TF32; RTX 5090 kernels with 60 measured tiled entries,
+  12 stream-K entries, TMA-fed exact-f32 kernels and a TF32 set qualified on
+  CUDA 12.8, 13.0 and 13.2; and Hopper and datacenter-Blackwell kernels that
+  bind behind a self-check but have not been timed on a board.
+- **New inference kernels.** The forward-only family used by model and LM
+  contexts, now called `Inference` (`kernels/gemm_bi_inference/`, formerly
+  `Fixed`), grew from 8 files to 21 with 86 kernels: measured Ada kernels for
+  half precision, exact f32 and deterministic TF32, and RTX 5090 TMA
+  kernels. It is batch-invariant by construction and it is now the default
+  family of every model context; in 0.6.9 it was an opt-in that no dispatch
+  path reached.
+- **Measured, not assumed.** Every automatic kernel selection on the two
+  boards was timed cell by cell against cuBLAS Fast and cuBLAS Pedantic,
+  with the winners frozen together with the board, driver and toolkit
+  identity. A kernel outside its frozen identity is not selected; the
+  portable kernel serves instead and says so once.
+
+### Performance
+
+Speedups are cuBLAS time divided by mamba-rs time, or 0.6.9 time divided
+by 0.7.0 time; above 1.0 the 0.7.0 kernel is faster. Exact f32 is compared
+with cuBLAS Pedantic, which does the same arithmetic; bf16 and f16 with
+cuBLAS Fast on the native half tensor-core kernels; deterministic TF32 with
+cuBLAS Fast TF32.
+
+**Inference family against cuBLAS** (five serving shapes, bias off and on,
+geometric mean, eager path):
+
+| input → output | compared with | RTX 6000 Ada | RTX 5090 |
+|---|---|---:|---:|
+| BF16 → BF16 | Fast | 1.19× | 1.24× |
+| F16 → F16 | Fast | 1.17× | 1.23× |
+| BF16 → F32 | Fast | 0.83× | 1.29× |
+| F32 deterministic TF32 | Fast TF32 | 0.90× | 1.13× |
+| F32 exact | Pedantic | 1.00× | 1.08× |
+
+**Triad family against cuBLAS** (training products, geometric mean over the
+large shapes, eager path; the small d128 shapes are launch-bound and
+slower than cuBLAS on both boards):
+
+| precision | compared with | RTX 6000 Ada | RTX 5090 |
+|---|---|---:|---:|
+| BF16 | Fast | 1.09× | 1.06× |
+| F16 | Fast | 1.10× | 1.06× |
+| F32 deterministic TF32 | Fast TF32 | 0.74× | 1.08× |
+| F32 exact | Pedantic | 0.94× | 1.19× |
+
+**The new kernels against the 0.6.9 kernels** (RTX 6000 Ada, CUDA 13.2,
+the same program compiled against both trees, each tree's deterministic
+kernel timed in the same process as its cuBLAS arms; geometric mean of the
+speedup over the shapes of each class, and the range):
+
+| family | precision | large shapes | small d128 shapes |
+|---|---|---:|---:|
+| Triad (training) | BF16 | 1.29× (1.02 to 1.58) | 1.08× |
+| Triad (training) | F16 | 1.25× (1.02 to 1.44) | 1.08× |
+| Triad (training) | F32 exact | 1.40× (0.90 to 2.26) | 1.25× (up to 2.98) |
+| Inference (serving) | BF16 | 1.33× (1.27 to 1.43) | |
+| Inference (serving) | F16 | 1.33× (1.27 to 1.42) | |
+| Inference (serving) | F32 exact | 1.39× (1.19 to 1.47) | |
+
+The largest single gains are the exact-f32 weight-gradient kernels on the
+d128 shapes (2.0× and 3.0×) and the exact-f32 input-gradient kernel on the
+d768 in_proj shape (2.26×); one cell, the deep 4096-row exact-f32 forward,
+is 10 percent slower because no measured kernel covers it yet. The
+deterministic TF32 kernels have no 0.6.9 counterpart; against the only f32
+answer 0.6.9 had, the exact kernels, they are 2.3 to 3.1 times faster on
+the large shapes, at TF32 precision. The complete per-kernel tables, the
+cuBLAS comparisons for both boards and the measurement protocol are in
+[docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
+
+**Whole training step, 0.6.9 against 0.7.0** (RTX 6000 Ada, CUDA 13.2,
+`MambaTrainer` with graph replay, same shapes and settings in both trees,
+median of four alternating runs, milliseconds per step):
+
+| model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
+|---|---|---:|---:|---:|---:|---:|
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.79 | 1.09× | 2.43 | 2.50 |
+| d128, 2 layers, B=16, T=64 | bf16 (tensor cores) | 2.35 | 2.10 | 1.12× | 2.02 | 2.51 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.52 | 12.08 | 1.04× | 9.87 | 10.18 |
+| d256, 4 layers, B=16, T=128 | bf16 (tensor cores) | 9.68 | 8.51 | 1.14× | 8.07 | 10.42 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.88 | 32.16 | 1.08× | 24.44 | 27.91 |
+| d768, 4 layers, B=8, T=256 | bf16 (tensor cores) | 22.32 | 20.30 | 1.10× | 20.11 | 26.72 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.54 | 22.68 | 1.08× | 14.67 | 18.43 |
+| d1536, 2 layers, B=4, T=256 | bf16 (tensor cores) | 13.21 | 13.01 | 1.02× | 12.30 | 17.99 |
+
+The step is dominated by the scan and the other non-GEMM kernels, which
+this release did not touch, so the whole-step gain is a few percent to
+14 percent where the GEMM gain is larger. The deterministic bf16 training
+step is now within 2 percent of cuBLAS Fast on the d768 model and faster
+than cuBLAS Pedantic everywhere; f16 behaves like bf16. Opting the f32
+step into deterministic TF32 (`MAMBA_RS_BI_F32_POLICY=tf32`) brings the
+d768 model from 32.2 ms to 26.9 ms per step, within 10 percent of cuBLAS
+Fast; on the other three shapes no measured TF32 kernel exists yet and the
+exact kernels serve, so the time does not change.
+
+{{SET_B_SUMMARY}}
+
+### The GEMM mode API
+
+- `GemmMode { Deterministic, CublasFast, CublasPedantic }`, re-exported as
+  `mamba_rs::mamba_ssm::gpu::GemmMode`. `Deterministic` is the default.
+- `GpuCtx::new_with_mode`, `GpuCtx::new_with_state_cap_and_mode`,
+  `GpuCtx::gemm_mode` and the fallible `GpuCtx::set_gemm_mode`, which is
+  refused during a graph capture, restores the previous cuBLAS setting when
+  the change fails, and marks the context unusable if a rollback cannot be
+  verified.
+- Explicit-mode constructors beside every environment-reading one:
+  `GpuMambaBackbone::new_with_mode` and `new_with_dtype_and_mode`,
+  `GpuMamba3Backbone::new_with_mode` and `new_with_dtype_and_mode`,
+  `GpuMambaLM::from_hf_with_mode`, `from_hf_with_dtype_and_mode` and
+  `from_hf_with_dtype_batch_and_mode`, `GpuMamba3LM::from_weights_with_mode`
+  and `Mamba3LmBuild::build_with_mode`, `MambaTrainer::new_full_with_mode`,
+  `Mamba3Trainer::new_full_with_mode`, and `new_with_mode` on the four
+  inference engines. The plain constructors read `MAMBA_RS_GEMM_MODE`
+  (`deterministic`, `cublas-fast`, `cublas-pedantic`) and default to
+  `Deterministic`; the explicit ones ignore the GEMM environment.
+- Two policies inside the deterministic mode, both new: `F32TriadPolicy`
+  (`exact`, the default, or `tf32`, which permits the measured deterministic
+  TF32 kernels and stays exact elsewhere) through `set_f32_triad_policy` and
+  `MAMBA_RS_BI_F32_POLICY`, and `HalfTriadPolicy` (`tiled`, the default, or
+  `streamk`, which permits the measured stream-K weight-gradient kernels)
+  through `set_half_triad_policy` and `MAMBA_RS_BI_HALF_POLICY`.
+- `GpuCtx::gemm_route` returns the complete numeric route: mode, family,
+  policies, the selected kernels, and the compiler, artifact and device
+  identity. Captured graphs record it and every replay checks it; a mode,
+  family or policy change after a capture is refused at the next replay.
+  `GpuCtx::gemm_flags` remains as the three-flag view for existing callers.
+- Raw f32 products, the Mamba-3 projections and the tied LM heads follow the
+  context's mode; before this release several of them called cuBLAS
+  directly whatever the context said. Tied half-input heads keep f32 logits.
+
+### Breaking changes
+
+- The default GEMM path changed from cuBLAS to the deterministic kernels.
+  GPU outputs differ bit for bit from 0.6.9. Construct with
+  `GemmMode::CublasPedantic` to get the 0.6.9 numbers, or
+  `GemmMode::CublasFast` for the fastest vendor path.
+- `BiGemmFamily::Fixed` is `BiGemmFamily::Inference`, the module
+  `gemm_bi_fixed` is `gemm_bi_inference`, and `MAMBA_RS_BI_GEMM_FAMILY`
+  accepts `triad` and `inference` only; `fixed` is rejected. Frozen kernel
+  artifacts keep their recorded identities, so caches stay valid.
+- Model and LM contexts now default to the Inference family; trainers and
+  plain contexts default to Triad. `GpuCtx::new` no longer reads the
+  environment; `GpuCtx::new_from_env` does.
+- The older environment variables are resolved together: with neither set
+  the mode is `Deterministic`; `MAMBA_RS_BATCH_INVARIANT=1` selects
+  `Deterministic`; `MAMBA_RS_FAST_GEMM=1` selects `CublasFast`; an explicit
+  `0` on either, with no positive selector, selects `CublasPedantic`. Both
+  set to `1`, or either set together with `MAMBA_RS_GEMM_MODE`, is an error.
+  A script that set `MAMBA_RS_BATCH_INVARIANT=0` under 0.6.9 therefore
+  keeps its numbers; a script that set nothing moves to the deterministic
+  kernels.
+- The family, tensor-core and policy variables are rejected at construction
+  when a cuBLAS mode is selected; they describe deterministic kernels only.
+- Low-level graph capture: `graph_capture::capture_into_graph` and the
+  `GpuCtx` capture methods that borrow external allocations are `unsafe`,
+  because the caller must keep every captured resource alive and
+  pointer-stable until the graph is destroyed. The safe trainer and
+  inference owners handle this themselves. Public graph holders replay only
+  on the context that captured them; raw training graph handles are no
+  longer public.
+- The `cuda` feature no longer enables cuBLASLt. The
+  `cuda-cublaslt-qualification` feature adds it to the vendor-comparison
+  harness only; production routing never used it.
+- The low-level typed probes carry the `*_typed_native` suffix and may
+  return `UNCOVERED`; the full-coverage entries are
+  `blas::gemm_bi_forward_typed`, `gemm_bi_backward_dw_typed` and
+  `gemm_bi_backward_dx_typed`.
+
+### Deprecated
+
+- `GpuCtx::set_batch_invariant`, `GpuCtx::set_fast_gemm` and
+  `GpuCtx::disable_tf32` map onto `set_gemm_mode` and panic when the mode
+  change is refused, because their signatures cannot return an error. Use
+  `set_gemm_mode`. The read accessors `batch_invariant`, `fast_gemm` and
+  `tf32` are not deprecated and now describe the mode.
+- `MAMBA_RS_BATCH_INVARIANT` and `MAMBA_RS_FAST_GEMM` are still read but
+  conflict with `MAMBA_RS_GEMM_MODE`; use the new variable.
 
 ### Fixed
 
-- Exact-scalar F32 routes preserve their established `__fmaf_rn` numeric
-  contract. Typed automatic routing now keeps the exact scalar contract for
-  the measured SM89 NN deep-K, N=128 Split-K cells where it is faster; those
-  cells previously selected the separate Tensor Core numeric contract.
-- Deterministic TF32 is an explicit, separately identified numeric contract.
-  The `tf32` policy grants permission to use a frozen qualified route and
-  otherwise falls back to exact scalar FMA; it does not force TF32 execution.
-- Misaligned F32 subviews and odd output strides now take alignment-safe
-  scalar vector fallbacks without changing the reduction or epilogue order.
-- CUDA cache entries with wrong metadata, links, partial publication, stale
-  identities, malformed envelopes, or ambiguous preprocessor dependencies
-  are ignored and rebuilt instead of being trusted.
-- Cache reads reject FIFOs without blocking. Header manifests preserve the
-  lexical include context across symlinks, bind logical paths to canonical
-  targets, reject expanding symlink cycles, and fail closed when token pasting
-  can hide `__has_include` or `__has_include_next` across literal headers.
-- Persistent compilation is disabled when `__DATE__`, `__TIME__`, or an
-  `__has_include` operator can enter through direct use or token pasting across
-  source, headers, and NVRTC options.
-- NVRTC 12.9 and newer receives a stable per-module `--frandom-seed`; two
-  independent cold compiles must produce byte-identical canonical PTX.
+- Exact f32 kernels keep their `__fmaf_rn` contract on every route; the
+  measured SM89 deep-K split-K cells that are faster on the scalar kernels
+  stay on them instead of taking the tensor-core contract.
+- Misaligned f32 subviews and odd output strides take alignment-safe scalar
+  kernels without changing the reduction order.
+- A dispatch that could not use a specialised kernel used to decline
+  silently, which on any board other than the two measured ones meant the
+  scalar kernels served without a word. Every decline now prints once,
+  naming the identity field that did not match.
+- Cached CUDA artifacts are trusted only with an exact compile identity
+  (source, options, target, the literal header closure and the NVRTC
+  library pair). Entries with wrong metadata, partial writes, stale
+  identities or ambiguous preprocessor dependencies are rebuilt. The cache
+  is Linux-only, requires an absolute private path, and is disabled when
+  `__DATE__`, `__TIME__` or `__has_include` can reach the compiler. NVRTC
+  12.9 and newer receives a stable per-module `--frandom-seed`, so two cold
+  compiles produce byte-identical PTX.
+- Graph capture: the stream, kernel registry, cuBLAS workspace and
+  graph-visible scratch form one immutable resource core retained by
+  captured graphs, and a panic inside a capture body ends the capture
+  before unwinding. RTX 5090 kernels prepare their tensor maps eagerly and
+  fail closed inside a capture instead of allocating there.
+
+### Upgrading from 0.6.9
+
+| you had | you do now |
+|---|---|
+| the default (cuBLAS) | nothing, to get the deterministic kernels; or pass `GemmMode::CublasPedantic` to keep the 0.6.9 numbers |
+| `set_batch_invariant(true)` or `MAMBA_RS_BATCH_INVARIANT=1` | nothing; it is the default. Remove the call when convenient |
+| `set_fast_gemm(true)` or `MAMBA_RS_FAST_GEMM=1` | `GemmMode::CublasFast` or `MAMBA_RS_GEMM_MODE=cublas-fast` |
+| `MAMBA_RS_BI_GEMM_FAMILY=fixed` | `MAMBA_RS_BI_GEMM_FAMILY=inference`, or nothing for a model context |
+| `BiGemmFamily::Fixed` in code | `BiGemmFamily::Inference` |
+| a graph captured, then a flag changed | change the mode first, then capture |
+
+### What comes next
+
+0.7.0 is the first of a series. The kernels that surround the GEMMs in a
+step, the scan, the convolution and the norms, are the next target and
+carry most of a training step; the GEMM kernels keep moving toward cuBLAS
+Fast in the 0.7.x releases; and the architectures that run the portable
+deterministic kernels today (SM80, SM86, Hopper, the datacenter Blackwell
+parts and CC 12.1) get their own measured kernels in later releases.
+
+### Internals and tooling
+
+- The test tree is declared explicitly: 108 regression targets under
+  `tests/`, 15 benches under `benches/` with their own `main`, and 46
+  hardware and toolkit instruments under `tools/qualification/` behind the
+  non-default `qualification` feature. Kernel-candidate experiments moved
+  to `internal/experiments/` outside the crate; `internal/` is excluded
+  from the package. `qual/lanes.toml` gives every target a lane and a host
+  test keeps the manifest and the lanes in step.
+- The qualification runs behind the numbers on this page, with their raw
+  records, verification scripts and device identities, live under
+  `internal/perf/`.
+
+## 0.6.9 (2026-08-26)
+
+### Fixed
+
+- Build and release-pipeline fixes. No functional change: every route
+  returns bit-identical output to 0.6.8.
 
 ## 0.6.8 (2026-08-26)
 

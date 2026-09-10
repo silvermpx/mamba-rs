@@ -7,7 +7,7 @@
 //! The per-step inference path costs one matvec pipeline per token — a
 //! whole prompt/page of T tokens pays T dispatches. `forward_prefill` runs
 //! the training forward's batched-SGEMM pipeline instead (no activation
-//! tape), writes the post-norm_f output at EVERY position, and carries the
+//! tape), writes the post-norm_f output at every position, and carries the
 //! recurrent state so `forward_step` continues seamlessly.
 //!
 //! Featureless builds work but use the pure-Rust scalar GEMM (5-20x

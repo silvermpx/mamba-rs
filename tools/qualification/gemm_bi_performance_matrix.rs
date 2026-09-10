@@ -2939,7 +2939,7 @@ fn physical_kind_name(kind: PhysicalLaunchKind) -> &'static str {
 
 fn module_kind_name(kind: ModuleKind) -> &'static str {
     match kind {
-        ModuleKind::Fixed => "fixed",
+        ModuleKind::Fixed => "inference",
         ModuleKind::TriadScalar => "triad_scalar",
         ModuleKind::TriadSm80 => "triad_sm80",
         ModuleKind::TriadSm89Finalist => "triad_sm89_finalist",

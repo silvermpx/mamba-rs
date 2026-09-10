@@ -88,52 +88,30 @@ forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
 | out_proj | [d_inner, d_model] | No |
 | norm | [d_model] | — |
 
-## Numeric routes (scan + GEMM), and how one is selected
+## Numeric routes: the scan and the GEMM
 
-A "numeric route" is the pair (scan implementation, GEMM tier). Bits are
-guaranteed stable WITHIN a route (run-to-run, eager vs captured graph,
-save vs nosave prefill); ACROSS routes only tolerance parity holds —
-different reduction orders are different bit families, permanently.
+A numeric route is the pair of scan implementation and GEMM mode. Bits are
+stable within a route: run to run, eager against a captured graph, and
+between the saving and the non-saving prefill. Across routes only
+tolerance parity holds, because different reduction orders are different
+bit families.
 
-Scan: `ScanMode::{Sequential, Parallel, Auto}` on `MambaConfig`;
-`use_parallel(T, d_state)` is the single dispatch predicate (Auto routes
-parallel above T=256; `d_state > 64` always forces parallel because the
-sequential kernels cap per-thread state at 64). At the classifier shape
-(T=4621) the parallel scan is both ~5x faster and numerically preferable
-(~220x shorter rounding chains).
+The scan is chosen by `ScanMode::{Sequential, Parallel, Auto}` on
+`MambaConfig`. `Auto` uses the parallel scan above T = 256, and any
+`d_state` above 64 uses it at every length; that rule dates from a time
+when the sequential kernels were capped at 64 and stays because it is part
+of the numeric identity of existing runs. At long sequences the parallel
+scan is also the faster path.
 
-GEMM tiers, per `GpuCtx` flags:
-- default: cuBLAS (TF32 for f32 sgemm, PEDANTIC f32-accumulate for typed);
-- `set_fast_gemm(true)`: typed GEMMs use non-PEDANTIC `CUBLAS_COMPUTE_32F`
-  (tensor-core cuBLAS kernels; opt-in, unmeasured — see changelog);
-- `set_batch_invariant(true)`: forward/dW/dX and the typed decode matvec on
-  custom fixed-order kernels (deterministic, batch-invariant);
-- `set_bi_gemm_family(..)`: which family serves the forward under that flag
-  — `Triad` (`gemm_bi_triad/`, default; all three layouts, per-bucket
-  invariance) or `Inference` (`gemm_bi_inference/`; forward-only, a bit-identical
-  tile ladder with `SPLIT_K=1`, invariant by construction);
-- + `set_bi_tensor_cores(true)`: permission to use the separately identified
-  deterministic `mma.sync` contract. CC12.0 automatic dispatch is sealed to
-  the qualified 18-cell BF16/F16 NN/TN/NT table, whose physical routes include
-  both BK32 and BK64 schedules. CC12.1 and shapes outside that table decline
-  the SM120 route and continue through the portable deterministic ladder;
-- `set_f32_triad_policy(..)`: exact scalar F32 is the default. The TF32 policy
-  permits a frozen, separately identified deterministic TF32 route and falls
-  back to exact scalar `__fmaf_rn` when no such route is qualified.
+The GEMM is chosen by the context's `GemmMode`. In the default
+`Deterministic` mode a model context uses the Inference kernels and a
+trainer the Triad kernels; `CublasFast` and `CublasPedantic` select cuBLAS.
+The modes, the settings inside the deterministic mode, the environment
+variables and the graph rules are described in
+[gemm-modes.md](gemm-modes.md), and the measurements in
+[determinism-benchmarks.md](determinism-benchmarks.md).
 
-The deterministic custom routes assign each output to one owner and reduce K
-in a fixed ascending order. Numerical atomics and dynamic Split-K reductions
-are not part of the contract. The public typed forward, dW, and dX calls are
-the normal integration surface. The low-level forced SM120 resolver, tensor-map
-preparation, launch, and replay-validation calls exist for qualification and
-route census; forcing one does not make it eligible for automatic dispatch.
+## Checkpoint provenance
 
-Graph captures snapshot the full route (`ctx.gemm_route()`, including policy,
-physical schedule, compiler, artifact, and device identity) and replays assert
-it; the split forward/backward cycle refuses a mid-cycle flip. A qualified
-SM120 route must be prepared once in eager execution. Capture fails closed if
-its tensor-map cache entry is missing, stale for the current managed-allocation
-epoch, or backed by an untracked allocation; unsupported routes keep using the
-existing fallback rather than silently changing the numeric contract.
-Checkpoint provenance:
-`serialize` carries `scan_mode` + `rms_norm_eps` in the checkpoint.
+`serialize` stores `scan_mode` and `rms_norm_eps` in the checkpoint, so a
+loaded model reproduces the route it was trained with.

@@ -1,17 +1,17 @@
 # Mamba SSM Benchmarks
 
-Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
-Generation (48 GB), CUDA 13.2, Driver 595.45.
-
-The decode numbers below were measured with **the batch-invariant
-matvec kernel** (`kernels/gemm_bi_inference/`) — pure Rust +
-NVRTC, no Python or Triton dependency. That kernel is OPT-IN
-(`ctx.set_batch_invariant(true)` / `MAMBA_RS_BATCH_INVARIANT=1`); the
-shipped decode default dispatches cuBLAS gemv. Under the flag it
-guarantees bit-identical per-row output across batch sizes
-(KL ≈ 1e-11) and reaches ~86% of cuBLAS gemv throughput on M=1 decode.
-Parallel prefill rides the deterministic GEMM tiers
-([determinism-benchmarks.md](determinism-benchmarks.md)).
+Unless a heading names another board, the numbers were taken on an
+Intel Xeon Gold 5412U (48 threads) with an NVIDIA RTX 6000 Ada Generation
+(48 GB), CUDA 13.2, driver 595.45. Every table is a measurement of the
+release, board and toolkit named in its heading; the tables are kept as
+history and are not remeasured for each release. The decode numbers were
+taken with the batch-invariant kernels of the Inference family, which on
+0.6.x were an opt-in and in 0.7.0 are what the default
+`GemmMode::Deterministic` selects for a model context; a row's output is
+bit-identical at every batch size (cross-batch KL below 1e-10). The
+current kernel comparisons against cuBLAS are in
+[determinism-benchmarks.md](determinism-benchmarks.md) and the modes in
+[gemm-modes.md](gemm-modes.md).
 
 ## Serving prefill — classifier page shape (0.6.4, RTX 5090, CUDA 13.0)
 
@@ -26,20 +26,21 @@ download. Bit-identical outputs across 0.6.3 -> 0.6.4
 | pooled prefill, eager | 29.43 ms/page | 11.14 ms/page |
 | full-temporal prefill, eager | 30.10 ms/page | 11.53 ms/page |
 
-Main levers: T-tiled nosave conv (the serial per-channel walk left 146
-of 170 SMs idle at B=1), gating fused into the scan store, staged
-t-major B/C gathers, runtime-`d_state` scan smem, rmsnorm register
-hold. The remaining wall is the parallel scan itself plus the four
-forward GEMMs.
+What changed: the convolution is tiled over the sequence (the previous
+per-channel loop left 146 of 170 SMs idle at batch 1), the gating is fused
+into the scan's store, the B and C gathers are staged in time-major
+order, the scan's shared memory is sized from the run-time `d_state`, and
+the RMSNorm keeps its row in registers. What remains is the parallel scan
+itself plus the four forward GEMMs.
 
 ## Training step — production shape (2x RTX 5090, CUDA 13.0)
 
-d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
-tensor-core GEMM tier, graph lane. A kernel-optimization pass took
-this step from 441.4 to 131.5 ms/step (-70%) with run-to-run bit
-determinism preserved throughout (one deliberate bit-family break,
-baselines in the CHANGELOG). Peak-memory side: the h tape is gone
-(-12.3 GB at this shape), so a B=32 micro-batch fits a 32 GB card.
+d_model 384, 24 layers, B=8, T=1300, bf16, deterministic GEMMs with
+tensor cores, graph replay; the step time is for one GPU of the pair. A
+kernel pass took this step from 441.4 to 131.5 ms (-70%) with run-to-run
+bit determinism kept throughout (one deliberate change of bit family,
+recorded in the changelog). The activation tape of the scan is gone
+(-12.3 GB at this shape), so a micro-batch of 32 fits a 32 GB card.
 
 | Stage | ms/step |
 |-------|--------:|
@@ -53,9 +54,7 @@ baselines in the CHANGELOG). Peak-memory side: the h tape is gone
 
 Isolated ledger at 131.5 (x24-layer ms): scan fwd 10.7 / bwd ~20 plus
 fold partials, backward GEMMs 15.4 (dt_proj 3.5), conv dw 2.6 / dx
-1.5, dB/dC reducer ~2.5. The torch reference (fused CUDA
-selective-scan, atomicAdd backward - no bit contract) sits at 61.4
-ms/step on the same shape.
+1.5, dB/dC reducer ~2.5.
 
 ## LLM Inference — state-spaces/mamba-*-hf (end-to-end, graph-captured)
 
@@ -86,8 +85,9 @@ shorter window, a few percent below steady-state).
 | mamba-1.4b-hf | 532.9 ms | **224** | 4.46 |
 | mamba-2.8b-hf | 1009.2 ms | **122** | 8.19 |
 
-(Prompt length 128 < `PREFILL_PARALLEL_THRESHOLD = 256` → per-step prefill
-on the same kernel as decode, guaranteeing cross-batch bit-identity.)
+(A 128-token prompt is below the 256-token threshold of the parallel
+prefill, so it runs step by step on the decode kernels, which keeps the
+cross-batch bit identity.)
 
 ### Long-context prefill (mamba-370m-hf, bf16)
 
@@ -98,13 +98,12 @@ on the same kernel as decode, guaranteeing cross-batch bit-identity.)
 |  1024 |   87.9 ms |   86 |
 |  4096 |  328.8 ms |   80 |
 
-Linear O(T) scaling confirmed at large T (SSM structural advantage:
-no O(T²) cost as context grows). The 64→256 transition is the
-`PREFILL_PARALLEL_THRESHOLD` boundary — short prompts use the same
-T=1 SSM kernel as decode for cross-batch determinism; longer prompts
-switch to the batched parallel-prefill SSM path, whose GEMMs ride the
-tensor-core deterministic tier (4096-token prefill:
-843 → 329 ms against the scalar tier, 2.6× faster).
+The cost per token is flat at large T, as expected of a state-space
+model. Prompts shorter than 256 tokens run step by step on the decode
+kernels, which keeps the cross-batch bit identity; longer prompts switch
+to the batched parallel prefill, whose GEMMs run on the deterministic
+tensor-core kernels (4096-token prefill: 843 ms on the scalar kernels,
+329 ms on the tensor-core kernels).
 
 ### RL parallel-envs throughput (mamba-130m-hf, bf16)
 
@@ -121,10 +120,10 @@ identical to a standalone B=1 run on the same prompt —
 |  8 | 375 | 3 002 |  333 |
 | 16 | 314 | 5 026 |  199 |
 
-Per-env latency grows with B because B is a 2D grid dim
-(`(N/32, M=B)`) — each env loads its own weight stream. cuBLAS would
-share weights across env rows for higher aggregate throughput, but at
-the cost of cross-env determinism.
+Per-environment latency grows with B because each environment's row is
+its own block and loads its own weight stream. cuBLAS would share the
+weights across rows for higher aggregate throughput; this kernel keeps
+every environment's bits independent of the batch it is in.
 
 ### Numerical parity vs f32 (tests/gpu_bf16_parity.rs)
 
@@ -161,15 +160,6 @@ Greedy top-1 match over 15 tokens + KL(f32 ‖ bf16) on final logits:
 
 CUDA Graph capture saves ~45 µs/step in kernel launch overhead.
 
-## Deterministic training GEMM
-
-Opt-in deterministic GEMM tiers (scalar `MAMBA_RS_BATCH_INVARIANT` +
-tensor-core `MAMBA_RS_BI_TENSOR_CORES`): bit-identical training across
-runs on f32/bf16/f16; the TC tier is at-or-near cuBLAS parity even on
-d128/d256 models (1.04×/1.01× per step, bf16) and FASTER than
-cuBLAS-PEDANTIC from d768 up (0.70× per step at d1536 bf16). Full
-tables: [determinism-benchmarks.md](determinism-benchmarks.md).
-
 ## GPU Training (mamba-130m, B=1, T=32, graph-captured)
 
 | dtype | per step |
@@ -178,9 +168,8 @@ tables: [determinism-benchmarks.md](determinism-benchmarks.md).
 | bf16 | 38.9 ms |
 | f16  | 29.6 ms |
 
-(bf16 training at B=1 T=32 is dominated by cuBLAS GemmEx PEDANTIC
-matmuls on thin shapes; the deterministic TC tier — see above — is the
-fast path for serious training batches.)
+(Measured on 0.6.x with the cuBLAS Pedantic lane; bf16 training at B=1
+T=32 is dominated by thin-shape GEMMs.)
 
 ## RL Training (synthetic d_model=128, 3 layers, B=1, T=32, graph)
 
@@ -209,17 +198,18 @@ fast path for serious training batches.)
 
 ## Summary
 
-- End-to-end bf16/f16 gives **+42% to +82%** throughput over f32 with
-  no accuracy loss (15/15 greedy match on all four HF sizes).
-- **Bit-identical batch invariance** (KL ≈ 1e-11) on the same kernel
-  used by both decode (M=1) and RL parallel envs (M=N) — strict cross-
-  batch reproducibility behind the `MAMBA_RS_BATCH_INVARIANT` opt-in.
-- Long-context prefill 2.6× faster with parallel-prefill GEMMs on
-  the deterministic tensor-core tier.
-- CUDA Graph capture saves ~45 µs/step launch overhead.
-- Linear O(T) prefill scaling (4096-token prompt = same µs/tok as 1024-token).
-- Zero heap allocations per inference step — all buffers pre-allocated at
-  construction time.
+- bf16 and f16 give 42 to 82 percent more decode throughput than f32 on
+  the four HuggingFace sizes; 15 of 15 greedy tokens match f32 and the
+  final-logit KL is at most 1.1e-3.
+- Batch invariance: a row's bits are the same at batch 1 and at batch N
+  (cross-batch KL below 1e-10) on the kernels that serve both decode and
+  parallel environments, the default deterministic mode in 0.7.0.
+- Long prompts prefill on the deterministic tensor-core kernels: a
+  4096-token prompt takes 329 ms against 843 ms on the scalar kernels.
+- CUDA Graph capture saves about 45 µs of launch overhead per step.
+- Prefill cost per token is flat from 1024 to 4096 tokens.
+- All GPU buffers are allocated at construction; a step allocates nothing
+  by design.
 
 Reproduce:
 ```

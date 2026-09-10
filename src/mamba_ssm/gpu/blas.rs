@@ -481,8 +481,8 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
     // claims determinism.
     assert!(
         dy.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
-        "f32 TypedPtr under the batch-invariant flag would silently take \
-         non-deterministic cuBLAS — use gpu_gemm_bi_backward_dw_grad instead"
+        "f32 TypedPtr in the deterministic GEMM mode would silently take \
+         the vendor cuBLAS route; use gpu_gemm_bi_backward_dw_grad instead"
     );
     if ctx.batch_invariant() && dy.dtype != WeightDtype::F32 {
         return gemm_bi_backward_dw_typed(ctx, dw.ptr(), dy, x_saved, (batch, n_in, n_out));
@@ -552,8 +552,8 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     // Hard assert - same determinism rationale as the dW twin above.
     assert!(
         dx.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
-        "f32 TypedPtr under the batch-invariant flag would silently take \
-         non-deterministic cuBLAS — use gpu_gemm_bi_backward_dx_raw instead"
+        "f32 TypedPtr in the deterministic GEMM mode would silently take \
+         the vendor cuBLAS route; use gpu_gemm_bi_backward_dx_raw instead"
     );
     if ctx.batch_invariant() && dx.dtype != WeightDtype::F32 {
         return gemm_bi_backward_dx_typed(ctx, dx, dy, w, (batch, n_in, n_out));
@@ -4180,7 +4180,7 @@ pub fn gpu_gemm_typed_forward_raw(
     // Canonical routing is mode-first. All-F32 delegates to the shared NN
     // seam: deterministic mode follows the selected Inference/Triad family,
     // while cuBLAS Fast/Pedantic use the configured vendor handle. Remaining
-    // deterministic homogeneous-half triples follow the selected fixed-tile,
+    // deterministic homogeneous-half triples follow the selected Inference,
     // Triad, or matvec coverage below; unsupported mixed triples fail closed.
     // Vendor modes reach GemmEx only after those deterministic branches are
     // dormant. Keep the registered legacy selector referenced.
@@ -4214,8 +4214,8 @@ pub fn gpu_gemm_typed_forward_raw(
     // matvec hold it — each is one reduction order for every M it serves.
     // Mixed a/b dtype combos have NO matvec_bi kernel (the a==b guard in
     // pick_bi_matvec): under the batch-invariant contract they FAIL LOUD
-    // below instead of silently taking non-deterministic cuBLAS.
-    // Family selector: the fixed-tile family serves the typed forward
+    // below instead of silently taking the vendor cuBLAS route.
+    // Family selector: the Inference family serves the typed forward
     // whole (its Tensor-Core instantiation covers bf16/f16), so it is
     // tried before the triad's buckets.
     if ctx.batch_invariant() && ctx.bi_gemm_family() == super::context::BiGemmFamily::Inference {

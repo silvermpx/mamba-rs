@@ -4802,16 +4802,24 @@ pub(crate) struct CapturedGemmGraphPlan {
 }
 
 impl CapturedGemmGraphPlan {
+    /// A plan is only as trustworthy as the agreement between its launch
+    /// digest and its routes, so that agreement is checked once here, when
+    /// the plan is built; the replay path then validates the routes against
+    /// the live context without hashing them again on every launch.
     pub(crate) fn new(
         context: GemmRouteIdentity,
         launches: ResolvedGemmLaunchSet,
         routes: Box<[ResolvedGemmRoute]>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let rebuilt = build_resolved_gemm_launch_set(&routes)?;
+        if rebuilt != launches {
+            return Err("captured GEMM graph plan digest does not match its routes".into());
+        }
+        Ok(Self {
             context,
             launches,
             routes,
-        }
+        })
     }
 
     pub(crate) fn routes(&self) -> &[ResolvedGemmRoute] {
@@ -4825,14 +4833,11 @@ impl CapturedGemmGraphPlan {
         launch: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         ctx.ensure_gemm_usable()?;
-        self.context.ensure_current(ctx.gemm_route(), label)?;
-        let mut live_launch_set = ResolvedGemmLaunchSetBuilder::new(self.routes().len())?;
+        let live = ctx.gemm_route();
+        self.context.ensure_current(live, label)?;
         for route in self.routes() {
-            ctx.validate_resolved_gemm_route(route, label)?;
-            live_launch_set.push(route)?;
+            ctx.validate_resolved_gemm_route_in(&live, route, label)?;
         }
-        self.launches
-            .ensure_current(live_launch_set.finish()?, label)?;
         launch()
     }
 }

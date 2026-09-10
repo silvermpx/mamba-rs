@@ -1246,7 +1246,7 @@ fn source_sha() -> Result<String, String> {
     for path in [
         "src/mamba_ssm/gpu/gemm_bi_inference.rs",
         "src/mamba_ssm/gpu/kernel_identity.rs",
-        "tests/gemm_bi_fixed_performance.rs",
+        "tests/gemm_bi_inference_performance.rs",
         "tests/support/fixed_sm89_toolkit_admission.rs",
     ] {
         digest.update(path.as_bytes());

@@ -2,7 +2,10 @@
 
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
 Generation (48 GB), CUDA 13.2, Driver 595.45. GPU training-step
-sections were measured on 2x RTX 5090 (CUDA 13.0) as marked.
+sections were measured on 2x RTX 5090 (CUDA 13.0) as marked. Every table
+is a measurement of the release named in its heading and is kept as
+history; the current kernel comparisons against cuBLAS are in
+[determinism-benchmarks.md](determinism-benchmarks.md).
 
 > **Note**: all numbers below are against synthetic weights via
 > `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet
@@ -12,24 +15,23 @@ sections were measured on 2x RTX 5090 (CUDA 13.0) as marked.
 
 ## Training step — production shape (2x RTX 5090, CUDA 13.0)
 
-d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 179.4 -> 165.2
-ms/step in the latest optimization pass. The chunk-scan forward now runs one head per
-128-thread cooperative block with a triangle-packed decayed tile
-(replacing a 32-thread block behind 32 KB of static shared memory at
-5-6% occupancy), bias-add + RoPE fuse into one launch, and the
-per-layer residual round trip is gone - all bit-identical (the eleven
-gradient hash arms and every parity suite match the prior release).
-The Mamba-3 serving surface is `run_full` plus the pooled prefill
-graph; see the changelog.
+d_model 384, 24 layers, B=8, T=1300, bf16, graph replay, one GPU of the
+pair: 179.4 ms per step before the 0.6.4 kernel pass, 165.2 ms after.
+The chunked-scan forward now runs one head per 128-thread block with a
+triangle-packed decayed tile (it used to run a 32-thread block behind
+32 KB of static shared memory at 5 to 6 percent occupancy), the bias add
+and the RoPE rotation are one launch, and the per-layer residual round
+trip is gone. All of it is bit-identical to the previous release: the
+gradient digests and every parity suite match.
 
-## Training step — the prior optimization pass (2x RTX 5090, CUDA 13.0)
+## Training step — the earlier kernel pass (2x RTX 5090, CUDA 13.0)
 
-d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 636 -> 179.4
-ms/step (-72%) across that pass. The dominant backward kernel
-(m3_dqkv) went 11.4 -> 1.94 ms/launch via shared pair/decay matrices,
-t-split lane widening and the chunk-parallel backward decomposition
-(state terms + state passing + parallel chunks, mirroring the
-forward's three-phase structure).
+Same shape: 636 ms per step before that pass, 179.4 ms after (-72%). The
+dominant backward kernel went from 11.4 ms to 1.94 ms per launch by
+staging the pair and decay matrices in shared memory, widening the
+per-thread work along the sequence, and splitting the backward into
+state terms, state passing and parallel chunks, the same three-phase
+structure as the forward.
 
 ## GPU Inference (T=1 step, default config: d_model=128, 4 layers, nheads=16, headdim=16)
 
@@ -55,12 +57,13 @@ pipeline, not a real LLM). From `bench_bf16_vs_f32::bench_m3_bf16_vs_f32_synthet
 
 ## GPU Training — multi-chunk step (0.6; B=1, T=256, 24 layers, d_model=384)
 
-Production training runs the chunked parallel scan at multi-chunk
-sequence lengths; earlier editions of this table timed a T=32
-sequential configuration that production never runs, and those numbers
-are retired. Measured through the public trainer (`Mamba3Trainer::step`,
-full forward + backward + AdamW + sync), on a GPU shared with other
-load — treat the ratios as the claim:
+Training runs the chunked parallel scan at multi-chunk sequence lengths;
+earlier editions of this table timed a T=32 sequential configuration that
+is never used, and those numbers are retired. Measured through the public
+trainer (`Mamba3Trainer::step`: forward, backward, AdamW and sync). The
+first two columns were taken on a GPU shared with other load, so their
+ratio is the claim, not their absolute values; the last column is the
+clean re-measurement:
 
 | dtype | before the 0.6 kernel pass | after (shared Ada) | idle RTX 5090 |
 |-------|---------------------------:|-------------------:|--------------:|
@@ -80,7 +83,8 @@ chunk-parallel angle accumulation.
 ## GPU Prompt Prefill (0.6; T=4621, 24 layers, d_model=384, f32)
 
 One-pass prompt window through the chunked pipeline
-(`tests/m3_prefill_bench.rs`), same shared-box caveat:
+(`tools/qualification/m3_prefill_bench.rs`), same shared-GPU caveat for
+the first rows:
 
 | stage | ms/prefill |
 |-------|-----------:|
@@ -94,10 +98,10 @@ release build): **23.65 ms/prefill — 42.3 prefills/s**.
 
 ## Large d_state capacity cost (0.6; Mamba-1 fused decode step, d_model=256, 4 layers)
 
-Measured on the MAMBA-1 fused decode step (the same JIT state-capacity
-mechanism covers every generation; a Mamba-3 twin of this table rides
-the release re-measure). Past the register budget the compiler spills
-to local memory — correct and measurably slower:
+Measured on the Mamba SSM fused decode step; the same compile-time
+state-capacity mechanism covers both architectures, and no Mamba-3 twin
+of this table has been measured. Past the register budget the compiler
+spills to local memory, which is correct and measurably slower:
 
 | d_state | ms/step |
 |--------:|--------:|
@@ -136,14 +140,17 @@ to local memory — correct and measurably slower:
 
 Linear scaling to B=64; larger batches approach memory-bandwidth limits.
 
-## Mamba-3 vs Mamba SSM Comparison (default config, synthetic)
+## Mamba-3 and Mamba SSM at the default synthetic config
+
+The two default configs differ (Mamba-3 has four layers and heads, Mamba
+SSM three layers and a convolution), so these are step costs of two
+different tiny models on the same box, not a ranking of the architectures.
 
 |   | Mamba-3 | Mamba SSM | Notes |
 |---|--------:|--------:|-------|
-| CPU Inference B=1 | **64.5 us** | 86.8 us | M3 faster — no conv1d, BLAS matvec |
-| GPU Inference B=1 (Graph) | 87 us | 79 us | Similar (M3 has 4 layers vs M1 3) |
-| GPU Training Fwd+Bwd (T=32, tiny shape) | 1 784 us | 1 653 us | retired micro-shape number, kept only for this cross-model comparison; production-scale numbers above |
-| CPU Training Fwd+Bwd | 3 635 us | 14 859 us | M3 **4.1× faster** — no conv1d backward |
+| CPU Inference B=1 | 64.5 us | 86.8 us | no conv1d, BLAS matvec |
+| GPU Inference B=1 (Graph) | 87 us | 79 us | 4 layers against 3 |
+| CPU Training Fwd+Bwd | 3 635 us | 14 859 us | no conv1d backward |
 
 ## Key Differences from Mamba SSM
 
@@ -154,13 +161,13 @@ Linear scaling to B=64; larger batches approach memory-bandwidth limits.
 - **Multi-head B/C** with per-group BCNorm.
 - **4 persistent recurrent states** (SSM + K + V + angle) vs 2 in Mamba SSM
   (conv_state + ssm_state).
-- Implemented via NVRTC-compiled CUDA kernels across 5 `.cu` files.
+- Implemented as NVRTC-compiled CUDA kernels.
 
 ## Optimizations
 
 - SIMD SSM recurrence via `pulp` (CPU inference + training).
 - BLAS matvec for `in_proj` / `out_proj` (CPU inference).
-- CUDA Graph capture for GPU inference (~1.6× speedup).
+- CUDA Graph capture for GPU inference (the eager and graph columns above).
 - Flat weight buffer + `WeightSlice` for CUDA Graph safety.
 - Zero heap allocations per inference step.
 - `disable_event_tracking()` for CUDA Graph capture stability.
@@ -174,20 +181,13 @@ cargo bench --features cuda --bench m3_gpu_benchmark
 cargo bench --bench m3_cpu_benchmark
 cargo test --release --features "cuda hf qualification" --test bench_bf16_vs_f32 \
     bench_m3_bf16_vs_f32_synthetic -- --ignored --nocapture
-cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
-    rl_ -- --ignored --nocapture
 ```
 
 ## Deterministic GEMM
 
-Mamba-3 shares the deterministic GEMM layer with Mamba SSM on BOTH
-sides: the trainer forward/backward and the inference prefill all route
-through the context-carrying dispatcher, so the opt-in tiers
-(`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_BI_TENSOR_CORES`) and the family
-selector (`MAMBA_RS_BI_GEMM_FAMILY=triad|inference`; legacy `fixed` remains
-an input alias) applies to inference
-exactly as they do to training, with the same contracts and CUDA-Graph
-guards (`presize_bi_upcast_scratch_for_train_m3`; the capture identity
-is `ctx.gemm_route()`, which carries the family). Measurement tables,
-including a family comparison at a prefill shape:
+Mamba-3 shares the GEMM layer with Mamba SSM: the trainer, the inference
+prefill and the decode step all multiply through the context, so the
+context's `GemmMode` and its settings apply to inference exactly as to
+training, with the same graph guards. The modes are described in
+[gemm-modes.md](gemm-modes.md) and the kernel measurements in
 [determinism-benchmarks.md](determinism-benchmarks.md).

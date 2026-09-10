@@ -1,4 +1,4 @@
-//! Correctness of the FIXED-tile batch-invariant GEMM
+//! Correctness of the fixed-tile batch-invariant GEMM
 //! (`kernels/gemm_bi_inference/`, `BiGemmFamily::Inference`) against a CPU
 //! reference, across shapes that exercise the tile tails.
 //!

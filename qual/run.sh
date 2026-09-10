@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Qualification runner: executes one lane of qual/lanes.toml on a GPU box.
+# Lane runner: executes or lists one lane of qual/lanes.toml on a GPU box.
 #
-#   qual/run.sh gate       every-run correctness (plain battery)
-#   qual/run.sh contract   pre-release / post-edit / post-merge bit gates
-#   qual/run.sh record     lists the manual instruments (never auto-runs)
+#   qual/run.sh gate           every-run correctness (plain battery)
+#   qual/run.sh contract       pre-release / post-edit / post-merge bit gates
+#   qual/run.sh record         lists the manual instruments under tests/
+#   qual/run.sh bench          lists the bench entry points
+#   qual/run.sh qualification  lists the qualification tools
 #
 # Set MAMBA_RS_ACCEPTANCE_TSV to also capture the contract lane's cells
 # for examples/acceptance_diff.
@@ -35,10 +37,18 @@ contract)
     ;;
 record)
     echo "record-lane instruments (run by hand, one at a time):"
-    suites record | sed 's/^/  cargo test --release --features cuda --test /;s/$/ -- --ignored --nocapture/'
+    suites record | sed 's/^/  cargo test --release --features "cuda hf" --test /;s/$/ -- --ignored --nocapture/'
+    ;;
+bench)
+    echo "bench entry points (each runs every instrument, or the names given after --):"
+    suites bench | sed 's/^/  cargo bench --features cuda --bench /'
+    ;;
+qualification)
+    echo "qualification tools (built only with the qualification feature; run one on its board):"
+    suites qualification | sed 's/^/  cargo test --release --features "cuda hf qualification" --test /;s/$/ -- --ignored --nocapture/'
     ;;
 *)
-    echo "usage: qual/run.sh [gate|contract|record]" >&2
+    echo "usage: qual/run.sh [gate|contract|record|bench|qualification]" >&2
     exit 2
     ;;
 esac

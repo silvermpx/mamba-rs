@@ -234,12 +234,7 @@ fn bi_gemm_family_from_result(
         Ok(value) => match value.trim() {
             "" => Ok(BiGemmFamily::Triad),
             value if value.eq_ignore_ascii_case("triad") => Ok(BiGemmFamily::Triad),
-            value
-                if value.eq_ignore_ascii_case("inference")
-                    || value.eq_ignore_ascii_case("fixed") =>
-            {
-                Ok(BiGemmFamily::Inference)
-            }
+            value if value.eq_ignore_ascii_case("inference") => Ok(BiGemmFamily::Inference),
             value => Err(format!(
                 "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not a recognized family; \
                  only inference or triad are accepted"
@@ -358,10 +353,10 @@ impl HalfTriadPolicy {
     }
 }
 
-/// The explicit half policy, `None` when the environment names none: the
-/// tensor-core tier then runs its fastest deterministic route (stream-K
-/// where the SM89 rule admits it), and `tiled` opts back into bit parity
-/// with the tiled kernels.
+/// The explicit half policy, `None` when the environment names none. The
+/// resolver then keeps the tiled policy, which reproduces the portable
+/// tensor-core kernels bit for bit; `streamk` is the explicit opt-in to the
+/// measured stream-K routes and their own fold order.
 fn half_triad_policy_from_result(
     value: Result<String, std::env::VarError>,
 ) -> Result<Option<HalfTriadPolicy>, String> {
@@ -426,11 +421,7 @@ impl GemmRouteRecordingGuard<'_> {
             .ensure_current(self.ctx.gemm_route(), "GEMM graph capture")?;
         let launches = build_resolved_gemm_launch_set(&recorder.routes)?;
         let routes = recorder.routes.into_boxed_slice();
-        Ok(CapturedGemmGraphPlan::new(
-            recorder.context,
-            launches,
-            routes,
-        ))
+        CapturedGemmGraphPlan::new(recorder.context, launches, routes)
     }
 
     pub(crate) fn finish_trace(self) -> Result<RecordedGemmTrace, String> {
@@ -464,11 +455,7 @@ impl GemmRouteRecordingGuard<'_> {
             return Ok(None);
         };
         let routes = recorder.routes.into_boxed_slice();
-        Ok(Some(CapturedGemmGraphPlan::new(
-            recorder.context,
-            launches,
-            routes,
-        )))
+        CapturedGemmGraphPlan::new(recorder.context, launches, routes).map(Some)
     }
 }
 
@@ -540,7 +527,7 @@ pub struct GpuCtx {
     bi_tensor_cores: std::cell::Cell<bool>,
     /// Which deterministic family serves the forward while
     /// `batch_invariant` is on. Env: MAMBA_RS_BI_GEMM_FAMILY
-    /// (`triad` | `fixed`). Part of the numeric route, so it rides
+    /// (`triad` | `inference`). Part of the numeric route, so it rides
     /// [`GpuCtx::gemm_route`] into every capture identity.
     bi_gemm_family: std::cell::Cell<BiGemmFamily>,
     /// Explicit numeric policy for deterministic batch-invariant f32 GEMMs.
@@ -1495,7 +1482,19 @@ impl GpuCtx {
         route: &ResolvedGemmRoute,
         label: &str,
     ) -> Result<(), String> {
-        let context = self.gemm_route();
+        self.validate_resolved_gemm_route_in(&self.gemm_route(), route, label)
+    }
+
+    /// The same validation against a route identity the caller already
+    /// holds, so a graph replay computes the live identity once for all of
+    /// its routes.
+    pub(crate) fn validate_resolved_gemm_route_in(
+        &self,
+        context: &GemmRouteIdentity,
+        route: &ResolvedGemmRoute,
+        label: &str,
+    ) -> Result<(), String> {
+        let context = *context;
         let inference_terminal = matches!(
             route.backend,
             PhysicalGemmBackend::InferenceScalarFmaV1
@@ -1515,7 +1514,7 @@ impl GpuCtx {
                 && route.backend == PhysicalGemmBackend::MmaTf32RnaV1
                 && route.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3");
         if inference_terminal {
-            return self.validate_inference_terminal_route(route, label);
+            return self.validate_inference_terminal_route(&context, route, label);
         }
         if context.policy.bi_gemm_family == BiGemmFamily::Inference
             && route.backend == PhysicalGemmBackend::Sm120TmaFmaExactV1
@@ -1711,10 +1710,10 @@ impl GpuCtx {
 
     fn validate_inference_terminal_route(
         &self,
+        context: &GemmRouteIdentity,
         route: &ResolvedGemmRoute,
         label: &str,
     ) -> Result<(), String> {
-        let context = self.gemm_route();
         let spec = super::gemm_bi_inference::identity::terminal(route.symbol)
             .ok_or_else(|| format!("{label}: unknown Inference terminal"))?;
         spec.validate_route(route)?;
@@ -2429,14 +2428,21 @@ mod tests {
                 "{value:?}"
             );
         }
-        for value in ["fixed", "\nFiXeD ", "inference", " \nInFeReNcE\t"] {
+        for value in ["inference", " \nInFeReNcE\t"] {
             assert_eq!(
                 bi_gemm_family_from_result(Ok(value.into()), BiGemmFamily::Triad).unwrap(),
                 BiGemmFamily::Inference,
                 "{value:?}"
             );
         }
-        for value in ["gemm_bi", "batch_invariant", "warptile", "wmma", "other"] {
+        for value in [
+            "fixed",
+            "gemm_bi",
+            "batch_invariant",
+            "warptile",
+            "wmma",
+            "other",
+        ] {
             let error = bi_gemm_family_from_result(Ok(value.into()), BiGemmFamily::Triad)
                 .expect_err("unknown family names must fail");
             assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");

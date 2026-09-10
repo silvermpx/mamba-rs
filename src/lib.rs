@@ -4,8 +4,9 @@
 //! Supports **Mamba SSM** (Gu & Dao, 2023) and **Mamba-3 SISO** (Lahoti
 //! et al., 2026) on CPU and GPU, with full inference and training pipelines.
 //!
-//! Standalone — no PyTorch, no Triton, no Burn, no Candle. Kernels compile
-//! at runtime via NVRTC.
+//! No Python, no C++ build step and no framework dependency: the kernels
+//! compile at run time through NVRTC, and the GPU path links only the CUDA
+//! driver API and cuBLAS.
 //!
 //! ## Capabilities
 //!
@@ -15,9 +16,33 @@
 //! - `WeightDtype::{F32, Bf16, F16}` with f32 master state and accumulation;
 //!   GEMM product precision follows the selected numeric route
 //! - CUDA Graph capture for inference and training steps
-//! - Deterministic batch-invariant f32/bf16/f16 GEMM routes for inference
-//!   and training
+//! - Deterministic f32/bf16/f16 GEMM kernels for inference and training,
+//!   the default since 0.7.0; the inference kernels are batch-invariant,
+//!   the training kernels within one dispatch bucket
 //! - HuggingFace safetensors loader for Mamba SSM checkpoints
+//!
+//! ## GEMM modes (CUDA)
+//!
+//! Every GPU context carries a [`mamba_ssm::gpu::GemmMode`]:
+//!
+//! - `Deterministic` (default): the crate's own fixed-reduction-order kernels
+//!   serve every GEMM that goes through the context; cuBLAS is never called
+//!   in this mode. Model contexts use the Inference family, trainers and
+//!   plain contexts the Triad family.
+//! - `CublasFast`: cuBLAS with TF32 permitted for f32 operands and f32
+//!   accumulation for half operands.
+//! - `CublasPedantic`: cuBLAS with pedantic f32 compute, the default of
+//!   0.6.9 and earlier.
+//!
+//! Select the mode at construction (`GpuCtx::new_with_mode`, the model and
+//! trainer `*_with_mode` constructors, or `MAMBA_RS_GEMM_MODE` for the
+//! environment-reading constructors) or change it with
+//! `GpuCtx::set_gemm_mode`, which is refused while a graph is being captured.
+//! Storage dtype, mode, family and the f32/half policies are separate
+//! settings. The guide is
+//! <https://github.com/silvermpx/mamba-rs/blob/main/docs/gemm-modes.md> and
+//! the measurements are in
+//! <https://github.com/silvermpx/mamba-rs/blob/main/docs/determinism-benchmarks.md>.
 //!
 //! ## Module Structure
 //!
@@ -25,12 +50,14 @@
 //! - [`mamba3_siso`] — Mamba-3 SISO (CPU + GPU forward, backward, training)
 //! - [`module`] — high-level backbone and LM wrappers, HF integration
 //! - [`ops`] — shared dimensions, BLAS, norms, fast-math helpers
+//! - [`dist`] — deterministic data-parallel training (one fixed-order
+//!   reduction per optimizer step)
 //! - [`config`], [`state`], [`weights`], [`serialize`] — Mamba SSM data types
 //!
 //! ## References
 //!
 //! - Gu & Dao, *Mamba: Linear-Time Sequence Modeling with Selective State
-//!   Spaces*, ICLR 2024.
+//!   Spaces*, arXiv:2312.00752, 2023.
 //! - Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
 //!   Principles*, ICLR 2026.
 
