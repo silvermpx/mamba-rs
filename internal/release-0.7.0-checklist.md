@@ -99,6 +99,16 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 - [x] Reconcile all66 actual Ada paired-Triad physical routes against retained
   assembly decisions: zero omitted accepted winners, foreign symbols or
   unexplained fallthroughs. Review: `internal/perf/final-auto-benchmarks-20260910/ada-triad-reachability-review.md`.
+- [x] Bounded Inference lower-toolkit audit: no already-qualified omitted
+  winner identified. Ada half, exact-F32 CopyPlan and TF32 RNA-wide selectors
+  explicitly cover12.8/13.0/13.2; narrower13.2 overrides have separate evidence
+  and preserve lower-toolkit incumbents. The fresh23-key SM120 TF32 admission
+  above belongs to Triad, not to the separate Inference selector.
+- [ ] Deferred optimization candidate, not a blocker for this assembly: SM120
+  Inference TF32 hot-B M128S2 on CUDA12.8/13.0. Older-source screen21 records
+  are favorable but do not supply current-source confirmation/post-AUTO proof.
+  Keep it in the follow-up inventory; do not widen a13.2 gate by assumption.
+  Evidence: `internal/perf/sm120-fixed-full-census-20260906/`.
 - [ ] Preserve or justify every route from the saved RTX 5090 inference and
   Triad snapshots; investigate any newly observed route or speed regression.
   The 66-cell assembly smoke passes132 eager/graph rows;65 physical routes
@@ -133,6 +143,12 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   This is not whole-model eager/graph bit equivalence or a throughput claim.
 - [ ] Confirm architecture/toolkit portability and fallback coverage for the
   advertised SM80–SM120 families, distinguishing compile-only from live tests.
+  The bounded source audit finds production portable half/exact-F32 floors
+  and no disconnected accepted winner in the traced paths. It does not qualify
+  performance on untested cards. Triad TF32 remains evidence-gated on SM80/86
+  and the empty-cohort SM90a/SM100 rows; guarded native half heuristics on
+  SM90a/SM100 are not measured winners. Audit:
+  `internal/perf/final-auto-benchmarks-20260910/architecture-release-wiring-audit.md`.
 
 Relevant existing integration tests include `inference_graph_route`,
 `training_graph_parity`, `f32_training_graph_parity`,
@@ -161,6 +177,12 @@ Select their actual supported cases and prerequisites before executing them.
   deltas in the changelog; do not multiply unrelated discovery ratios.
 - [ ] Refresh README, docs, API docstrings, examples and benchmark tables;
   remove obsolete comparisons, unsupported claims and filler.
+  In particular replace stale SM120 half18-cell descriptions (current source
+  has60 tiled/12 stream-K entries), do not extend CC12.0 evidence toCC12.1,
+  and distinguish measured overrides from guarded SM90a/SM100 heuristics.
+  SM120 half also interpolates within a guarded nearest-entry band; do not
+  describe either all nearby shapes as independently measured or every
+  unlisted shape as a portable fallback. Correct corresponding diagnostics.
 - [ ] Bump Cargo/manifests/lockfile and changelog consistently to 0.7.0.
 - [ ] Complete release tests and independent final review, then merge `main`.
 - [ ] Stop before publication until the owner explicitly approves the release.
