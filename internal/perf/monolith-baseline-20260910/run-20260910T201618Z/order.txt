@@ -1,0 +1,19 @@
+20:16:18 build old
+20:16:19 build new
+20:16:22 set D block 1 pos 1 arm old start
+20:17:35 set D block 1 pos 1 arm old rc=0
+20:17:40 set D block 1 pos 2 arm new start
+20:22:02 set D block 1 pos 2 arm new rc=0
+20:22:06 set D block 1 pos 3 arm new start
+20:24:03 set D block 1 pos 3 arm new rc=0
+20:24:07 set D block 1 pos 4 arm old start
+20:24:46 set D block 1 pos 4 arm old rc=0
+20:24:50 set D block 2 pos 1 arm old start
+20:25:30 set D block 2 pos 1 arm old rc=0
+20:25:34 set D block 2 pos 2 arm new start
+20:27:31 set D block 2 pos 2 arm new rc=0
+20:27:35 set D block 2 pos 3 arm new start
+20:29:33 set D block 2 pos 3 arm new rc=0
+20:29:37 set D block 2 pos 4 arm old start
+20:30:16 set D block 2 pos 4 arm old rc=0
+20:30:16 done

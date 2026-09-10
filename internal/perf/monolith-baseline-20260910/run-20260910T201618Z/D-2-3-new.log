@@ -1,0 +1,488 @@
+DEVICE DeviceIdentity { compute_capability: (8, 9), multiprocessor_count: 142, target: CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }, driver: DriverIdentity { api_version: 13020, build_sources: 7, build_digest: [209, 237, 197, 165, 188, 62, 16, 162, 104, 142, 33, 86, 141, 204, 189, 229, 226, 128, 220, 57, 20, 77, 216, 30, 133, 56, 67, 202, 152, 178, 208, 225] } }
+CONTEXT family=triad dtype=f32 arm=det batch_invariant=true family=Triad tensor_cores=false fast_gemm=false tf32=false
+CONTEXT family=triad dtype=f32 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=triad dtype=f32 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=triad cell=d128_in_proj op=nn dtype=f32 arm=det rel_l2_vs_pedantic=2.159e-7
+CHECK family=triad cell=d128_in_proj op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.797e-4
+CHECK family=triad cell=d128_in_proj op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nn dtype=f32 m=1024 k=128 n=512 arm=det iters=246 windows=21 p05_us=15.784 p50_us=15.798 p95_us=15.810
+TIMING family=triad cell=d128_in_proj op=nn dtype=f32 m=1024 k=128 n=512 arm=fast iters=639 windows=21 p05_us=5.652 p50_us=5.660 p95_us=5.689
+TIMING family=triad cell=d128_in_proj op=nn dtype=f32 m=1024 k=128 n=512 arm=pedantic iters=381 windows=21 p05_us=9.936 p50_us=9.946 p95_us=9.963
+CHECK family=triad cell=d128_in_proj op=tn dtype=f32 arm=det rel_l2_vs_pedantic=1.701e-7
+CHECK family=triad cell=d128_in_proj op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.823e-4
+CHECK family=triad cell=d128_in_proj op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=tn dtype=f32 m=1024 k=128 n=512 arm=det iters=112 windows=21 p05_us=35.399 p50_us=35.410 p95_us=35.447
+TIMING family=triad cell=d128_in_proj op=tn dtype=f32 m=1024 k=128 n=512 arm=fast iters=381 windows=21 p05_us=9.966 p50_us=9.979 p95_us=9.995
+TIMING family=triad cell=d128_in_proj op=tn dtype=f32 m=1024 k=128 n=512 arm=pedantic iters=304 windows=21 p05_us=12.676 p50_us=12.685 p95_us=12.712
+CHECK family=triad cell=d128_in_proj op=nt dtype=f32 arm=det rel_l2_vs_pedantic=2.397e-7
+CHECK family=triad cell=d128_in_proj op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.953e-4
+CHECK family=triad cell=d128_in_proj op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nt dtype=f32 m=1024 k=128 n=512 arm=det iters=228 windows=21 p05_us=17.144 p50_us=17.161 p95_us=17.175
+TIMING family=triad cell=d128_in_proj op=nt dtype=f32 m=1024 k=128 n=512 arm=fast iters=406 windows=21 p05_us=9.291 p50_us=9.297 p95_us=9.306
+TIMING family=triad cell=d128_in_proj op=nt dtype=f32 m=1024 k=128 n=512 arm=pedantic iters=282 windows=21 p05_us=13.729 p50_us=13.733 p95_us=13.740
+CHECK family=triad cell=d128_out_proj op=nn dtype=f32 arm=det rel_l2_vs_pedantic=1.849e-7
+CHECK family=triad cell=d128_out_proj op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.807e-4
+CHECK family=triad cell=d128_out_proj op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nn dtype=f32 m=1024 k=256 n=128 arm=det iters=386 windows=21 p05_us=10.099 p50_us=10.102 p95_us=10.112
+TIMING family=triad cell=d128_out_proj op=nn dtype=f32 m=1024 k=256 n=128 arm=fast iters=548 windows=21 p05_us=6.757 p50_us=6.763 p95_us=6.770
+TIMING family=triad cell=d128_out_proj op=nn dtype=f32 m=1024 k=256 n=128 arm=pedantic iters=434 windows=21 p05_us=8.685 p50_us=8.690 p95_us=8.694
+CHECK family=triad cell=d128_out_proj op=tn dtype=f32 arm=det rel_l2_vs_pedantic=1.945e-7
+CHECK family=triad cell=d128_out_proj op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.782e-4
+CHECK family=triad cell=d128_out_proj op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=tn dtype=f32 m=1024 k=256 n=128 arm=det iters=143 windows=21 p05_us=27.526 p50_us=27.533 p95_us=27.541
+TIMING family=triad cell=d128_out_proj op=tn dtype=f32 m=1024 k=256 n=128 arm=fast iters=386 windows=21 p05_us=9.699 p50_us=9.706 p95_us=9.715
+TIMING family=triad cell=d128_out_proj op=tn dtype=f32 m=1024 k=256 n=128 arm=pedantic iters=359 windows=21 p05_us=10.482 p50_us=10.490 p95_us=10.499
+CHECK family=triad cell=d128_out_proj op=nt dtype=f32 arm=det rel_l2_vs_pedantic=1.495e-7
+CHECK family=triad cell=d128_out_proj op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.974e-4
+CHECK family=triad cell=d128_out_proj op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nt dtype=f32 m=1024 k=256 n=128 arm=det iters=303 windows=21 p05_us=12.829 p50_us=12.839 p95_us=12.846
+TIMING family=triad cell=d128_out_proj op=nt dtype=f32 m=1024 k=256 n=128 arm=fast iters=711 windows=21 p05_us=5.016 p50_us=5.022 p95_us=5.029
+TIMING family=triad cell=d128_out_proj op=nt dtype=f32 m=1024 k=256 n=128 arm=pedantic iters=461 windows=21 p05_us=8.168 p50_us=8.170 p95_us=8.172
+CHECK family=triad cell=underfill op=nn dtype=f32 arm=det rel_l2_vs_pedantic=1.935e-7
+CHECK family=triad cell=underfill op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.802e-4
+CHECK family=triad cell=underfill op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nn dtype=f32 m=256 k=512 n=384 arm=det iters=309 windows=21 p05_us=12.666 p50_us=12.672 p95_us=12.679
+TIMING family=triad cell=underfill op=nn dtype=f32 m=256 k=512 n=384 arm=fast iters=381 windows=21 p05_us=9.979 p50_us=9.985 p95_us=9.988
+TIMING family=triad cell=underfill op=nn dtype=f32 m=256 k=512 n=384 arm=pedantic iters=315 windows=21 p05_us=12.190 p50_us=12.210 p95_us=12.239
+CHECK family=triad cell=underfill op=tn dtype=f32 arm=det rel_l2_vs_pedantic=1.649e-7
+CHECK family=triad cell=underfill op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.810e-4
+CHECK family=triad cell=underfill op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=tn dtype=f32 m=256 k=512 n=384 arm=det iters=49 windows=21 p05_us=80.353 p50_us=80.682 p95_us=80.849
+TIMING family=triad cell=underfill op=tn dtype=f32 m=256 k=512 n=384 arm=fast iters=481 windows=21 p05_us=7.822 p50_us=7.830 p95_us=7.836
+TIMING family=triad cell=underfill op=tn dtype=f32 m=256 k=512 n=384 arm=pedantic iters=400 windows=21 p05_us=9.539 p50_us=9.546 p95_us=9.551
+CHECK family=triad cell=underfill op=nt dtype=f32 arm=det rel_l2_vs_pedantic=1.763e-7
+CHECK family=triad cell=underfill op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.956e-4
+CHECK family=triad cell=underfill op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nt dtype=f32 m=256 k=512 n=384 arm=det iters=250 windows=21 p05_us=15.688 p50_us=15.696 p95_us=15.708
+TIMING family=triad cell=underfill op=nt dtype=f32 m=256 k=512 n=384 arm=fast iters=466 windows=21 p05_us=7.981 p50_us=7.985 p95_us=7.990
+TIMING family=triad cell=underfill op=nt dtype=f32 m=256 k=512 n=384 arm=pedantic iters=326 windows=21 p05_us=11.741 p50_us=11.754 p95_us=11.782
+CHECK family=triad cell=d768_in_proj op=nn dtype=f32 arm=det rel_l2_vs_pedantic=5.101e-7
+CHECK family=triad cell=d768_in_proj op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.805e-4
+CHECK family=triad cell=d768_in_proj op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nn dtype=f32 m=2048 k=768 n=3072 arm=det iters=16 windows=21 p05_us=247.824 p50_us=304.954 p95_us=328.448
+TIMING family=triad cell=d768_in_proj op=nn dtype=f32 m=2048 k=768 n=3072 arm=fast iters=39 windows=21 p05_us=102.265 p50_us=125.768 p95_us=130.967
+TIMING family=triad cell=d768_in_proj op=nn dtype=f32 m=2048 k=768 n=3072 arm=pedantic iters=14 windows=21 p05_us=295.497 p50_us=364.322 p95_us=381.349
+CHECK family=triad cell=d768_in_proj op=tn dtype=f32 arm=det rel_l2_vs_pedantic=5.919e-7
+CHECK family=triad cell=d768_in_proj op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.804e-4
+CHECK family=triad cell=d768_in_proj op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=tn dtype=f32 m=2048 k=768 n=3072 arm=det iters=13 windows=21 p05_us=318.139 p50_us=328.940 p95_us=335.006
+TIMING family=triad cell=d768_in_proj op=tn dtype=f32 m=2048 k=768 n=3072 arm=fast iters=30 windows=21 p05_us=133.769 p50_us=138.507 p95_us=140.732
+TIMING family=triad cell=d768_in_proj op=tn dtype=f32 m=2048 k=768 n=3072 arm=pedantic iters=15 windows=21 p05_us=268.356 p50_us=278.596 p95_us=284.331
+CHECK family=triad cell=d768_in_proj op=nt dtype=f32 arm=det rel_l2_vs_pedantic=1.037e-6
+CHECK family=triad cell=d768_in_proj op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.952e-4
+CHECK family=triad cell=d768_in_proj op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nt dtype=f32 m=2048 k=768 n=3072 arm=det iters=14 windows=21 p05_us=349.536 p50_us=365.625 p95_us=382.464
+TIMING family=triad cell=d768_in_proj op=nt dtype=f32 m=2048 k=768 n=3072 arm=fast iters=34 windows=21 p05_us=122.398 p50_us=157.756 p95_us=162.449
+TIMING family=triad cell=d768_in_proj op=nt dtype=f32 m=2048 k=768 n=3072 arm=pedantic iters=13 windows=21 p05_us=312.005 p50_us=367.143 p95_us=374.927
+CHECK family=triad cell=d768_out_proj op=nn dtype=f32 arm=det rel_l2_vs_pedantic=7.360e-7
+CHECK family=triad cell=d768_out_proj op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.801e-4
+CHECK family=triad cell=d768_out_proj op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nn dtype=f32 m=2048 k=1536 n=768 arm=det iters=29 windows=21 p05_us=137.181 p50_us=167.689 p95_us=171.176
+TIMING family=triad cell=d768_out_proj op=nn dtype=f32 m=2048 k=1536 n=768 arm=fast iters=63 windows=21 p05_us=62.968 p50_us=77.369 p95_us=79.368
+TIMING family=triad cell=d768_out_proj op=nn dtype=f32 m=2048 k=1536 n=768 arm=pedantic iters=27 windows=21 p05_us=145.749 p50_us=174.042 p95_us=177.455
+CHECK family=triad cell=d768_out_proj op=tn dtype=f32 arm=det rel_l2_vs_pedantic=4.510e-7
+CHECK family=triad cell=d768_out_proj op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.801e-4
+CHECK family=triad cell=d768_out_proj op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=tn dtype=f32 m=2048 k=1536 n=768 arm=det iters=21 windows=21 p05_us=192.651 p50_us=200.802 p95_us=207.138
+TIMING family=triad cell=d768_out_proj op=tn dtype=f32 m=2048 k=1536 n=768 arm=fast iters=48 windows=21 p05_us=82.261 p50_us=86.504 p95_us=88.771
+TIMING family=triad cell=d768_out_proj op=tn dtype=f32 m=2048 k=1536 n=768 arm=pedantic iters=29 windows=21 p05_us=137.643 p50_us=144.349 p95_us=146.750
+CHECK family=triad cell=d768_out_proj op=nt dtype=f32 arm=det rel_l2_vs_pedantic=4.733e-7
+CHECK family=triad cell=d768_out_proj op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.963e-4
+CHECK family=triad cell=d768_out_proj op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nt dtype=f32 m=2048 k=1536 n=768 arm=det iters=27 windows=21 p05_us=145.143 p50_us=182.765 p95_us=188.795
+TIMING family=triad cell=d768_out_proj op=nt dtype=f32 m=2048 k=1536 n=768 arm=fast iters=57 windows=21 p05_us=66.812 p50_us=86.228 p95_us=88.996
+TIMING family=triad cell=d768_out_proj op=nt dtype=f32 m=2048 k=1536 n=768 arm=pedantic iters=24 windows=21 p05_us=162.347 p50_us=191.147 p95_us=194.979
+CHECK family=triad cell=large_deep op=nn dtype=f32 arm=det rel_l2_vs_pedantic=1.036e-6
+CHECK family=triad cell=large_deep op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.798e-4
+CHECK family=triad cell=large_deep op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nn dtype=f32 m=4096 k=3072 n=1536 arm=det iters=8 windows=21 p05_us=1624.816 p50_us=1659.520 p95_us=1680.768
+TIMING family=triad cell=large_deep op=nn dtype=f32 m=4096 k=3072 n=1536 arm=fast iters=11 windows=21 p05_us=418.001 p50_us=429.801 p95_us=442.476
+TIMING family=triad cell=large_deep op=nn dtype=f32 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1062.016 p50_us=1083.256 p95_us=1115.884
+CHECK family=triad cell=large_deep op=tn dtype=f32 arm=det rel_l2_vs_pedantic=1.200e-6
+CHECK family=triad cell=large_deep op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.796e-4
+CHECK family=triad cell=large_deep op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=tn dtype=f32 m=4096 k=3072 n=1536 arm=det iters=8 windows=21 p05_us=1395.680 p50_us=1435.264 p95_us=1539.456
+TIMING family=triad cell=large_deep op=tn dtype=f32 m=4096 k=3072 n=1536 arm=fast iters=8 windows=21 p05_us=483.864 p50_us=504.320 p95_us=526.720
+TIMING family=triad cell=large_deep op=tn dtype=f32 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=947.712 p50_us=984.320 p95_us=997.980
+CHECK family=triad cell=large_deep op=nt dtype=f32 arm=det rel_l2_vs_pedantic=0.000e0
+CHECK family=triad cell=large_deep op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.959e-4
+CHECK family=triad cell=large_deep op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nt dtype=f32 m=4096 k=3072 n=1536 arm=det iters=8 windows=21 p05_us=2082.688 p50_us=2363.136 p95_us=2730.740
+TIMING family=triad cell=large_deep op=nt dtype=f32 m=4096 k=3072 n=1536 arm=fast iters=11 windows=21 p05_us=428.032 p50_us=458.287 p95_us=529.967
+TIMING family=triad cell=large_deep op=nt dtype=f32 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1178.976 p50_us=1225.344 p95_us=1290.624
+CHECK family=triad cell=prism_in_proj op=nn dtype=f32 arm=det rel_l2_vs_pedantic=0.000e0
+CHECK family=triad cell=prism_in_proj op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.808e-4
+CHECK family=triad cell=prism_in_proj op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nn dtype=f32 m=4621 k=384 n=1928 arm=det iters=21 windows=21 p05_us=194.790 p50_us=249.807 p95_us=252.840
+TIMING family=triad cell=prism_in_proj op=nn dtype=f32 m=4621 k=384 n=1928 arm=fast iters=39 windows=21 p05_us=102.954 p50_us=132.989 p95_us=138.319
+TIMING family=triad cell=prism_in_proj op=nn dtype=f32 m=4621 k=384 n=1928 arm=pedantic iters=18 windows=21 p05_us=225.164 p50_us=267.145 p95_us=279.211
+CHECK family=triad cell=prism_in_proj op=tn dtype=f32 arm=det rel_l2_vs_pedantic=5.555e-7
+CHECK family=triad cell=prism_in_proj op=tn dtype=f32 arm=fast rel_l2_vs_pedantic=2.795e-4
+CHECK family=triad cell=prism_in_proj op=tn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=tn dtype=f32 m=4621 k=384 n=1928 arm=det iters=17 windows=21 p05_us=238.588 p50_us=285.455 p95_us=298.225
+TIMING family=triad cell=prism_in_proj op=tn dtype=f32 m=4621 k=384 n=1928 arm=fast iters=40 windows=21 p05_us=99.814 p50_us=121.370 p95_us=126.541
+TIMING family=triad cell=prism_in_proj op=tn dtype=f32 m=4621 k=384 n=1928 arm=pedantic iters=21 windows=21 p05_us=192.558 p50_us=234.252 p95_us=240.542
+CHECK family=triad cell=prism_in_proj op=nt dtype=f32 arm=det rel_l2_vs_pedantic=7.505e-7
+CHECK family=triad cell=prism_in_proj op=nt dtype=f32 arm=fast rel_l2_vs_pedantic=2.958e-4
+CHECK family=triad cell=prism_in_proj op=nt dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nt dtype=f32 m=4621 k=384 n=1928 arm=det iters=13 windows=21 p05_us=337.841 p50_us=350.838 p95_us=356.982
+TIMING family=triad cell=prism_in_proj op=nt dtype=f32 m=4621 k=384 n=1928 arm=fast iters=52 windows=21 p05_us=78.592 p50_us=89.718 p95_us=92.455
+TIMING family=triad cell=prism_in_proj op=nt dtype=f32 m=4621 k=384 n=1928 arm=pedantic iters=16 windows=21 p05_us=256.640 p50_us=283.712 p95_us=288.522
+CONTEXT family=triad dtype=bf16 arm=det batch_invariant=true family=Triad tensor_cores=true fast_gemm=false tf32=false
+CONTEXT family=triad dtype=bf16 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=triad dtype=bf16 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=triad cell=d128_in_proj op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=3.047e-5
+CHECK family=triad cell=d128_in_proj op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=3.047e-5
+CHECK family=triad cell=d128_in_proj op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nn dtype=bf16 m=1024 k=128 n=512 arm=det iters=638 windows=21 p05_us=5.752 p50_us=5.756 p95_us=5.757
+TIMING family=triad cell=d128_in_proj op=nn dtype=bf16 m=1024 k=128 n=512 arm=fast iters=728 windows=21 p05_us=4.801 p50_us=4.809 p95_us=4.838
+TIMING family=triad cell=d128_in_proj op=nn dtype=bf16 m=1024 k=128 n=512 arm=pedantic iters=359 windows=21 p05_us=10.434 p50_us=10.442 p95_us=10.448
+CHECK family=triad cell=d128_in_proj op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=8.773e-7
+CHECK family=triad cell=d128_in_proj op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.331e-7
+CHECK family=triad cell=d128_in_proj op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=tn dtype=bf16 m=1024 k=128 n=512 arm=det iters=213 windows=21 p05_us=18.350 p50_us=18.355 p95_us=18.355
+TIMING family=triad cell=d128_in_proj op=tn dtype=bf16 m=1024 k=128 n=512 arm=fast iters=472 windows=21 p05_us=7.910 p50_us=7.934 p95_us=7.949
+TIMING family=triad cell=d128_in_proj op=tn dtype=bf16 m=1024 k=128 n=512 arm=pedantic iters=79 windows=21 p05_us=50.460 p50_us=50.462 p95_us=50.474
+CHECK family=triad cell=d128_in_proj op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=4.170e-5
+CHECK family=triad cell=d128_in_proj op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=4.170e-5
+CHECK family=triad cell=d128_in_proj op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nt dtype=bf16 m=1024 k=128 n=512 arm=det iters=411 windows=21 p05_us=9.316 p50_us=9.321 p95_us=9.326
+TIMING family=triad cell=d128_in_proj op=nt dtype=bf16 m=1024 k=128 n=512 arm=fast iters=488 windows=21 p05_us=7.634 p50_us=7.640 p95_us=7.645
+TIMING family=triad cell=d128_in_proj op=nt dtype=bf16 m=1024 k=128 n=512 arm=pedantic iters=112 windows=21 p05_us=35.145 p50_us=35.154 p95_us=35.163
+CHECK family=triad cell=d128_out_proj op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=2.699e-5
+CHECK family=triad cell=d128_out_proj op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.699e-5
+CHECK family=triad cell=d128_out_proj op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nn dtype=bf16 m=1024 k=256 n=128 arm=det iters=568 windows=21 p05_us=6.589 p50_us=6.591 p95_us=6.600
+TIMING family=triad cell=d128_out_proj op=nn dtype=bf16 m=1024 k=256 n=128 arm=fast iters=665 windows=21 p05_us=5.376 p50_us=5.379 p95_us=5.388
+TIMING family=triad cell=d128_out_proj op=nn dtype=bf16 m=1024 k=256 n=128 arm=pedantic iters=263 windows=21 p05_us=14.632 p50_us=14.636 p95_us=14.640
+CHECK family=triad cell=d128_out_proj op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=8.822e-7
+CHECK family=triad cell=d128_out_proj op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.346e-7
+CHECK family=triad cell=d128_out_proj op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=tn dtype=bf16 m=1024 k=256 n=128 arm=det iters=217 windows=21 p05_us=18.172 p50_us=18.177 p95_us=18.181
+TIMING family=triad cell=d128_out_proj op=tn dtype=bf16 m=1024 k=256 n=128 arm=fast iters=514 windows=21 p05_us=7.178 p50_us=7.190 p95_us=7.309
+TIMING family=triad cell=d128_out_proj op=tn dtype=bf16 m=1024 k=256 n=128 arm=pedantic iters=79 windows=21 p05_us=50.474 p50_us=50.487 p95_us=50.500
+CHECK family=triad cell=d128_out_proj op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=2.745e-5
+CHECK family=triad cell=d128_out_proj op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=2.745e-5
+CHECK family=triad cell=d128_out_proj op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nt dtype=bf16 m=1024 k=256 n=128 arm=det iters=710 windows=21 p05_us=5.349 p50_us=5.355 p95_us=5.359
+TIMING family=triad cell=d128_out_proj op=nt dtype=bf16 m=1024 k=256 n=128 arm=fast iters=744 windows=21 p05_us=4.658 p50_us=4.660 p95_us=4.670
+TIMING family=triad cell=d128_out_proj op=nt dtype=bf16 m=1024 k=256 n=128 arm=pedantic iters=329 windows=21 p05_us=11.662 p50_us=11.669 p95_us=11.675
+CHECK family=triad cell=underfill op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=2.344e-5
+CHECK family=triad cell=underfill op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.641e-3
+CHECK family=triad cell=underfill op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nn dtype=bf16 m=256 k=512 n=384 arm=det iters=571 windows=21 p05_us=6.621 p50_us=6.623 p95_us=6.626
+TIMING family=triad cell=underfill op=nn dtype=bf16 m=256 k=512 n=384 arm=fast iters=512 windows=21 p05_us=7.298 p50_us=7.306 p95_us=7.326
+TIMING family=triad cell=underfill op=nn dtype=bf16 m=256 k=512 n=384 arm=pedantic iters=151 windows=21 p05_us=25.933 p50_us=25.945 p95_us=25.960
+CHECK family=triad cell=underfill op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=2.049e-7
+CHECK family=triad cell=underfill op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.049e-7
+CHECK family=triad cell=underfill op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=tn dtype=bf16 m=256 k=512 n=384 arm=det iters=434 windows=21 p05_us=8.916 p50_us=8.919 p95_us=8.921
+TIMING family=triad cell=underfill op=tn dtype=bf16 m=256 k=512 n=384 arm=fast iters=665 windows=21 p05_us=5.522 p50_us=5.525 p95_us=5.531
+TIMING family=triad cell=underfill op=tn dtype=bf16 m=256 k=512 n=384 arm=pedantic iters=228 windows=21 p05_us=16.959 p50_us=16.967 p95_us=16.976
+CHECK family=triad cell=underfill op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=3.605e-5
+CHECK family=triad cell=underfill op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=3.605e-5
+CHECK family=triad cell=underfill op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nt dtype=bf16 m=256 k=512 n=384 arm=det iters=496 windows=21 p05_us=7.843 p50_us=7.843 p95_us=7.847
+TIMING family=triad cell=underfill op=nt dtype=bf16 m=256 k=512 n=384 arm=fast iters=568 windows=21 p05_us=6.532 p50_us=6.537 p95_us=6.540
+TIMING family=triad cell=underfill op=nt dtype=bf16 m=256 k=512 n=384 arm=pedantic iters=143 windows=21 p05_us=27.383 p50_us=27.398 p95_us=27.405
+CHECK family=triad cell=d768_in_proj op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=5.318e-5
+CHECK family=triad cell=d768_in_proj op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=5.318e-5
+CHECK family=triad cell=d768_in_proj op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nn dtype=bf16 m=2048 k=768 n=3072 arm=det iters=64 windows=21 p05_us=62.128 p50_us=72.256 p95_us=74.224
+TIMING family=triad cell=d768_in_proj op=nn dtype=bf16 m=2048 k=768 n=3072 arm=fast iters=51 windows=21 p05_us=77.663 p50_us=82.743 p95_us=84.811
+TIMING family=triad cell=d768_in_proj op=nn dtype=bf16 m=2048 k=768 n=3072 arm=pedantic iters=12 windows=21 p05_us=336.213 p50_us=398.507 p95_us=409.771
+CHECK family=triad cell=d768_in_proj op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=1.970e-6
+CHECK family=triad cell=d768_in_proj op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=9.138e-7
+CHECK family=triad cell=d768_in_proj op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=tn dtype=bf16 m=2048 k=768 n=3072 arm=det iters=46 windows=21 p05_us=86.573 p50_us=91.782 p95_us=93.562
+TIMING family=triad cell=d768_in_proj op=tn dtype=bf16 m=2048 k=768 n=3072 arm=fast iters=44 windows=21 p05_us=90.415 p50_us=92.721 p95_us=93.766
+TIMING family=triad cell=d768_in_proj op=tn dtype=bf16 m=2048 k=768 n=3072 arm=pedantic iters=11 windows=21 p05_us=354.118 p50_us=393.309 p95_us=401.594
+CHECK family=triad cell=d768_in_proj op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=1.226e-4
+CHECK family=triad cell=d768_in_proj op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=2.150e-3
+CHECK family=triad cell=d768_in_proj op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nt dtype=bf16 m=2048 k=768 n=3072 arm=det iters=56 windows=21 p05_us=71.058 p50_us=71.643 p95_us=72.776
+TIMING family=triad cell=d768_in_proj op=nt dtype=bf16 m=2048 k=768 n=3072 arm=fast iters=51 windows=21 p05_us=74.893 p50_us=76.982 p95_us=77.639
+TIMING family=triad cell=d768_in_proj op=nt dtype=bf16 m=2048 k=768 n=3072 arm=pedantic iters=11 windows=21 p05_us=358.865 p50_us=363.334 p95_us=367.802
+CHECK family=triad cell=d768_out_proj op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=8.136e-5
+CHECK family=triad cell=d768_out_proj op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=8.136e-5
+CHECK family=triad cell=d768_out_proj op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nn dtype=bf16 m=2048 k=1536 n=768 arm=det iters=105 windows=21 p05_us=37.927 p50_us=37.949 p95_us=37.966
+TIMING family=triad cell=d768_out_proj op=nn dtype=bf16 m=2048 k=1536 n=768 arm=fast iters=83 windows=21 p05_us=47.363 p50_us=47.425 p95_us=47.485
+TIMING family=triad cell=d768_out_proj op=nn dtype=bf16 m=2048 k=1536 n=768 arm=pedantic iters=21 windows=21 p05_us=188.660 p50_us=188.757 p95_us=188.855
+CHECK family=triad cell=d768_out_proj op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=1.970e-6
+CHECK family=triad cell=d768_out_proj op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=6.197e-7
+CHECK family=triad cell=d768_out_proj op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=tn dtype=bf16 m=2048 k=1536 n=768 arm=det iters=72 windows=21 p05_us=55.083 p50_us=55.211 p95_us=55.268
+TIMING family=triad cell=d768_out_proj op=tn dtype=bf16 m=2048 k=1536 n=768 arm=fast iters=79 windows=21 p05_us=50.137 p50_us=50.306 p95_us=50.435
+TIMING family=triad cell=d768_out_proj op=tn dtype=bf16 m=2048 k=1536 n=768 arm=pedantic iters=19 windows=21 p05_us=213.315 p50_us=213.369 p95_us=213.531
+CHECK family=triad cell=d768_out_proj op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=6.323e-5
+CHECK family=triad cell=d768_out_proj op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=3.875e-5
+CHECK family=triad cell=d768_out_proj op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nt dtype=bf16 m=2048 k=1536 n=768 arm=det iters=108 windows=21 p05_us=36.494 p50_us=41.737 p95_us=42.411
+TIMING family=triad cell=d768_out_proj op=nt dtype=bf16 m=2048 k=1536 n=768 arm=fast iters=100 windows=21 p05_us=38.605 p50_us=39.864 p95_us=40.458
+TIMING family=triad cell=d768_out_proj op=nt dtype=bf16 m=2048 k=1536 n=768 arm=pedantic iters=22 windows=21 p05_us=180.364 p50_us=208.477 p95_us=210.897
+CHECK family=triad cell=large_deep op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=1.291e-4
+CHECK family=triad cell=large_deep op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.147e-3
+CHECK family=triad cell=large_deep op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nn dtype=bf16 m=4096 k=3072 n=1536 arm=det iters=13 windows=21 p05_us=367.680 p50_us=380.748 p95_us=392.738
+TIMING family=triad cell=large_deep op=nn dtype=bf16 m=4096 k=3072 n=1536 arm=fast iters=17 windows=21 p05_us=255.759 p50_us=265.999 p95_us=273.950
+TIMING family=triad cell=large_deep op=nn dtype=bf16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1560.704 p50_us=1640.320 p95_us=1681.536
+CHECK family=triad cell=large_deep op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=4.451e-6
+CHECK family=triad cell=large_deep op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.012e-6
+CHECK family=triad cell=large_deep op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=tn dtype=bf16 m=4096 k=3072 n=1536 arm=det iters=11 windows=21 p05_us=350.767 p50_us=394.333 p95_us=405.969
+TIMING family=triad cell=large_deep op=tn dtype=bf16 m=4096 k=3072 n=1536 arm=fast iters=13 windows=21 p05_us=305.135 p50_us=330.988 p95_us=342.095
+TIMING family=triad cell=large_deep op=tn dtype=bf16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1222.400 p50_us=1526.240 p95_us=1575.680
+CHECK family=triad cell=large_deep op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=8.454e-5
+CHECK family=triad cell=large_deep op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=5.675e-5
+CHECK family=triad cell=large_deep op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nt dtype=bf16 m=4096 k=3072 n=1536 arm=det iters=13 windows=21 p05_us=317.361 p50_us=412.670 p95_us=425.433
+TIMING family=triad cell=large_deep op=nt dtype=bf16 m=4096 k=3072 n=1536 arm=fast iters=17 windows=21 p05_us=235.640 p50_us=271.240 p95_us=279.851
+TIMING family=triad cell=large_deep op=nt dtype=bf16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1228.032 p50_us=1595.648 p95_us=1664.384
+CHECK family=triad cell=prism_in_proj op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=3.619e-5
+CHECK family=triad cell=prism_in_proj op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=3.619e-5
+CHECK family=triad cell=prism_in_proj op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nn dtype=bf16 m=4621 k=384 n=1928 arm=det iters=66 windows=21 p05_us=59.826 p50_us=67.708 p95_us=68.624
+TIMING family=triad cell=prism_in_proj op=nn dtype=bf16 m=4621 k=384 n=1928 arm=fast iters=53 windows=21 p05_us=74.303 p50_us=76.839 p95_us=78.288
+TIMING family=triad cell=prism_in_proj op=nn dtype=bf16 m=4621 k=384 n=1928 arm=pedantic iters=16 windows=21 p05_us=254.836 p50_us=292.096 p95_us=303.168
+CHECK family=triad cell=prism_in_proj op=tn dtype=bf16 arm=det rel_l2_vs_pedantic=5.120e-6
+CHECK family=triad cell=prism_in_proj op=tn dtype=bf16 arm=fast rel_l2_vs_pedantic=8.276e-7
+CHECK family=triad cell=prism_in_proj op=tn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=tn dtype=bf16 m=4621 k=384 n=1928 arm=det iters=51 windows=21 p05_us=77.562 p50_us=77.643 p95_us=78.627
+TIMING family=triad cell=prism_in_proj op=tn dtype=bf16 m=4621 k=384 n=1928 arm=fast iters=72 windows=21 p05_us=54.670 p50_us=54.798 p95_us=55.083
+TIMING family=triad cell=prism_in_proj op=tn dtype=bf16 m=4621 k=384 n=1928 arm=pedantic iters=12 windows=21 p05_us=333.995 p50_us=334.080 p95_us=334.336
+CHECK family=triad cell=prism_in_proj op=nt dtype=bf16 arm=det rel_l2_vs_pedantic=9.235e-5
+CHECK family=triad cell=prism_in_proj op=nt dtype=bf16 arm=fast rel_l2_vs_pedantic=2.649e-3
+CHECK family=triad cell=prism_in_proj op=nt dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nt dtype=bf16 m=4621 k=384 n=1928 arm=det iters=80 windows=21 p05_us=49.521 p50_us=52.504 p95_us=54.413
+TIMING family=triad cell=prism_in_proj op=nt dtype=bf16 m=4621 k=384 n=1928 arm=fast iters=65 windows=21 p05_us=60.558 p50_us=61.015 p95_us=62.056
+TIMING family=triad cell=prism_in_proj op=nt dtype=bf16 m=4621 k=384 n=1928 arm=pedantic iters=13 windows=21 p05_us=297.137 p50_us=322.796 p95_us=334.592
+CONTEXT family=triad dtype=f16 arm=det batch_invariant=true family=Triad tensor_cores=true fast_gemm=false tf32=false
+CONTEXT family=triad dtype=f16 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=triad dtype=f16 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=triad cell=d128_in_proj op=nn dtype=f16 arm=det rel_l2_vs_pedantic=1.472e-5
+CHECK family=triad cell=d128_in_proj op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=1.472e-5
+CHECK family=triad cell=d128_in_proj op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nn dtype=f16 m=1024 k=128 n=512 arm=det iters=651 windows=21 p05_us=5.716 p50_us=5.719 p95_us=5.726
+TIMING family=triad cell=d128_in_proj op=nn dtype=f16 m=1024 k=128 n=512 arm=fast iters=679 windows=21 p05_us=5.305 p50_us=5.309 p95_us=5.313
+TIMING family=triad cell=d128_in_proj op=nn dtype=f16 m=1024 k=128 n=512 arm=pedantic iters=396 windows=21 p05_us=9.524 p50_us=9.529 p95_us=9.537
+CHECK family=triad cell=d128_in_proj op=tn dtype=f16 arm=det rel_l2_vs_pedantic=1.729e-6
+CHECK family=triad cell=d128_in_proj op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=2.989e-7
+CHECK family=triad cell=d128_in_proj op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=tn dtype=f16 m=1024 k=128 n=512 arm=det iters=213 windows=21 p05_us=18.355 p50_us=18.360 p95_us=18.370
+TIMING family=triad cell=d128_in_proj op=tn dtype=f16 m=1024 k=128 n=512 arm=fast iters=481 windows=21 p05_us=7.851 p50_us=7.864 p95_us=7.877
+TIMING family=triad cell=d128_in_proj op=tn dtype=f16 m=1024 k=128 n=512 arm=pedantic iters=316 windows=21 p05_us=12.223 p50_us=12.239 p95_us=12.262
+CHECK family=triad cell=d128_in_proj op=nt dtype=f16 arm=det rel_l2_vs_pedantic=3.810e-4
+CHECK family=triad cell=d128_in_proj op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=3.810e-4
+CHECK family=triad cell=d128_in_proj op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_in_proj op=nt dtype=f16 m=1024 k=128 n=512 arm=det iters=411 windows=21 p05_us=9.393 p50_us=9.397 p95_us=9.403
+TIMING family=triad cell=d128_in_proj op=nt dtype=f16 m=1024 k=128 n=512 arm=fast iters=625 windows=21 p05_us=5.844 p50_us=5.852 p95_us=5.857
+TIMING family=triad cell=d128_in_proj op=nt dtype=f16 m=1024 k=128 n=512 arm=pedantic iters=304 windows=21 p05_us=12.601 p50_us=12.608 p95_us=12.618
+CHECK family=triad cell=d128_out_proj op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.331e-4
+CHECK family=triad cell=d128_out_proj op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.331e-4
+CHECK family=triad cell=d128_out_proj op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nn dtype=f16 m=1024 k=256 n=128 arm=det iters=577 windows=21 p05_us=6.635 p50_us=6.641 p95_us=6.646
+TIMING family=triad cell=d128_out_proj op=nn dtype=f16 m=1024 k=256 n=128 arm=fast iters=744 windows=21 p05_us=4.786 p50_us=4.791 p95_us=4.799
+TIMING family=triad cell=d128_out_proj op=nn dtype=f16 m=1024 k=256 n=128 arm=pedantic iters=406 windows=21 p05_us=9.379 p50_us=9.385 p95_us=9.393
+CHECK family=triad cell=d128_out_proj op=tn dtype=f16 arm=det rel_l2_vs_pedantic=1.724e-6
+CHECK family=triad cell=d128_out_proj op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=3.034e-7
+CHECK family=triad cell=d128_out_proj op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=tn dtype=f16 m=1024 k=256 n=128 arm=det iters=216 windows=21 p05_us=18.223 p50_us=18.228 p95_us=18.232
+TIMING family=triad cell=d128_out_proj op=tn dtype=f16 m=1024 k=256 n=128 arm=fast iters=496 windows=21 p05_us=7.383 p50_us=7.397 p95_us=7.459
+TIMING family=triad cell=d128_out_proj op=tn dtype=f16 m=1024 k=256 n=128 arm=pedantic iters=386 windows=21 p05_us=9.890 p50_us=9.892 p95_us=9.898
+CHECK family=triad cell=d128_out_proj op=nt dtype=f16 arm=det rel_l2_vs_pedantic=1.399e-5
+CHECK family=triad cell=d128_out_proj op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=1.399e-5
+CHECK family=triad cell=d128_out_proj op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d128_out_proj op=nt dtype=f16 m=1024 k=256 n=128 arm=det iters=710 windows=21 p05_us=5.329 p50_us=5.339 p95_us=5.350
+TIMING family=triad cell=d128_out_proj op=nt dtype=f16 m=1024 k=256 n=128 arm=fast iters=784 windows=21 p05_us=4.484 p50_us=4.488 p95_us=4.493
+TIMING family=triad cell=d128_out_proj op=nt dtype=f16 m=1024 k=256 n=128 arm=pedantic iters=513 windows=21 p05_us=7.244 p50_us=7.258 p95_us=7.260
+CHECK family=triad cell=underfill op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.289e-4
+CHECK family=triad cell=underfill op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.289e-4
+CHECK family=triad cell=underfill op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nn dtype=f16 m=256 k=512 n=384 arm=det iters=579 windows=21 p05_us=6.598 p50_us=6.604 p95_us=6.607
+TIMING family=triad cell=underfill op=nn dtype=f16 m=256 k=512 n=384 arm=fast iters=638 windows=21 p05_us=5.725 p50_us=5.728 p95_us=5.735
+TIMING family=triad cell=underfill op=nn dtype=f16 m=256 k=512 n=384 arm=pedantic iters=332 windows=21 p05_us=11.557 p50_us=11.563 p95_us=11.579
+CHECK family=triad cell=underfill op=tn dtype=f16 arm=det rel_l2_vs_pedantic=4.940e-7
+CHECK family=triad cell=underfill op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=4.940e-7
+CHECK family=triad cell=underfill op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=tn dtype=f16 m=256 k=512 n=384 arm=det iters=440 windows=21 p05_us=8.869 p50_us=8.872 p95_us=8.876
+TIMING family=triad cell=underfill op=tn dtype=f16 m=256 k=512 n=384 arm=fast iters=651 windows=21 p05_us=5.560 p50_us=5.564 p95_us=5.570
+TIMING family=triad cell=underfill op=tn dtype=f16 m=256 k=512 n=384 arm=pedantic iters=359 windows=21 p05_us=10.682 p50_us=10.688 p95_us=10.696
+CHECK family=triad cell=underfill op=nt dtype=f16 arm=det rel_l2_vs_pedantic=2.048e-5
+CHECK family=triad cell=underfill op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=2.048e-5
+CHECK family=triad cell=underfill op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=underfill op=nt dtype=f16 m=256 k=512 n=384 arm=det iters=496 windows=21 p05_us=7.827 p50_us=7.833 p95_us=7.837
+TIMING family=triad cell=underfill op=nt dtype=f16 m=256 k=512 n=384 arm=fast iters=679 windows=21 p05_us=5.304 p50_us=5.305 p95_us=5.310
+TIMING family=triad cell=underfill op=nt dtype=f16 m=256 k=512 n=384 arm=pedantic iters=336 windows=21 p05_us=11.326 p50_us=11.331 p95_us=11.349
+CHECK family=triad cell=d768_in_proj op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.711e-4
+CHECK family=triad cell=d768_in_proj op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.711e-4
+CHECK family=triad cell=d768_in_proj op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nn dtype=f16 m=2048 k=768 n=3072 arm=det iters=64 windows=21 p05_us=62.256 p50_us=84.048 p95_us=84.992
+TIMING family=triad cell=d768_in_proj op=nn dtype=f16 m=2048 k=768 n=3072 arm=fast iters=63 windows=21 p05_us=61.586 p50_us=76.149 p95_us=77.808
+TIMING family=triad cell=d768_in_proj op=nn dtype=f16 m=2048 k=768 n=3072 arm=pedantic iters=15 windows=21 p05_us=260.710 p50_us=358.059 p95_us=366.319
+CHECK family=triad cell=d768_in_proj op=tn dtype=f16 arm=det rel_l2_vs_pedantic=3.376e-6
+CHECK family=triad cell=d768_in_proj op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=1.749e-6
+CHECK family=triad cell=d768_in_proj op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=tn dtype=f16 m=2048 k=768 n=3072 arm=det iters=46 windows=21 p05_us=90.335 p50_us=104.598 p95_us=105.803
+TIMING family=triad cell=d768_in_proj op=tn dtype=f16 m=2048 k=768 n=3072 arm=fast iters=44 windows=21 p05_us=89.991 p50_us=102.679 p95_us=104.119
+TIMING family=triad cell=d768_in_proj op=tn dtype=f16 m=2048 k=768 n=3072 arm=pedantic iters=14 windows=21 p05_us=276.919 p50_us=355.913 p95_us=359.717
+CHECK family=triad cell=d768_in_proj op=nt dtype=f16 arm=det rel_l2_vs_pedantic=5.314e-4
+CHECK family=triad cell=d768_in_proj op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=5.518e-4
+CHECK family=triad cell=d768_in_proj op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_in_proj op=nt dtype=f16 m=2048 k=768 n=3072 arm=det iters=56 windows=21 p05_us=71.077 p50_us=85.721 p95_us=91.593
+TIMING family=triad cell=d768_in_proj op=nt dtype=f16 m=2048 k=768 n=3072 arm=fast iters=51 windows=21 p05_us=76.097 p50_us=77.864 p95_us=84.695
+TIMING family=triad cell=d768_in_proj op=nt dtype=f16 m=2048 k=768 n=3072 arm=pedantic iters=14 windows=21 p05_us=279.918 p50_us=335.799 p95_us=365.419
+CHECK family=triad cell=d768_out_proj op=nn dtype=f16 arm=det rel_l2_vs_pedantic=4.594e-4
+CHECK family=triad cell=d768_out_proj op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=4.594e-4
+CHECK family=triad cell=d768_out_proj op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nn dtype=f16 m=2048 k=1536 n=768 arm=det iters=104 windows=21 p05_us=37.945 p50_us=42.170 p95_us=43.453
+TIMING family=triad cell=d768_out_proj op=nn dtype=f16 m=2048 k=1536 n=768 arm=fast iters=83 windows=21 p05_us=47.683 p50_us=48.793 p95_us=50.334
+TIMING family=triad cell=d768_out_proj op=nn dtype=f16 m=2048 k=1536 n=768 arm=pedantic iters=26 windows=21 p05_us=152.181 p50_us=166.951 p95_us=173.202
+CHECK family=triad cell=d768_out_proj op=tn dtype=f16 arm=det rel_l2_vs_pedantic=3.371e-6
+CHECK family=triad cell=d768_out_proj op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=1.197e-6
+CHECK family=triad cell=d768_out_proj op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=tn dtype=f16 m=2048 k=1536 n=768 arm=det iters=71 windows=21 p05_us=56.147 p50_us=59.219 p95_us=60.066
+TIMING family=triad cell=d768_out_proj op=tn dtype=f16 m=2048 k=1536 n=768 arm=fast iters=79 windows=21 p05_us=50.241 p50_us=51.978 p95_us=52.639
+TIMING family=triad cell=d768_out_proj op=tn dtype=f16 m=2048 k=1536 n=768 arm=pedantic iters=27 windows=21 p05_us=147.835 p50_us=160.692 p95_us=163.537
+CHECK family=triad cell=d768_out_proj op=nt dtype=f16 arm=det rel_l2_vs_pedantic=2.790e-4
+CHECK family=triad cell=d768_out_proj op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=2.790e-4
+CHECK family=triad cell=d768_out_proj op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=d768_out_proj op=nt dtype=f16 m=2048 k=1536 n=768 arm=det iters=109 windows=21 p05_us=36.516 p50_us=43.581 p95_us=45.122
+TIMING family=triad cell=d768_out_proj op=nt dtype=f16 m=2048 k=1536 n=768 arm=fast iters=102 windows=21 p05_us=38.571 p50_us=41.602 p95_us=43.038
+TIMING family=triad cell=d768_out_proj op=nt dtype=f16 m=2048 k=1536 n=768 arm=pedantic iters=26 windows=21 p05_us=150.770 p50_us=179.003 p95_us=184.044
+CHECK family=triad cell=large_deep op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.710e-4
+CHECK family=triad cell=large_deep op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.713e-4
+CHECK family=triad cell=large_deep op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nn dtype=f16 m=4096 k=3072 n=1536 arm=det iters=13 windows=21 p05_us=378.486 p50_us=384.551 p95_us=392.665
+TIMING family=triad cell=large_deep op=nn dtype=f16 m=4096 k=3072 n=1536 arm=fast iters=17 windows=21 p05_us=265.173 p50_us=270.396 p95_us=275.998
+TIMING family=triad cell=large_deep op=nn dtype=f16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1152.136 p50_us=1236.608 p95_us=1249.920
+CHECK family=triad cell=large_deep op=tn dtype=f16 arm=det rel_l2_vs_pedantic=6.634e-6
+CHECK family=triad cell=large_deep op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=1.243e-6
+CHECK family=triad cell=large_deep op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=tn dtype=f16 m=4096 k=3072 n=1536 arm=det iters=11 windows=21 p05_us=430.639 p50_us=445.719 p95_us=452.887
+TIMING family=triad cell=large_deep op=tn dtype=f16 m=4096 k=3072 n=1536 arm=fast iters=16 windows=21 p05_us=304.000 p50_us=313.920 p95_us=321.408
+TIMING family=triad cell=large_deep op=tn dtype=f16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1342.848 p50_us=1402.228 p95_us=1421.952
+CHECK family=triad cell=large_deep op=nt dtype=f16 arm=det rel_l2_vs_pedantic=4.076e-5
+CHECK family=triad cell=large_deep op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=2.964e-5
+CHECK family=triad cell=large_deep op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=large_deep op=nt dtype=f16 m=4096 k=3072 n=1536 arm=det iters=13 windows=21 p05_us=429.765 p50_us=445.834 p95_us=467.417
+TIMING family=triad cell=large_deep op=nt dtype=f16 m=4096 k=3072 n=1536 arm=fast iters=16 windows=21 p05_us=282.944 p50_us=296.120 p95_us=307.008
+TIMING family=triad cell=large_deep op=nt dtype=f16 m=4096 k=3072 n=1536 arm=pedantic iters=8 windows=21 p05_us=1122.556 p50_us=1408.384 p95_us=1446.144
+CHECK family=triad cell=prism_in_proj op=nn dtype=f16 arm=det rel_l2_vs_pedantic=2.070e-5
+CHECK family=triad cell=prism_in_proj op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=2.070e-5
+CHECK family=triad cell=prism_in_proj op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nn dtype=f16 m=4621 k=384 n=1928 arm=det iters=66 windows=21 p05_us=59.873 p50_us=77.514 p95_us=80.694
+TIMING family=triad cell=prism_in_proj op=nn dtype=f16 m=4621 k=384 n=1928 arm=fast iters=54 windows=21 p05_us=74.050 p50_us=85.352 p95_us=87.497
+TIMING family=triad cell=prism_in_proj op=nn dtype=f16 m=4621 k=384 n=1928 arm=pedantic iters=20 windows=21 p05_us=202.394 p50_us=258.867 p95_us=267.877
+CHECK family=triad cell=prism_in_proj op=tn dtype=f16 arm=det rel_l2_vs_pedantic=7.490e-6
+CHECK family=triad cell=prism_in_proj op=tn dtype=f16 arm=fast rel_l2_vs_pedantic=1.480e-6
+CHECK family=triad cell=prism_in_proj op=tn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=tn dtype=f16 m=4621 k=384 n=1928 arm=det iters=51 windows=21 p05_us=77.418 p50_us=90.694 p95_us=92.114
+TIMING family=triad cell=prism_in_proj op=tn dtype=f16 m=4621 k=384 n=1928 arm=fast iters=73 windows=21 p05_us=54.075 p50_us=59.630 p95_us=60.626
+TIMING family=triad cell=prism_in_proj op=tn dtype=f16 m=4621 k=384 n=1928 arm=pedantic iters=20 windows=21 p05_us=200.290 p50_us=237.466 p95_us=243.098
+CHECK family=triad cell=prism_in_proj op=nt dtype=f16 arm=det rel_l2_vs_pedantic=5.335e-4
+CHECK family=triad cell=prism_in_proj op=nt dtype=f16 arm=fast rel_l2_vs_pedantic=6.469e-4
+CHECK family=triad cell=prism_in_proj op=nt dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=triad cell=prism_in_proj op=nt dtype=f16 m=4621 k=384 n=1928 arm=det iters=81 windows=21 p05_us=48.822 p50_us=58.659 p95_us=62.549
+TIMING family=triad cell=prism_in_proj op=nt dtype=f16 m=4621 k=384 n=1928 arm=fast iters=41 windows=21 p05_us=96.406 p50_us=99.603 p95_us=100.680
+TIMING family=triad cell=prism_in_proj op=nt dtype=f16 m=4621 k=384 n=1928 arm=pedantic iters=19 windows=21 p05_us=213.639 p50_us=258.530 p95_us=267.048
+CONTEXT family=inference dtype=f32 arm=det batch_invariant=true family=Inference tensor_cores=false fast_gemm=false tf32=false
+CONTEXT family=inference dtype=f32 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=inference dtype=f32 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=inference cell=hot_a op=nn dtype=f32 arm=det rel_l2_vs_pedantic=0.000e0
+CHECK family=inference cell=hot_a op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.808e-4
+CHECK family=inference cell=hot_a op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_a op=nn dtype=f32 m=4621 k=384 n=1928 arm=det iters=21 windows=21 p05_us=187.148 p50_us=246.984 p95_us=249.758
+TIMING family=inference cell=hot_a op=nn dtype=f32 m=4621 k=384 n=1928 arm=fast iters=39 windows=21 p05_us=103.075 p50_us=133.908 p95_us=135.559
+TIMING family=inference cell=hot_a op=nn dtype=f32 m=4621 k=384 n=1928 arm=pedantic iters=18 windows=21 p05_us=224.210 p50_us=271.644 p95_us=273.164
+CHECK family=inference cell=hot_b op=nn dtype=f32 arm=det rel_l2_vs_pedantic=5.096e-7
+CHECK family=inference cell=hot_b op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.806e-4
+CHECK family=inference cell=hot_b op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_b op=nn dtype=f32 m=4621 k=768 n=2304 arm=det iters=9 windows=21 p05_us=587.435 p50_us=616.562 p95_us=632.149
+TIMING family=inference cell=hot_b op=nn dtype=f32 m=4621 k=768 n=2304 arm=fast iters=21 windows=21 p05_us=192.414 p50_us=277.065 p95_us=290.670
+TIMING family=inference cell=hot_b op=nn dtype=f32 m=4621 k=768 n=2304 arm=pedantic iters=8 windows=21 p05_us=511.104 p50_us=633.216 p95_us=658.304
+CHECK family=inference cell=hot_c op=nn dtype=f32 arm=det rel_l2_vs_pedantic=8.224e-7
+CHECK family=inference cell=hot_c op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.802e-4
+CHECK family=inference cell=hot_c op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_c op=nn dtype=f32 m=4621 k=1928 n=384 arm=det iters=14 windows=21 p05_us=285.401 p50_us=338.798 p95_us=358.112
+TIMING family=inference cell=hot_c op=nn dtype=f32 m=4621 k=1928 n=384 arm=fast iters=51 windows=21 p05_us=77.862 p50_us=93.385 p95_us=99.489
+TIMING family=inference cell=hot_c op=nn dtype=f32 m=4621 k=1928 n=384 arm=pedantic iters=21 windows=21 p05_us=194.746 p50_us=228.254 p95_us=241.800
+CHECK family=inference cell=hot_d op=nn dtype=f32 arm=det rel_l2_vs_pedantic=5.096e-7
+CHECK family=inference cell=hot_d op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.803e-4
+CHECK family=inference cell=hot_d op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_d op=nn dtype=f32 m=2048 k=768 n=2304 arm=det iters=19 windows=21 p05_us=204.908 p50_us=216.980 p95_us=223.771
+TIMING family=inference cell=hot_d op=nn dtype=f32 m=2048 k=768 n=2304 arm=fast iters=40 windows=21 p05_us=99.334 p50_us=104.115 p95_us=110.234
+TIMING family=inference cell=hot_d op=nn dtype=f32 m=2048 k=768 n=2304 arm=pedantic iters=17 windows=21 p05_us=240.520 p50_us=252.382 p95_us=267.326
+CHECK family=inference cell=hot_e op=nn dtype=f32 arm=det rel_l2_vs_pedantic=8.992e-7
+CHECK family=inference cell=hot_e op=nn dtype=f32 arm=fast rel_l2_vs_pedantic=2.799e-4
+CHECK family=inference cell=hot_e op=nn dtype=f32 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_e op=nn dtype=f32 m=2048 k=2304 n=768 arm=det iters=20 windows=21 p05_us=203.418 p50_us=249.138 p95_us=259.994
+TIMING family=inference cell=hot_e op=nn dtype=f32 m=2048 k=2304 n=768 arm=fast iters=44 windows=21 p05_us=91.178 p50_us=114.711 p95_us=117.941
+TIMING family=inference cell=hot_e op=nn dtype=f32 m=2048 k=2304 n=768 arm=pedantic iters=19 windows=21 p05_us=210.905 p50_us=257.940 p95_us=263.384
+CONTEXT family=inference dtype=bf16 arm=det batch_invariant=true family=Inference tensor_cores=true fast_gemm=false tf32=false
+CONTEXT family=inference dtype=bf16 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=inference dtype=bf16 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=inference cell=hot_a op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=3.619e-5
+CHECK family=inference cell=hot_a op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=3.619e-5
+CHECK family=inference cell=hot_a op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_a op=nn dtype=bf16 m=4621 k=384 n=1928 arm=det iters=62 windows=21 p05_us=64.281 p50_us=68.079 p95_us=70.904
+TIMING family=inference cell=hot_a op=nn dtype=bf16 m=4621 k=384 n=1928 arm=fast iters=53 windows=21 p05_us=74.595 p50_us=75.969 p95_us=77.171
+TIMING family=inference cell=hot_a op=nn dtype=bf16 m=4621 k=384 n=1928 arm=pedantic iters=16 windows=21 p05_us=254.720 p50_us=278.964 p95_us=292.082
+CHECK family=inference cell=hot_b op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=5.733e-5
+CHECK family=inference cell=hot_b op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=5.733e-5
+CHECK family=inference cell=hot_b op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_b op=nn dtype=bf16 m=4621 k=768 n=2304 arm=det iters=40 windows=21 p05_us=126.157 p50_us=135.808 p95_us=140.416
+TIMING family=inference cell=hot_b op=nn dtype=bf16 m=4621 k=768 n=2304 arm=fast iters=44 windows=21 p05_us=99.398 p50_us=111.523 p95_us=115.711
+TIMING family=inference cell=hot_b op=nn dtype=bf16 m=4621 k=768 n=2304 arm=pedantic iters=8 windows=21 p05_us=572.388 p50_us=774.272 p95_us=806.272
+CHECK family=inference cell=hot_c op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=9.382e-5
+CHECK family=inference cell=hot_c op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=2.154e-3
+CHECK family=inference cell=hot_c op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_c op=nn dtype=bf16 m=4621 k=1928 n=384 arm=det iters=73 windows=21 p05_us=54.623 p50_us=54.675 p95_us=54.705
+TIMING family=inference cell=hot_c op=nn dtype=bf16 m=4621 k=1928 n=384 arm=fast iters=52 windows=21 p05_us=76.111 p50_us=76.326 p95_us=76.622
+TIMING family=inference cell=hot_c op=nn dtype=bf16 m=4621 k=1928 n=384 arm=pedantic iters=13 windows=21 p05_us=297.984 p50_us=298.142 p95_us=298.220
+CHECK family=inference cell=hot_d op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=5.826e-5
+CHECK family=inference cell=hot_d op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=5.826e-5
+CHECK family=inference cell=hot_d op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_d op=nn dtype=bf16 m=2048 k=768 n=2304 arm=det iters=61 windows=21 p05_us=65.671 p50_us=65.738 p95_us=67.379
+TIMING family=inference cell=hot_d op=nn dtype=bf16 m=2048 k=768 n=2304 arm=fast iters=66 windows=21 p05_us=60.111 p50_us=60.215 p95_us=60.695
+TIMING family=inference cell=hot_d op=nn dtype=bf16 m=2048 k=768 n=2304 arm=pedantic iters=15 windows=21 p05_us=275.046 p50_us=277.436 p95_us=284.653
+CHECK family=inference cell=hot_e op=nn dtype=bf16 arm=det rel_l2_vs_pedantic=1.014e-4
+CHECK family=inference cell=hot_e op=nn dtype=bf16 arm=fast rel_l2_vs_pedantic=1.014e-4
+CHECK family=inference cell=hot_e op=nn dtype=bf16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_e op=nn dtype=bf16 m=2048 k=2304 n=768 arm=det iters=66 windows=21 p05_us=60.633 p50_us=60.649 p95_us=60.664
+TIMING family=inference cell=hot_e op=nn dtype=bf16 m=2048 k=2304 n=768 arm=fast iters=59 windows=21 p05_us=67.758 p50_us=67.827 p95_us=67.896
+TIMING family=inference cell=hot_e op=nn dtype=bf16 m=2048 k=2304 n=768 arm=pedantic iters=14 windows=21 p05_us=280.647 p50_us=280.722 p95_us=280.869
+CONTEXT family=inference dtype=f16 arm=det batch_invariant=true family=Inference tensor_cores=true fast_gemm=false tf32=false
+CONTEXT family=inference dtype=f16 arm=fast batch_invariant=false family=Triad tensor_cores=true fast_gemm=true tf32=true
+CONTEXT family=inference dtype=f16 arm=pedantic batch_invariant=false family=Triad tensor_cores=true fast_gemm=false tf32=false
+CHECK family=inference cell=hot_a op=nn dtype=f16 arm=det rel_l2_vs_pedantic=2.070e-5
+CHECK family=inference cell=hot_a op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=2.070e-5
+CHECK family=inference cell=hot_a op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_a op=nn dtype=f16 m=4621 k=384 n=1928 arm=det iters=62 windows=21 p05_us=64.182 p50_us=76.271 p95_us=82.135
+TIMING family=inference cell=hot_a op=nn dtype=f16 m=4621 k=384 n=1928 arm=fast iters=54 windows=21 p05_us=73.996 p50_us=80.649 p95_us=88.273
+TIMING family=inference cell=hot_a op=nn dtype=f16 m=4621 k=384 n=1928 arm=pedantic iters=19 windows=21 p05_us=204.101 p50_us=242.946 p95_us=264.731
+CHECK family=inference cell=hot_b op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.301e-4
+CHECK family=inference cell=hot_b op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.301e-4
+CHECK family=inference cell=hot_b op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_b op=nn dtype=f16 m=4621 k=768 n=2304 arm=det iters=40 windows=21 p05_us=133.299 p50_us=151.270 p95_us=155.184
+TIMING family=inference cell=hot_b op=nn dtype=f16 m=4621 k=768 n=2304 arm=fast iters=38 windows=21 p05_us=110.134 p50_us=128.593 p95_us=136.622
+TIMING family=inference cell=hot_b op=nn dtype=f16 m=4621 k=768 n=2304 arm=pedantic iters=9 windows=21 p05_us=454.087 p50_us=647.047 p95_us=695.865
+CHECK family=inference cell=hot_c op=nn dtype=f16 arm=det rel_l2_vs_pedantic=4.593e-4
+CHECK family=inference cell=hot_c op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=4.829e-4
+CHECK family=inference cell=hot_c op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_c op=nn dtype=f16 m=4621 k=1928 n=384 arm=det iters=73 windows=21 p05_us=54.721 p50_us=62.352 p95_us=64.947
+TIMING family=inference cell=hot_c op=nn dtype=f16 m=4621 k=1928 n=384 arm=fast iters=53 windows=21 p05_us=75.506 p50_us=81.721 p95_us=84.799
+TIMING family=inference cell=hot_c op=nn dtype=f16 m=4621 k=1928 n=384 arm=pedantic iters=19 windows=21 p05_us=201.189 p50_us=238.368 p95_us=246.191
+CHECK family=inference cell=hot_d op=nn dtype=f16 arm=det rel_l2_vs_pedantic=3.299e-4
+CHECK family=inference cell=hot_d op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=3.299e-4
+CHECK family=inference cell=hot_d op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_d op=nn dtype=f16 m=2048 k=768 n=2304 arm=det iters=64 windows=21 p05_us=62.064 p50_us=73.120 p95_us=73.883
+TIMING family=inference cell=hot_d op=nn dtype=f16 m=2048 k=768 n=2304 arm=fast iters=66 windows=21 p05_us=60.041 p50_us=71.447 p95_us=72.006
+TIMING family=inference cell=hot_d op=nn dtype=f16 m=2048 k=768 n=2304 arm=pedantic iters=19 windows=21 p05_us=208.835 p50_us=273.069 p95_us=273.192
+CHECK family=inference cell=hot_e op=nn dtype=f16 arm=det rel_l2_vs_pedantic=5.276e-4
+CHECK family=inference cell=hot_e op=nn dtype=f16 arm=fast rel_l2_vs_pedantic=5.480e-4
+CHECK family=inference cell=hot_e op=nn dtype=f16 arm=pedantic rel_l2_vs_pedantic=0.000e0
+TIMING family=inference cell=hot_e op=nn dtype=f16 m=2048 k=2304 n=768 arm=det iters=66 windows=21 p05_us=59.778 p50_us=68.174 p95_us=70.004
+TIMING family=inference cell=hot_e op=nn dtype=f16 m=2048 k=2304 n=768 arm=fast iters=64 windows=21 p05_us=57.810 p50_us=58.783 p95_us=62.288
+TIMING family=inference cell=hot_e op=nn dtype=f16 m=2048 k=2304 n=768 arm=pedantic iters=20 windows=21 p05_us=204.605 p50_us=237.523 p95_us=246.477
+DONE

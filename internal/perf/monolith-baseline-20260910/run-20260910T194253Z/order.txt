@@ -1,0 +1,25 @@
+19:42:53 build old
+19:42:54 build new
+19:42:58 set B block 1 pos 1 arm old start
+19:43:49 set B block 1 pos 1 arm old rc=101
+19:43:53 set B block 1 pos 2 arm new start
+19:47:48 set B block 1 pos 2 arm new rc=101
+19:47:52 set B block 1 pos 3 arm new start
+19:48:54 set B block 1 pos 3 arm new rc=101
+19:48:58 set B block 1 pos 4 arm old start
+19:49:11 set B block 1 pos 4 arm old rc=101
+19:49:15 set B block 2 pos 1 arm old start
+19:49:27 set B block 2 pos 1 arm old rc=101
+19:49:32 set B block 2 pos 2 arm new start
+19:50:35 set B block 2 pos 2 arm new rc=101
+19:50:39 set B block 2 pos 3 arm new start
+19:51:40 set B block 2 pos 3 arm new rc=101
+19:51:44 set B block 2 pos 4 arm old start
+19:51:57 set B block 2 pos 4 arm old rc=101
+19:51:57 build new bench
+19:52:01 set C2 block 1 pos 1 arm new start
+19:56:19 set C2 block 1 pos 1 arm new rc=0
+19:56:23 set C2 block 1 pos 2 arm new start
+20:00:43 set C2 block 1 pos 2 arm new rc=0
+20:00:43 done C2
+20:00:43 done

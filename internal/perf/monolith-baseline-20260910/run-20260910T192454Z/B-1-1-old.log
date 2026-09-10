@@ -1,0 +1,14 @@
+MODEL d_model=128 layers=3 d_inner=256 d_state=16 params=366464
+
+thread 'main' (299217) panicked at examples/m1_inference_family_baseline.rs:76:9:
+assertion `left == right` failed: eager: Triad family
+  left: Fixed
+ right: Triad
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::assert_failed_inner
+   3: core::panicking::assert_failed::<mamba_rs::mamba_ssm::gpu::context::BiGemmFamily, mamba_rs::mamba_ssm::gpu::context::BiGemmFamily>
+   4: m1_inference_family_baseline::baseline::configure
+   5: m1_inference_family_baseline::baseline::run
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

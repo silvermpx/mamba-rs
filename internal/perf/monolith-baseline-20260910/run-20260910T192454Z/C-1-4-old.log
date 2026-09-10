@@ -1,0 +1,26 @@
+
+running 1 test
+test bench_sgemm_bi_vs_tf32 ... [RL-small d128 F32] B=16 T=64: cuBLAS-TF32 2.442 ms/step | sgemm_bi 3.034 ms/step | ratio 1.24x
+[RL-small d128 Bf16] B=16 T=64: cuBLAS-PEDANTIC 2.524 ms/step | sgemm_bi 2.842 ms/step | ratio 1.13x
+[RL-small d128 Bf16] B=16 T=64: sgemm_bi+TC 2.349 ms/step | vs cuBLAS-PEDANTIC 0.93x | vs scalar bi 0.83x
+[RL-small d128 F16] B=16 T=64: cuBLAS-PEDANTIC 2.165 ms/step | sgemm_bi 2.888 ms/step | ratio 1.33x
+[RL-small d128 F16] B=16 T=64: sgemm_bi+TC 2.401 ms/step | vs cuBLAS-PEDANTIC 1.11x | vs scalar bi 0.83x
+[d256 F32] B=16 T=128: cuBLAS-TF32 10.042 ms/step | sgemm_bi 12.569 ms/step | ratio 1.25x
+[d256 Bf16] B=16 T=128: cuBLAS-PEDANTIC 10.576 ms/step | sgemm_bi 11.609 ms/step | ratio 1.10x
+[d256 Bf16] B=16 T=128: sgemm_bi+TC 9.816 ms/step | vs cuBLAS-PEDANTIC 0.93x | vs scalar bi 0.85x
+[d256 F16] B=16 T=128: cuBLAS-PEDANTIC 9.772 ms/step | sgemm_bi 12.548 ms/step | ratio 1.28x
+[d256 F16] B=16 T=128: sgemm_bi+TC 10.561 ms/step | vs cuBLAS-PEDANTIC 1.08x | vs scalar bi 0.84x
+[130m-ish d768 F32] B=8 T=256: cuBLAS-TF32 25.206 ms/step | sgemm_bi 34.971 ms/step | ratio 1.39x
+[130m-ish d768 Bf16] B=8 T=256: cuBLAS-PEDANTIC 27.117 ms/step | sgemm_bi 31.952 ms/step | ratio 1.18x
+[130m-ish d768 Bf16] B=8 T=256: sgemm_bi+TC 22.462 ms/step | vs cuBLAS-PEDANTIC 0.83x | vs scalar bi 0.70x
+[130m-ish d768 F16] B=8 T=256: cuBLAS-PEDANTIC 24.817 ms/step | sgemm_bi 32.263 ms/step | ratio 1.30x
+[130m-ish d768 F16] B=8 T=256: sgemm_bi+TC 22.762 ms/step | vs cuBLAS-PEDANTIC 0.92x | vs scalar bi 0.71x
+[770m-ish d1536 F32] B=4 T=256: cuBLAS-TF32 15.059 ms/step | sgemm_bi 24.677 ms/step | ratio 1.64x
+[770m-ish d1536 Bf16] B=4 T=256: cuBLAS-PEDANTIC 18.431 ms/step | sgemm_bi 22.803 ms/step | ratio 1.24x
+[770m-ish d1536 Bf16] B=4 T=256: sgemm_bi+TC 13.368 ms/step | vs cuBLAS-PEDANTIC 0.73x | vs scalar bi 0.59x
+[770m-ish d1536 F16] B=4 T=256: cuBLAS-PEDANTIC 16.811 ms/step | sgemm_bi 23.330 ms/step | ratio 1.39x
+[770m-ish d1536 F16] B=4 T=256: sgemm_bi+TC 13.727 ms/step | vs cuBLAS-PEDANTIC 0.82x | vs scalar bi 0.59x
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 15.55s
+
