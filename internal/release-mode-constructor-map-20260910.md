@@ -43,9 +43,14 @@ Generic public `GpuCtx::new*` defaults need not change from Triad. Defaulting
 model inference to Inference depends on completion of its physical route
 recording and guarded graph replay, not just the renamed module's availability.
 
-An explicit-mode constructor must document whether it ignores all GEMM env
-settings; the existing context explicit-mode constructors do. Do not parse env
-then overwrite only mode, leaving a hidden mix of precision/family selectors.
+An explicit-mode constructor must document which env settings it ignores.
+The existing context explicit-mode constructors bypass mode/precision/family
+resolution. The Inference architecture-rung self-check separately reads the
+process-wide `MAMBA_RS_ARCH_RUNG` flag at first use; do not describe that as
+already ignored by construction. Preserve or deliberately document this
+existing distinction in the API task rather than silently changing its
+process-wide admission behavior. Do not parse env then overwrite only mode,
+leaving a hidden mix of precision/family selectors.
 Existing env-aware constructors should preserve strict conflict diagnostics.
 Making the M3 model constructor env-aware is an intentional documented
 consistency change, not an already-implemented behavior.
@@ -65,6 +70,12 @@ consistency change, not an already-implemented behavior.
 - M3's crate-visible `ctx()` from Task902 is sufficient for internal forwarding;
   decide its public accessor together with the high-level mode API, not as an
   accidental visibility expansion in tied-head work.
+- Both trainer files also have a local `with_validated_launch` wrapper whose
+  `None` branch calls the callback directly. During the trainer API step,
+  verify the actual vendor-graph entry checks context health before that branch;
+  reuse the reviewed shared guard from the model graph task if the caller does
+  not. An absent custom plan in a vendor graph must not bypass an unusable
+  context. This is a concrete source risk, not yet a confirmed runtime failure.
 
 The final implementation task still needs its concrete signatures and focused
 tests; this map records source facts and avoids another constructor census.

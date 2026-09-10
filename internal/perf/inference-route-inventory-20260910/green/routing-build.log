@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-inference-inventory-green.Z6uxvD)
+    Finished `release` profile [optimized] target(s) in 53.93s
+  Executable tests/gemm_inference_route_inventory.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_inference_route_inventory-2d2d1000bd381d25)

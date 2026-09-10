@@ -1,0 +1,19 @@
+
+running 5 tests
+test deterministic_inference_empty_output_has_no_terminal_record ... 
+thread 'deterministic_inference_empty_output_has_no_terminal_record' (3392164) panicked at tests/gemm_inference_route_inventory.rs:161:18:
+called `Result::unwrap()` on an `Err` value: "invalid GEMM dimensions: output axes must be positive, got rows=0 columns=96"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test deterministic_inference_public_bf16_forward_records_nn_route ... ok
+test deterministic_inference_public_bf16_to_f32_forward_records_nn_route ... ok
+test deterministic_inference_public_f32_forward_records_nn_route ... ok
+test deterministic_triad_public_half_matvec_records_both_tensor_core_states ... ok
+
+failures:
+
+failures:
+    deterministic_inference_empty_output_has_no_terminal_record
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.71s
+

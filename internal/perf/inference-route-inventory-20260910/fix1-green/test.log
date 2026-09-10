@@ -1,0 +1,6 @@
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_inference::inference_arch_rung_decision_skips_cold_probe_for_aligned_empty_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 833 filtered out; finished in 0.00s
+

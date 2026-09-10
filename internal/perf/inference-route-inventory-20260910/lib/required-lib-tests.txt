@@ -1,0 +1,3 @@
+mamba_ssm::gpu::gemm_bi_inference::observed_inventory_cuda_tests::inference_observed_terminals_match_unrecorded_bits_on_ada
+mamba_ssm::gpu::blas::matvec_inventory_cuda_tests::typed_matvec_physical_observation_preserves_public_output_and_storage
+mamba_ssm::gpu::context::tests::inference_recorder_query_rejects_conflicting_borrow

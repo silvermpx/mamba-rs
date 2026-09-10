@@ -1,0 +1,13 @@
+
+running 8 tests
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::allocation_bound_digest_updates_the_contained_route_and_rejects_stale_copy ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::allocation_spans_and_zero_reduction_use_actual_required_operands ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::cached_bridge_preserves_only_its_two_existing_triad_specs ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::disabled_recording_never_builds_metadata ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::every_terminal_has_its_exact_storage_geometry_and_arithmetic_tuple ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::every_terminal_rejects_individually_changed_route_and_abi_before_enqueue ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::pair_store_symbol_is_bound_even_when_geometry_is_identical ... ok
+test mamba_ssm::gpu::gemm_bi_inference::identity::tests::terminal_permissions_follow_live_family_and_not_the_triad_half_switch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 824 filtered out; finished in 0.01s
+

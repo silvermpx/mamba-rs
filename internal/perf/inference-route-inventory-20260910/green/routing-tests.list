@@ -1,0 +1,7 @@
+deterministic_inference_empty_output_has_no_terminal_record: test
+deterministic_inference_public_bf16_forward_records_nn_route: test
+deterministic_inference_public_bf16_to_f32_forward_records_nn_route: test
+deterministic_inference_public_f32_forward_records_nn_route: test
+deterministic_triad_public_half_matvec_records_both_tensor_core_states: test
+
+5 tests, 0 benchmarks

@@ -197,8 +197,15 @@ Select their actual supported cases and prerequisites before executing them.
   with pre-capture M1/M3 scratch reservation. Ada12/12 actual tests, CUDA-only
   and CUDA+HF compilation, Rustdoc and independent review pass. Evidence:
   `internal/perf/gemm-tied-f32-output-20260910/report.md`.
-  Complete Inference/M3 physical graph inventory and model-wide no-vendor
-  acceptance remain explicit follow-up tasks; no model-wide completion claim yet.
+  Inference terminal inventory is committed7d890e6c with empty-architecture
+  guard fix086716e3:85 exact terminal symbols, conditional observation,
+  actual function/ABI/storage binding and existing bridge forwarding. Focused
+  Ada packet has29 host+8 actual GPU passes; the review fix separately passes
+  three host guards and the aligned no-op GPU case. Independent review and
+  scoped fix review accepted. Evidence:
+  `internal/perf/inference-route-inventory-20260910/report.md`.
+  Complete M1/M3 model graph manifests and model-wide no-vendor acceptance
+  remain follow-up work; no model-wide completion claim yet.
   Evidence: `internal/perf/gemm-context-routing-20260910/report.md`.
 - [ ] Document the public API in Rustdoc alongside implementation, not only
   in README: IDE hover/completion must explain each mode, defaults, arguments,

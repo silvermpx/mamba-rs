@@ -3219,3 +3219,145 @@ let record = O::ENABLED || ctx.gemm_route_recording_active()?;
   actual test counts/commands/source hashes. Commit the coherent block and
   obtain independent spec+quality review before model guard integration.
   No performance tournament or global release gate during this wiring task.
+
+## Task 905: Complete model GEMM manifests and guarded replay (2026-09-10)
+
+Execute after Task904 source verification and independent review. Specs:
+`internal/inference-m3-physical-recording-design-20260910.md` section C and
+runtime proof; `internal/model-graph-acceptance-followups-20260910.md` in full.
+This task closes the actual model graph/no-vendor requirement, not constructor
+role defaults or public API redesign. Consume Task904 complete terminal records
+and `prepare_inference_arch_rung(&GpuCtx) -> Result<(),String>`.
+
+Files: `src/mamba_ssm/gpu/graph_capture.rs`,
+`src/mamba_ssm/gpu/inference.rs`, `src/mamba3_siso/gpu/inference.rs`,
+`src/mamba_ssm/gpu/blas.rs` (test-only FFI tripwire),
+`src/module/gpu_lm.rs` and `src/module/gpu_lm3.rs` (colocated real head tests),
+`tests/inference_graph_route.rs`, plus narrowly scoped existing context/identity
+test support where an inaccessible mutation needs a private cfg(test) seam.
+No public testing API, new CUDA body, selector, compiler/qualification changes,
+new mode/default, or duplicate tracing framework.
+
+Shared private interfaces in graph_capture.rs:
+
+```rust
+pub(crate) fn require_deterministic_gemm_graph_plan(
+    ctx: &GpuCtx, has_gemm_work: bool,
+    plan: Option<&CapturedGemmGraphPlan>, label: &str,
+) -> Result<(), String>;
+
+pub(crate) fn with_validated_gemm_graph_launch(
+    ctx: &GpuCtx, has_gemm_work: bool,
+    plan: Option<&CapturedGemmGraphPlan>, label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String>;
+```
+
+The second function checks context usability, calls the first, then delegates
+to the existing plan's `with_validated_launch` when present; the no-plan vendor
+branch may call the callback only after health/policy guards. Existing model
+logical route and pointer/scratch checks remain before this shared seam.
+
+- [ ] Tests first. Add a colocated real M3 F32 fixture with small owned weights
+  and identity input projection. Prepare its private production body once to
+  warm actual caches without calling a public eager step, then call actual
+  `capture_graph`. Assert it rejects the missing successful eager manifest.
+  Current M3 accepts it. Use the existing concrete config/owned fixture style
+  in tests/inference_graph_route.rs, not downloads or a fake context.
+  Add a second guard regression under Deterministic/Inference with a known
+  nonzero half GEMM body; the existing F32/Triad-only guard must reject an empty
+  plan. Root observes these intended failures before production edits.
+
+- [ ] Replace the F32/Triad-specific empty-plan helper with the shared
+  deterministic guard for all families and storage dtypes. `has_gemm_work`
+  reflects actual nonzero batch and optional input projection/layer workload,
+  not a fixed true constant or storage-mode label. For validated nonzero model
+  dimensions, F32 and M1 legacy mixed have work when
+  `batch != 0 && (!identity_proj || n_layers != 0)`; native mixed has work when
+  `batch != 0 && n_layers != 0`. Do not forbid legitimate vendor-only graphs.
+
+- [ ] Use the existing Cell<Option<PreparedGemmCaptureManifest>> and
+  Option<CapturedGemmGraphPlan> pattern in both M3 engines. Add equivalent
+  coverage to M1 legacy mixed, and repair stale-eager-manifest handling for
+  existing M1 F32/native mixed. Cover all six M1 and four M3 entry paths from
+  the spec table. Before a new eager attempt (including H2D/validation), clear
+  only the corresponding eager permit; assign it after the body succeeds.
+  Prepare the Inference architecture rung before opening the serving recorder.
+  Record each existing private body exactly once, never nested public/body
+  recorders. Keep H2D/D2H out of the body.
+
+- [ ] Every capture consumes its matching successful eager manifest and calls
+  capture_into_graph_with_gemm_plan. Validate the result before assigning the
+  graph/plan together; a failed capture cannot install a new partial plan.
+  Preserve presizing/freeze, context resource anchors, module/weight/state
+  lifetime, stream cleanup on capture failure and graph destruction order.
+  M1 mixed legacy/native share a graph slot: explicitly associate the plan
+  with the captured path, so one entry cannot replay the other path's graph.
+  Use a small private path tag or equally explicit existing-state association;
+  do not introduce a generic graph manager. All ten replay entries pass through
+  the shared guard before graph.launch and retain their existing pointer checks.
+
+- [ ] Colocated tests inspect the actual ordered captured routes and matching
+  eager manifest. For exact direct Inference fixtures, expected logical shapes
+  are generated from these literal sequences, not copied from the trace itself:
+
+```rust
+let m1_layer = [
+    (batch, d_model, 2 * d_inner),
+    (batch, d_inner, xdbl_dim),
+    (batch, dt_rank, d_inner),
+    (batch, d_inner, d_model),
+];
+let m3_layer = [
+    (batch, d_model, in_proj_out_dim),
+    (batch, d_inner, d_model),
+];
+```
+
+  Repeat per layer; prepend `(batch,input_dim,d_model)` only for supported
+  nonidentity F32 or M1 legacy mixed. Native mixed stays identity-only. Use
+  B1/B3 and two layers; cover F32/BF16/F16 and both logical families, including
+  Triad TC-off typed matvec. For scalar decompositions, check the expected
+  projection groups and real physical records rather than equating every
+  logical GEMM to one physical launch. Compare eager versus replay output bits
+  after resetting recurrence on the same owned inputs/buffers. The test may
+  call the private real body with record_eager_gemm_trace to inspect it, then
+  separately exercise the public eager/capture path; do not nest recorders.
+
+- [ ] Mutation tests remove a middle projection from a nonempty manifest,
+  reorder routes, change symbol/module/storage/argument/map binding, mutate
+  live mode/family or poison the context. Assert the supplied launch callback
+  is not invoked. Also cover missing eager permit, failed-step stale permit,
+  cold preparation, scratch growth/address checks and M1 mixed path mismatch.
+  Arrange otherwise-valid buffers and route state so an unrelated check cannot
+  mask the intended failure. Zero workload and explicit vendor plan absence
+  get positive controls.
+
+- [ ] Add one cfg(test) thread-local vendor GEMM count/deny seam immediately
+  before each of the nine current SGEMM/GemmEx result calls in blas.rs,
+  including standalone no-context helpers. Keep it entirely absent from
+  non-test production builds, no env switch or process-global mutable counter.
+  Count/deny guards restore thread-local state on every return/unwind; nested
+  test guards must reject or preserve their enclosing state explicitly.
+  Verify both CublasFast and CublasPedantic actually hit the counter, then
+  verify denial returns before FFI. Under deny, run actual deterministic
+  M1/M3 step/capture and tied/untied head fixtures in all three storage dtypes,
+  asserting zero vendor calls. Place hook consumers in colocated library
+  tests, because integration tests do not set cfg(test) in the library.
+  Keep a source census of every vendor FFI as supporting evidence, not the
+  runtime proof itself. CuBLAS handle creation is not a vendor GEMM launch.
+
+- [ ] Correct touched Rustdoc to state required eager warmup, fixed buffers,
+  mode changes/capture restrictions, error conditions and GEMM-only inventory
+  scope. Remove touched SGEMM-only or unsupported fixed-latency claims. Do not
+  claim normalization/SSM/casts are all recorded by the GEMM manifest; the
+  existing physical observer and Task903 own conversion-inclusive evidence.
+
+- [ ] Root runs one focused Ada functional batch, CUDA-only and CUDA+HF
+  compilation, affected existing graph/control groups, scoped formatting and
+  Rustdoc. Freeze exact source/receipt counts; unchanged CUDA/selector/compiler
+  checks and independent review precede completion. Use the current immutable
+  source, no repeat of valid Task904 terminal tests without affected changes.
+  Fresh5090 execution remains explicitly pending unless its supplied endpoint
+  is available. No full performance tournament, new branch, push/publish,
+  lint suppression or unrelated source writer during this task.

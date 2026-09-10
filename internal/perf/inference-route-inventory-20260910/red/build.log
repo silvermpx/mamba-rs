@@ -1,0 +1,15 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-inference-inventory-red.R7o5y8)
+warning: method `ctx` is never used
+    --> src/mamba3_siso/gpu/inference.rs:1875:19
+     |
+1636 | impl GpuMamba3Backbone {
+     | ---------------------- method in this implementation
+...
+1875 |     pub(crate) fn ctx(&self) -> &GpuCtx {
+     |                   ^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mamba-rs` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 41.53s
+  Executable tests/gemm_inference_route_inventory.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_inference_route_inventory-afe16857f4b2e4fb)
