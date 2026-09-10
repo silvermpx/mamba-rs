@@ -661,6 +661,11 @@ path = "tests/trainer_split_m3.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "target_forward_parity"
+path = "tests/target_forward_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "training_graph_parity"
 path = "tests/training_graph_parity.rs"
 required-features = ["cuda"]

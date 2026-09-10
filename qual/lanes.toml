@@ -185,5 +185,6 @@
 "trainer_smoke" = "gate"
 "trainer_split" = "gate"
 "trainer_split_m3" = "gate"
+"target_forward_parity" = "gate"
 "training_graph_parity" = "gate"
 "typed_bwd_parity" = "gate"

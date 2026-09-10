@@ -546,7 +546,7 @@ fn rmsnorm_bwd_bf16_matches_f32() {
     );
 }
 
-// ─── conv1d_burnin_backward ─────────────────────────────────────────
+// ─── conv1d burnin backward ─────────────────────────────────────────
 
 struct Conv1dBurninBwdInputs<'a> {
     batch: usize,
