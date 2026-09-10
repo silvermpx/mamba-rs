@@ -307,6 +307,7 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
         + usize::from(artifacts.specialized.is_some())
         + usize::from(artifacts.sm89_half.is_some())
         + usize::from(artifacts.sm89_exact_f32.is_some())
+        + usize::from(artifacts.sm89_exact_f32_d128.is_some())
         + usize::from(artifacts.sm89_tf32_joint.is_some());
     assert_eq!(
         usize::from(artifacts.module_count),
@@ -326,6 +327,9 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     }
     if let Some(sm89_exact_f32) = artifacts.sm89_exact_f32 {
         active.push(sm89_exact_f32);
+    }
+    if let Some(sm89_exact_f32_d128) = artifacts.sm89_exact_f32_d128 {
+        active.push(sm89_exact_f32_d128);
     }
     if let Some(sm89_tf32_joint) = artifacts.sm89_tf32_joint {
         active.push(sm89_tf32_joint);
