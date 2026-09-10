@@ -2831,7 +2831,7 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
 ];
 /// The portable extension fragment's TF32 routes: composed into the module
 /// for every sm80-family target except CC 12.x, so they sit outside
-/// [`SM80_TF32_ROUTE_SPECS`] and join it through [`tf32_route_specs_for`].
+/// [`SM80_TF32_ROUTE_SPECS`] and join it through `tf32_route_specs_for`.
 pub const SM80_TF32_WIDE_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
     op: ResolvedGemmOp::Nn,
     route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {

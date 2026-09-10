@@ -82,7 +82,8 @@ impl GpuMamba3LM {
     ///
     /// Inspect GEMM execution with [`GpuCtx::gemm_mode`] and the deterministic
     /// role family with [`GpuCtx::bi_gemm_family`]. Storage precision remains
-    /// a separate choice available through [`Self::dtype`].
+    /// a separate choice available through [`Self::dtype`]. Graph capture
+    /// retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         self.backbone.ctx()
     }
@@ -119,7 +120,13 @@ pub struct Mamba3LmBuild<'a> {
 }
 
 impl GpuMamba3LM {
-    /// F32 construction shortcut.
+    /// Build an f32, batch-1 M3 LM using the GEMM environment.
+    ///
+    /// Missing selectors use Deterministic + Inference. M3 parses invalid or
+    /// conflicting selectors strictly; use [`Self::from_weights_with_mode`] to
+    /// bypass them and [`Self::ctx`] to inspect the route graph capture binds.
+    /// Errors match [`Self::build`]; `MAMBA_RS_ARCH_RUNG` remains a separate
+    /// first-use Inference policy.
     pub fn from_weights(
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
@@ -144,8 +151,9 @@ impl GpuMamba3LM {
     ///
     /// GEMM mode, custom precision/tensor-core controls, and family selectors
     /// in the environment are ignored; `MAMBA_RS_ARCH_RUNG` remains the
-    /// separate first-use Inference policy. Configuration, projection, CUDA,
-    /// upload, and allocation failures are returned.
+    /// separate first-use Inference policy and is not captured by this
+    /// constructor. Configuration, projection, CUDA, upload, and allocation
+    /// failures are returned.
     pub fn from_weights_with_mode(
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
@@ -170,7 +178,12 @@ impl GpuMamba3LM {
         )
     }
 
-    /// Batch=1 dtype-aware construction.
+    /// Build a batch-1 M3 LM with explicit storage and env-selected GEMMs.
+    ///
+    /// `dtype` controls storage independently of execution mode. Missing
+    /// selectors use Deterministic + Inference; invalid or conflicting values
+    /// are errors. For explicit mode and storage use [`Self::build_with_mode`];
+    /// other errors match [`Self::build`].
     pub fn from_weights_with_dtype(
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
@@ -196,7 +209,16 @@ impl GpuMamba3LM {
     ///
     /// `embed`: `[vocab_size_padded * d_model]` row-major; `lm_head` (if
     /// untied): `[d_model * vocab_size]`. Tied lm_head → pass `None` and the
-    /// embed table is reused as the tied projection matrix.
+    /// embed table is reused as the tied projection matrix. `args.dtype`
+    /// controls storage, while missing GEMM selectors use Deterministic +
+    /// Inference. Invalid or conflicting selectors are errors. Inspect the
+    /// result with [`Self::ctx`]; graph capture binds the complete route.
+    /// `MAMBA_RS_ARCH_RUNG` remains a separate first-use Inference policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns projection, shape, configuration, GEMM-environment, M3
+    /// state-cap, CUDA, upload, or allocation failures.
     pub fn build(args: Mamba3LmBuild<'_>) -> Result<Self, String> {
         Self::build_inner(args, None)
     }
@@ -207,8 +229,9 @@ impl GpuMamba3LM {
     /// independently controls GEMM execution. GEMM mode, custom precision/
     /// tensor-core controls, and family selectors in the environment are
     /// ignored, while `MAMBA_RS_ARCH_RUNG` remains a separate first-use
-    /// Inference policy. Existing input-projection, shape, CUDA, upload, and
-    /// allocation errors are preserved, and captured graphs bind the route.
+    /// Inference policy and is not captured by this constructor. Existing
+    /// input-projection, shape, CUDA, upload, and allocation errors are
+    /// preserved, and captured graphs bind the route.
     pub fn build_with_mode(args: Mamba3LmBuild<'_>, mode: GemmMode) -> Result<Self, String> {
         Self::build_inner(args, Some(mode))
     }

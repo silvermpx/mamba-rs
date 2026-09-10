@@ -122,9 +122,10 @@ pub struct GpuMambaLM {
 impl GpuMambaLM {
     /// CUDA context of the underlying backbone.
     ///
-    /// Inspect the selected execution policy with `ctx().gemm_mode()` and
-    /// `ctx().bi_gemm_family()`. Storage precision is reported separately by
-    /// [`Self::dtype`]. Graph capture binds the complete context route.
+    /// Inspect the selected execution policy with
+    /// [`crate::mamba_ssm::gpu::context::GpuCtx::gemm_mode`] and
+    /// [`crate::mamba_ssm::gpu::context::GpuCtx::bi_gemm_family`]. Storage is
+    /// reported separately by [`Self::dtype`]. Graph capture binds this route.
     pub fn ctx(&self) -> &crate::mamba_ssm::gpu::context::GpuCtx {
         self.backbone.ctx()
     }
@@ -137,7 +138,13 @@ impl GpuMambaLM {
 }
 
 impl GpuMambaLM {
-    /// Load HF model with f32 storage, batch=1.
+    /// Load an HF model with f32 storage, batch 1, and env-selected GEMMs.
+    ///
+    /// Missing selectors use Deterministic + Inference; invalid or conflicting
+    /// selectors are errors. Use [`Self::from_hf_with_mode`] for an explicit
+    /// mode and [`Self::ctx`] to inspect the route that graph capture binds.
+    /// Errors match [`Self::from_hf_with_dtype_batch`]; `MAMBA_RS_ARCH_RUNG`
+    /// remains a separate first-use Inference policy.
     pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
     }
@@ -146,8 +153,9 @@ impl GpuMambaLM {
     ///
     /// GEMM mode, custom precision/tensor-core controls, and family selectors
     /// in the environment are ignored. `MAMBA_RS_ARCH_RUNG` remains the
-    /// separate first-use Inference policy. Loading, validation, CUDA setup,
-    /// upload, and allocation failures are returned.
+    /// separate first-use Inference policy and is not captured by this
+    /// constructor. Loading, validation, CUDA setup, upload, and allocation
+    /// failures are returned.
     pub fn from_hf_with_mode(
         dir: &Path,
         gpu_ordinal: usize,
@@ -156,7 +164,12 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, WeightDtype::F32, 1, Some(mode))
     }
 
-    /// Load HF model with explicit storage dtype, batch=1.
+    /// Load an HF model with explicit storage dtype and env-selected GEMMs.
+    ///
+    /// `dtype` controls storage independently of execution mode. Missing
+    /// selectors use Deterministic + Inference; invalid or conflicting values
+    /// are errors. See [`Self::from_hf_with_dtype_and_mode`] for explicit mode;
+    /// other errors match [`Self::from_hf_with_dtype_batch`].
     pub fn from_hf_with_dtype(
         dir: &Path,
         gpu_ordinal: usize,
@@ -170,7 +183,8 @@ impl GpuMambaLM {
     /// Storage precision and GEMM execution are independent. The explicit
     /// lane ignores GEMM mode, custom precision/tensor-core controls, and
     /// family selectors in the environment; `MAMBA_RS_ARCH_RUNG` remains a
-    /// separate first-use policy. Errors match [`Self::from_hf_with_dtype`].
+    /// separate first-use policy and is not captured by this constructor.
+    /// Errors match [`Self::from_hf_with_dtype`].
     pub fn from_hf_with_dtype_and_mode(
         dir: &Path,
         gpu_ordinal: usize,
@@ -184,7 +198,16 @@ impl GpuMambaLM {
     ///
     /// `batch > 1` enables parallel generation of multiple independent
     /// sequences sharing the same weights. Each batch slot has its own
-    /// recurrent state. Use `generate_batch` to drive them.
+    /// recurrent state. Storage remains independent of GEMM execution. Missing
+    /// selectors use Deterministic + Inference; invalid or conflicting values
+    /// are errors. Use [`Self::generate_batch`] to drive the result and
+    /// [`Self::ctx`] to inspect its route. `MAMBA_RS_ARCH_RUNG` remains a
+    /// separate first-use Inference policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns checkpoint, configuration, GEMM-environment, CUDA, upload, or
+    /// batch-dependent allocation failures.
     pub fn from_hf_with_dtype_batch(
         dir: &Path,
         gpu_ordinal: usize,
@@ -198,10 +221,10 @@ impl GpuMambaLM {
     ///
     /// `dtype` controls storage and `mode` independently controls GEMM
     /// execution. GEMM environment selectors are bypassed except that
-    /// `MAMBA_RS_ARCH_RUNG` remains the separate first-use Inference policy.
-    /// Invalid checkpoints, model configuration, batch-dependent allocation,
-    /// CUDA setup, or upload failures are returned. Graph capture remains tied
-    /// to the complete selected route.
+    /// `MAMBA_RS_ARCH_RUNG` remains the separate first-use Inference policy and
+    /// is not captured by this constructor. Invalid checkpoints, model
+    /// configuration, batch-dependent allocation, CUDA setup, or upload
+    /// failures are returned. Graph capture remains tied to the complete route.
     pub fn from_hf_with_dtype_batch_and_mode(
         dir: &Path,
         gpu_ordinal: usize,

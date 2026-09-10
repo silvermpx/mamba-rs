@@ -77,6 +77,12 @@ pub struct Mamba3Trainer {
 }
 
 impl Mamba3Trainer {
+    /// Construct an M3 trainer with default Adam settings and env-selected GEMMs.
+    ///
+    /// `dtype` controls storage independently of GEMM mode. Missing selectors
+    /// use Deterministic + Triad; invalid or conflicting selectors are errors.
+    /// See [`Self::new_full`] for explicit optimizer settings and [`Self::ctx`]
+    /// to inspect the route that graph capture binds.
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -101,6 +107,13 @@ impl Mamba3Trainer {
         )
     }
 
+    /// Construct an M3 trainer with session settings and env-selected GEMMs.
+    ///
+    /// Missing selectors use Deterministic + Triad. An explicit environment
+    /// family can select Inference, whose `MAMBA_RS_ARCH_RUNG` policy is applied
+    /// on first use. Invalid configuration/environment, M3 state-cap, CUDA,
+    /// upload, or allocation returns an error. Use [`Self::new_full_with_mode`]
+    /// to bypass GEMM selectors.
     pub fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -120,6 +133,8 @@ impl Mamba3Trainer {
     /// configuration, launch-capacity, explicit f32 input-projection, M3
     /// state-cap, CUDA, upload, and allocation errors are preserved. Captured
     /// graphs remain bound to the complete construction route.
+    /// `MAMBA_RS_ARCH_RUNG` remains a separate first-use process policy and is
+    /// not captured by this constructor.
     pub fn new_full_with_mode(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -202,7 +217,11 @@ impl Mamba3Trainer {
         }
     }
 
-    /// CUDA context the trainer runs on.
+    /// Access the trainer's GPU execution context.
+    ///
+    /// Storage is reported separately by [`Self::dtype`]; inspect execution
+    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::bi_gemm_family`]. A captured
+    /// graph retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.inner {
             Trainer3Inner::F32(t) => &t.ctx,
