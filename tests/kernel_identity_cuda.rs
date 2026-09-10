@@ -157,14 +157,22 @@ const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
     "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
 ];
 
+/// The Ada-qualified RNA TF32 tiles, composed only for the sm_89 target.
+const FIXED_TF32_ENTRIES_SM89: &[&str] = &[
+    "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+    "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+];
+
 /// The Fixed TF32 entries a PTX compiled for `target` carries: the portable
-/// set on every architecture, plus the TMA set on the two SM120 targets the
-/// kernel source admits.
+/// set on every architecture, the RNA tiles on sm_89, plus the TMA set on
+/// the two SM120 targets the kernel source admits.
 #[cfg(target_os = "linux")]
 fn expected_fixed_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
     let sm120 = matches!(target, "compute_120" | "compute_121");
+    let sm89 = target == "compute_89";
     FIXED_TF32_ENTRIES_PORTABLE
         .iter()
+        .chain(FIXED_TF32_ENTRIES_SM89.iter().filter(|_| sm89))
         .chain(FIXED_TF32_ENTRIES_SM120.iter().filter(|_| sm120))
         .map(|name| (*name).to_string())
         .collect()
