@@ -104,6 +104,12 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   selector identity, eager and prepared/captured graph correctness.
 - [ ] Paired eager and whole-graph performance against cuBLAS Fast; also
   cuBLAS Pedantic for exact F32, with numerical contracts clearly labelled.
+  Full paired acquisition is complete on Ada and RTX5090/CUDA13.2:
+  Inference280 records per board; Triad324 records per board. Raw statistics
+  and completion metadata replay independently. Results and exact measured
+  source identities are in `internal/perf/final-auto-benchmarks-20260910/`.
+  Final-source preservation/release aggregation remains part of this item;
+  the tables do not claim that all cases beat cuBLAS Fast.
 - [ ] Real model integration: Mamba and Mamba-3 inference graph replay,
   training graph parity/safety, and trainer full-step replay. The split
   `forward`/`backward_step` API is intentionally eager for external losses.

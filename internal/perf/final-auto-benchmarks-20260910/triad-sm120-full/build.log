@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-triad-final.9wzHfO)
+    Finished `release` profile [optimized] target(s) in 5.28s
+  Executable tests/gemm_bi_performance_matrix.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_performance_matrix-d1b0332edac85e69)
