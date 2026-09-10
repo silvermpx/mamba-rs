@@ -140,3 +140,10 @@ one selector process CPU-bound rebuilding modules for minutes before timing.
 Do not count a cancelled startup as a kernel failure or a qualification pass.
 NVIDIA documents these controls in the CUDA Programming Guide, environment
 variables appendix: https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html
+
+The final `MAMBA_RS_KERNEL_CACHE` directory must be owned by the executing
+user and have exactly mode0700. A pre-created0755 directory silently disables
+the project's persistent PTX cache (`trusted_directory_stat`), even with
+Driver JIT caching enabled. Check ownership/mode before starting a packet;
+set0700 only on the exact task-owned cache directory. Do not change cache
+setup midway through a recorded process or relax the cache security gate.

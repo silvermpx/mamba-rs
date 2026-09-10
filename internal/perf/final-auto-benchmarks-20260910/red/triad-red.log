@@ -1,0 +1,106 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-sm120-reachability-fix1.Djr8r8)
+error[E0422]: cannot find struct, variant or union type `FinalAutoComparator` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9184:13
+     |
+9184 |             FinalAutoComparator {
+     |             ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `FinalAutoComparator` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9188:13
+     |
+9188 |             FinalAutoComparator {
+     |             ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `FinalAutoComparator` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9196:14
+     |
+9196 |         vec![FinalAutoComparator {
+     |              ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `FinalAutoComparator` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9204:18
+     |
+9204 |             vec![FinalAutoComparator {
+     |                  ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_cell_inventory` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9129:17
+     |
+9129 |     let cells = final_auto_cell_inventory();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_cell_inventory` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9173:17
+     |
+9173 |     let cells = final_auto_cell_inventory();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_comparator_views` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9182:9
+     |
+9182 |         final_auto_comparator_views(find("f32_policy_exact/")),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_comparator_views` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9195:9
+     |
+9195 |         final_auto_comparator_views(find("f32_policy_allow_tf32/")),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_comparator_views` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9203:13
+     |
+9203 |             final_auto_comparator_views(find(prefix)),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_comparator_view_count` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9210:16
+     |
+9210 |     assert_eq!(final_auto_comparator_view_count(&cells), 81);
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_expected_record_count` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9211:16
+     |
+9211 |     assert_eq!(final_auto_expected_record_count(&cells), 324);
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_ratio_samples` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9217:9
+     |
+9217 |         final_auto_ratio_samples(&[4.0, 12.0], &[8.0, 6.0]).unwrap(),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_ratio_samples` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9220:13
+     |
+9220 |     assert!(final_auto_ratio_samples(&[1.0], &[1.0, 2.0]).is_err());
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_ratio_samples` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9221:13
+     |
+9221 |     assert!(final_auto_ratio_samples(&[1.0], &[0.0]).is_err());
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `final_auto_cell_inventory` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9226:17
+     |
+9226 |     let cells = final_auto_cell_inventory();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `select_final_auto_cells` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9229:9
+     |
+9229 |         select_final_auto_cells(&cells, Some(first)).unwrap().len(),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `select_final_auto_cells` in this scope
+    --> tests/gemm_bi_performance_matrix.rs:9240:13
+     |
+9240 |             select_final_auto_cells(&cells, Some(invalid)).is_err(),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0422, E0425.
+For more information about an error, try `rustc --explain E0422`.
+error: could not compile `mamba-rs` (test "gemm_bi_performance_matrix") due to 17 previous errors

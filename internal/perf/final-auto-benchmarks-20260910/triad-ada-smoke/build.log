@@ -1,0 +1,4 @@
+   Compiling cudarc v0.19.9
+   Compiling mamba-rs v0.6.9 (/root/mamba-final-auto.aWsNUi)
+    Finished `release` profile [optimized] target(s) in 47.13s
+  Executable tests/gemm_bi_performance_matrix.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_performance_matrix-d1b0332edac85e69)

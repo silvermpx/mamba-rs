@@ -59,6 +59,8 @@ const UNSUPPORTED_PADDED_INVENTORY_COUNT: usize = 16;
 const UNSUPPORTED_PADDED_INVENTORY_DIGEST: &str =
     "4884091a6f0f85c207185f89a8ae0ba1ea0c55cbc0b08eda12c4c643fd415e8d";
 const TF32_TOURNAMENT_OUTPUT_ENV: &str = "MAMBA_RS_TF32_NN_TOURNAMENT_JSONL";
+const FINAL_AUTO_OUTPUT_ENV: &str = "GEMM_BI_FINAL_AUTO_JSONL";
+const FINAL_AUTO_DEFAULT_WINDOWS: usize = 21;
 
 #[derive(Clone, Copy)]
 struct Shape {
@@ -327,6 +329,16 @@ enum CublasDenominatorMode {
     Fast,
     Pedantic,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FinalAutoComparator {
+    label: &'static str,
+    mode: CublasDenominatorMode,
+}
+
+const FINAL_AUTO_PATHS: [Tf32TournamentPath; 2] =
+    [Tf32TournamentPath::Eager, Tf32TournamentPath::Graph];
+const FINAL_AUTO_ORDERS: [PathOrder; 2] = [PathOrder::Ab, PathOrder::Ba];
 
 impl CublasDenominatorMode {
     fn as_str(self) -> &'static str {
@@ -3876,6 +3888,95 @@ fn build_cells() -> Vec<Cell> {
     cells
 }
 
+fn final_auto_cell_inventory() -> Vec<Cell> {
+    build_cells()
+        .into_iter()
+        .filter(|cell| {
+            let projection = TF32_PROJECTION_SHAPES.contains(&cell.shape.name);
+            match cell.route {
+                Route::F32Policy {
+                    policy: F32TriadPolicy::ExactScalarFmaV1,
+                } => projection,
+                Route::F32Policy {
+                    policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                } => projection || matches!(cell.shape.name, "underfill" | "large_deep"),
+                Route::HalfPolicy {
+                    tensor_cores: true, ..
+                } => projection,
+                _ => false,
+            }
+        })
+        .collect()
+}
+
+fn select_final_auto_cells(cells: &[Cell], filter: Option<&str>) -> Result<Vec<Cell>, String> {
+    let requested = filter
+        .map(|value| parse_qualification_cell_ids(value, cells))
+        .transpose()?;
+    select_qualification_cells(cells, requested.as_ref(), 0, 1)
+}
+
+fn final_auto_comparator_views(cell: Cell) -> Vec<FinalAutoComparator> {
+    match cell.route {
+        Route::F32Policy {
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+        } => vec![
+            FinalAutoComparator {
+                label: "cublas_fast_tf32",
+                mode: CublasDenominatorMode::Fast,
+            },
+            FinalAutoComparator {
+                label: "cublas_pedantic",
+                mode: CublasDenominatorMode::Pedantic,
+            },
+        ],
+        Route::F32Policy {
+            policy: F32TriadPolicy::AllowDeterministicTf32V1,
+        } => vec![FinalAutoComparator {
+            label: "cublas_fast_tf32",
+            mode: CublasDenominatorMode::Fast,
+        }],
+        Route::HalfPolicy {
+            tensor_cores: true, ..
+        } => vec![FinalAutoComparator {
+            label: "cublas_fast",
+            mode: CublasDenominatorMode::Fast,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn final_auto_comparator_view_count(cells: &[Cell]) -> usize {
+    cells
+        .iter()
+        .copied()
+        .map(final_auto_comparator_views)
+        .map(|views| views.len())
+        .sum()
+}
+
+fn final_auto_expected_record_count(cells: &[Cell]) -> usize {
+    final_auto_comparator_view_count(cells) * FINAL_AUTO_PATHS.len() * FINAL_AUTO_ORDERS.len()
+}
+
+fn final_auto_ratio_samples(auto_us: &[f64], vendor_us: &[f64]) -> Result<Vec<f64>, String> {
+    if auto_us.len() != vendor_us.len() || auto_us.is_empty() {
+        return Err("final AUTO ratio arms require equal non-empty sample counts".into());
+    }
+    auto_us
+        .iter()
+        .zip(vendor_us)
+        .enumerate()
+        .map(|(index, (&auto, &vendor))| {
+            validate_sample_us(auto, index)?;
+            validate_sample_us(vendor, index)?;
+            let ratio = auto / vendor;
+            validate_sample_us(ratio, index)?;
+            Ok(ratio)
+        })
+        .collect()
+}
+
 fn expected_cell_count() -> usize {
     let op_count = 3;
     let policy_cells = SHAPES.len() * op_count * (2 + 2 * 2);
@@ -5094,6 +5195,662 @@ fn run_cublas_denominator_cell(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FinalAutoPairIterations {
+    auto: usize,
+    vendor: usize,
+}
+
+struct FinalAutoPairSamples {
+    auto_us: Vec<f64>,
+    vendor_us: Vec<f64>,
+    ratios: Vec<f64>,
+}
+
+struct FinalAutoJsonlSink {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    digest: Sha256,
+    records: usize,
+}
+
+impl FinalAutoJsonlSink {
+    fn create_from_env() -> Result<Self, String> {
+        let value = std::env::var_os(FINAL_AUTO_OUTPUT_ENV)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{FINAL_AUTO_OUTPUT_ENV} must name a new JSONL file"))?;
+        let path = PathBuf::from(value);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("create final AUTO evidence {path:?}: {error}"))?;
+        if !file
+            .metadata()
+            .map_err(|error| format!("inspect final AUTO evidence {path:?}: {error}"))?
+            .file_type()
+            .is_file()
+        {
+            return Err(format!(
+                "final AUTO evidence {path:?} is not a regular file"
+            ));
+        }
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+            digest: Sha256::new(),
+            records: 0,
+        })
+    }
+
+    fn write(&mut self, record: String) -> Result<(), String> {
+        let mut bytes = record.into_bytes();
+        bytes.push(b'\n');
+        self.writer
+            .write_all(&bytes)
+            .map_err(|error| format!("write final AUTO evidence {:?}: {error}", self.path))?;
+        self.digest.update(&bytes);
+        self.records += 1;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        expected_records: usize,
+        selected_cells: usize,
+        selected_views: usize,
+        windows: usize,
+        full_inventory: bool,
+        source_sha: &str,
+        quiet_gpu: &QuietGpu,
+        device: &GpuDevice,
+    ) -> Result<(), String> {
+        if self.records != expected_records {
+            return Err(format!(
+                "incomplete final AUTO evidence: got {} records, expected {expected_records}",
+                self.records
+            ));
+        }
+        if full_inventory
+            && (selected_cells != 66 || selected_views != 81 || expected_records != 324)
+        {
+            return Err(format!(
+                "full final AUTO inventory changed: cells={selected_cells}, views={selected_views}, records={expected_records}"
+            ));
+        }
+        let cohort_digest = format!("{:x}", self.digest.clone().finalize());
+        self.write(format!(
+            concat!(
+                "{{\"schema\":\"MambaBiFinalProductionAutoCompletionV1\",",
+                "\"scope\":\"performance_only\",\"source_git_sha\":\"{}\",",
+                "\"gpu_uuid\":\"{}\",\"cc\":\"{}.{}\",\"multiprocessors\":{},",
+                "\"full_inventory\":{},\"cells\":{},\"comparator_views\":{},",
+                "\"paths\":2,\"orders\":2,\"records\":{},\"windows_per_order\":{},",
+                "\"total_jsonl_records\":{},\"cohort_digest\":\"{}\",",
+                "\"decision\":\"descriptive_performance_only_no_admission\"}}"
+            ),
+            source_sha,
+            quiet_gpu.uuid(),
+            device.compute_capability.0,
+            device.compute_capability.1,
+            device.multiprocessor_count(),
+            full_inventory,
+            selected_cells,
+            selected_views,
+            expected_records,
+            windows,
+            expected_records + 1,
+            cohort_digest,
+        ))?;
+        self.writer
+            .flush()
+            .map_err(|error| format!("flush final AUTO evidence {:?}: {error}", self.path))?;
+        self.writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| format!("sync final AUTO evidence {:?}: {error}", self.path))?;
+        eprintln!(
+            "final AUTO evidence complete: {:?}; records={expected_records}; digest={cohort_digest}",
+            self.path
+        );
+        Ok(())
+    }
+}
+
+fn final_auto_source_sha(value: &str) -> Result<&str, String> {
+    if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(value)
+    } else {
+        Err("GEMM_BI_FINAL_AUTO_GIT_SHA must be exactly 40 hexadecimal characters".into())
+    }
+}
+
+fn validate_final_auto_device(device: &GpuDevice) -> Result<(), String> {
+    match (device.compute_capability, device.multiprocessor_count()) {
+        ((8, 9), 142) | ((12, 0), 170) => Ok(()),
+        (cc, sms) => Err(format!(
+            "final AUTO evidence supports only CC8.9/142SM or CC12.0/170SM, got CC{}.{}/{}SM",
+            cc.0, cc.1, sms
+        )),
+    }
+}
+
+fn final_auto_input_dtype(cell: Cell) -> Result<WeightDtype, String> {
+    match cell.route {
+        Route::F32Policy { .. } => Ok(WeightDtype::F32),
+        Route::HalfPolicy {
+            dtype,
+            tensor_cores: true,
+        } => Ok(dtype),
+        _ => Err(format!(
+            "{} is not a final production AUTO cell",
+            cell_id(cell)
+        )),
+    }
+}
+
+fn final_auto_vendor_cell(cell: Cell) -> Result<CublasDenominatorCell, String> {
+    Ok(CublasDenominatorCell {
+        dtype: final_auto_input_dtype(cell)?,
+        op: cell.op,
+        shape: cell.shape,
+    })
+}
+
+fn final_auto_half_seeded_values(len: usize, salt: usize) -> Vec<f32> {
+    (0..len)
+        .map(|logical| {
+            let numerator = ((logical * 13 + salt * 7) % 29) as f32 - 14.0;
+            numerator / 16.0
+        })
+        .collect()
+}
+
+fn seed_final_auto_physical(
+    ctx: &GpuCtx,
+    cell: Cell,
+    physical: &mut QualifiedPhysicalLaunch<'_>,
+    salt: u64,
+) -> Result<(), String> {
+    match cell.route {
+        Route::F32Policy { .. } => physical.seed_f32_operands(ctx, salt),
+        Route::HalfPolicy {
+            tensor_cores: true, ..
+        } => physical.seed_half_operands(ctx, salt as usize),
+        _ => Err(format!(
+            "{} is not a final production AUTO cell",
+            cell_id(cell)
+        )),
+    }
+}
+
+fn seed_final_auto_vendor(
+    ctx: &GpuCtx,
+    cell: Cell,
+    buffers: &CublasDenominatorBuffers,
+    salt: u64,
+) -> Result<(), String> {
+    let generator = |len, operand_salt| match final_auto_input_dtype(cell) {
+        Ok(WeightDtype::F32) => tf32_tournament_seeded_values(len, operand_salt),
+        Ok(WeightDtype::Bf16 | WeightDtype::F16) => {
+            final_auto_half_seeded_values(len, operand_salt as usize)
+        }
+        Err(error) => panic!("{error}"),
+    };
+    buffers.output.upload_f32(
+        &ctx.stream,
+        &generator(buffers.output.len_elems(), salt ^ 0x91),
+    )?;
+    buffers
+        .a
+        .upload_f32(&ctx.stream, &generator(buffers.a.len_elems(), salt ^ 0x2d))?;
+    buffers
+        .b
+        .upload_f32(&ctx.stream, &generator(buffers.b.len_elems(), salt ^ 0x67))?;
+    ctx.stream
+        .synchronize()
+        .map_err(|error| format!("synchronize final AUTO vendor seed: {error:?}"))
+}
+
+fn validate_final_auto_vendor_base_pointers(pointers: [u64; 3]) -> Result<(), String> {
+    for (label, pointer) in ["output", "A", "B"].into_iter().zip(pointers) {
+        if pointer % 256 != 0 {
+            return Err(format!(
+                "final AUTO vendor {label} base pointer {pointer:#x} is not 256-byte aligned"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_final_auto_vendor_alignment(buffers: &CublasDenominatorBuffers) -> Result<(), String> {
+    validate_final_auto_vendor_base_pointers([
+        buffers.output.cached_ptr(),
+        buffers.a.cached_ptr(),
+        buffers.b.cached_ptr(),
+    ])
+}
+
+fn reset_final_auto_vendor_output(
+    ctx: &GpuCtx,
+    cell: Cell,
+    buffers: &CublasDenominatorBuffers,
+    salt: u64,
+) -> Result<(), String> {
+    if cell.op != ResolvedGemmOp::Tn {
+        return Ok(());
+    }
+    let values = match final_auto_input_dtype(cell)? {
+        WeightDtype::F32 => tf32_tournament_seeded_values(buffers.output.len_elems(), salt ^ 0x91),
+        WeightDtype::Bf16 | WeightDtype::F16 => {
+            final_auto_half_seeded_values(buffers.output.len_elems(), (salt ^ 0x91) as usize)
+        }
+    };
+    buffers.output.upload_f32(&ctx.stream, &values)?;
+    ctx.stream
+        .synchronize()
+        .map_err(|error| format!("synchronize final AUTO vendor output reset: {error:?}"))
+}
+
+fn capture_cublas_denominator_graph(
+    ctx: &GpuCtx,
+    cell: CublasDenominatorCell,
+    mode: CublasDenominatorMode,
+    buffers: &CublasDenominatorBuffers,
+) -> Result<CudaGraph, String> {
+    // The context, cuBLAS handle, and buffers outlive every captured graph.
+    unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_cublas_denominator(ctx, cell, mode, buffers)
+        })
+    }
+}
+
+fn measure_final_auto_vendor_window_ms(
+    ctx: &GpuCtx,
+    cell: CublasDenominatorCell,
+    comparator: FinalAutoComparator,
+    buffers: &CublasDenominatorBuffers,
+    graph: &CudaGraph,
+    path: Tf32TournamentPath,
+    iterations: usize,
+) -> Result<f64, String> {
+    match path {
+        Tf32TournamentPath::Eager => {
+            measure_cublas_denominator_window_ms(ctx, cell, comparator.mode, buffers, iterations)
+        }
+        Tf32TournamentPath::Graph => {
+            measure_tf32_tournament_graph_window_ms(ctx, graph, iterations)
+        }
+    }
+}
+
+fn collect_final_auto_pair(
+    auto_ctx: &GpuCtx,
+    vendor_ctx: &GpuCtx,
+    cell: Cell,
+    vendor_cell: CublasDenominatorCell,
+    comparator: FinalAutoComparator,
+    physical: &mut QualifiedPhysicalLaunch<'_>,
+    buffers: &CublasDenominatorBuffers,
+    graph: &CudaGraph,
+    path: Tf32TournamentPath,
+    order: PathOrder,
+    iterations: FinalAutoPairIterations,
+    windows: usize,
+) -> Result<FinalAutoPairSamples, String> {
+    const SALT: u64 = 0x51a7_0f1a;
+    let mut auto_us = Vec::with_capacity(windows);
+    let mut vendor_us = Vec::with_capacity(windows);
+    for index in 0..windows {
+        let mut measure_auto = || {
+            if cell.op == ResolvedGemmOp::Tn {
+                seed_final_auto_physical(auto_ctx, cell, physical, SALT)?;
+            }
+            let value = measure_tf32_tournament_physical_window_ms(
+                auto_ctx,
+                physical,
+                path,
+                iterations.auto,
+            )? * 1_000.0
+                / iterations.auto as f64;
+            validate_sample_us(value, index)?;
+            Ok::<f64, String>(value)
+        };
+        let measure_vendor = || {
+            reset_final_auto_vendor_output(vendor_ctx, cell, buffers, SALT)?;
+            let value = measure_final_auto_vendor_window_ms(
+                vendor_ctx,
+                vendor_cell,
+                comparator,
+                buffers,
+                graph,
+                path,
+                iterations.vendor,
+            )? * 1_000.0
+                / iterations.vendor as f64;
+            validate_sample_us(value, index)?;
+            Ok::<f64, String>(value)
+        };
+        let (auto, vendor) = match order {
+            PathOrder::Ab => (measure_auto()?, measure_vendor()?),
+            PathOrder::Ba => {
+                let vendor = measure_vendor()?;
+                (measure_auto()?, vendor)
+            }
+        };
+        auto_us.push(auto);
+        vendor_us.push(vendor);
+    }
+    let ratios = final_auto_ratio_samples(&auto_us, &vendor_us)?;
+    Ok(FinalAutoPairSamples {
+        auto_us,
+        vendor_us,
+        ratios,
+    })
+}
+
+fn final_auto_summary(values: &[f64]) -> (f64, f64) {
+    let mut values = values.to_vec();
+    values.sort_by(f64::total_cmp);
+    (percentile(&values, 0.50), percentile(&values, 0.95))
+}
+
+fn final_auto_raw(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:.9}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn render_final_auto_identity(identity: &GemmRouteIdentity) -> String {
+    let compiler = identity.compiler;
+    format!(
+        concat!(
+            "\"compiler_source_digest\":\"{}\",\"compiler_invocation_digest\":\"{}\",",
+            "\"header_manifest_digest\":\"{}\",\"compiler_target\":\"{}\",",
+            "\"nvrtc_version\":[{},{}],\"nvrtc_library_domain\":\"{}\",",
+            "\"nvrtc_library_known\":{},\"artifact_module_count\":{},",
+            "\"artifact_set_digest\":\"{}\",\"policy_revision\":{},",
+            "\"policy_hash\":\"{}\",\"tuning_table_revision\":{},",
+            "\"schedule_set_revision\":{},\"driver_api_version\":{},",
+            "\"driver_build_sources\":{},\"driver_build_digest\":\"{}\""
+        ),
+        digest_hex(&compiler.source_digest),
+        digest_hex(&compiler.invocation_digest),
+        digest_hex(&compiler.header_manifest_digest),
+        compiler.target.as_str(),
+        compiler.nvrtc_version.0,
+        compiler.nvrtc_version.1,
+        digest_hex(&compiler.nvrtc_library_domain),
+        compiler.nvrtc_library_known,
+        identity.artifacts.module_count,
+        digest_hex(&identity.artifacts.ordered_digest),
+        identity.policy_revision,
+        digest_hex(&identity.policy_hash),
+        identity.tuning_table_revision,
+        identity.schedule_set_revision,
+        identity.device.driver.api_version,
+        identity.device.driver.build_sources,
+        digest_hex(&identity.device.driver.build_digest),
+    )
+}
+
+fn emit_final_auto_record(
+    sink: &mut FinalAutoJsonlSink,
+    ctx: &GpuCtx,
+    quiet_gpu: &QuietGpu,
+    source_sha: &str,
+    variant: &str,
+    cell: Cell,
+    comparator: FinalAutoComparator,
+    path: Tf32TournamentPath,
+    order: PathOrder,
+    iterations: FinalAutoPairIterations,
+    samples: &FinalAutoPairSamples,
+    physical: &QualifiedPhysicalLaunchEvidence,
+    preflight: &str,
+    postflight: &str,
+) -> Result<(), String> {
+    let (auto_p50, auto_p95) = final_auto_summary(&samples.auto_us);
+    let (vendor_p50, vendor_p95) = final_auto_summary(&samples.vendor_us);
+    let (ratio_p50, ratio_p95) = final_auto_summary(&samples.ratios);
+    let vendor_cell = final_auto_vendor_cell(cell)?;
+    let output_dtype = cublas_denominator_output_dtype(vendor_cell.dtype, vendor_cell.op);
+    let (m, k, n) = cell.shape.dims;
+    let cc = ctx.stream.context().compute_capability().expect("CUDA CC");
+    sink.write(format!(
+        concat!(
+            "{{\"schema\":\"MambaBiFinalProductionAutoPairV1\",",
+            "\"scope\":\"performance_only\",\"call_scope\":\"production_auto\",",
+            "\"source_git_sha\":\"{}\",\"variant\":\"{}\",\"gpu_uuid\":\"{}\",",
+            "\"cc\":\"{}.{}\",\"cell_id\":\"{}\",\"op\":\"{}\",",
+            "\"shape\":\"{}\",\"m\":{},\"k\":{},\"n\":{},",
+            "\"alpha\":1,\"beta\":{},\"bias\":false,",
+            "\"input_dtype\":\"{}\",\"output_dtype\":\"{}\",",
+            "\"denominator\":\"{}\",\"vendor_compute\":\"{}\",",
+            "\"vendor_algorithm\":\"CUBLAS_GEMM_DEFAULT\",",
+            "\"vendor_base_alignment_bytes\":256,\"path\":\"{}\",",
+            "\"order\":\"{}\",\"timing\":\"cuda_events\",",
+            "\"output_reset\":\"{}\",\"window_semantics\":\"{}\",",
+            "\"windows\":{},\"auto_iterations\":{},\"vendor_iterations\":{},",
+            "\"auto_p50_us\":{:.9},\"auto_p95_us\":{:.9},",
+            "\"vendor_p50_us\":{:.9},\"vendor_p95_us\":{:.9},",
+            "\"auto_over_vendor_p50\":{:.9},\"auto_over_vendor_p95\":{:.9},",
+            "\"auto_samples_us\":[{}],\"vendor_samples_us\":[{}],",
+            "\"auto_over_vendor_samples\":[{}],\"quiet_preflight\":\"{}\",",
+            "\"quiet_postflight\":\"{}\",{},{} }}"
+        ),
+        source_sha,
+        escape_json_string(variant),
+        quiet_gpu.uuid(),
+        cc.0,
+        cc.1,
+        cell_id(cell),
+        op_name(cell.op),
+        cell.shape.name,
+        m,
+        k,
+        n,
+        u8::from(cell.op == ResolvedGemmOp::Tn),
+        dtype_name(vendor_cell.dtype),
+        dtype_name(output_dtype),
+        comparator.label,
+        cublas_denominator_compute_name(vendor_cell.dtype, comparator.mode),
+        path.as_str(),
+        order.as_str(),
+        if cell.op == ResolvedGemmOp::Tn {
+            "deterministic_seed_before_start_event"
+        } else {
+            "beta0_overwrite"
+        },
+        if cell.op == ResolvedGemmOp::Tn {
+            "repeated_beta1_accumulation"
+        } else {
+            "repeated_beta0_overwrite"
+        },
+        samples.auto_us.len(),
+        iterations.auto,
+        iterations.vendor,
+        auto_p50,
+        auto_p95,
+        vendor_p50,
+        vendor_p95,
+        ratio_p50,
+        ratio_p95,
+        final_auto_raw(&samples.auto_us),
+        final_auto_raw(&samples.vendor_us),
+        final_auto_raw(&samples.ratios),
+        escape_json_string(preflight),
+        escape_json_string(postflight),
+        render_physical_evidence_fields(physical),
+        render_final_auto_identity(physical.route_identity()),
+    ))
+}
+
+fn run_final_auto_comparator(
+    auto_ctx: &GpuCtx,
+    vendor_ctx: &GpuCtx,
+    quiet_gpu: &QuietGpu,
+    source_sha: &str,
+    variant: &str,
+    cell: Cell,
+    comparator: FinalAutoComparator,
+    windows: usize,
+    physical: &mut QualifiedPhysicalLaunch<'_>,
+    sink: &mut FinalAutoJsonlSink,
+) -> Result<usize, String> {
+    const SALT: u64 = 0x51a7_0f1a;
+    let vendor_cell = final_auto_vendor_cell(cell)?;
+    let buffers = allocate_cublas_denominator_buffers(vendor_ctx, vendor_cell)?;
+    validate_final_auto_vendor_alignment(&buffers)?;
+    seed_final_auto_physical(auto_ctx, cell, physical, SALT)?;
+    seed_final_auto_vendor(vendor_ctx, cell, &buffers, SALT)?;
+    launch_cublas_denominator(vendor_ctx, vendor_cell, comparator.mode, &buffers)?;
+    vendor_ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("warm final AUTO cuBLAS handle: {error:?}"))?;
+    seed_final_auto_vendor(vendor_ctx, cell, &buffers, SALT)?;
+    let graph =
+        capture_cublas_denominator_graph(vendor_ctx, vendor_cell, comparator.mode, &buffers)?;
+    let mut records = 0;
+    for path in FINAL_AUTO_PATHS {
+        let mut iterations = None;
+        for order in FINAL_AUTO_ORDERS {
+            let label = format!(
+                "final-auto/{}/{}/{}/{}",
+                cell_id(cell),
+                comparator.label,
+                path.as_str(),
+                order.as_str()
+            );
+            let preflight = quiet_gpu.require_cohort(&label)?;
+            let iterations = match iterations {
+                Some(iterations) => iterations,
+                None => {
+                    let auto = calibrate_measurement(|count| {
+                        if cell.op == ResolvedGemmOp::Tn {
+                            seed_final_auto_physical(auto_ctx, cell, physical, SALT)?;
+                        }
+                        measure_tf32_tournament_physical_window_ms(auto_ctx, physical, path, count)
+                    })?;
+                    let vendor = calibrate_measurement(|count| {
+                        reset_final_auto_vendor_output(vendor_ctx, cell, &buffers, SALT)?;
+                        measure_final_auto_vendor_window_ms(
+                            vendor_ctx,
+                            vendor_cell,
+                            comparator,
+                            &buffers,
+                            &graph,
+                            path,
+                            count,
+                        )
+                    })?;
+                    let calibrated = FinalAutoPairIterations { auto, vendor };
+                    iterations = Some(calibrated);
+                    calibrated
+                }
+            };
+            let mut warm_auto = || {
+                if cell.op == ResolvedGemmOp::Tn {
+                    seed_final_auto_physical(auto_ctx, cell, physical, SALT)?;
+                }
+                measure_tf32_tournament_physical_window_ms(auto_ctx, physical, path, 128)?;
+                Ok::<(), String>(())
+            };
+            let warm_vendor = || {
+                reset_final_auto_vendor_output(vendor_ctx, cell, &buffers, SALT)?;
+                measure_final_auto_vendor_window_ms(
+                    vendor_ctx,
+                    vendor_cell,
+                    comparator,
+                    &buffers,
+                    &graph,
+                    path,
+                    128,
+                )?;
+                Ok::<(), String>(())
+            };
+            match order {
+                PathOrder::Ab => {
+                    warm_auto()?;
+                    warm_vendor()?;
+                }
+                PathOrder::Ba => {
+                    warm_vendor()?;
+                    warm_auto()?;
+                }
+            }
+            let samples = collect_final_auto_pair(
+                auto_ctx,
+                vendor_ctx,
+                cell,
+                vendor_cell,
+                comparator,
+                physical,
+                &buffers,
+                &graph,
+                path,
+                order,
+                iterations,
+                windows,
+            )?;
+            let postflight = quiet_gpu.verify_post_cohort(&label)?;
+            emit_final_auto_record(
+                sink,
+                auto_ctx,
+                quiet_gpu,
+                source_sha,
+                variant,
+                cell,
+                comparator,
+                path,
+                order,
+                iterations,
+                &samples,
+                physical.evidence(),
+                &preflight,
+                &postflight,
+            )?;
+            records += 1;
+        }
+    }
+    Ok(records)
+}
+
+fn run_final_auto_cell(
+    auto_ctx: &GpuCtx,
+    vendor_ctx: &GpuCtx,
+    quiet_gpu: &QuietGpu,
+    source_sha: &str,
+    variant: &str,
+    cell: Cell,
+    windows: usize,
+    sink: &mut FinalAutoJsonlSink,
+) -> Result<usize, String> {
+    let request = qualification_request(cell);
+    let mut physical = prepare_cell(auto_ctx, cell)?;
+    physical.validate_timed_request(auto_ctx, request)?;
+    let mut records = 0;
+    for comparator in final_auto_comparator_views(cell) {
+        records += run_final_auto_comparator(
+            auto_ctx,
+            vendor_ctx,
+            quiet_gpu,
+            source_sha,
+            variant,
+            cell,
+            comparator,
+            windows,
+            &mut physical,
+            sink,
+        )?;
+    }
+    Ok(records)
 }
 
 mod tn_narrow_cublas_pair {
@@ -7879,6 +8636,98 @@ fn gemm_bi_cublas_performance_denominators() {
 }
 
 #[test]
+#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits paired production AUTO/cuBLAS evidence"]
+fn gemm_bi_production_auto_paired_cublas_release_matrix() {
+    let _suite_guard = performance_suite_lock()
+        .lock()
+        .expect("lock serialized performance suite");
+    assert_ne!(
+        std::env::var("NVIDIA_TF32_OVERRIDE").as_deref(),
+        Ok("0"),
+        "NVIDIA_TF32_OVERRIDE=0 disables the explicit FAST_TF32 denominator"
+    );
+    if cfg!(debug_assertions) {
+        panic!("final production AUTO comparator requires --release");
+    }
+    let source_sha_value = std::env::var("GEMM_BI_FINAL_AUTO_GIT_SHA")
+        .expect("GEMM_BI_FINAL_AUTO_GIT_SHA must bind evidence to the final source");
+    let source_sha = final_auto_source_sha(&source_sha_value).expect("validate final source SHA");
+    let windows = parse_env_usize("GEMM_BI_QUAL_WINDOWS", FINAL_AUTO_DEFAULT_WINDOWS)
+        .expect("parse final AUTO window count");
+    assert!(
+        (1..=10_001).contains(&windows),
+        "final AUTO windows must be in 1..=10001"
+    );
+    validate_run_profile(windows, cfg!(debug_assertions)).expect("validate Rust build profile");
+    let variant = std::env::var("GEMM_BI_QUAL_VARIANT").unwrap_or_else(|_| "final-auto".into());
+    validate_variant(&variant).expect("validate final AUTO variant");
+    let filter = match std::env::var(QUALIFICATION_CELL_IDS_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read {QUALIFICATION_CELL_IDS_ENV}: {error}"),
+    };
+    let inventory = final_auto_cell_inventory();
+    assert_eq!(inventory.len(), 66, "final AUTO cell inventory");
+    assert_eq!(
+        final_auto_comparator_view_count(&inventory),
+        81,
+        "final AUTO comparator inventory"
+    );
+    let cells = select_final_auto_cells(&inventory, filter.as_deref())
+        .expect("select strict final AUTO cells");
+    let selected_views = final_auto_comparator_view_count(&cells);
+    let expected_records = final_auto_expected_record_count(&cells);
+    let full_inventory = filter.is_none();
+
+    let mut sink = FinalAutoJsonlSink::create_from_env().expect("new final AUTO evidence file");
+    let quiet_gpu = QuietGpu::for_cuda_ordinal(0).expect("resolve CUDA device 0 UUID");
+    let _pre_context = quiet_gpu
+        .require_pre_context("final-auto/pre-context")
+        .expect("exclusive CUDA device 0 before context creation");
+    let device = GpuDevice::new(0).expect("open final AUTO CUDA device");
+    validate_final_auto_device(&device).expect("admit exact final AUTO board class");
+    let auto_ctx = GpuCtx::new(&device).expect("create final AUTO production context");
+    let vendor_ctx = GpuCtx::new(&device).expect("create final AUTO vendor context");
+    auto_ctx.set_batch_invariant(true);
+    auto_ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    auto_ctx.set_fast_gemm(false);
+    auto_ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    let requests = cells
+        .iter()
+        .copied()
+        .map(qualification_request)
+        .collect::<Vec<_>>();
+    presize_physical_qualification_suite(&auto_ctx, &requests)
+        .expect("pre-size final AUTO qualification scratch");
+    let mut records = 0;
+    for cell in cells.iter().copied() {
+        records += run_final_auto_cell(
+            &auto_ctx,
+            &vendor_ctx,
+            &quiet_gpu,
+            source_sha,
+            &variant,
+            cell,
+            windows,
+            &mut sink,
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", cell_id(cell)));
+    }
+    assert_eq!(records, expected_records, "final AUTO emitted record count");
+    sink.finish(
+        expected_records,
+        cells.len(),
+        selected_views,
+        windows,
+        full_inventory,
+        source_sha,
+        &quiet_gpu,
+        &device,
+    )
+    .expect("complete final AUTO evidence");
+}
+
+#[test]
 #[ignore = "requires an idle SM80+ GPU and emits the forced TN narrow two-launch paired fast-cuBLAS comparator"]
 fn gemm_bi_tn_narrow_two_launch_paired_fast_cublas() {
     let _suite_guard = performance_suite_lock()
@@ -9120,6 +9969,137 @@ fn cublas_denominator_output_dtype_matches_the_training_contract() {
         assert_eq!(
             cublas_denominator_output_dtype(dtype, ResolvedGemmOp::Nt),
             dtype
+        );
+    }
+}
+
+#[test]
+fn final_auto_inventory_is_the_exact_66_cell_release_set() {
+    let cells = final_auto_cell_inventory();
+    let ids = cells.iter().copied().map(cell_id).collect::<BTreeSet<_>>();
+    assert_eq!(cells.len(), 66);
+    assert_eq!(ids.len(), 66);
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.starts_with("f32_policy_exact/"))
+            .count(),
+        15
+    );
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.starts_with("f32_policy_allow_tf32/"))
+            .count(),
+        21
+    );
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.starts_with("bf16_policy_tc/"))
+            .count(),
+        15
+    );
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.starts_with("f16_policy_tc/"))
+            .count(),
+        15
+    );
+    for required in [
+        "f32_policy_exact/nn/d128_in_proj/contiguous",
+        "f32_policy_exact/tn/prism_in_proj/contiguous",
+        "f32_policy_allow_tf32/nt/underfill/contiguous",
+        "f32_policy_allow_tf32/tn/large_deep/contiguous",
+        "bf16_policy_tc/tn/d768_out_proj/contiguous",
+        "f16_policy_tc/nt/prism_in_proj/contiguous",
+    ] {
+        assert!(ids.contains(required), "missing final AUTO cell {required}");
+    }
+    assert!(!ids.contains("f32_policy_exact/nn/underfill/contiguous"));
+    assert!(!ids.contains("bf16_policy_scalar/nn/d128_in_proj/contiguous"));
+}
+
+#[test]
+fn final_auto_comparator_mapping_and_record_count_are_exact() {
+    let cells = final_auto_cell_inventory();
+    let find = |prefix: &str| {
+        cells
+            .iter()
+            .copied()
+            .find(|cell| cell_id(*cell).starts_with(prefix))
+            .unwrap()
+    };
+    assert_eq!(
+        final_auto_comparator_views(find("f32_policy_exact/")),
+        vec![
+            FinalAutoComparator {
+                label: "cublas_fast_tf32",
+                mode: CublasDenominatorMode::Fast,
+            },
+            FinalAutoComparator {
+                label: "cublas_pedantic",
+                mode: CublasDenominatorMode::Pedantic,
+            },
+        ]
+    );
+    assert_eq!(
+        final_auto_comparator_views(find("f32_policy_allow_tf32/")),
+        vec![FinalAutoComparator {
+            label: "cublas_fast_tf32",
+            mode: CublasDenominatorMode::Fast,
+        }]
+    );
+    for prefix in ["bf16_policy_tc/", "f16_policy_tc/"] {
+        assert_eq!(
+            final_auto_comparator_views(find(prefix)),
+            vec![FinalAutoComparator {
+                label: "cublas_fast",
+                mode: CublasDenominatorMode::Fast,
+            }]
+        );
+    }
+    assert_eq!(final_auto_comparator_view_count(&cells), 81);
+    assert_eq!(final_auto_expected_record_count(&cells), 324);
+}
+
+#[test]
+fn final_auto_ratio_orientation_is_auto_over_vendor() {
+    assert_eq!(
+        final_auto_ratio_samples(&[4.0, 12.0], &[8.0, 6.0]).unwrap(),
+        [0.5, 2.0]
+    );
+    assert!(final_auto_ratio_samples(&[1.0], &[1.0, 2.0]).is_err());
+    assert!(final_auto_ratio_samples(&[1.0], &[0.0]).is_err());
+}
+
+#[test]
+fn final_auto_vendor_base_alignment_is_fail_closed() {
+    assert!(validate_final_auto_vendor_base_pointers([0x1000, 0x2000, 0x3000]).is_ok());
+    for pointers in [
+        [0x1001, 0x2000, 0x3000],
+        [0x1000, 0x20ff, 0x3000],
+        [0x1000, 0x2000, 0x3008],
+    ] {
+        assert!(validate_final_auto_vendor_base_pointers(pointers).is_err());
+    }
+}
+
+#[test]
+fn final_auto_filter_rejects_non_release_duplicate_and_empty_cells() {
+    let cells = final_auto_cell_inventory();
+    let first = "f32_policy_exact/nn/d128_in_proj/contiguous";
+    assert_eq!(
+        select_final_auto_cells(&cells, Some(first)).unwrap().len(),
+        1
+    );
+    for invalid in [
+        "",
+        "f32_policy_exact/nn/d128_in_proj/contiguous,f32_policy_exact/nn/d128_in_proj/contiguous",
+        "f32_policy_exact/nn/d128_in_proj/contiguous ",
+        "f32_policy_exact/nn/underfill/contiguous",
+        "bf16_policy_scalar/nn/d128_in_proj/contiguous",
+    ] {
+        assert!(
+            select_final_auto_cells(&cells, Some(invalid)).is_err(),
+            "accepted invalid final AUTO filter {invalid:?}"
         );
     }
 }

@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-final-auto-fix1.mFZCqX)
+    Finished `release` profile [optimized] target(s) in 5.17s
+  Executable tests/gemm_bi_performance_matrix.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_performance_matrix-d1b0332edac85e69)
