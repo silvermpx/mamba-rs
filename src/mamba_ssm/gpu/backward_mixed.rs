@@ -276,6 +276,16 @@ pub fn gpu_backward_mamba_layer_mixed(
             // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
             //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
             //   batch, T, d_inner, d_state.
+            if !use_fold {
+                // The ungrouped parallel kernel accumulates its per-sample
+                // d_a_log rows chunk by chunk with additions; it needs a
+                // zero slate every step, unlike the fold, which assigns
+                // every slot.
+                scratch
+                    .d_a_log_local
+                    .zero(&ctx.stream)
+                    .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
+            }
             let mut bld = ctx.stream.launch_builder(if use_fold {
                 k.ssm_parallel_bwd_fold_typed.get(dtype)
             } else {
@@ -394,7 +404,12 @@ pub fn gpu_backward_mamba_layer_mixed(
         // chunked reducer folds one sample's slots first, then adds
         // across the batch (the retired accumulate-then-reduce order).
         let p = d_lw.a_log.ptr();
-        if dims.scan_mode.use_parallel(t, ds) {
+        // Only the fold writes chunk-partial rows; the ungrouped parallel
+        // kernel and the sequential kernel both leave one accumulated row
+        // per sample, which the flat reducer folds.
+        let use_fold_rows = dims.scan_mode.use_parallel(t, ds)
+            && di.is_multiple_of(crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP);
+        if use_fold_rows {
             let nc = t.div_ceil(crate::mamba_ssm::gpu::launch::SCAN_CHUNK).max(1) as i32;
             let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log_chunks);
             bld.arg(&p);

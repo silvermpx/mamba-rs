@@ -21,6 +21,9 @@
 //!   decay values forever. Without the fix this test fails because
 //!   `a_neg_all` is identical to its initialization after any number of
 //!   steps (only `a_log` changes).
+//! * `m1_trainer_rejects_a_config_the_kernels_cannot_serve` — a d_inner
+//!   that is not a multiple of four never reaches the launchers: the
+//!   trainer validates the config first, as the Mamba-3 trainer does.
 
 #![cfg(feature = "cuda")]
 
@@ -429,4 +432,32 @@ fn m1_trainer_f16_production_lr_stable() {
         "f16 weights barely moved after 50 prod-lr steps (max|Δw|={max_diff:.3e})"
     );
     assert!(max_diff.is_finite(), "max|Δw|={max_diff} non-finite");
+}
+
+#[test]
+fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
+    use mamba_rs::config::{MambaConfig, ScanMode};
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::weights::MambaWeights;
+
+    // d_model 5 with expand 2 gives d_inner 10: the vectorized kernels need
+    // a multiple of four, and the parallel backward pairs its kernels and
+    // reducers on that assumption.
+    let cfg = MambaConfig {
+        d_model: 5,
+        n_layers: 1,
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: ScanMode::Parallel,
+        rms_norm_eps: 1e-5,
+    };
+    let cpu = MambaWeights::init(&cfg, cfg.d_model, 7);
+    let error = MambaTrainer::new_with_dtype(0, &cpu, cfg, cfg.d_model, 1, 300, WeightDtype::F32)
+        .err()
+        .expect("a d_inner of 10 must be rejected before any kernel runs");
+    assert!(
+        error.contains("divisible by 4"),
+        "unexpected rejection: {error}"
+    );
 }

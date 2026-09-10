@@ -155,6 +155,15 @@ pub fn gpu_backward_mamba_layer(
         } else {
             &ctx.kernels.ssm_backward_local
         };
+        if use_parallel && !use_fold {
+            // The ungrouped parallel kernel accumulates its per-sample
+            // d_a_log rows chunk by chunk with additions; it needs a zero
+            // slate every step, unlike the fold, which assigns every slot.
+            scratch
+                .d_a_log_local
+                .zero(&ctx.stream)
+                .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
+        }
         let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.delta.inner());
@@ -259,7 +268,12 @@ pub fn gpu_backward_mamba_layer(
         // only then adds across the batch, reproducing the retired
         // accumulate-then-reduce association exactly.
         let _p = d_lw.a_log.ptr();
-        if dims.scan_mode.use_parallel(t, ds) {
+        // Only the fold writes chunk-partial rows; the ungrouped parallel
+        // kernel and the sequential kernel both leave one accumulated row
+        // per sample, which the flat reducer folds.
+        let use_fold =
+            dims.scan_mode.use_parallel(t, ds) && di.is_multiple_of(super::launch::SCAN_BWD_DGROUP);
+        if use_fold {
             let nc = t.div_ceil(super::launch::SCAN_CHUNK).max(1) as i32;
             let mut builder = ctx
                 .stream
