@@ -144,7 +144,7 @@ pub(crate) fn simd_ssm_recurrence(
 /// `1 + x` for x >= 0, `1 / (1 - x)` for x < 0. Always positive; polynomial
 /// decay for negative inputs where softplus saturates exponentially — using
 /// softplus here changed the decay-spectrum distribution and gradient tails
-/// relative to the published model (paper-fidelity audit finding #1).
+/// relative to the published model.
 pub(crate) fn heavy_tail(x: f32) -> f32 {
     if x >= 0.0 { 1.0 + x } else { 1.0 / (1.0 - x) }
 }

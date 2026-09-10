@@ -2925,8 +2925,8 @@ const SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED: &[Tf32AutoCell] = &[
     },
 ];
 
-/// Fresh 595.58.03 module identity observed in the retained 2026-09-05
-/// full 36-route qualification, four strict sanitizer runs and the completed
+/// Fresh 595.58.03 module identity observed in the retained full 36-route
+/// qualification, four strict sanitizer runs and the completed
 /// five-cell selector (projection-recovery.jsonl, SHA-256
 /// 9240e14277a8fe6f616e095e39704f1bd623e4180c367c43e0c463d80d8d8431).
 /// Only three cells admitted; both 1024-row small projections stayed exact.
@@ -3395,8 +3395,8 @@ fn measured_tf32_cell(
         .map(|cell| cell.route)
 }
 
-/// Separately qualified NN bias epilogues on the frozen Ada module. The
-/// 2026-09-05 bias-wide5-v2 qualification measured 21 discovery and 101 final
+/// Separately qualified NN bias epilogues on the frozen Ada module. Their
+/// qualification measured 21 discovery and 101 final
 /// windows per order/path, with repeat, graph and red-zone gates. No-bias
 /// evidence elsewhere does not authorize this epilogue or adjacent shapes.
 fn sm89_measured_tf32_bias_route(

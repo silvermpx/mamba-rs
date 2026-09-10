@@ -10110,8 +10110,8 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
     const SM120_TAG33_SYMBOL: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
 
     match module_kind {
-        // Same-source Task 3 Driver census: 125 registers on CUDA12.8/13.0
-        // and 121 on13.2, with zero local memory and two resident CTAs.
+        // The compiled kernel uses 125 registers on CUDA 12.8 and 13.0 and
+        // 121 on 13.2, with no local memory and two resident CTAs.
         ModuleKind::TriadSm89Finalist
             if symbol == super::sm89_finalist_source::SM89_FINALIST_SYMBOL =>
         {

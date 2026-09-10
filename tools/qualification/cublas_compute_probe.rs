@@ -1,4 +1,4 @@
-//! P0.5 — CUDA-13 cuBLAS compute-mode probe (the pedantic-pin decision
+//! CUDA-13 cuBLAS compute-mode probe (the pedantic-pin decision
 //! instrument).
 //!
 //! History: 61325b3 (RTX 4090, CUDA 12.8) observed K-scaling accumulation

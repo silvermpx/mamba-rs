@@ -999,8 +999,8 @@ fn ssm_backward_local_bf16_matches_f32() {
 //
 // cuBLAS GemmEx typed dW: dW[n_in, n_out] += X^T @ dY. bf16/f16 A,B with
 // f32 master C, CUBLAS_COMPUTE_32F_PEDANTIC (true f32 accumulate — we
-// intentionally diverge from PyTorch's TF32 default; see commit 61325b3
-// for the 1.4b regression that motivated PEDANTIC).
+// intentionally diverge from PyTorch's TF32 default after a 1.4b
+// checkpoint regressed under TF32).
 //
 // Production shape: mamba-130m in_proj bwd has B*T=2048, n_in=768,
 // n_out=3072. We test at that exact shape so cuBLAS picks a realistic

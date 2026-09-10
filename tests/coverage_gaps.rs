@@ -14,7 +14,7 @@
 //! * `a_log_actually_reaches_ssm_after_training` — asserts that after a
 //!   few training steps, BOTH `a_log` master weights AND the SSM
 //!   recurrence's `a_neg` compute buffer have changed. This is the
-//!   regression test for the round-2 audit CRIT bug where `a_neg` was
+//!   regression test for the bug where `a_neg` was
 //!   initialized once at trainer construction and never refreshed after
 //!   AdamW touched `a_log` — letting the optimizer "train" the A-matrix
 //!   in isolation while the forward kernel kept reading the pre-training
@@ -196,7 +196,7 @@ fn m1_trainer_parallel_scan_f16() {
 
 /// Trainer construction seeds `a_neg_all = -exp(a_log)` once. AdamW
 /// updates `a_log` every step, but the forward/backward SSM kernels read
-/// `a_neg_all`. Before the round-2 audit fix, `a_neg_all` was never
+/// `a_neg_all`. Before the fix, `a_neg_all` was never
 /// recomputed → the SSM used the initial A-matrix for the entire run
 /// even though `a_log` changed in memory. Assert that after 5 training
 /// steps:

@@ -91,7 +91,7 @@ impl Ctx {
     fn new() -> Self {
         let device = GpuDevice::new(0).expect("gpu");
         let ctx = GpuCtx::new(&device).expect("ctx");
-        // M-13 (GEMM-map audit): pin the tier explicitly - a shell with
+        // Pin the tier explicitly: a shell with
         // MAMBA_RS_BI_TENSOR_CORES exported used to silently reroute this
         // suite through the TC kernels, testing a different contract.
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -353,7 +353,7 @@ fn typed_full_coverage_bit_match_f32_triad() {
         check_forward(&t, dt, (2048, 768, 512), true, true);
         check_forward(&t, dt, (256, 100, 512), true, true);
         check_forward(&t, dt, (256, 8, 256), true, true);
-        // Wide-N / wide-K gap-fill (audit blocker #2): Mamba-1 in_proj at
+        // Wide-N and wide-K shapes: Mamba-1 in_proj at
         // micro-batch — M ∈ [32,128) with N = 2·d_inner > 2048, and M < 32
         // with K = d_model > 2048 (d_model = 2560 class).
         check_forward(&t, dt, (64, 768, 3072), true, true);

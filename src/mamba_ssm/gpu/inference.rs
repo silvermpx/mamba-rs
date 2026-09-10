@@ -2026,9 +2026,9 @@ impl GpuMambaInferenceMixed {
             // the final downcast. Replaces the (gather_bc + ssm_step +
             // elementwise_mul) triplet with a single kernel.
             //
-            // Prior attempt (commit 39b248d) observed a 1.4b/2.8b NaN cascade
-            // at 0/15 token match. Root cause was the missing RMSNorm
-            // finite-guard (fixed in 2b0670d + e270d78). With that guard in
+            // An earlier attempt observed a 1.4b/2.8b NaN cascade at 0/15
+            // token match. The root cause was the missing RMSNorm
+            // finite-guard, since fixed. With that guard in
             // place, the fused gating is safe across all four HF model sizes.
             //
             // Hard guard: the fused kernel uses `float h_local[64]` +

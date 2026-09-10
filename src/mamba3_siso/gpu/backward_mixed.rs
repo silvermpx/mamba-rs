@@ -15,8 +15,8 @@
 //! - **Activations**: typed (bf16/f16) — read via `cached_ptr()` from
 //!   `GpuMamba3LayerMixedActs` and written to typed scratch buffers in
 //!   `GpuMamba3MixedScratch`.
-//! - **Master grads** (in `GpuMamba3LayerGrads`): all stay f32 — atomicAdd
-//!   master-grad invariant per audit.
+//! - **Master grads** (in `GpuMamba3LayerGrads`): all stay f32, the
+//!   master-gradient invariant.
 //! - **Activation grads on the wire**: typed where they cross typed-kernel
 //!   boundaries (d_gated, d_y, d_z, d_b_normed, d_c_normed, d_b_raw,
 //!   d_c_raw, d_proj, d_post_norm, d_temporal_typed); otherwise f32 in

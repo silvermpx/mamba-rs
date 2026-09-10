@@ -1,7 +1,7 @@
 //! verify f16 inference works end-to-end through the public
 //! `GpuMambaBackbone` / `GpuMamba3Backbone` wrappers.
 //!
-//! The audit flagged f16 inference as "not in wrapper API" — false alarm:
+//! f16 inference was once thought to be missing from the wrapper API;
 //! both wrappers have always dispatched `Bf16 | F16` into the `Mixed`
 //! engine path that's parameterized on dtype. This test confirms a clean
 //! end-to-end run: construct → step → finite output.

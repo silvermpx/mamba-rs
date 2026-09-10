@@ -597,9 +597,8 @@ fn training_graph_bf16_multi_replay_matches_eager() {
 }
 
 /// Reallocating `state.conv_states` between capture and replay must trip
-/// the conv-state assertion (regression coverage for an audit finding —
-/// before the fix this reallocation went silently undetected because only
-/// `state.ssm_states` was snapshotted).
+/// the conv-state assertion; before the fix this reallocation went
+/// silently undetected because only `state.ssm_states` was snapshotted.
 #[test]
 #[should_panic(expected = "state.conv_states pointer changed since capture")]
 fn training_graph_panics_on_state_conv_mismatch() {

@@ -86,8 +86,8 @@ pub struct GpuMambaBackboneMixedActs {
 impl GpuMambaBackboneMixedActs {
     /// Allocate all activation buffers, sized for `dims`. Fires async memsets
     /// on `stream`. Caller MUST `stream.synchronize()` before any default-stream
-    /// HtoD upload into one of these buffers (see commit a950648 for the race
-    /// class this prevents).
+    /// HtoD upload into one of these buffers; without the sync the upload
+    /// can race the memset and lose data.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
         dims: &GpuMambaDims,
@@ -146,7 +146,7 @@ impl GpuMambaBackboneMixedActs {
             dtype,
         };
 
-        // Enforce the race-fix invariant from commit a950648: every later
+        // Enforce the memset-before-upload invariant: every later
         // HtoD path that targets these buffers must observe the zeros first.
         stream
             .synchronize()

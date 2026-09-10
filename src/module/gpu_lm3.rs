@@ -301,8 +301,8 @@ impl GpuMamba3LM {
         // path. Without padding the GEMM emits contiguous [B, vocab_size]
         // while the CPU-side downloader reads with stride vocab_size_padded
         // → every batch slot beyond the first gets wrong logits on any
-        // checkpoint whose vocab isn't 64-aligned. Same bug + same fix that
-        // landed in M1 (GpuMambaLM) at commit 5dde438.
+        // checkpoint whose vocab isn't 64-aligned. Same bug and same fix as
+        // the Mamba-1 LM (GpuMambaLM).
         let lm_head_padded: Option<Vec<f32>> = lm_head.as_ref().map(|lm| {
             if vocab_size == vocab_size_padded {
                 lm.clone()

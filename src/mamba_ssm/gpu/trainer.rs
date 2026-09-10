@@ -1188,8 +1188,8 @@ impl MambaTrainerMixed {
 
     /// Download the current `a_neg_all` buffer used by the SSM backward
     /// kernel. Exposed for regression tests verifying that `a_neg` is
-    /// refreshed from the updated `a_log` after AdamW (see audit round-2
-    /// CRIT bug).
+    /// refreshed from the updated `a_log` after AdamW; it once was not, and
+    /// the optimizer trained an A matrix the kernels never read.
     #[doc(hidden)]
     pub fn debug_a_neg_all(&self) -> Result<Vec<f32>, String> {
         self.ctx
@@ -1855,8 +1855,8 @@ impl MambaTrainerMixed {
             "M1 f16 training graph capture requires one successful eager step".to_string()
         })?;
         // Snapshot every device pointer the captured kernels reference, so
-        // step_f16 can assert pointer-stability on each replay (audit Step
-        // audit finding: f16 graph was missing these guards).
+        // step_f16 can assert pointer stability on each replay; the f16
+        // graph once lacked these guards.
         let snap_bias = self.bias.ptr();
         let snap_unscale = self.unscale_factor.as_ref().unwrap().ptr();
         let snap_overflow = self

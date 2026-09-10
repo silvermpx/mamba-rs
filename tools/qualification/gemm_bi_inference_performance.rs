@@ -36,8 +36,8 @@ use sha2::{Digest, Sha256};
 const WARMUPS: usize = 10;
 const ITERS: usize = 200;
 
-// Task6B has a separate mirrored-bracket protocol; historical harnesses above
-// and below retain their original record meanings.
+// The Ada S3 pair below has its own mirrored-bracket protocol; the older
+// harnesses above and below keep their original record meanings.
 mod ada_s3_pair {
     use super::*;
 
@@ -12024,7 +12024,7 @@ fn fixed_explicit_vendor_tolerance_metadata(row: &FixedExplicitVendorRowSpec) ->
 // Each registry macro drives both the iterable census universe and an
 // exhaustive match. Adding an enum variant therefore cannot compile until it
 // is classified here, and classification automatically adds it to the reverse
-// inventory audit.
+// inventory check.
 macro_rules! define_fixed_force_half_tile_registry {
     ($($variant:ident),+ $(,)?) => {
         const FIXED_FORCE_HALF_TILE_UNIVERSE: &[InferenceSm120HalfTile] = &[

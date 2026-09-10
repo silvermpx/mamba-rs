@@ -813,9 +813,9 @@ fn upload_f32_as_dtype(
 /// The logits GEMM reads the head with stride `vocab_padded`; a flat
 /// `copy_from_slice` interleaves source rows into wrong destination
 /// offsets and silently produces wrong logits for every vocab that is not
-/// already 64-aligned (e.g. 50280 -> 50304 on mamba-130m-hf). M1 fixed
-/// this at commit 5dde438; the M3 LM shipped the flat copy until 0.6
-/// — both archs now share this one implementation.
+/// already 64-aligned (e.g. 50280 -> 50304 on mamba-130m-hf). The Mamba-1
+/// LM fixed this first; the Mamba-3 LM shipped the flat copy until 0.6, and
+/// both architectures now share this one implementation.
 pub(crate) fn pad_lm_head_rows(
     lm: &[f32],
     d_model: usize,

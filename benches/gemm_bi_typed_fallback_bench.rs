@@ -42,7 +42,7 @@ impl Ctx {
     fn new() -> Self {
         let device = GpuDevice::new(0).expect("gpu");
         let ctx = GpuCtx::new(&device).expect("ctx");
-        // M-13 (GEMM-map audit): pin the tier explicitly - a shell with
+        // Pin the tier explicitly: a shell with
         // MAMBA_RS_BI_TENSOR_CORES exported used to silently reroute this
         // suite through the TC kernels, testing a different contract.
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -65,7 +65,7 @@ impl Ctx {
 /// Measures the upcast-fallback tax on Big training shapes: typed entry
 /// (upcast → f32 kernel → downcast) vs the bare f32 kernel on pre-upcast
 /// operands. The delta is the ceiling on what native typed Big kernels
-/// (stage 3) could recover with a SLOWER-than-cp.async staging scheme.
+/// could recover with a slower-than-cp.async staging scheme.
 fn bench_upcast_fallback_tax() {
     use std::time::Instant;
     let t = Ctx::new();

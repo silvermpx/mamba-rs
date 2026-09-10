@@ -4,8 +4,7 @@
 //! inputs/weights, asserting tight cosine + norm-ratio thresholds across
 //! the full f32 master-grad arena.
 //!
-//! This was the top release blocker per the pre-release audit
-//! the mixed backward had unit parity for every typed
+//! Before this test existed, the mixed backward had unit parity for every typed
 //! bwd kernel but no integration-level call site.
 //!
 //! ## Production-config requirements

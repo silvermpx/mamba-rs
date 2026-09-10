@@ -1,9 +1,9 @@
 //! Batch-size and CPU↔GPU parity tests on real HF checkpoints.
 //!
-//! Targets two dark corners the round-2 audit flagged:
+//! Targets two dark corners:
 //!
-//! 1. **Untied lm_head stride** — the bug commit 5dde438 fixed (and the
-//!    ff47ad8 round-2 follow-up for M3): at batch > 1 with vocab not
+//! 1. **Untied lm_head stride**, a bug fixed for both architectures: at
+//!    batch > 1 with vocab not
 //!    64-aligned the old code wrote GEMM output at `vocab_size` row
 //!    stride while the CPU sliced with `vocab_size_padded`. Only
 //!    batch=1 would "work" by luck. This test drives `generate_batch`

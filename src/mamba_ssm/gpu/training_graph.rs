@@ -34,9 +34,9 @@
 //! ## Pointer-stability invariant
 //! Captured pointers are stored at capture time. On replay, the holder
 //! asserts that every input buffer's `cached_ptr()` still matches what
-//! was captured. Any reallocation panics — matches the audit's "the
-//! 130m race lesson" rule that mutating buffers between capture and
-//! replay silently corrupts outputs.
+//! was captured. Any reallocation panics: mutating buffers between
+//! capture and replay silently corrupts outputs, as a race on the 130m
+//! model once showed.
 //!
 //! ## Reference
 //! Same pattern as `GpuInferenceEngine::capture_graph` (inference.rs:307),
