@@ -3508,6 +3508,13 @@ ResolvedGemmEnv {
   If a local wrapper must remain, exercise that actual wrapper's poisoned None
   callback rejection. Preserve905 decode evidence; don't rerun unrelated kernels.
 
+  For the three prefill fixtures, retain all existing assertions and execute
+  the same body for both Triad and Inference, setting the actual context family
+  before eager/capture. Their generic `GpuCtx::new` otherwise tests only Triad,
+  not the new model default. Own the three corresponding test files as well;
+  do not duplicate whole bodies or mutate process environment. This is three
+  two-family controls, not a full constructor/kernel matrix.
+
 - [ ] Add process-isolated env coverage in the constructor integration binary.
   Parent tests spawn the current executable with one exact child test; each
   child Command removes all eight GEMM variables before setting its case.
@@ -3643,6 +3650,23 @@ Output boundaries:
   default CUDA checks cover shipping targets and a deliberate qualification
   compile lane covers manual tools, without starting hardware runs in CI.
 
+  The owner bans dead-code suppression. The current shared harness has a
+  multiline blanket allowance in tests/common/mod.rs; two support fixtures
+  also contain dead-code/argument-count allowances. Resolve those for any
+  retained shipping consumers through real fixture/module organization, not
+  by replacing allow with expect or another blanket suppression. Candidate
+  archive originals retain their historical bytes. Scan multiline attributes
+  too so a single-line search does not falsely report this requirement met.
+
+  Read internal/release-dead-code-audit-20260910.md for the bounded baseline
+  consumer map: five shipping allowances require real cleanup;64 are
+  archive-bound. Also remove the no-caller AdaHalfNtS3Fixture::new delegate,
+  archive the two unreferenced support modules, preserve actual production
+  route consumers and deprecated public compatibility methods, and migrate
+  their retained internal callers semantically. Bootstrap's cfg-aware binding
+  cleanup and the Q probe's parameter structs are in this bounded scope;
+  no behavior change, dummy call or visibility widening solely for lints.
+
 - [ ] Root verifies a single coherent layout packet: host layout/census and
   retained smoke tests, non-CUDA library tests, CUDA+HF all-target compilation,
   one representative qualification target compile and one stable CPU benchmark
@@ -3651,6 +3675,10 @@ Output boundaries:
   material, then run host library/test checks and CUDA library compilation from
   extracted contents. Keep Rustdoc and whole-shipping fmt/clippy checks honest;
   record unavailable feature/hardware lanes rather than counting skips.
+
+  Because the bounded cleanup touches bootstrap's NCCL conditional binding,
+  include a compile-only CUDA+NCCL library lane as well as non-NCCL builds.
+  This needs no multi-GPU execution and does not claim NCCL runtime acceptance.
 
 - [ ] Freeze source/move/fixture inventories, archive the report, commit the
   verified layout and obtain an independent scoped review. Existing kernel
@@ -3674,3 +3702,240 @@ prefill/training migration, then Task907 test/package cleanup. This is release
 assembly, not new candidate discovery. No new speed result or fresh SM120
 execution is implied. Public docs/version, old-main comparison and final
 release gate still follow; publishing requires the owner's separate approval.
+
+## Task 908: Measure the preserved old-main exact-F32 inference baseline
+
+Execute after Task907 verification/review, using the final reviewed runtime
+endpoint. Read `internal/monolith-baseline-plan-20260910.md`; its top execution
+corrections supersede the historical shell recipe below them. This is the
+owner-requested old monolith comparison, not a kernel optimization task.
+
+Scope: one non-shipping benchmark-only adapter and focused correctness helpers,
+under the root-assigned internal evidence directory; no production changes,
+kernel/dispatch edits, manifest/version changes or new public test target.
+Root owns immutable source snapshots, Cargo/GPU execution and raw receipts.
+
+- Preserve unchanged main `d8f2efbeaecc04a53cec9890097f2913cd3f09e6`. Record
+  the actual reviewed new SHA at dispatch, never an intermediate WIP tree.
+- Reuse only the two inference sections of the identical original
+  `tests/m1_gpu_benchmark.rs`, SHA256
+  `5ec73ac29bf4c135bb730aef18266d9cb3db4463512337b7225226a57d6b7bc0`.
+  Do not run its training/CPU timing tail. Preserve d128/L3, seed42, batches
+  1/4/16/64/128, input0.1, warmup20 and its eager/graph iteration counts.
+- One identical adapter must compile on both endpoints through their existing
+  common backbone API. Set and assert on each real context, before warmup or
+  capture: batch-invariant=true, family=Triad, tensor-cores=false, fast=false.
+  Clear ambient GEMM controls in the runner. Main ignores constructor env;
+  relying on env alone is invalid. Keep legacy-setter warnings visible in this
+  non-shipping cross-version adapter, without suppression.
+- Use only safe shared `GpuMambaBackbone` construction/step/reset/capture APIs.
+  Reset after capture and before fixed-step checks so both paths begin from
+  the same recurrent state. Check finite fixed-step outputs, same-arm repeat
+  bits and eager/graph bits for the tested fixture before timing. Validate
+  numerical output against the existing CPU fixture where applicable using
+  its established tolerance; do not invent a relaxed tolerance after failure.
+  Print ordered output digests. A cross-version digest difference must be
+  reported and investigated, not silently re-labelled bit equivalence.
+- Build both immutable snapshots once, with separate target roots and private
+  mode0700 kernel/Driver caches; CUDA_CACHE_DISABLE=0. Verify all source and
+  adapter hashes before/after. Qualify the exact toolkit/board/driver.
+- Root checks idle GPU/free VRAM before each process and runs two complete
+  old,new,new,old blocks. Preserve each raw per-batch eager/graph measurement
+  and process order. No competing GPU work. A startup/build failure is not a
+  kernel performance loss.
+- Report each board/path/batch separately and derive paired block ratios
+  new_us/old_us (below1 is faster); do not pool boards or infer a CUDA-kernel
+  speedup from this end-to-end adapter. Its timed boundary includes host
+  transfers, synchronization, recurrence and current route/graph guards.
+- This arm is explicitly Triad-backed exact-F32 model latency, not the new
+  Inference-family default. Do not call it the default-inference improvement,
+  generalize it to half/TF32, or multiply it by earlier kernel ratios. If the
+  result cannot support a general release headline, retain a scoped table.
+- Do not reconnect expired rental endpoints except the latest owner-supplied
+  working lane. An unavailable board remains missing, not a saved-snapshot
+  remeasurement. Continue available Ada work.
+- Supply a complete source/command/raw/result report and proposed exact public
+  wording. Root verifies and commits the bounded artifact/evidence, then gets
+  scoped independent review. Next is public documentation/version and the
+  one final release gate; no new candidate discovery.
+## Task 909: Complete public documentation and version 0.7.0
+
+Execute after Task908 and the accepted API/layout tasks. Read the complete
+`internal/release-public-docs-audit-20260910.md` and
+`internal/release-vendor-wording-sources-20260910.md`. Rebase its source anchors
+to the actual reviewed API/target layout. This implements the owner's existing
+documentation/version requirement, not new feature or kernel work.
+
+- Update README, docs, touched public Rustdoc and GPU examples using the exact
+  shipped constructors. Deterministic is default; model/inference contexts use
+  Inference, trainer/generic contexts use Triad. Vendor modes are explicit
+  CublasFast/CublasPedantic. No hidden vendor fallback in Deterministic.
+- Separate storage dtype, mode, custom F32/TF32/half policy and family. Explain
+  explicit versus env-aware construction and the separate first-use ARCH_RUNG
+  caveat. Do not describe cuBLAS as inherently nondeterministic or Pedantic as
+  a universal bit guarantee. Link the already checked NVIDIA primary sources.
+- Keep concise professional English, useful examples and IDE-visible docs.
+  Remove filler, unscoped speed claims and comparisons to unrelated frameworks.
+  Preserve versioned historical CHANGELOG facts rather than rewriting history.
+- Use one canonical current kernel results table in
+  docs/determinism-benchmarks.md, sourced from the final-AUTO receipts at
+  measured source732c1146. Keep board, eager/whole-graph, dtype, exact comparator
+  and counts explicit. Link from README/model pages. Never present those as
+  model throughput or results measured after API changes.
+- Add the old-main table only with Task908's actual supported scope and source
+  endpoints. Do not claim an Inference-default delta from its Triad-only arm.
+  Historical model timings must be clearly dated/source-scoped or removed from
+  the current release story. No unsupported whole-Triad Fast-win statement.
+- Source architecture coverage from the existing release wiring audit: preserve
+  CC12.0 versus12.1 distinction, measured versus guarded heuristic rungs, and
+  the guarded nearest-entry half selection band. Do not describe every nearby
+  shape as independently measured. No architecture selector edits.
+- Update reproduction/qualification commands to the accepted R/B/Q target
+  layout. Document archive-versus-published-package boundaries and serialized
+  GPU runs. CPU-only examples retain their CPU scope.
+- Resolve recorded public-to-private Rustdoc links and stale production/example
+  wording without lint allowances. Do not erase regression assertions or
+  numerical errors to obtain a documentation pass.
+- Bump only this package's manifests/lockfile/version references to0.7.0.
+  Add a brief factual CHANGELOG entry in existing style. Do not bump unrelated
+  dependencies, create a release tag, push or publish.
+- Root runs focused changed-example compilation, Rustdoc links/doctests, version
+  and link/command consistency checks, then commits and obtains independent
+  review. One final whole-release verification/review and authorized local
+  main merge follow. Publishing still requires separate owner approval.
+
+## 2026-09-10 continuation: API verification and dead-code cleanup
+
+Task906 source commit9808d873 passed all18 selected groups on Ada, all six
+process-isolated constructor cases, three two-family prefill fixtures, six
+training fixtures, CUDA-only/CUDA+HF compilation,15doctests and7non-CUDA HF
+tests. Full immutable receipts are internal/perf/model-mode-api-20260910/.
+Independent review found the functional/API/graph changes clean, but requires
+Rustdoc completion on existing constructors and removal of one duplicated
+dtype binding. Original worker handles one focused fix round; do not rerun
+kernel performance matrices for this correction.
+
+Task907 must follow the completed internal/release-dead-code-audit-20260910.md
+and release-test-layout audit. In addition to its mapped cleanup, remove the
+unreachable wildcard plus allow(unreachable_patterns) in bootstrap's
+rendezvous_paths: Rendezvous is local and has only File. Keep the906 constructor
+test's intentionally parent-invoked ignored child explicitly accounted for in
+the lane census. No lint suppression, dummy calls or visibility tricks.
+
+Original old-main benchmark input was preserved unchanged under
+internal/perf/monolith-baseline-20260910/source-inputs/m1_gpu_benchmark.rs,
+SHA2565ec73ac29bf4c135bb730aef18266d9cb3db4463512337b7225226a57d6b7bc0,
+before907 moves its public benchmark target. This is source preservation,
+not a new timing result.
+## Pause handoff — complete operational knowledge (2026-09-10)
+
+### Where work is paused
+
+- Worktree: `internal/worktrees/gemm-bi-triad-sm80`.
+- Branch: `codex/gemm-bi-triad-sm80`.
+- Last committed source: `9808d873` (`Expose model GEMM modes and guard remaining graph owners`).
+- Main is intentionally untouched; no push, tag, publication, or merge has been authorized.
+- The worktree currently contains an uncommitted documentation-only Task906 review fix in the M1/M3 inference/LM files, plus this handoff update. Inspect `git status` before resuming. Do not discard it.
+- All WIP in this worktree belongs to this effort. The unrelated `tmp/` in the main checkout is not ours.
+
+### What has actually been achieved
+
+1. The production deterministic GEMM path is wired through the shared context, admission, validated launch, and graph replay seams. The nine remaining model graph owners (three prefill and six training capture/replay paths) now preserve their real `has_gemm_work` predicates and prepare an Inference architecture rung before eager recorders when work is present.
+2. The public model/trainer mode API is additive. Existing constructors remain available; model/inference constructors are environment-aware with default `Deterministic + Inference`, while generic contexts and trainers default to `Deterministic + Triad`. Explicit overloads accept `GemmMode` and bypass GEMM mode/custom precision/tensor-core/family environment parsing. `MAMBA_RS_ARCH_RUNG` remains a separate first-use process policy and is not generally ignored.
+3. M3 keeps its generic context capacity of 64 while compiling its M3 kernels at the rounded model state capacity. Mixed engines retain one real f32 engine/context rather than creating a disposable context. M3 context accessors are public for inspection; no duplicate mode field was introduced.
+4. The API/graph packet was tested on RTX 6000 Ada (SM89, CUDA 13.2) from an immutable source snapshot. CUDA+HF all-target compilation and CUDA-only library/API compilation passed. All 18 selected exact groups passed: four host contracts and fourteen GPU groups, including six process-isolated environment cases, three prefill fixtures under both Triad and Inference, and six M1/M3 F32/BF16/F16 training-graph fixtures. Rustdoc completed, doctests were 15 passed/0 failed/3 pre-existing ignored, the non-CUDA HF suite was 7 passed/0 failed, and scoped rustfmt over all 19 changed source/test files passed. Receipts are under `internal/perf/model-mode-api-20260910/green/`; the initial intentional RED and failed first compile are preserved beside it.
+5. No new kernel tournament or performance win was created by Task906. Do not present API verification as a benchmark result. No fresh SM120/5090 result is assumed.
+
+### Current accepted performance evidence (do not relabel)
+
+Canonical retained kernel evidence is source `732c11462dd9a47376e6d15b36040ca69bde3e34`, in `internal/perf/final-auto-benchmarks-20260910/`. It contains 280 inference and 324 Triad cells per board plus eager/whole-graph windows. Ratios are cuBLAS divided by ours; greater than 1 means ours is faster.
+
+| Board / path | BF16 | F16 | BF16→F32 | F16→F32 | TF32 | exact/Fast | exact/Pedantic |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Ada inference | 1.185 | 1.165 | 0.825 | 0.812 | 0.900 | 0.459 | 1.002 |
+| RTX 5090 inference | 1.235 | 1.238 | 1.276 | 1.270 | 1.126 | 0.776 | 1.074 |
+| Ada Triad | 0.869 | 0.851 | 0.709 | 0.422 | 0.772 | — | — |
+| RTX 5090 Triad | 0.929 | 0.929 | 0.939 | 0.698 | 0.919 | — | — |
+
+These are kernel-level retained measurements, not end-to-end model throughput. There is no all-shape Fast win. Exact F32 remains the deterministic contract and should be reported as parity/closest achievable where it is not ahead. Do not combine Ada and 5090, eager and graph, different shapes, old receipts, or unrelated model timings into one claim.
+
+The old-main comparison is still pending. Its preserved input is `tests/m1_gpu_benchmark.rs`, SHA256 `5ec73ac29bf4c135bb730aef18266d9cb3db4463512337b7225226a57d6b7bc0`, copied under `internal/perf/monolith-baseline-20260910/source-inputs/`. Task908 must compare unchanged main `d8f2efbeaecc04a53cec9890097f2913cd3f09e6` to the final reviewed commit with one identical benchmark-only adapter, exact F32, Triad family, batches 1/4/16/64/128, seed42, d128/L3, input0.1, warmup20, ABBA blocks `old,new,new,old`. It is an end-to-end Triad-backed model latency comparison, not proof of the new Inference-default speed.
+
+### Kernel research and qualification protocol
+
+Use this protocol whenever future kernel work resumes; do not return to serial blind tile edits.
+
+1. Start from the remaining op/dtype/shape gap and the retained best plus real dispatcher reachability. Keep winning kernels for other SMs and shapes even if they lose on the current board.
+2. Read primary NVIDIA/CUTLASS/PTX material or a constrained heuristic/profile first. State the mechanism, unchanged-bit argument, resource budget, and stop condition for each candidate.
+3. Prepare a small distinct shortlist. One timed GPU executor only; agents may reason/read independently but must not overlap source writes or GPU runs.
+4. First run mapping/resource checks, exact-bit/repeat/graph/guard checks. Only valid candidates enter a short paired eager/graph once-7 screen against the retained best and explicit cuBLAS Fast. Preserve 256-byte guarded alignment and vendor graph opacity; do not assume vendor node counts.
+5. A valid loser stops. A new run requires a new source/profile-backed hypothesis. Do not repeat full gates after each prototype or call an unchanged old result a new win.
+6. Assemble finalists across the whole Triad (NN, NT, TN; all five shape families; all four precisions), then integrate together and run one supported-toolkit qualification batch. Keep experiments separate from production kernels.
+7. Before every CUDA/build/GPU command, identify the board/toolkit, check the exact GPU UUID, utilization and free VRAM, and ensure no competing workload is being killed. Preserve source/compiler/cache/artifact hashes. Use private mode0700 kernel and CUDA caches with `CUDA_CACHE_DISABLE=0`; do not reuse a stale binary after a source repair.
+
+### Mode/API contract for future maintainers
+
+- `GemmMode::Deterministic`: our custom deterministic kernels only; no hidden cuBLAS fallback. Default for model/inference and generic/trainer contexts, with family determined by role (`Inference` for models, `Triad` for training/generic).
+- `GemmMode::CublasFast`: explicit vendor fast path.
+- `GemmMode::CublasPedantic`: explicit vendor pedantic path.
+- Storage dtype (`f32`, `bf16`, `f16`) is independent from GEMM mode and accumulation policy. Do not describe BF16 as automatically falling back to F32 or claim vendor Pedantic gives a universal bit guarantee.
+- `MAMBA_RS_ARCH_RUNG` is a separate first-use architecture policy; explicit mode overloads bypass mode/custom precision/tensor-core/family selectors but do not erase that process policy.
+- Environment-aware constructors reject invalid/contradictory canonical and legacy controls. Explicit constructors do not parse those controls. Missing family uses the role default; explicitly empty/whitespace family retains the compatibility Triad behavior.
+- CUDA graph capture requires an eager manifest/valid plan; healthy vendor `None` and genuine zero-work `None` remain legal, while poisoned contexts must not reach callbacks. Do not reintroduce local forwarding wrappers or the removed F32/Triad-only admission helper.
+
+### Dead-code and release-layout rules
+
+The owner explicitly forbids dead-code camouflage. Never add `allow(dead_code)`, `expect(dead_code)`, unused-import allowances, dummy calls, fake public visibility, or Git-ignore tricks to hide shipping code. Remove real unused code or move candidate-only material into the recoverable internal archive.
+
+The bounded dead-code audit is `internal/release-dead-code-audit-20260910.md`. Its five shipping fixes are: cfg-aware `ctx` binding in `src/dist/bootstrap.rs` (including removal of the unreachable wildcard/allow in `rendezvous_paths`), narrow `tests/common` helper organization instead of the blanket module allowance, cohesive private descriptors for the two cublas probe argument trains, a slim retained d128 source-contract fixture, and removal of the no-caller `AdaHalfNtS3Fixture::new`. Two wholly unreferenced support modules (`fixed_half_batch_layout.rs` and `triad_f32_tn_copyplan_epilogue_source.rs`) move unchanged to the archive. Deprecated public compatibility setters stay public; migrate retained internal callers semantically. Other-SM production routes stay even if a single Ada build does not reference them.
+
+Task907's layout audit is `internal/release-test-layout-audit-20260910.md`. Its dispositions are:
+
+- R: public regressions, parity, determinism, source/dispatch contracts and safety remain under `tests/`.
+- B: small maintained timing instruments become explicit `benches/` with `harness = false` and a real `main`.
+- Q: reproducible hardware/toolkit/NVRTC/SASS/qualification instruments move to `tools/qualification/` behind a non-default `qualification` feature.
+- E: candidate tournaments, scouts and diagnostics move to `internal/experiments/release-0.7.0-archive/`, excluded from Cargo and the crate but preserved in Git/history with an index of old path, new path, disposition and retained-consumer reason.
+- S: split mixed targets, retaining release assertions and moving timing/discovery arms to B/Q/E. Extract the accepted compact-XOR fixture before excluding the 77-candidate stand. Preserve scalar-NT identity domains and raw receipts without publishing `internal/perf`.
+- F: compare the two ambiguous GPU benchmark targets with maintained metrics before deciding; never silently delete.
+
+Cargo must eventually set `autotests = false` and `autobenches = false`, explicitly enumerate targets, add `qualification = []`, update `qual/lanes.toml`/`qual_lane_census` for every declared path, and exclude `internal/`, `.superpowers/`, `AGENTS.md` and local fleet configuration from the package. The intentionally ignored Task906 child is not a hidden manual gate: its parent launches one exact ignored child and verifies `1 passed; 0 failed; 0 ignored` for each of six cases. The census must account for that relationship.
+
+### Remaining execution order after the pause
+
+1. Finish and review the current Task906 Rustdoc-only fix plus duplicate-binding deletion. Run scoped rustfmt, CUDA/non-CUDA compile/docs/doctests and source-hash checks; no GPU tournament rerun. Commit the fix without AI/co-author trailers, then obtain scoped re-review and mark Task906 complete.
+2. Implement Task907 test/package/dead-code layout from the two audits. Preserve all production kernels and accepted regression assertions; archive rather than destroy candidate sources. Verify host layout/census, non-CUDA library tests, CUDA+HF all-target compilation, one qualification compile, one stable CPU bench entrypoint, and one CUDA+NCCL compile-only lane. Generate/extract a `.crate` and inspect the extracted tree for missing fixtures and forbidden internal/archive material.
+3. Run Task908 only on an actually available final endpoint after idle-GPU confirmation. Keep raw logs, source/adapter/compiler/cache identities, fixed-step correctness/digests, and per-board/path/batch ABBA ratios. Do not infer a general Inference-default claim.
+4. Implement Task909 public README/docs/Rustdoc/examples, canonical benchmark table, archive/package boundary, version `0.7.0`, and concise factual CHANGELOG. Fix stale private Rustdoc links and old wording without suppressions. Keep history factual and remove marketing/unrelated framework comparisons.
+5. Run the final whole-release gate and independent review. Only after the owner explicitly authorizes it may the reviewed branch be merged locally into `main`; never push, tag or publish autonomously.
+
+### Evidence and recovery map
+
+- SDD ledger: `.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/progress.md`.
+- Task briefs/reports/reviews: same SDD directory; trust the ledger and Git history after compaction.
+- Task905 accepted graph/half receipts: `internal/perf/model-gemm-guards-20260910/` and associated report entries.
+- Task906 RED/GREEN API receipts: `internal/perf/model-mode-api-20260910/`; frozen source hashes: `.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/model-mode-green-source.sha256`.
+- Layout/dead-code audits: `internal/release-test-layout-audit-20260910.md` and `internal/release-dead-code-audit-20260910.md`.
+- Current performance shortlist and retained evidence: `internal/perf/ada-triad-discovery-shortlist-20260908.md` and `internal/perf/final-auto-benchmarks-20260910/`.
+- Do not delete raw evidence, old source snapshots, or archives to make the worktree look clean. They are the reproducibility record.
+
+### Safe resume commands
+
+```bash
+cd /Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80
+git status --short
+git log -8 --oneline
+sed -n '1,260p' .superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/progress.md
+git diff --check
+```
+
+Before any source or GPU action, read `AGENTS.md`, `internal/agent-operational-rules.md`, this handoff, and the active task brief. Resume from the first incomplete ledger task; do not rediscover completed kernel winners or rerun full qualification merely because the session was paused.
+
+### Review correction recorded at pause
+
+The Task906 review package reported two consecutive `let dtype = self.dtype;`
+bindings in M3 prefill. A direct current-tree search finds exactly one binding
+at `src/mamba3_siso/gpu/prefill.rs:295`, and it is used. Do not remove it. The
+Task906 fix round therefore contains Rustdoc edits only; treat the duplicate
+binding report as a review-package rendering discrepancy, not permission to
+delete live code. The worker's current uncommitted Rustdoc edits are visible in
+`git status` and must be reviewed/committed separately from this handoff.
