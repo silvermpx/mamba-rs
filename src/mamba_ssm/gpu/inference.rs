@@ -588,7 +588,7 @@ mod model_gemm_manifest_tests {
 /// - ssm:  `[n_layers][batch * d_inner * d_state]`
 ///
 /// Note: GPU conv uses `d_conv` slots (full window), while CPU inference uses
-/// `d_conv - 1` (history only). The CUDA kernel `conv1d_step_forward` handles
+/// `d_conv - 1` (history only). The conv1d step kernels handle the
 /// shift-register semantics with the full `d_conv` layout.
 pub struct GpuInferenceState {
     pub conv: GpuBuffer,
@@ -661,8 +661,6 @@ pub struct GpuInferenceScratch {
     pub xdbl: GpuBuffer,
     pub dt_gather: GpuBuffer,
     pub delta: GpuBuffer,
-    pub b_buf: GpuBuffer,
-    pub c_buf: GpuBuffer,
     pub y: GpuBuffer,
     pub rms_buf: GpuBuffer,
 }
@@ -677,7 +675,6 @@ impl GpuInferenceScratch {
     ) -> Result<Self, String> {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
-        let ds = cfg.d_state;
         let dt_rank = cfg.dt_rank();
         let xdbl_dim = cfg.xdbl_dim();
         Ok(Self {
@@ -691,8 +688,6 @@ impl GpuInferenceScratch {
             xdbl: GpuBuffer::zeros(stream, batch * xdbl_dim)?,
             dt_gather: GpuBuffer::zeros(stream, batch * dt_rank)?,
             delta: GpuBuffer::zeros(stream, batch * di)?,
-            b_buf: GpuBuffer::zeros(stream, batch * ds)?,
-            c_buf: GpuBuffer::zeros(stream, batch * ds)?,
             y: GpuBuffer::zeros(stream, batch * di)?,
             rms_buf: GpuBuffer::zeros(stream, batch)?,
         })
@@ -710,7 +705,7 @@ impl GpuInferenceScratch {
 ///
 /// - **Half dtype** (bf16/f16, matches weight dtype) — all linear-layer
 ///   I/O and activations: `temporal`, `proj`, `x_branch`, `gate_silu`,
-///   `u`, `xdbl`, `dt_gather`, `delta`, `b_buf`, `c_buf`, `y`. Storage
+///   `u`, `xdbl`, `dt_gather`, `delta`, `y`. Storage
 ///   mantissa (bf16: 7-bit) is sufficient; compute happens in f32
 ///   (CUBLAS_COMPUTE_32F for GEMMs, upcast-inside-kernel for activation
 ///   kernels). Matches the reference state-spaces/mamba bf16 path.
@@ -730,8 +725,6 @@ pub struct GpuInferenceMixedScratch {
     pub xdbl: DtypedBuf,
     pub dt_gather: DtypedBuf,
     pub delta: DtypedBuf,
-    pub b_buf: DtypedBuf,
-    pub c_buf: DtypedBuf,
     pub y: DtypedBuf,
     pub rms_buf: GpuBuffer,
     pub dtype: WeightDtype,
@@ -754,7 +747,6 @@ impl GpuInferenceMixedScratch {
         }
         let dm = cfg.d_model;
         let di = cfg.d_inner();
-        let ds = cfg.d_state;
         let dt_rank = cfg.dt_rank();
         let xdbl_dim = cfg.xdbl_dim();
         Ok(Self {
@@ -768,8 +760,6 @@ impl GpuInferenceMixedScratch {
             xdbl: DtypedBuf::zeros(stream, batch * xdbl_dim, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, batch * dt_rank, dtype)?,
             delta: DtypedBuf::zeros(stream, batch * di, dtype)?,
-            b_buf: DtypedBuf::zeros(stream, batch * ds, dtype)?,
-            c_buf: DtypedBuf::zeros(stream, batch * ds, dtype)?,
             y: DtypedBuf::zeros(stream, batch * di, dtype)?,
             rms_buf: GpuBuffer::zeros(stream, batch)?,
             dtype,
@@ -1117,9 +1107,9 @@ impl GpuMambaInference {
     ///
     /// Pipeline per layer:
     /// ```text
-    /// RmsNorm → in_proj SGEMM → split_gate_silu → conv1d_step → silu →
-    /// x_proj SGEMM → gather_cols(dt) → dt_proj SGEMM → softplus →
-    /// gather_bc → ssm_step → elementwise_mul → out_proj SGEMM → residual_add
+    /// RmsNorm → in_proj GEMM → split_gate_silu → conv1d_step+silu →
+    /// x_proj GEMM → gather_cols(dt) → dt_proj GEMM → softplus →
+    /// ssm_step+gather+gate → out_proj GEMM → residual_add
     /// ```
     fn step_kernels(
         &self,
@@ -1263,12 +1253,18 @@ impl GpuMambaInference {
                     .map_err(|e| format!("split_gate_silu L{layer_idx}: {e:?}"))?;
             }
 
-            // F4: conv1d_step (no SiLU) → u buffer
+            // F4: conv1d_step with the SiLU fused into its store → u buffer.
+            // The fused kernel spells the SiLU exactly as the standalone
+            // silu_forward did, so u carries the same bits as the former
+            // conv-then-silu pair.
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
                 let dc_i = d_conv as i32;
-                let mut bld = self.ctx.stream.launch_builder(&k.conv1d_step_fwd);
+                let mut bld = self
+                    .ctx
+                    .stream
+                    .launch_builder(&k.conv1d_step_fwd_silu_typed.f32);
                 let u_ptr = scratch.u.cached_ptr();
                 let xb_ptr2 = scratch.x_branch.cached_ptr();
                 bld.arg(&u_ptr);
@@ -1282,18 +1278,7 @@ impl GpuMambaInference {
                 bld.arg(&di_i);
                 bld.arg(&dc_i);
                 unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("conv1d_step L{layer_idx}: {e:?}"))?;
-            }
-
-            // F4b: SiLU on conv output (conv1d_step does NOT fuse SiLU)
-            {
-                let n = (b * di) as i32;
-                let mut bld = self.ctx.stream.launch_builder(&k.silu_fwd);
-                let u_silu_ptr = scratch.u.cached_ptr();
-                bld.arg(&u_silu_ptr); // in-place
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("silu_fwd L{layer_idx}: {e:?}"))?;
+                    .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
             // F5: x_proj GEMM [B, d_inner] → [B, xdbl_dim]
@@ -1339,86 +1324,72 @@ impl GpuMambaInference {
                 (b, dt_rank, di),
             )?;
             {
-                let n = (b * di) as i32;
-                let mut bld = self.ctx.stream.launch_builder(&k.softplus_copy);
+                // In place; the vectorized twin applies the same softplus
+                // per element when the count divides four and delta is
+                // 16-byte aligned.
                 let d_ptr = scratch.delta.cached_ptr();
+                let w = super::launch::vec8_width(4);
+                let (kern, count) = if super::launch::vec8_ok(b * di, 4, &[d_ptr]) {
+                    (&k.softplus_copy_v_typed.f32, b * di / w)
+                } else {
+                    (&k.softplus_copy, b * di)
+                };
+                let n = count as i32;
+                let mut bld = self.ctx.stream.launch_builder(kern);
                 bld.arg(&d_ptr); // dst
-                bld.arg(&d_ptr); // src (in-place ok)
+                bld.arg(&d_ptr); // src
                 bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d(count)) }
                     .map_err(|e| format!("softplus L{layer_idx}: {e:?}"))?;
             }
 
-            // F8: gather B, C from xdbl
-            {
-                let b_i = b as i32;
-                let xdbl_i = xdbl_dim as i32;
-                let ds_i = ds as i32;
-                let b_off = dt_rank as i32;
-                let c_off = (dt_rank + ds) as i32;
-                let mut bld = self.ctx.stream.launch_builder(&k.gather_bc_cols);
-                let bb_ptr = scratch.b_buf.cached_ptr();
-                let cb_ptr = scratch.c_buf.cached_ptr();
-                let xdbl_bc_ptr = scratch.xdbl.cached_ptr();
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&xdbl_bc_ptr);
-                bld.arg(&b_i);
-                bld.arg(&xdbl_i);
-                bld.arg(&ds_i);
-                bld.arg(&b_off);
-                bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d(b * ds)) }
-                    .map_err(|e| format!("gather_bc L{layer_idx}: {e:?}"))?;
-            }
-
-            // F9: SSM step (mutates ssm_state)
+            // F8: SSM step (mutates ssm_state), reading B and C straight
+            // from xdbl and multiplying the gate into y before the store.
+            // One launch replaces the former gather, step and gating
+            // triplet; the recurrence and the gating product are spelled
+            // exactly as before, so y carries the same bits.
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
                 let ds_i = ds as i32;
-                // the step kernel silently
-                // returns without writing y beyond its register cap - and
-                // T=1 decode has no parallel alternative to route to.
+                let xdbl_stride_i = xdbl_dim as i32;
+                let b_off = dt_rank as i32;
+                let c_off = (dt_rank + ds) as i32;
+                // The step kernel keeps the state in registers sized at
+                // compile time and silently returns without writing y
+                // beyond that cap; T=1 decode has no parallel alternative
+                // to route to, so refuse loudly.
                 assert!(
                     ds <= k.state_cap,
                     "ssm_step_fwd: d_state {ds} exceeds the compiled state capacity {}",
                     k.state_cap
                 );
                 let dp = lw.d_param();
-                let mut bld = self.ctx.stream.launch_builder(&k.ssm_step_fwd);
+                let mut bld = self
+                    .ctx
+                    .stream
+                    .launch_builder(&k.ssm_step_fwd_gather_gate_typed.f32);
                 let y_ssm_ptr = scratch.y.cached_ptr();
                 let delta_ssm_ptr = scratch.delta.cached_ptr();
                 let u_ssm_ptr = scratch.u.cached_ptr();
-                let b_ssm_ptr = scratch.b_buf.cached_ptr();
-                let c_ssm_ptr = scratch.c_buf.cached_ptr();
+                let xdbl_ssm_ptr = scratch.xdbl.cached_ptr();
+                let gs_ptr = scratch.gate_silu.cached_ptr();
                 bld.arg(&ssm_ptr);
                 bld.arg(&y_ssm_ptr);
                 bld.arg(&delta_ssm_ptr);
                 bld.arg(&u_ssm_ptr);
-                bld.arg(&b_ssm_ptr);
-                bld.arg(&c_ssm_ptr);
+                bld.arg(&xdbl_ssm_ptr);
+                bld.arg(&gs_ptr);
                 bld.arg(&aneg_ptr);
                 bld.arg(&dp);
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
+                bld.arg(&xdbl_stride_i);
+                bld.arg(&b_off);
+                bld.arg(&c_off);
                 unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("ssm_step L{layer_idx}: {e:?}"))?;
-            }
-
-            // F10: gating y * gate_silu
-            {
-                let n = (b * di) as i32;
-                let mut bld = self.ctx.stream.launch_builder(&k.elementwise_mul);
-                let y_ptr = scratch.y.cached_ptr();
-                let gs_ptr = scratch.gate_silu.cached_ptr();
-                bld.arg(&y_ptr);
-                bld.arg(&y_ptr);
-                bld.arg(&gs_ptr);
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("gating L{layer_idx}: {e:?}"))?;
+                    .map_err(|e| format!("ssm_step+gather+gate L{layer_idx}: {e:?}"))?;
             }
 
             // F11: out_proj GEMM [B, d_inner] → [B, d_model]

@@ -9,26 +9,6 @@
 
 // ===================== SiLU forward (templated) =====================
 
-#define DEFINE_SILU_FWD(SUFFIX, T, FROM_F)                                \
-extern "C" __global__ void silu_forward_##SUFFIX(T* x, int n) {           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                        \
-    if (i >= n) return;                                                   \
-    float v = to_f(x[i]);                                                 \
-    x[i] = FROM_F(v / (1.0f + exp2f(-v * LOG2E)));                        \
-}
-
-DEFINE_SILU_FWD(f32,  float,         from_f_f32)
-DEFINE_SILU_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SILU_FWD(f16,  __half,        from_f_f16)
-
-// Legacy alias — existing code calls `silu_forward` without suffix.
-extern "C" __global__ void silu_forward(float* x, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    float v = x[i];
-    x[i] = v / (1.0f + exp2f(-v * LOG2E));
-}
-
 // ===================== Softplus forward (templated) =====================
 
 #define DEFINE_SOFTPLUS_FWD(SUFFIX, T, FROM_F)                            \
@@ -43,7 +23,7 @@ DEFINE_SOFTPLUS_FWD(f32,  float,         from_f_f32)
 DEFINE_SOFTPLUS_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SOFTPLUS_FWD(f16,  __half,        from_f_f16)
 
-// Legacy alias
+// Untyped f32 entry: the training and prefill paths load it as softplus_fwd.
 extern "C" __global__ void softplus_forward(float* x, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;

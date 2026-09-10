@@ -146,12 +146,6 @@ pub struct MambaKernels {
     pub ssm_reduce_d_a_log_chunks: CudaFunction,
 
     // -- Conv1d --
-    /// Single-step depthwise conv1d forward with SiLU.
-    pub conv1d_step_fwd: CudaFunction,
-    /// Single-step depthwise conv1d backward.
-    pub conv1d_step_bwd: CudaFunction,
-    /// Multi-step conv1d forward with state saves for backward.
-    pub conv1d_burnin_fwd: CudaFunction,
     /// Multi-step conv1d forward without saves (target network).
     pub conv1d_burnin_fwd_nosave: CudaFunction,
     /// Nosave tiled twin (inference prefill): tile-0 seeds from the
@@ -163,10 +157,6 @@ pub struct MambaKernels {
     pub conv1d_burnin_bwd: CudaFunction,
 
     // -- Activations --
-    /// SiLU forward: `x * sigmoid(x)`.
-    pub silu_fwd: CudaFunction,
-    /// SiLU backward: gradient through `x * sigmoid(x)`.
-    pub silu_bwd: CudaFunction,
     /// Softplus forward: `ln(1 + exp(x))`.
     pub softplus_fwd: CudaFunction,
     /// Softplus backward: gradient through `ln(1 + exp(x))`.
@@ -283,7 +273,6 @@ pub struct MambaKernels {
     pub pack_xdbl_cols_typed: TypedKernel,
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
-    pub silu_fwd_typed: TypedKernel,
     pub softplus_fwd_typed: TypedKernel,
     pub rmsnorm_fwd_typed: TypedKernel,
     pub bias_broadcast_typed: TypedKernel,
@@ -308,17 +297,11 @@ pub struct MambaKernels {
     pub elementwise_mul_v_typed: TypedKernel,
     pub softplus_copy_v_typed: TypedKernel,
     pub softplus_copy_typed: TypedKernel,
-    pub ssm_step_fwd_typed: TypedKernel,
-    /// SSM step with fused B/C gather from xdbl. Inference-only: replaces
-    /// (gather_bc_cols + ssm_step_forward) launch pair with a single kernel,
-    /// also eliminates b_buf / c_buf scratch allocations.
-    pub ssm_step_fwd_gather_typed: TypedKernel,
-    /// SSM step with fused B/C gather AND fused gating multiplication.
-    /// Replaces (gather_bc + ssm_step + elementwise_mul) triplet.
+    /// SSM step that reads B and C straight from xdbl and multiplies the
+    /// gate into y before the store: the decode routes' only step kernel.
     pub ssm_step_fwd_gather_gate_typed: TypedKernel,
-    pub conv1d_step_fwd_typed: TypedKernel,
-    /// Conv1d step with fused SiLU on output. Inference-only: replaces the
-    /// (conv1d_step + silu_fwd) launch pair with a single kernel.
+    /// Conv1d step with the SiLU fused into its store: the decode routes'
+    /// only conv step kernel, one launch per layer.
     pub conv1d_step_fwd_silu_typed: TypedKernel,
     pub ssm_burnin_nosave_typed: TypedKernel,
     pub conv1d_burnin_nosave_typed: TypedKernel,
@@ -1296,16 +1279,11 @@ impl MambaKernels {
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
             ssm_reduce_d_a_log_chunks: get("ssm_reduce_d_a_log_chunks")?,
             // conv1d
-            conv1d_step_fwd: get("conv1d_step_forward")?,
-            conv1d_step_bwd: get("conv1d_step_backward")?,
-            conv1d_burnin_fwd: get("conv1d_burnin_forward")?,
             conv1d_burnin_fwd_nosave: get("conv1d_burnin_forward_nosave")?,
             conv1d_burnin_fwd_nosave_tiled: get("conv1d_burnin_forward_nosave_tiled_f32")?,
             conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
             conv1d_burnin_bwd: get("conv1d_burnin_backward")?,
             // activations
-            silu_fwd: get("silu_forward")?,
-            silu_bwd: get("silu_backward")?,
             softplus_fwd: get("softplus_forward")?,
             softplus_bwd: get("softplus_backward")?,
             // norms
@@ -1518,7 +1496,6 @@ impl MambaKernels {
             matvec_bi_f32_f32: get("matvec_bi_f32_f32")?,
 
             // typed inference kernels
-            silu_fwd_typed: load_typed("silu_forward")?,
             softplus_fwd_typed: load_typed("softplus_forward")?,
             rmsnorm_fwd_typed: load_typed("rmsnorm_forward")?,
             bias_broadcast_typed: load_typed("bias_broadcast")?,
@@ -1538,7 +1515,6 @@ impl MambaKernels {
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
             ssm_step_fwd_gather_typed: load_typed("ssm_step_forward_gather")?,
             ssm_step_fwd_gather_gate_typed: load_typed("ssm_step_forward_gather_gate")?,
-            conv1d_step_fwd_typed: load_typed("conv1d_step_forward")?,
             conv1d_step_fwd_silu_typed: load_typed("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
             conv1d_burnin_nosave_typed: load_typed("conv1d_burnin_forward_nosave")?,

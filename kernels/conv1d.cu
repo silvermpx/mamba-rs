@@ -11,112 +11,15 @@
 // state[b, d, 0..d_conv-1] = state[b, d, 1..d_conv]
 // state[b, d, d_conv-1] = new_x[b, d]
 // out[b, d] = sum_k(state[b, d, k] * weight[d, k]) + bias[d]
-extern "C" __global__ void conv1d_step_forward(
-    float* __restrict__ out,          // [batch * d_inner]
-    float* __restrict__ state,        // [batch * d_inner * d_conv] mutated
-    const float* __restrict__ new_x,  // [batch * d_inner]
-    const float* __restrict__ weight, // [d_inner * d_conv]
-    const float* __restrict__ bias,   // [d_inner]
-    int batch, int d_inner, int d_conv
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
-    if (idx >= total) return;
-
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int state_base = (b * d_inner + d) * d_conv;
-
-    // Registerized d_conv == 4 fast path (the production value): the shift
-    // happens in registers and global memory sees one window load, one
-    // writeback and one output store - the generic path below pays three
-    // global read-modify-write shifts plus four reloads of what it just
-    // wrote, a read-after-write hazard the compiler cannot forward through.
-    // Value contract: the accumulation is the k-ascending chain of the
-    // generic loop, term for term; an f32 held in a register carries the
-    // exact bits a global round-trip would have returned.
-    if (d_conv == 4) {
-        float s0 = state[state_base + 1];
-        float s1 = state[state_base + 2];
-        float s2 = state[state_base + 3];
-        float s3 = new_x[idx];
-        state[state_base] = s0;
-        state[state_base + 1] = s1;
-        state[state_base + 2] = s2;
-        state[state_base + 3] = s3;
-        float sum = bias[d];
-        sum += s0 * weight[d * 4];
-        sum += s1 * weight[d * 4 + 1];
-        sum += s2 * weight[d * 4 + 2];
-        sum += s3 * weight[d * 4 + 3];
-        out[idx] = sum;
-        return;
-    }
-
-    // Shift register left
-    for (int k = 0; k < d_conv - 1; k++) {
-        state[state_base + k] = state[state_base + k + 1];
-    }
-    // Insert new value
-    state[state_base + d_conv - 1] = new_x[idx];
-
-    // Depthwise dot product
-    float sum = bias[d];
-    for (int k = 0; k < d_conv; k++) {
-        sum += state[state_base + k] * weight[d * d_conv + k];
-    }
-    out[idx] = sum;
-}
-
-// Templated conv1d step — input activations in T_IN, output in T_IN,
-// conv state/weight/bias stay f32.
-#define DEFINE_CONV1D_STEP_FWD(SUFFIX, T, FROM_F)                          \
-extern "C" __global__ void conv1d_step_forward_##SUFFIX(                    \
-    T* __restrict__ out,                                                   \
-    float* __restrict__ state,                                             \
-    const T* __restrict__ new_x,                                           \
-    const float* __restrict__ weight,                                      \
-    const float* __restrict__ bias,                                        \
-    int batch, int d_inner, int d_conv                                     \
-) {                                                                        \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
-    int total = batch * d_inner;                                           \
-    if (idx >= total) return;                                              \
-    int b = idx / d_inner;                                                 \
-    int d = idx % d_inner;                                                 \
-    int state_base = (b * d_inner + d) * d_conv;                           \
-    /* Registerized d_conv == 4 fast path - see the f32 twin. */           \
-    if (d_conv == 4) {                                                     \
-        float s0 = state[state_base + 1];                                  \
-        float s1 = state[state_base + 2];                                  \
-        float s2 = state[state_base + 3];                                  \
-        float s3 = to_f(new_x[idx]);                                       \
-        state[state_base] = s0;                                            \
-        state[state_base + 1] = s1;                                        \
-        state[state_base + 2] = s2;                                        \
-        state[state_base + 3] = s3;                                        \
-        float sum = bias[d];                                               \
-        sum += s0 * weight[d * 4];                                         \
-        sum += s1 * weight[d * 4 + 1];                                     \
-        sum += s2 * weight[d * 4 + 2];                                     \
-        sum += s3 * weight[d * 4 + 3];                                     \
-        out[idx] = FROM_F(sum);                                            \
-        return;                                                            \
-    }                                                                      \
-    for (int k = 0; k < d_conv - 1; k++) {                                 \
-        state[state_base + k] = state[state_base + k + 1];                 \
-    }                                                                      \
-    state[state_base + d_conv - 1] = to_f(new_x[idx]);                     \
-    float sum = bias[d];                                                   \
-    for (int k = 0; k < d_conv; k++) {                                     \
-        sum += state[state_base + k] * weight[d * d_conv + k];             \
-    }                                                                      \
-    out[idx] = FROM_F(sum);                                                \
-}
-
-DEFINE_CONV1D_STEP_FWD(f32,  float,         from_f_f32)
-DEFINE_CONV1D_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_STEP_FWD(f16,  __half,        from_f_f16)
+//
+// Both step kernels below take a registerized d_conv == 4 fast path (the
+// production value): the shift happens in registers and global memory
+// sees one window load, one writeback and one output store - the generic
+// path pays three global read-modify-write shifts plus four reloads of
+// what it just wrote, a read-after-write hazard the compiler cannot
+// forward through. Value contract: the accumulation is the k-ascending
+// chain of the generic loop, term for term; an f32 held in a register
+// carries the exact bits a global round-trip would have returned.
 
 // Templated conv1d step with fused SiLU on output. Inference-only fast
 // path — replaces the F4 (conv1d_step) + F4b (silu_fwd) launch pair with
@@ -141,7 +44,7 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
     int state_base = (b * d_inner + d) * d_conv;                           \
-    /* Registerized d_conv == 4 fast path - see the f32 twin. */           \
+    /* Registerized d_conv == 4 fast path - see the note above. */          \
     if (d_conv == 4) {                                                     \
         float s0 = state[state_base + 1];                                  \
         float s1 = state[state_base + 2];                                  \
