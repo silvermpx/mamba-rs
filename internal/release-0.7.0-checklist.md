@@ -188,6 +188,14 @@ Select their actual supported cases and prerequisites before executing them.
   tests pass; independent Task901 spec/quality review approved. High-level constructors and
   direct model dispatch seams still block completion of this release item.
   Evidence: `internal/perf/gemm-mode-api-20260910/report.md`.
+  F32 routing committed as5ba6c5e2: context-routed raw NN/tied NT and M3
+  projection/head dispatch. Ada routing7/7 and prepared-control54/54 pass;
+  six existing GPU-ignored unit cases are not included as passes. CUDA+HF
+  compilation and Rustdoc pass. Independent spec/quality review approved
+  without findings. Half-input
+  tied F32 heads and complete Inference/M3 physical graph inventory remain
+  explicit follow-up tasks; no model-wide completion claim yet.
+  Evidence: `internal/perf/gemm-context-routing-20260910/report.md`.
 - [ ] Document the public API in Rustdoc alongside implementation, not only
   in README: IDE hover/completion must explain each mode, defaults, arguments,
   return values, errors, numeric/determinism scope and graph restrictions.

@@ -2894,6 +2894,11 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
   allocate/copy F32 operands or add an alternate arithmetic implementation.
   Keep selection-bearing private helpers, including ExactScalar, reusable by
   the subsequent typed tied-head composition.
+  Preserve cudarc per-slice wait/record behavior for legacy public wrappers
+  that receive a stream with event tracking enabled. GpuCtx disables this
+  tracking, so its raw-pointer path does not need those events. If necessary,
+  use one narrow owned-versus-raw argument submission adapter in the shared
+  body; do not clone scalar dispatch branches or weaken legacy synchronization.
 
 - [ ] The central F32 NN pointer seam checks context health and selected mode.
   Deterministic follows the selected family: Inference calls existing

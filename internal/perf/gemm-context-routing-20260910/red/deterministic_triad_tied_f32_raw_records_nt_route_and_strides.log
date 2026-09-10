@@ -1,0 +1,15 @@
+
+running 1 test
+test deterministic_triad_tied_f32_raw_records_nt_route_and_strides ... 
+thread 'deterministic_triad_tied_f32_raw_records_nt_route_and_strides' (2676638) panicked at tests/gemm_context_routing.rs:78:10:
+deterministic Triad tied F32 NT forward: "gpu_gemm_bi_tied_lm_head_raw: deterministic GEMM mode reached a cuBLAS dispatch boundary"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deterministic_triad_tied_f32_raw_records_nt_route_and_strides
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 5.23s
+
