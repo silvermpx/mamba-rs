@@ -1,0 +1,28 @@
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running unittests src/lib.rs (/root/target-ada-finalist-aldmatrix-cuda130-20260910/release/deps/mamba_rs-4cd14b3dbbbe9ca1)
+
+running 20 tests
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_confirmed_a_bias_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::at_least_one_sm120_tf32_cohort_matches_this_tree ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_identity_rejects_all_29_single_field_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_route_manifest_is_literal_and_complete ... mamba-rs WARNING: no SM120 TF32 evidence cohort matches this stack (newest cohort differs at: compile key); the exact f32 family serves every TF32 request until a requalification is frozen
+ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_all_nine_routes_fail_closed_on_request_or_operand_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_identity_rejects_all_29_single_field_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_route_manifest_is_literal_and_complete ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_2_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_2_route_manifest_is_literal_and_complete ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_evidence_cohorts_are_exact_and_unambiguous ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_cohort_manifest_is_exact_and_unique ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_nn_cell_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_portable_tn_cell_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_lower_toolkit_595_84_identities_are_literal_and_live ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_operand_aware_resolution_admits_only_archived_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_real_cohorts_bind_routes_and_reject_cross_version_splices ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_tn_underfill_uses_the_requalified_portable_winner ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 758 filtered out; finished in 0.01s
+

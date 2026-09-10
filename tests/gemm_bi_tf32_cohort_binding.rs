@@ -22,6 +22,199 @@ mod fixed_full_mantissa;
 
 const SM89_NT_FINALIST_SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
 
+#[derive(Clone, Copy)]
+struct Sm120CurrentCohortCase {
+    id: &'static str,
+    op: ResolvedGemmOp,
+    dims: (usize, usize, usize),
+    expected: Option<(ModuleKind, &'static str)>,
+}
+
+const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
+    sm120_case(
+        "nn_d768_in_proj",
+        ResolvedGemmOp::Nn,
+        (2048, 768, 3072),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+    ),
+    sm120_case(
+        "tn_d768_in_proj",
+        ResolvedGemmOp::Tn,
+        (2048, 768, 3072),
+        ModuleKind::TriadSm120,
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    ),
+    sm120_case(
+        "nt_d768_in_proj",
+        ResolvedGemmOp::Nt,
+        (2048, 768, 3072),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "nn_d768_out_proj",
+        ResolvedGemmOp::Nn,
+        (2048, 1536, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "tn_d768_out_proj",
+        ResolvedGemmOp::Tn,
+        (2048, 1536, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    ),
+    sm120_case(
+        "nt_d768_out_proj",
+        ResolvedGemmOp::Nt,
+        (2048, 1536, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "nn_prism_in_proj",
+        ResolvedGemmOp::Nn,
+        (4621, 384, 1928),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "tn_prism_in_proj",
+        ResolvedGemmOp::Tn,
+        (4621, 384, 1928),
+        ModuleKind::TriadSm120,
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    ),
+    sm120_case(
+        "nt_prism_in_proj",
+        ResolvedGemmOp::Nt,
+        (4621, 384, 1928),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "nn_large_deep",
+        ResolvedGemmOp::Nn,
+        (4096, 3072, 1536),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+    ),
+    sm120_case(
+        "tn_large_deep",
+        ResolvedGemmOp::Tn,
+        (4096, 3072, 1536),
+        ModuleKind::TriadSm120,
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    ),
+    sm120_case(
+        "nt_large_deep",
+        ResolvedGemmOp::Nt,
+        (4096, 3072, 1536),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+    ),
+    sm120_case(
+        "nn_large",
+        ResolvedGemmOp::Nn,
+        (2048, 3072, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "tn_large",
+        ResolvedGemmOp::Tn,
+        (2048, 3072, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    ),
+    sm120_case(
+        "nt_large",
+        ResolvedGemmOp::Nt,
+        (2048, 3072, 768),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+    ),
+    sm120_case(
+        "nn_d128_in_proj",
+        ResolvedGemmOp::Nn,
+        (1024, 128, 512),
+        ModuleKind::TriadSm80,
+        "gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3",
+    ),
+    sm120_case(
+        "tn_d128_in_proj",
+        ResolvedGemmOp::Tn,
+        (1024, 128, 512),
+        ModuleKind::TriadSm80,
+        "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+    ),
+    sm120_case(
+        "nt_d128_in_proj",
+        ResolvedGemmOp::Nt,
+        (1024, 128, 512),
+        ModuleKind::TriadSm80,
+        "gemm_bi_nt_sm80_mma_tf32_v1_m16n16_bk32_s4",
+    ),
+    sm120_case(
+        "tn_d128_out_proj",
+        ResolvedGemmOp::Tn,
+        (1024, 256, 128),
+        ModuleKind::TriadSm80,
+        "gemm_bi_tn_sm80_mma_tf32_v1_m16n16_bk32_s4",
+    ),
+    sm120_case(
+        "nn_batch_in_proj",
+        ResolvedGemmOp::Nn,
+        (10400, 384, 1536),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    Sm120CurrentCohortCase {
+        id: "tn_m8192_k128_n128",
+        op: ResolvedGemmOp::Tn,
+        dims: (8192, 128, 128),
+        expected: None,
+    },
+    sm120_case(
+        "nt_split_candidate",
+        ResolvedGemmOp::Nt,
+        (128, 8192, 128),
+        ModuleKind::TriadSm80,
+        "gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2",
+    ),
+    sm120_case(
+        "nt_batch_in_proj",
+        ResolvedGemmOp::Nt,
+        (10400, 384, 1536),
+        ModuleKind::TriadSm120,
+        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+    ),
+    sm120_case(
+        "tn_underfill",
+        ResolvedGemmOp::Tn,
+        (256, 512, 384),
+        ModuleKind::TriadSm80,
+        "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+    ),
+];
+
+const fn sm120_case(
+    id: &'static str,
+    op: ResolvedGemmOp,
+    dims: (usize, usize, usize),
+    module: ModuleKind,
+    symbol: &'static str,
+) -> Sm120CurrentCohortCase {
+    Sm120CurrentCohortCase {
+        id,
+        op,
+        dims,
+        expected: Some((module, symbol)),
+    }
+}
+
 fn configure_deterministic_tf32(ctx: &GpuCtx) {
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
@@ -334,14 +527,137 @@ fn sm89_finalist_live_binding_identity() {
     );
 }
 
+fn sm120_current_case_lengths(case: Sm120CurrentCohortCase) -> (usize, usize, usize) {
+    let (m, k, n) = case.dims;
+    match case.op {
+        ResolvedGemmOp::Nn => (m * n, m * k, k * n),
+        ResolvedGemmOp::Tn => (k * n, m * k, m * n),
+        ResolvedGemmOp::Nt => (m * k, m * n, k * n),
+    }
+}
+
+fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
+    let requests = SM120_CURRENT_COHORT_CASES.map(|case| {
+        PhysicalQualificationRequest::contiguous_f32(
+            case.op,
+            case.dims,
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationF32Epilogue::new(
+                1.0,
+                if case.op == ResolvedGemmOp::Tn {
+                    1.0
+                } else {
+                    0.0
+                },
+                false,
+            ),
+        )
+    });
+    presize_physical_qualification_suite(ctx, &requests).expect("presize current SM120 cohort");
+    let mut tf32_served = 0;
+    for (index, (case, request)) in SM120_CURRENT_COHORT_CASES
+        .into_iter()
+        .zip(requests)
+        .enumerate()
+    {
+        let mut launch = qualify_physical_launch(ctx, request)
+            .unwrap_or_else(|error| panic!("qualify {} {:?}: {error}", case.id, case.dims));
+        assert!(
+            launch.evidence().eager_graph_equal(),
+            "{} eager/graph launch metadata differs",
+            case.id
+        );
+        let nodes = launch.evidence().nodes();
+        match case.expected {
+            Some((module, symbol)) => {
+                tf32_served += 1;
+                let numeric_contract = match module {
+                    ModuleKind::TriadSm80 => ResolvedNumericContract::MmaTf32RnaV1,
+                    ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => {
+                        ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
+                    }
+                    ModuleKind::TriadSm120 => ResolvedNumericContract::Sm120TmaMmaTf32RnaV1,
+                    _ => panic!("{} has an unsupported TF32 module {module:?}", case.id),
+                };
+                assert!(
+                    nodes.iter().any(|node| {
+                        node.module_kind == module
+                            && node.symbol == symbol
+                            && node.numeric_contract == Some(numeric_contract)
+                    }),
+                    "{} did not bind expected {:?}:{}; got {:?}",
+                    case.id,
+                    module,
+                    symbol,
+                    nodes
+                        .iter()
+                        .map(|node| (node.module_kind, node.symbol))
+                        .collect::<Vec<_>>()
+                );
+            }
+            None => {
+                assert_eq!(case.id, "tn_m8192_k128_n128");
+                assert_eq!(case.dims, (8192, 128, 128));
+                assert!(
+                    !nodes.is_empty(),
+                    "true G10 must execute a nonempty exact F32 route"
+                );
+                assert!(
+                    nodes.iter().all(|node| {
+                        matches!(
+                            node.numeric_contract,
+                            Some(
+                                ResolvedNumericContract::ScalarFmaV1
+                                    | ResolvedNumericContract::ScalarFmaTnSplitMPartialV1
+                                    | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
+                            )
+                        ) && !node.symbol.contains("tf32")
+                    }),
+                    "true G10 must remain on the exact F32 route: {:?}",
+                    nodes
+                        .iter()
+                        .map(|node| (node.module_kind, node.symbol, node.numeric_contract))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        let (output_len, a_len, b_len) = sm120_current_case_lengths(case);
+        let output = if case.op == ResolvedGemmOp::Tn {
+            vec![1.0_f32.to_bits(); output_len]
+        } else {
+            vec![0.0_f32.to_bits(); output_len]
+        };
+        let a = full_mantissa_words(a_len, 0x1200_1000 + index as u64);
+        let b = full_mantissa_words(b_len, 0x1200_2000 + index as u64);
+        let eager = run_exact_words(ctx, &mut launch, request, &output, &a, &b, false);
+        let eager_repeat = run_exact_words(ctx, &mut launch, request, &output, &a, &b, false);
+        let graph = run_exact_words(ctx, &mut launch, request, &output, &a, &b, true);
+        assert_eq!(eager_repeat, eager, "{} eager repeat bits", case.id);
+        assert_eq!(graph, eager, "{} eager/graph output bits", case.id);
+        println!(
+            "SM120 current cohort {} {:?} {:?} bits={}",
+            case.id,
+            case.op,
+            case.dims,
+            word_digest(&eager)
+        );
+    }
+    assert_eq!(tf32_served, 23, "current SM120 retained TF32 count");
+}
+
 #[test]
-#[ignore = "requires a CUDA device whose TF32 cohort is frozen in the tree"]
+#[ignore = "requires a CUDA device whose TF32 cohort is frozen in the tree; SM120 expects a current driver-595.84 toolkit cohort"]
 fn tf32_cohort_binds_on_this_board() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    if device.compute_capability == (12, 0) && device.multiprocessor_count() == 170 {
+        run_sm120_current_cohort_binding(&ctx);
+        return;
+    }
     let shapes = [
         (2048, 768, 3072),
         (2048, 1536, 768),

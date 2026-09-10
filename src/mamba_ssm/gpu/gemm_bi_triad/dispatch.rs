@@ -2424,6 +2424,178 @@ const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     ),
 ];
 
+/// Fresh current-source CUDA 12.8 identities from the complete 24-key V2
+/// packet under driver 595.84. Twenty-three keys admitted; true G10 stayed exact.
+const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm120,
+        module_target: "compute_120",
+        device_target: "sm_120",
+        compute_capability: (12, 0),
+        multiprocessor_count: 170,
+        nvrtc_version: (12, 8),
+        driver_api_version: 13020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101376,
+        tensor_map_access: true,
+        compile_key: [
+            129, 2, 160, 110, 76, 140, 195, 186, 166, 55, 5, 15, 70, 145, 109, 186, 26, 74, 240,
+            218, 39, 159, 213, 133, 42, 58, 50, 16, 186, 86, 231, 209,
+        ],
+        artifact_digest: [
+            170, 227, 68, 210, 134, 11, 145, 234, 251, 68, 100, 177, 18, 24, 178, 236, 181, 104,
+            78, 72, 224, 16, 80, 154, 43, 117, 126, 236, 39, 71, 7, 236,
+        ],
+        source_digest: [
+            157, 71, 239, 137, 217, 228, 227, 1, 113, 54, 73, 227, 171, 203, 71, 58, 54, 250, 144,
+            111, 179, 161, 15, 189, 72, 154, 32, 245, 204, 113, 118, 175,
+        ],
+        invocation_digest: [
+            129, 2, 160, 110, 76, 140, 195, 186, 166, 55, 5, 15, 70, 145, 109, 186, 26, 74, 240,
+            218, 39, 159, 213, 133, 42, 58, 50, 16, 186, 86, 231, 209,
+        ],
+        header_manifest_digest: [
+            181, 113, 92, 62, 73, 147, 149, 66, 33, 106, 83, 153, 209, 243, 113, 167, 110, 230,
+            167, 121, 158, 29, 197, 213, 168, 210, 119, 18, 100, 185, 79, 152,
+        ],
+        nvrtc_library_domain: [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+        driver_build_digest: [
+            142, 150, 68, 239, 130, 136, 131, 5, 214, 222, 50, 93, 180, 249, 96, 244, 193, 247,
+            254, 61, 169, 46, 223, 96, 180, 53, 238, 116, 173, 98, 33, 178,
+        ],
+    };
+
+const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84:
+    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
+    module_kind: ModuleKind::TriadSm80,
+    module_target: "compute_120",
+    device_target: "sm_120",
+    compute_capability: (12, 0),
+    multiprocessor_count: 170,
+    nvrtc_version: (12, 8),
+    driver_api_version: 13020,
+    driver_build_sources: 7,
+    optin_shared_bytes: 101376,
+    tensor_map_access: true,
+    compile_key: [
+        30, 182, 35, 250, 172, 206, 226, 205, 29, 12, 72, 188, 114, 186, 166, 202, 93, 127, 249,
+        191, 43, 214, 222, 238, 255, 75, 249, 174, 50, 19, 145, 210,
+    ],
+    artifact_digest: [
+        152, 180, 130, 6, 66, 119, 95, 103, 148, 45, 202, 242, 171, 84, 22, 129, 7, 90, 2, 238, 98,
+        207, 62, 168, 231, 94, 176, 11, 21, 136, 167, 185,
+    ],
+    source_digest: [
+        123, 6, 93, 13, 99, 156, 70, 127, 222, 185, 224, 146, 228, 74, 32, 36, 95, 28, 144, 127,
+        173, 220, 249, 144, 110, 139, 173, 76, 241, 66, 192, 127,
+    ],
+    invocation_digest: [
+        30, 182, 35, 250, 172, 206, 226, 205, 29, 12, 72, 188, 114, 186, 166, 202, 93, 127, 249,
+        191, 43, 214, 222, 238, 255, 75, 249, 174, 50, 19, 145, 210,
+    ],
+    header_manifest_digest: [
+        223, 164, 75, 78, 163, 5, 191, 29, 65, 98, 51, 98, 156, 26, 113, 186, 29, 128, 17, 192,
+        181, 217, 58, 39, 9, 195, 134, 151, 46, 39, 120, 240,
+    ],
+    nvrtc_library_domain: [
+        38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166, 146,
+        164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+    ],
+    driver_build_digest: [
+        142, 150, 68, 239, 130, 136, 131, 5, 214, 222, 50, 93, 180, 249, 96, 244, 193, 247, 254,
+        61, 169, 46, 223, 96, 180, 53, 238, 116, 173, 98, 33, 178,
+    ],
+};
+
+/// Fresh current-source CUDA 13.0 identities from the retained 24-key packet
+/// under driver 595.84. Twenty-three keys admitted; true G10 stayed exact.
+const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm120,
+        module_target: "compute_120",
+        device_target: "sm_120",
+        compute_capability: (12, 0),
+        multiprocessor_count: 170,
+        nvrtc_version: (13, 0),
+        driver_api_version: 13020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101376,
+        tensor_map_access: true,
+        compile_key: [
+            165, 177, 245, 202, 222, 105, 108, 43, 223, 159, 239, 22, 86, 122, 133, 19, 97, 168,
+            234, 246, 109, 186, 130, 55, 22, 73, 150, 35, 184, 105, 65, 97,
+        ],
+        artifact_digest: [
+            181, 61, 100, 61, 19, 31, 204, 89, 188, 250, 250, 223, 59, 92, 114, 3, 14, 244, 143,
+            148, 137, 189, 180, 21, 188, 28, 158, 18, 0, 17, 230, 167,
+        ],
+        source_digest: [
+            157, 71, 239, 137, 217, 228, 227, 1, 113, 54, 73, 227, 171, 203, 71, 58, 54, 250, 144,
+            111, 179, 161, 15, 189, 72, 154, 32, 245, 204, 113, 118, 175,
+        ],
+        invocation_digest: [
+            165, 177, 245, 202, 222, 105, 108, 43, 223, 159, 239, 22, 86, 122, 133, 19, 97, 168,
+            234, 246, 109, 186, 130, 55, 22, 73, 150, 35, 184, 105, 65, 97,
+        ],
+        header_manifest_digest: [
+            238, 127, 44, 155, 2, 170, 187, 92, 211, 42, 64, 234, 98, 31, 146, 102, 125, 86, 213,
+            49, 187, 233, 29, 156, 241, 6, 35, 32, 93, 8, 117, 53,
+        ],
+        nvrtc_library_domain: [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+        driver_build_digest: [
+            142, 150, 68, 239, 130, 136, 131, 5, 214, 222, 50, 93, 180, 249, 96, 244, 193, 247,
+            254, 61, 169, 46, 223, 96, 180, 53, 238, 116, 173, 98, 33, 178,
+        ],
+    };
+
+const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84:
+    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
+    module_kind: ModuleKind::TriadSm80,
+    module_target: "compute_120",
+    device_target: "sm_120",
+    compute_capability: (12, 0),
+    multiprocessor_count: 170,
+    nvrtc_version: (13, 0),
+    driver_api_version: 13020,
+    driver_build_sources: 7,
+    optin_shared_bytes: 101376,
+    tensor_map_access: true,
+    compile_key: [
+        80, 176, 147, 144, 14, 72, 52, 253, 154, 175, 186, 221, 51, 138, 254, 154, 36, 189, 25,
+        126, 22, 197, 60, 137, 116, 201, 94, 59, 204, 197, 241, 228,
+    ],
+    artifact_digest: [
+        151, 54, 61, 25, 67, 210, 78, 176, 78, 255, 14, 138, 49, 15, 52, 42, 220, 127, 30, 140, 15,
+        51, 184, 155, 53, 175, 78, 245, 199, 38, 84, 163,
+    ],
+    source_digest: [
+        123, 6, 93, 13, 99, 156, 70, 127, 222, 185, 224, 146, 228, 74, 32, 36, 95, 28, 144, 127,
+        173, 220, 249, 144, 110, 139, 173, 76, 241, 66, 192, 127,
+    ],
+    invocation_digest: [
+        80, 176, 147, 144, 14, 72, 52, 253, 154, 175, 186, 221, 51, 138, 254, 154, 36, 189, 25,
+        126, 22, 197, 60, 137, 116, 201, 94, 59, 204, 197, 241, 228,
+    ],
+    header_manifest_digest: [
+        121, 0, 164, 88, 169, 201, 223, 149, 224, 205, 121, 182, 85, 90, 23, 195, 86, 255, 13, 52,
+        243, 93, 240, 88, 227, 3, 217, 219, 226, 107, 95, 64,
+    ],
+    nvrtc_library_domain: [
+        112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+        238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+    ],
+    driver_build_digest: [
+        142, 150, 68, 239, 130, 136, 131, 5, 214, 222, 50, 93, 180, 249, 96, 244, 193, 247, 254,
+        61, 169, 46, 223, 96, 180, 53, 238, 116, 173, 98, 33, 178,
+    ],
+};
+
 /// Frozen CUDA 13.2 qualification identity from the 595.84 driver build. The
 /// 13.2 cohort above was taken on 595.91, and two of its nine cells chose a
 /// different route there, so the two builds carry separate evidence.
@@ -2469,10 +2641,7 @@ const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualifi
         ],
     };
 
-/// Exact SM120 TF32 evidence inventory measured on the 595.84 driver build:
-/// nineteen projection cells over the 101-window selector protocol. Two of the
-/// twenty-one shapes measured, both 1024x256x128 output projections, admitted
-/// no TF32 winner at all and are absent by measurement, not by omission.
+/// Portable identity paired with the CUDA 13.2 specialized module on 595.84.
 /// The portable module the 595.84 cohort measured its portable routes on:
 /// a portable cell of that cohort is admitted only while the board binds
 /// this exact module beside the SM120 one.
@@ -2518,7 +2687,10 @@ const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84:
     ],
 };
 
-const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
+/// Stable current-source route/key manifest independently requalified on CUDA
+/// 12.8, 13.0 and 13.2 under driver 595.84. All three packets admitted these
+/// same 23 keys; true G10 `Tn(128,128,8192)` lost and is intentionally absent.
+const SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED: &[Tf32AutoCell] = &[
     sm120_tf32_cell(
         Nn,
         2048,
@@ -2713,15 +2885,6 @@ const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
         super::contract::Tf32Sm120Stages::S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    sm120_tf32_cell(
-        Tn,
-        128,
-        128,
-        8192,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
-        RequiresVectorAlignmentEvidence,
-    ),
     Tf32AutoCell {
         op: Nt,
         shape: Tf32ExactShape {
@@ -2845,10 +3008,22 @@ const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_58_03: &[Tf32AutoCell] = &[
 /// the module source the tree contains, so each one can match a board.
 const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     Tf32AutoEvidenceCohort {
+        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+    },
+    Tf32AutoEvidenceCohort {
         identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
         portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84),
         tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84,
+        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
     },
     Tf32AutoEvidenceCohort {
         identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_58_03,
@@ -11678,8 +11853,15 @@ mod tf32_tests {
         SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
         SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8,
         SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0, SM89_TF32_EVIDENCE_CELLS,
-        SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS,
-        SM120_TF32_RETIRED_COHORTS, Tf32AutoEvidenceCohort, Tf32AutoOperandGate,
+        SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
+        SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED, SM120_TF32_EVIDENCE_COHORTS,
+        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
+        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84, SM120_TF32_RETIRED_COHORTS,
+        Tf32AutoEvidenceCohort, Tf32AutoOperandGate, Tf32AutoQualificationIdentity,
         matching_tf32_cohort, measured_tf32_cell, measured_tf32_route_with_operands,
         resolve_f32_triad_auto, resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
     };
@@ -12294,7 +12476,7 @@ mod tf32_tests {
             retained.identity.driver_build_digest,
             identity.driver_build_digest
         );
-        assert_eq!(retained.cells.len(), 24);
+        assert_eq!(retained.cells.len(), 23);
         for retired in SM120_TF32_RETIRED_COHORTS {
             let mut splice = module;
             splice.artifact = qualified_module_for_auto_identity(retired.identity).artifact;
@@ -13616,21 +13798,54 @@ mod tf32_tests {
                 F32TriadSelection::ScalarFmaV1,
             );
         }
-        for mutate in sm120_identity_mutations()
-            .into_iter()
-            .chain(portable_sm120_coupled_mutations())
-        {
-            let mut rejected = availability();
-            mutate(rejected.portable.as_mut().unwrap());
+        for (specialized, portable) in [
+            (
+                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+            ),
+            (
+                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+            ),
+            (
+                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
+            ),
+        ] {
+            let availability = || {
+                let mut value = sm120_availability_for(specialized);
+                value.portable = Some(qualified_module_for_auto_identity(portable));
+                value
+            };
             assert_eq!(
                 resolve(
                     F32TriadPolicy::AllowDeterministicTf32V1,
                     request,
                     operands,
-                    rejected,
+                    availability(),
                 ),
-                F32TriadSelection::ScalarFmaV1,
+                F32TriadSelection::Tf32(route),
+                "CUDA {:?} exact portable twin",
+                specialized.nvrtc_version,
             );
+            for mutate in sm120_identity_mutations()
+                .into_iter()
+                .chain(portable_sm120_coupled_mutations())
+            {
+                let mut rejected = availability();
+                mutate(rejected.portable.as_mut().unwrap());
+                assert_eq!(
+                    resolve(
+                        F32TriadPolicy::AllowDeterministicTf32V1,
+                        request,
+                        operands,
+                        rejected,
+                    ),
+                    F32TriadSelection::ScalarFmaV1,
+                    "CUDA {:?} mismatched portable twin",
+                    specialized.nvrtc_version,
+                );
+            }
         }
     }
 
@@ -13850,8 +14065,8 @@ mod tf32_tests {
 
     #[test]
     fn sm120_tf32_real_cohorts_bind_routes_and_reject_cross_version_splices() {
-        let cuda_12_8 = sm120_retired_cohort((12, 8));
-        let cuda_13_0 = sm120_retired_cohort((13, 0));
+        let cuda_12_8 = sm120_cohort((12, 8));
+        let cuda_13_0 = sm120_cohort((13, 0));
         let cuda_13_2 = sm120_cohort((13, 2));
         let request = normalized_request(ResolvedGemmOp::Tn, 768, 3072, 2048);
         let operands = F32TriadOperands {
@@ -13864,17 +14079,21 @@ mod tf32_tests {
         };
         assert_eq!(
             measured_tf32_cell(request, operands, cuda_12_8.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
-                tile: Tf32Sm120Tile::M64N128,
-                stages: Tf32Sm120Stages::S2,
-            },)),
+            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
+                Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Tf32Sm120Stages::S3,
+                },
+            )),
         );
         assert_eq!(
             measured_tf32_cell(request, operands, cuda_13_0.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
-                tile: Tf32Sm120Tile::M128N64,
-                stages: Tf32Sm120Stages::S2,
-            },)),
+            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
+                Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Tf32Sm120Stages::S3,
+                },
+            )),
         );
         assert_eq!(
             measured_tf32_cell(request, operands, cuda_13_2.cells,),
@@ -13886,9 +14105,27 @@ mod tf32_tests {
             )),
         );
 
-        // A retired cohort keeps its manifest but resolves nothing: the
-        // runtime table no longer holds it.
-        for retired in [cuda_12_8, cuda_13_0] {
+        for live in [cuda_12_8, cuda_13_0, cuda_13_2] {
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    operands,
+                    sm120_availability_for(live.identity),
+                )
+                .unwrap(),
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
+                    Tf32Sm120Route {
+                        tile: Tf32Sm120Tile::M64N128,
+                        stages: Tf32Sm120Stages::S3,
+                    },
+                )),
+            );
+        }
+
+        // Historical lower-toolkit records retain their old manifests but
+        // remain unreachable because only fresh current-source identities are live.
+        for retired in [sm120_retired_cohort((12, 8)), sm120_retired_cohort((13, 0))] {
             assert_no_tf32_route(
                 resolve_f32_triad_auto_with_operands(
                     F32TriadPolicy::AllowDeterministicTf32V1,
@@ -13899,22 +14136,6 @@ mod tf32_tests {
                 .unwrap(),
             );
         }
-        assert_eq!(
-            resolve_f32_triad_auto_with_operands(
-                F32TriadPolicy::AllowDeterministicTf32V1,
-                request,
-                operands,
-                sm120_availability_for(cuda_13_2.identity),
-            )
-            .unwrap(),
-            F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
-                Tf32Sm120Route {
-                    tile: Tf32Sm120Tile::M64N128,
-                    stages: Tf32Sm120Stages::S3,
-                },
-            )),
-        );
-
         let cohorts = SM120_TF32_EVIDENCE_COHORTS
             .iter()
             .chain(SM120_TF32_RETIRED_COHORTS)
@@ -13946,33 +14167,162 @@ mod tf32_tests {
     /// deterministic TF32 family is dead code until someone requalifies it.
     #[test]
     fn sm120_tf32_live_cohort_manifest_is_exact_and_unique() {
-        let cohort = sm120_cohort((13, 2));
-        assert_eq!(cohort.cells.len(), 24);
-        let mut keys = cohort
-            .cells
+        fn digest(hex: &str) -> [u8; 32] {
+            assert_eq!(hex.len(), 64);
+            std::array::from_fn(|index| {
+                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
+            })
+        }
+        let driver_595_84 =
+            digest("8e9644ef82888305d6de325db4f960f4c1f7fe3da92edf60b435ee74ad6221b2");
+        let cohorts = SM120_TF32_EVIDENCE_COHORTS
             .iter()
-            .map(|cell| (cell.op, cell.shape))
+            .filter(|cohort| cohort.identity.driver_build_digest == driver_595_84)
             .collect::<Vec<_>>();
-        keys.sort_unstable_by_key(|(op, shape)| {
-            (
-                *op as u8,
-                shape.output_rows,
-                shape.output_columns,
-                shape.reduction,
-            )
-        });
-        keys.dedup();
-        assert_eq!(keys.len(), cohort.cells.len(), "a shape is measured twice");
-        let portable = cohort
-            .cells
-            .iter()
-            .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm80)
-            .count();
-        assert_eq!(portable, 6);
-        assert!(
-            cohort.portable.is_some(),
-            "the live cohort routes six cells into the portable module and must name it"
+        assert_eq!(
+            cohorts
+                .iter()
+                .map(|cohort| cohort.identity.nvrtc_version)
+                .collect::<Vec<_>>(),
+            [(12, 8), (13, 0), (13, 2)]
         );
+        for cohort in cohorts {
+            assert_eq!(
+                cohort.cells,
+                SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED
+            );
+            assert_eq!(cohort.cells.len(), 23);
+            let mut keys = cohort
+                .cells
+                .iter()
+                .map(|cell| (cell.op, cell.shape))
+                .collect::<Vec<_>>();
+            keys.sort_unstable_by_key(|(op, shape)| {
+                (
+                    *op as u8,
+                    shape.output_rows,
+                    shape.output_columns,
+                    shape.reduction,
+                )
+            });
+            keys.dedup();
+            assert_eq!(keys.len(), cohort.cells.len(), "a shape is measured twice");
+            assert!(!cohort.cells.iter().any(|cell| {
+                cell.op == ResolvedGemmOp::Tn
+                    && cell.shape.output_rows == 128
+                    && cell.shape.output_columns == 128
+                    && cell.shape.reduction == 8192
+            }));
+            assert_eq!(
+                cohort
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm80)
+                    .count(),
+                6
+            );
+            assert!(cohort.portable.is_some());
+        }
+    }
+
+    #[test]
+    fn sm120_tf32_lower_toolkit_595_84_identities_are_literal_and_live() {
+        fn digest(hex: &str) -> [u8; 32] {
+            assert_eq!(hex.len(), 64);
+            std::array::from_fn(|index| {
+                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
+            })
+        }
+        let cases: [(
+            Tf32AutoQualificationIdentity,
+            Tf32AutoQualificationIdentity,
+            (i32, i32),
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static str,
+        ); 2] = [
+            (
+                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+                (12, 8),
+                "8102a06e4c8cc3baa637050f46916dba1a4af0da279fd5852a3a3210ba56e7d1",
+                "aae344d2860b91eafb4464b11218b2ecb5684e48e010509a2b757eec274707ec",
+                "b5715c3e49939542216a5399d1f371a76ee6a7799e1dc5d5a8d2771264b94f98",
+                "1eb623faaccee2cd1d0c48bc72baa6ca5d7ff9bf2bd6deeeff4bf9ae321391d2",
+                "98b4820642775f67942dcaf2ab541681075a02ee62cf3ea8e75eb00b1588a7b9",
+                "dfa44b4ea305bf1d416233629c1a71ba1d8011c0b5d93a2709c386972e2778f0",
+                "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+            ),
+            (
+                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
+                (13, 0),
+                "a5b1f5cade696c2bdf9fef16567a851361a8eaf66dba823716499623b8694161",
+                "b53d643d131fcc59bcfafadf3b5c72030ef48f9489bdb415bc1c9e120011e6a7",
+                "ee7f2c9b02aabb5cd32a40ea621f92667d56d531bbe91d9cf10623205d087535",
+                "50b093900e4834fd9aafbadd338afe9a24bd197e16c53c8974c95e3bccc5f1e4",
+                "97363d1943d24eb04eff0e8a310f342adc7f1e8c0f33b89b35af4ef5c72654a3",
+                "7900a458a9c9df95e0cd79b6555a17c356ff0d34f35df058e303d9dbe26b5f40",
+                "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+            ),
+        ];
+        for (
+            specialized,
+            portable,
+            version,
+            specialized_key,
+            specialized_artifact,
+            specialized_header,
+            portable_key,
+            portable_artifact,
+            portable_header,
+            nvrtc_domain,
+        ) in cases
+        {
+            assert_eq!(specialized.module_kind, ModuleKind::TriadSm120);
+            assert_eq!(portable.module_kind, ModuleKind::TriadSm80);
+            for identity in [specialized, portable] {
+                assert_eq!(identity.module_target, "compute_120");
+                assert_eq!(identity.device_target, "sm_120");
+                assert_eq!(identity.compute_capability, (12, 0));
+                assert_eq!(identity.multiprocessor_count, 170);
+                assert_eq!(identity.nvrtc_version, version);
+                assert_eq!(identity.driver_api_version, 13020);
+                assert_eq!(identity.driver_build_sources, 7);
+                assert_eq!(identity.optin_shared_bytes, 101376);
+                assert!(identity.tensor_map_access);
+                assert_eq!(
+                    identity.driver_build_digest,
+                    digest("8e9644ef82888305d6de325db4f960f4c1f7fe3da92edf60b435ee74ad6221b2")
+                );
+                assert!(identity.matches(qualified_module_for_auto_identity(identity)));
+            }
+            assert_eq!(specialized.compile_key, digest(specialized_key));
+            assert_eq!(specialized.artifact_digest, digest(specialized_artifact));
+            assert_eq!(specialized.invocation_digest, digest(specialized_key));
+            assert_eq!(
+                specialized.header_manifest_digest,
+                digest(specialized_header)
+            );
+            assert_eq!(portable.compile_key, digest(portable_key));
+            assert_eq!(portable.artifact_digest, digest(portable_artifact));
+            assert_eq!(portable.invocation_digest, digest(portable_key));
+            assert_eq!(portable.header_manifest_digest, digest(portable_header));
+            assert_eq!(specialized.nvrtc_library_domain, digest(nvrtc_domain));
+            assert_eq!(portable.nvrtc_library_domain, digest(nvrtc_domain));
+            assert_eq!(
+                specialized.source_digest,
+                digest("9d47ef89d9e4e301713649e3abcb473a36fa906fb3a10fbd489a20f5cc7176af")
+            );
+            assert_eq!(
+                portable.source_digest,
+                digest("7b065d0d639c467fdeb9e092e44a20245f1c907faddcf9906e8bad4cf142c07f")
+            );
+        }
     }
 
     #[test]
