@@ -591,6 +591,239 @@ pub fn state_capacity(d_state: usize) -> Result<usize, String> {
 }
 
 impl MambaKernels {
+    /// Exact membership in loaded inference terminal holders, including the borrowed wide holder.
+    pub(in crate::mamba_ssm::gpu) fn inference_terminal_function(
+        &self,
+        symbol: &str,
+    ) -> Option<&CudaFunction> {
+        match symbol {
+            "gemm_bi_f32_f32_s2" => Some(&self.gemm_bi_f32_f32_s2),
+            "gemm_bi_f32_f32_n128_s2" => Some(&self.gemm_bi_f32_f32_n128_s2),
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" => {
+                self.fixed_sm89_f32_n64_copyplan.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1" => {
+                self.fixed_sm120_f32_n64_copyplan.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1" => {
+                self.fixed_sm120_f32_n64_copyplan_t256.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1" => {
+                self.fixed_sm120_f32_m128n64_copyplan_t256.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1" => self.fixed_sm120_f32_n64_sliced.as_ref(),
+            "gemm_bi_bf16_bf16" => Some(&self.gemm_bi_bf16_bf16),
+            "matvec_bi_bf16_bf16" => Some(&self.matvec_bi_bf16_bf16),
+            "gemm_bi_bf16_f32" => Some(&self.gemm_bi_bf16_f32),
+            "matvec_bi_bf16_f32" => Some(&self.matvec_bi_bf16_f32),
+            "gemm_bi_nn_tc128_bf16" => Some(&self.gemm_bi_nn_tc128_typed.bf16),
+            "gemm_bi_nn_tc128_f32out_bf16" => Some(&self.gemm_bi_nn_tc128_f32out.bf16),
+            "gemm_bi_nn_tcw64_bf16" => Some(&self.gemm_bi_nn_tcw64_typed.bf16),
+            "gemm_bi_nn_tcwn64_bf16" => Some(&self.gemm_bi_nn_tcwn64_typed.bf16),
+            "gemm_bi_nn_tc64_bf16" => Some(&self.gemm_bi_nn_tc64_typed.bf16),
+            "gemm_bi_nn_tc64_f32out_bf16" => Some(&self.gemm_bi_nn_tc64_f32out.bf16),
+            "gemm_bi_nn_tc16_bf16" => Some(&self.gemm_bi_nn_tc16_typed.bf16),
+            "gemm_bi_nn_tc16_f32out_bf16" => Some(&self.gemm_bi_nn_tc16_f32out.bf16),
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16" => {
+                Some(&self.fixed_sm89_half_pipeline.as_ref()?.bf16)
+            }
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16" => {
+                Some(&self.fixed_sm89_half_swizzle.as_ref()?.bf16)
+            }
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16" => {
+                Some(&self.fixed_sm89_half_s3.as_ref()?.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_bf16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m64n64_bk64_s2
+                    .bf16,
+            ),
+            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n128_bk64_s2.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_bf16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m64n128_bk64_s2
+                    .bf16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n64_bk32_s3.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_bf16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n64_bk32_s3
+                    .bf16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s2.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_bf16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n128_bk32_s2
+                    .bf16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s3.bf16)
+            }
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_bf16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n128_bk32_s3
+                    .bf16,
+            ),
+            "gemm_bi_nn_sm90a_wgmma_wg1_bf16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.bf16),
+            "gemm_bi_nn_sm100_tcgen_c4_bf16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.bf16),
+            "gemm_bi_f16_f16" => Some(&self.gemm_bi_f16_f16),
+            "matvec_bi_f16_f16" => Some(&self.matvec_bi_f16_f16),
+            "gemm_bi_f16_f32" => Some(&self.gemm_bi_f16_f32),
+            "matvec_bi_f16_f32" => Some(&self.matvec_bi_f16_f32),
+            "gemm_bi_nn_tc128_f16" => Some(&self.gemm_bi_nn_tc128_typed.f16),
+            "gemm_bi_nn_tc128_f32out_f16" => Some(&self.gemm_bi_nn_tc128_f32out.f16),
+            "gemm_bi_nn_tcw64_f16" => Some(&self.gemm_bi_nn_tcw64_typed.f16),
+            "gemm_bi_nn_tcwn64_f16" => Some(&self.gemm_bi_nn_tcwn64_typed.f16),
+            "gemm_bi_nn_tc64_f16" => Some(&self.gemm_bi_nn_tc64_typed.f16),
+            "gemm_bi_nn_tc64_f32out_f16" => Some(&self.gemm_bi_nn_tc64_f32out.f16),
+            "gemm_bi_nn_tc16_f16" => Some(&self.gemm_bi_nn_tc16_typed.f16),
+            "gemm_bi_nn_tc16_f32out_f16" => Some(&self.gemm_bi_nn_tc16_f32out.f16),
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16" => {
+                Some(&self.fixed_sm89_half_pipeline.as_ref()?.f16)
+            }
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16" => {
+                Some(&self.fixed_sm89_half_swizzle.as_ref()?.f16)
+            }
+            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16" => Some(&self.fixed_sm89_half_s3.as_ref()?.f16),
+            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.f16)
+            }
+            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_f16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m64n64_bk64_s2
+                    .f16,
+            ),
+            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n128_bk64_s2.f16)
+            }
+            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_f16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m64n128_bk64_s2
+                    .f16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n64_bk32_s3.f16)
+            }
+            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_f16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n64_bk32_s3
+                    .f16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s2.f16)
+            }
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_f16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n128_bk32_s2
+                    .f16,
+            ),
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16" => {
+                Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s3.f16)
+            }
+            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_f16" => Some(
+                &self
+                    .gemm_bi_nn_half_sm120_f32out
+                    .as_ref()?
+                    .m128n128_bk32_s3
+                    .f16,
+            ),
+            "gemm_bi_nn_sm90a_wgmma_wg1_f16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.f16),
+            "gemm_bi_nn_sm100_tcgen_c4_f16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.f16),
+            "matvec_bi_f32_f32" => Some(&self.matvec_bi_f32_f32),
+            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16" => {
+                self.fixed_sm89_half_m64n64_s3_f16.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16" => {
+                self.fixed_sm89_half_m128n64_s2_f16.as_ref()
+            }
+            "gemm_bi_nn_tf32_v1_m128n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m128n64_s2),
+            "gemm_bi_nn_tf32_v1_m128n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m128n64_s3),
+            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m64n64_s2),
+            "gemm_bi_nn_tf32_v1_m64n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m64n64_s3),
+            "gemm_bi_nn_tf32_v1_m16n32_bk32_s4" => Some(&self.gemm_bi_nn_tf32.m16n32_s4),
+            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3" => {
+                self.fixed_sm89_tf32_rna_wide.as_ref()
+            }
+            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3" => {
+                self.fixed_sm89_tf32_rna_n96.as_ref()
+            }
+            "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3" => {
+                self.triad_kernels().tf32_function(symbol)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m128n64_s2)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m128n64_s3)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n128_s2)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n128_s3)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2_producer_warp)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2)
+            }
+            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store" => {
+                Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2_pair_store)
+            }
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2" => {
+                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n64)
+            }
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => {
+                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m64n128)
+            }
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => {
+                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n96)
+            }
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4" => {
+                self.fixed_sm120_fma_postbias.as_ref()?.m128n64_k4.as_ref()
+            }
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2" => self
+                .fixed_sm120_fma_postbias
+                .as_ref()?
+                .m128n64_t256
+                .as_ref(),
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => self
+                .fixed_sm120_fma_postbias
+                .as_ref()?
+                .nobias_m128n64_t256
+                .as_ref(),
+            _ => None,
+        }
+    }
+
     /// Compile with the default state capacity of 64 — the common
     /// shapes' tightest register budget. Models with a larger `d_state`
     /// use [`Self::compile_with_state_cap`].

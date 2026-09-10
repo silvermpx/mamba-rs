@@ -5,12 +5,12 @@
 
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
-pub use super::gemm_mode::GemmMode;
-use super::gemm_mode::{MathModeBackend, MathTransitionError, change_math_mode};
 use super::gemm_bi_triad::{
     F32PreparedLaunchCache, Sm90aPreparedLaunchCache, Sm100PreparedLaunchCache,
     Sm120PreparedLaunchCache,
 };
+pub use super::gemm_mode::GemmMode;
+use super::gemm_mode::{MathModeBackend, MathTransitionError, change_math_mode};
 use super::kernel_identity::{
     ArtifactIdentity, BackendSet, CapturedGemmGraphPlan, CompilerIdentity, ModuleKind,
     PhysicalGemmBackend, PolicyDtype, PreparedGemmCaptureManifest, RecordedGemmTrace,
@@ -106,10 +106,8 @@ fn gemm_mode_from_results(
         };
     }
 
-    let batch_invariant = optional_tier_flag_from_result(
-        "MAMBA_RS_BATCH_INVARIANT",
-        batch_invariant,
-    )?;
+    let batch_invariant =
+        optional_tier_flag_from_result("MAMBA_RS_BATCH_INVARIANT", batch_invariant)?;
     let fast_gemm = optional_tier_flag_from_result("MAMBA_RS_FAST_GEMM", fast_gemm)?;
     match (batch_invariant, fast_gemm) {
         (None, None) | (Some(true), None | Some(false)) => Ok(GemmMode::Deterministic),
@@ -119,9 +117,7 @@ fn gemm_mode_from_results(
                 .into(),
         ),
         (None | Some(false), Some(true)) => Ok(GemmMode::CublasFast),
-        (None, Some(false)) | (Some(false), None | Some(false)) => {
-            Ok(GemmMode::CublasPedantic)
-        }
+        (None, Some(false)) | (Some(false), None | Some(false)) => Ok(GemmMode::CublasPedantic),
     }
 }
 
@@ -159,11 +155,9 @@ fn resolve_gemm_env(
         });
     }
 
-    let tensor_cores = optional_tier_flag_from_result(
-        "MAMBA_RS_BI_TENSOR_CORES",
-        values.tensor_cores,
-    )?
-    .unwrap_or(true);
+    let tensor_cores =
+        optional_tier_flag_from_result("MAMBA_RS_BI_TENSOR_CORES", values.tensor_cores)?
+            .unwrap_or(true);
     let f32_policy = f32_triad_policy_from_result(values.f32_policy)?;
     let half_policy = half_triad_policy_from_result(values.half_policy)?
         .unwrap_or(HalfTriadPolicy::TiledParityV1);
@@ -591,9 +585,8 @@ impl MathModeBackend for CublasMathBackend<'_> {
 
     fn query(&mut self) -> Result<Self::Mode, String> {
         let mut mode = Self::Mode::CUBLAS_DEFAULT_MATH;
-        let status = unsafe {
-            cudarc::cublas::sys::cublasGetMathMode(*self.blas.handle(), &mut mode)
-        };
+        let status =
+            unsafe { cudarc::cublas::sys::cublasGetMathMode(*self.blas.handle(), &mut mode) };
         if status == cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             Ok(mode)
         } else {
@@ -602,9 +595,7 @@ impl MathModeBackend for CublasMathBackend<'_> {
     }
 
     fn update(&mut self, mode: Self::Mode) -> Result<(), String> {
-        let status = unsafe {
-            cudarc::cublas::sys::cublasSetMathMode(*self.blas.handle(), mode)
-        };
+        let status = unsafe { cudarc::cublas::sys::cublasSetMathMode(*self.blas.handle(), mode) };
         if status == cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             Ok(())
         } else {
@@ -1200,11 +1191,12 @@ impl GpuCtx {
         self.bi_gemm_family.get()
     }
 
-    /// Set permission for qualified deterministic tensor-core GEMM routes.
+    /// Set permission for qualified deterministic Triad tensor-core GEMM routes.
     ///
     /// Fresh contexts set this to `true`. It affects dispatch only in
     /// [`GemmMode::Deterministic`]; cuBLAS modes leave the value stored but
-    /// dormant. Setting it to `false` keeps the custom scalar/fallback policy.
+    /// dormant. Setting it to `false` keeps Triad's custom scalar/fallback policy.
+    /// Inference's native half ladder uses its own dispatch and is unaffected.
     /// This permission does not enable vendor TF32 and does not implicitly
     /// select the stream-K half policy.
     pub fn set_bi_tensor_cores(&self, on: bool) {
@@ -1367,6 +1359,15 @@ impl GpuCtx {
         access(&mut launches)
     }
 
+    /// Whether this context currently inventories pointer-bound GEMM routes.
+    /// A conflicting borrow is an error, never an inactive-recorder verdict.
+    pub(crate) fn gemm_route_recording_active(&self) -> Result<bool, String> {
+        self.gemm_route_recorder
+            .try_borrow()
+            .map(|recorder| recorder.is_some())
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())
+    }
+
     pub(crate) fn record_resolved_gemm_route(
         &self,
         route: ResolvedGemmRoute,
@@ -1474,12 +1475,63 @@ impl GpuCtx {
         label: &str,
     ) -> Result<(), String> {
         let context = self.gemm_route();
+        let inference_terminal = matches!(
+            route.backend,
+            PhysicalGemmBackend::InferenceScalarFmaV1
+                | PhysicalGemmBackend::InferenceWmmaV1
+                | PhysicalGemmBackend::InferenceMma16V1
+                | PhysicalGemmBackend::InferenceSm90aWgmmaV1
+                | PhysicalGemmBackend::InferenceSm100Tcgen05V1
+                | PhysicalGemmBackend::InferenceMmaTf32RnaV1
+                | PhysicalGemmBackend::InferenceSm120TmaFmaV1
+                | PhysicalGemmBackend::InferenceSm120TmaMma16V1
+                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
+                | PhysicalGemmBackend::FixedMatvecEightWarpV1
+        ) || (route.backend
+            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBiasV1)
+            || (context.policy.bi_gemm_family == BiGemmFamily::Inference
+                && route.backend == PhysicalGemmBackend::MmaTf32RnaV1
+                && route.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3");
+        if inference_terminal {
+            return self.validate_inference_terminal_route(route, label);
+        }
+        if context.policy.bi_gemm_family == BiGemmFamily::Inference
+            && route.backend == PhysicalGemmBackend::Sm120TmaFmaExactV1
+        {
+            super::gemm_bi_inference::identity::validate_cached_bridge(route)?;
+            if self.kernels.tf32_function(route.symbol).is_none() {
+                return Err(format!(
+                    "{label}: prepared exact-TMA bridge holder is not loaded"
+                ));
+            }
+        }
+        if route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            && (route.numeric_contract != ResolvedNumericContract::ScalarFmaV1
+                || context.policy.bi_gemm_family != BiGemmFamily::Triad
+                || route.symbol != "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
+                || self
+                    .kernels
+                    .inference_terminal_function(route.symbol)
+                    .is_none())
+        {
+            return Err(format!(
+                "{label}: Fixed copy-plan backend/family/numeric binding changed"
+            ));
+        }
         if !context.policy.batch_invariant || !context.backend_set.contains(BackendSet::TRIAD) {
             return Err(format!(
                 "{label}: captured Triad backend is unavailable under the live GEMM policy"
             ));
         }
         let required_contract = match route.numeric_contract {
+            ResolvedNumericContract::ScalarFmaPostDotBiasV1
+            | ResolvedNumericContract::WmmaF32PostDotBiasV1
+            | ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBiasV1 => {
+                return Err(format!(
+                    "{label}: Inference numeric contract has an incompatible backend"
+                ));
+            }
             ResolvedNumericContract::ScalarFmaV1
             | ResolvedNumericContract::ScalarFmaSplitKPartialV1
             | ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1
@@ -1631,6 +1683,51 @@ impl GpuCtx {
         {
             return Err(format!(
                 "{label}: captured typed Tensor Core route is disabled by the live policy"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_inference_terminal_route(
+        &self,
+        route: &ResolvedGemmRoute,
+        label: &str,
+    ) -> Result<(), String> {
+        let context = self.gemm_route();
+        let spec = super::gemm_bi_inference::identity::terminal(route.symbol)
+            .ok_or_else(|| format!("{label}: unknown Inference terminal"))?;
+        spec.validate_route(route)?;
+        let required = spec.required_contract(context.policy.bi_gemm_family)?;
+        let backend = if route.module_kind == ModuleKind::Fixed {
+            BackendSet::FIXED
+        } else {
+            BackendSet::TRIAD
+        };
+        if !context.policy.batch_invariant
+            || !context.backend_set.contains(backend)
+            || !context.numeric_contracts.contains(required)
+            || (required == NumericContractSet::FIXED_DETERMINISTIC_TF32_V1
+                && self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1)
+        {
+            return Err(format!(
+                "{label}: Inference terminal is disabled by the live policy"
+            ));
+        }
+        let (artifact, compiler) = self
+            .live_gemm_module_binding(route.module_kind)
+            .ok_or_else(|| format!("{label}: Inference terminal module is not loaded"))?;
+        if route.artifact != artifact
+            || route.compiler != compiler
+            || route.target != compiler.target
+            || route.device != context.device
+            || route.device_caps != context.device_caps
+            || self
+                .kernels
+                .inference_terminal_function(route.symbol)
+                .is_none()
+        {
+            return Err(format!(
+                "{label}: Inference terminal live function/module binding changed"
             ));
         }
         Ok(())
@@ -1947,7 +2044,17 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
             ModuleKind::TriadSm89ExactF32
         }
         PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 => ModuleKind::TriadSm89ExactF32D128,
-        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => ModuleKind::Fixed,
+        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+        | PhysicalGemmBackend::InferenceScalarFmaV1
+        | PhysicalGemmBackend::InferenceWmmaV1
+        | PhysicalGemmBackend::InferenceMma16V1
+        | PhysicalGemmBackend::InferenceSm90aWgmmaV1
+        | PhysicalGemmBackend::InferenceSm100Tcgen05V1
+        | PhysicalGemmBackend::InferenceMmaTf32RnaV1
+        | PhysicalGemmBackend::InferenceSm120TmaFmaV1
+        | PhysicalGemmBackend::InferenceSm120TmaMma16V1
+        | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
+        | PhysicalGemmBackend::FixedMatvecEightWarpV1 => ModuleKind::Fixed,
         PhysicalGemmBackend::Sm80Mma16V1
         | PhysicalGemmBackend::MmaTf32RnaV1
         | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
@@ -2018,6 +2125,23 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn inference_recorder_query_rejects_conflicting_borrow() {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).unwrap();
+        let ctx = super::GpuCtx::new(&device).unwrap();
+        assert!(!ctx.gemm_route_recording_active().unwrap());
+        let borrow = ctx.gemm_route_recorder.borrow_mut();
+        assert!(ctx.gemm_route_recording_active().is_err());
+        drop(borrow);
+        ctx.record_eager_gemm_trace(|| {
+            assert!(ctx.gemm_route_recording_active()?);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!ctx.gemm_route_recording_active().unwrap());
+    }
+
     use super::{
         BiGemmFamily, F32TriadPolicy, GemmEnvValues, GemmMode, HalfTriadPolicy,
         bi_gemm_family_from_result, expected_route_module, expected_route_schedule_revision,

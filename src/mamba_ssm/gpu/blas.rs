@@ -3825,12 +3825,17 @@ struct BiGemmArgs {
 // The WMMA GEMM path stays registered in MambaKernels and is reachable
 // through gemm_bi_forward_raw (the Inference family's entry and the f32
 // dispatch arm).
-fn launch_bi_gemm(
+fn launch_bi_gemm<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
     threads: u32,
     args: BiGemmArgs,
+    storage: [WeightDtype; 3],
+    observer: &mut O,
 ) -> Result<(), String> {
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
     // The selected kernel supplies its qualified thread count. Every
     // variant below still owns a 64x64 output tile; a mismatched block
     // size can return plausible garbage rather than a launch error.
@@ -3862,7 +3867,17 @@ fn launch_bi_gemm(
     builder.arg(&lda);
     builder.arg(&ldb);
     builder.arg(&ldc);
-    unsafe { builder.launch(cfg) }.map_err(|e| format!("gemm_bi launch failed: {e:?}"))?;
+    let observation =
+        super::gemm_bi_inference::identity::observation(ctx, observer, kernel, cfg, || {
+            super::gemm_bi_inference::identity::Arguments::legacy(
+                [args.c, args.a, args.b, args.bias],
+                storage.map(super::gemm_bi_inference::identity::policy_dtype),
+                [args.alpha, args.beta],
+                [args.m, args.n, args.k, lda, ldb, ldc],
+            )
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("Inference legacy launch")))?;
     Ok(())
 }
 
@@ -3885,15 +3900,14 @@ pub fn gemm_bi_forward_raw(
 /// The Inference family's LEGACY tile (64x64x32, strict, no buckets): the
 /// narrow-N fallback of the inference ladder and the whole f32 arm (the
 /// shipped serve route - its bits never move with ladder work).
-pub(crate) fn fixed_legacy_forward(
+pub(in crate::mamba_ssm::gpu) fn fixed_legacy_forward<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
-    c: TypedPtr,
-    x: TypedPtr,
-    w: TypedPtr,
-    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
-    dims: (usize, usize, usize),
+    operands: super::gemm_bi_inference::InferenceFwdOperands,
+    shape: super::gemm_bi_inference::InferenceShape,
+    observer: &mut O,
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let super::gemm_bi_inference::InferenceFwdOperands { c, x, w, bias_ptr } = operands;
+    let (batch, n_in, n_out) = (shape.m, shape.k, shape.n);
     let Some((kernel, threads)) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) else {
         return Err(format!(
             "gemm_bi: no kernel for operand dtypes a={:?} b={:?} c={:?}",
@@ -3911,10 +3925,12 @@ pub(crate) fn fixed_legacy_forward(
             bias: bias_ptr.unwrap_or(0),
             alpha: 1.0,
             beta: 0.0,
-            m: batch as i32,
-            n: n_out as i32,
-            k: n_in as i32,
+            m: i32::try_from(batch).map_err(|_| "Inference M exceeds i32")?,
+            n: i32::try_from(n_out).map_err(|_| "Inference N exceeds i32")?,
+            k: i32::try_from(n_in).map_err(|_| "Inference K exceeds i32")?,
         },
+        [x.dtype, w.dtype, c.dtype],
+        observer,
     )
 }
 
@@ -3939,19 +3955,29 @@ fn pick_bi_matvec(
     }
 }
 
-fn launch_bi_matvec(
+fn launch_bi_matvec<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
     args: BiGemmArgs,
-    io_dtype: WeightDtype,
+    storage: [WeightDtype; 3],
+    observer: &mut O,
 ) -> Result<(), String> {
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
     // Must match kernel constants in kernels/gemm_bi_inference/:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
     const BLOCK_N_MV: i32 = 32;
     const THREADS_PER_BLOCK: i32 = 256;
-    let a_bytes = (args.k as u32) * (io_dtype.size_bytes() as u32);
-    let smem_bytes = (a_bytes + 15) & !15;
+    let a_bytes = u32::try_from(args.k)
+        .ok()
+        .and_then(|k| k.checked_mul(storage[0].size_bytes() as u32))
+        .ok_or("matvec input byte span exceeds u32")?;
+    let smem_bytes = a_bytes
+        .checked_add(15)
+        .ok_or("matvec aligned byte span exceeds u32")?
+        & !15;
     let num_pid_n = (args.n + BLOCK_N_MV - 1) / BLOCK_N_MV;
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (num_pid_n as u32, args.m as u32, 1),
@@ -3974,7 +4000,17 @@ fn launch_bi_matvec(
     builder.arg(&lda);
     builder.arg(&ldb);
     builder.arg(&ldc);
-    unsafe { builder.launch(cfg) }.map_err(|e| format!("matvec_bi launch failed: {e:?}"))?;
+    let observation =
+        super::gemm_bi_inference::identity::observation(ctx, observer, kernel, cfg, || {
+            super::gemm_bi_inference::identity::Arguments::legacy(
+                [args.c, args.a, args.b, args.bias],
+                storage.map(super::gemm_bi_inference::identity::policy_dtype),
+                [args.alpha, args.beta],
+                [args.m, args.n, args.k, lda, ldb, ldc],
+            )
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("Fixed matvec launch")))?;
     Ok(())
 }
 
@@ -4060,7 +4096,8 @@ pub fn gpu_gemm_typed_forward_raw(
                 n: n_out as i32,
                 k: n_in as i32,
             },
-            x.dtype,
+            [x.dtype, w.dtype, c.dtype],
+            &mut NoPhysicalObserver,
         );
     }
 
@@ -4123,4 +4160,128 @@ pub fn gpu_gemm_typed_forward_raw(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod matvec_inventory_cuda_tests {
+    use super::*;
+    use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+    use crate::mamba_ssm::gpu::context::BiGemmFamily;
+    use crate::mamba_ssm::gpu::device::GpuDevice;
+    use crate::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, ResolvedNumericContract};
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn typed_matvec_physical_observation_preserves_public_output_and_storage() {
+        let device = GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new(&device).unwrap();
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        for tc in [false, true] {
+            ctx.set_bi_tensor_cores(tc);
+            for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                for output in [dtype, WeightDtype::F32] {
+                    for k in [0, 37] {
+                        let x = DtypedBuf::zeros(&ctx.stream, (3 * k).max(1), dtype).unwrap();
+                        let w = DtypedBuf::zeros(&ctx.stream, (k * 16).max(1), dtype).unwrap();
+                        let y = DtypedBuf::zeros(&ctx.stream, 3 * 16, output).unwrap();
+                        let bias = DtypedBuf::zeros(&ctx.stream, 16, WeightDtype::F32).unwrap();
+                        x.upload_f32(&ctx.stream, &vec![1.0; (3 * k).max(1)])
+                            .unwrap();
+                        w.upload_f32(&ctx.stream, &vec![1.0; (k * 16).max(1)])
+                            .unwrap();
+                        bias.upload_f32(&ctx.stream, &[0.5; 16]).unwrap();
+                        let input = TypedPtr {
+                            ptr: if k == 0 { 0 } else { x.cached_ptr() },
+                            dtype,
+                        };
+                        let weight = TypedPtr {
+                            ptr: if k == 0 { 0 } else { w.cached_ptr() },
+                            dtype,
+                        };
+                        let output_ptr = TypedPtr {
+                            ptr: y.cached_ptr(),
+                            dtype: output,
+                        };
+                        gpu_gemm_typed_forward_raw(
+                            &ctx,
+                            output_ptr,
+                            input,
+                            weight,
+                            Some(bias.cached_ptr()),
+                            (3, k, 16),
+                        )
+                        .unwrap();
+                        let mut expected = vec![0.0; 48];
+                        y.download_f32(&ctx.stream, &mut expected).unwrap();
+                        let mut ranges = vec![
+                            PhysicalArgumentRange {
+                                pointer: y.cached_ptr(),
+                                required_bytes: (48 * output.size_bytes()) as u64,
+                            },
+                            PhysicalArgumentRange {
+                                pointer: bias.cached_ptr(),
+                                required_bytes: 64,
+                            },
+                        ];
+                        if k != 0 {
+                            ranges.push(PhysicalArgumentRange {
+                                pointer: x.cached_ptr(),
+                                required_bytes: (3 * k * dtype.size_bytes()) as u64,
+                            });
+                            ranges.push(PhysicalArgumentRange {
+                                pointer: w.cached_ptr(),
+                                required_bytes: (k * 16 * dtype.size_bytes()) as u64,
+                            });
+                        }
+                        let mut observer = prepare_physical_observer(&ctx, 1, &ranges).unwrap();
+                        let kernel = pick_bi_matvec(&ctx, dtype, dtype, output).unwrap();
+                        let eager = ctx
+                            .record_eager_gemm_trace(|| {
+                                launch_bi_matvec(
+                                    &ctx,
+                                    kernel,
+                                    BiGemmArgs {
+                                        c: y.cached_ptr(),
+                                        a: input.ptr,
+                                        b: weight.ptr,
+                                        bias: bias.cached_ptr(),
+                                        alpha: 1.0,
+                                        beta: 0.0,
+                                        m: 3,
+                                        n: 16,
+                                        k: k as i32,
+                                    },
+                                    [dtype, dtype, output],
+                                    &mut observer,
+                                )
+                            })
+                            .unwrap();
+                        let trace =
+                            finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
+                        assert_eq!(eager.routes().len(), 1);
+                        assert_eq!(trace.nodes().len(), 1);
+                        let node = trace.nodes()[0];
+                        let route = node.gemm_route().unwrap();
+                        assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarpV1);
+                        assert_eq!(
+                            route.numeric_contract,
+                            ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBiasV1
+                        );
+                        assert_eq!(route.tile, (1, 32));
+                        assert_eq!(route.bk, 0);
+                        assert_eq!(node.launch.arguments_digest, route.launch.arguments_digest);
+                        assert_ne!(
+                            route.launch.arguments_digest,
+                            eager.routes()[0].launch.arguments_digest
+                        );
+                        let mut actual = vec![0.0; 48];
+                        y.download_f32(&ctx.stream, &mut actual).unwrap();
+                        assert_eq!(actual, expected);
+                        assert!(actual.iter().all(|v| *v == k as f32 + 0.5));
+                    }
+                }
+            }
+        }
+    }
 }

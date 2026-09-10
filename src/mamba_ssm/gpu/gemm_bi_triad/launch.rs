@@ -5111,11 +5111,12 @@ pub(crate) enum FixedSm120ExactTmaTile {
 /// family without entering Triad AUTO. The prepared-cache key seals the
 /// literal physical route, pointers, policy and shape, so graph capture keeps
 /// the same descriptor binding as the eager warmup.
-pub(crate) fn launch_cached_fixed_sm120_exact_tma(
+pub(in crate::mamba_ssm::gpu) fn launch_cached_fixed_sm120_exact_tma<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     shape: (usize, usize, usize),
     operands: F32TriadOperands,
     tile: FixedSm120ExactTmaTile,
+    observer: &mut O,
 ) -> Result<bool, String> {
     let request = F32TriadRequest {
         op: ResolvedGemmOp::Nn,
@@ -5141,11 +5142,12 @@ pub(crate) fn launch_cached_fixed_sm120_exact_tma(
     {
         return Ok(false);
     }
-    launch_cached_f32_triad(
+    launch_cached_f32_triad_observed(
         ctx,
         F32PreparedSelection::Forced(route),
         request,
         operands,
+        (observer, PolicyDtype::F32),
         |_| Err("Fixed exact-TMA bridge unexpectedly entered the scalar fallback".into()),
     )?;
     Ok(true)

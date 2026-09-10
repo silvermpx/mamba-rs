@@ -26,6 +26,11 @@ use super::buffers::{DtypedBuf, ManagedAllocationEpochStamp, managed_allocation_
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
 
+pub(in crate::mamba_ssm::gpu) mod identity;
+use super::kernel_identity::{
+    NoPhysicalObserver, PhysicalLaunchObserver, PolicyDtype, enqueue_with_physical_observation,
+};
+
 type CUptr = cudarc::driver::sys::CUdeviceptr;
 
 /// Which inference tile actually launched - returned so callers and
@@ -193,26 +198,37 @@ pub fn inference_forward_with_tile(
     shape: InferenceShape,
     tile: InferenceTile,
 ) -> Result<(), String> {
+    inference_forward_with_tile_observed(ctx, operands, shape, tile, &mut NoPhysicalObserver)
+}
+
+pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    tile: InferenceTile,
+    observer: &mut O,
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     if tile == InferenceTile::F32Sm89N64CopyPlan {
-        return launch_sm89_exact_n64(ctx, operands, shape);
+        return launch_sm89_exact_n64(ctx, operands, shape, observer);
     }
     if tile == InferenceTile::F32Sm120N64CopyPlan {
-        return launch_sm120_exact_n64(ctx, operands, shape);
+        return launch_sm120_exact_n64(ctx, operands, shape, observer);
     }
     if matches!(
         tile,
         InferenceTile::F32Sm120N64CopyPlanT256 | InferenceTile::F32Sm120M128N64CopyPlanT256
     ) {
-        return launch_sm120_copyplan_t256(ctx, operands, shape, tile);
+        return launch_sm120_copyplan_t256(ctx, operands, shape, tile, observer);
     }
     if tile == InferenceTile::F32Sm120N64Sliced {
-        return launch_sm120_sliced(ctx, operands, shape);
+        return launch_sm120_sliced(ctx, operands, shape, observer);
     }
     if matches!(
         tile,
         InferenceTile::F32Sm120TmaFmaM128N64 | InferenceTile::F32Sm120TmaFmaM64N128
     ) {
-        return launch_sm120_tma_fma(ctx, operands, shape, tile);
+        return launch_sm120_tma_fma(ctx, operands, shape, tile, observer);
     }
     if matches!(
         tile,
@@ -223,17 +239,10 @@ pub fn inference_forward_with_tile(
             | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
             | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
     ) {
-        return launch_sm120_tma_postbias(ctx, operands, shape, tile);
+        return launch_sm120_tma_postbias(ctx, operands, shape, tile, observer);
     }
     if tile == InferenceTile::Legacy {
-        return super::blas::fixed_legacy_forward(
-            ctx,
-            operands.c,
-            operands.x,
-            operands.w,
-            operands.bias_ptr,
-            (shape.m, shape.k, shape.n),
-        );
+        return super::blas::fixed_legacy_forward(ctx, operands, shape, observer);
     }
     if tile == InferenceTile::Tc128Sm89Pipeline {
         if operands.x.dtype == WeightDtype::F32
@@ -243,7 +252,7 @@ pub fn inference_forward_with_tile(
             return Err("Fixed Ada half pipeline requires matching bf16/f16 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_sm89_half_pipeline(ctx, operands.x.dtype, &args);
+        return launch_sm89_half_pipeline(ctx, operands.x.dtype, &args, observer);
     }
     if tile == InferenceTile::Tc128Sm89Swizzle {
         if operands.x.dtype == WeightDtype::F32
@@ -253,7 +262,7 @@ pub fn inference_forward_with_tile(
             return Err("Fixed Ada half swizzle requires matching bf16/f16 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_sm89_half_swizzle(ctx, operands.x.dtype, &args);
+        return launch_sm89_half_swizzle(ctx, operands.x.dtype, &args, observer);
     }
     if tile == InferenceTile::Tc128Sm89S3 {
         if operands.x.dtype == WeightDtype::F32
@@ -263,7 +272,7 @@ pub fn inference_forward_with_tile(
             return Err("Fixed Ada half s3 requires matching bf16/f16 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_sm89_half_s3(ctx, operands.x.dtype, &args);
+        return launch_sm89_half_s3(ctx, operands.x.dtype, &args, observer);
     }
     if matches!(
         tile,
@@ -276,7 +285,7 @@ pub fn inference_forward_with_tile(
             return Err("Fixed Ada N64 finalists require matching f16 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_sm89_half_n64(ctx, tile, &args);
+        return launch_sm89_half_n64(ctx, tile, &args, observer);
     }
     if tile == InferenceTile::F32N128S2 {
         if operands.c.dtype != WeightDtype::F32
@@ -286,7 +295,7 @@ pub fn inference_forward_with_tile(
             return Err("forced Fixed F32 N128 launch requires f32 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_f32_n128_s2(ctx, &args);
+        return launch_f32_n128_s2(ctx, &args, observer);
     }
     if matches!(
         tile,
@@ -320,7 +329,7 @@ pub fn inference_forward_with_tile(
             return Ok(());
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_tf32(ctx, tile, &args, false);
+        return launch_tf32(ctx, tile, &args, false, observer);
     }
     if let InferenceTile::Sm120Half(sm120_tile) = tile {
         let half_inputs =
@@ -334,7 +343,14 @@ pub fn inference_forward_with_tile(
             );
         }
         let args = FixedArgs::try_new(operands, shape)?;
-        return launch_sm120_half(ctx, sm120_tile, operands.x.dtype, operands.c.dtype, &args);
+        return launch_sm120_half(
+            ctx,
+            sm120_tile,
+            operands.x.dtype,
+            operands.c.dtype,
+            &args,
+            observer,
+        );
     }
     if !matches!(
         tile,
@@ -360,9 +376,9 @@ pub fn inference_forward_with_tile(
     }
     let args = FixedArgs::try_new(operands, shape)?;
     if mixed_f32_output {
-        launch_f32out_ladder(ctx, tile, operands.x.dtype, &args)
+        launch_f32out_ladder(ctx, tile, operands.x.dtype, &args, observer)
     } else {
-        launch_ladder(ctx, tile, operands.c.dtype, &args)
+        launch_ladder(ctx, tile, operands.c.dtype, &args, observer)
     }
 }
 
@@ -1373,10 +1389,11 @@ fn fixed_sm89_exact_n64_byte_end(
     Ok(())
 }
 
-fn launch_sm89_exact_n64(
+fn launch_sm89_exact_n64<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
+    observer: &mut O,
 ) -> Result<(), String> {
     let Some((args, grid)) =
         prepare_sm89_exact_n64_launch(operands, shape, ctx.compute_capability())?
@@ -1410,9 +1427,31 @@ fn launch_sm89_exact_n64(
         .arg(&params);
     // A failed explicit force is not retried through a different arithmetic
     // route. The caller receives the real launch error.
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::ExactF32,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed Ada exact N64 copy-plan: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm89_exact_n64"))
+        })
 }
 
 fn prepare_sm120_exact_n64_launch(
@@ -1494,10 +1533,11 @@ fn fixed_sm120_exact_n64_byte_end(
     Ok(())
 }
 
-fn launch_sm120_exact_n64(
+fn launch_sm120_exact_n64<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
+    observer: &mut O,
 ) -> Result<(), String> {
     let Some((args, grid)) =
         prepare_sm120_exact_n64_launch(operands, shape, ctx.compute_capability())?
@@ -1527,16 +1567,39 @@ fn launch_sm120_exact_n64(
         .arg(&args.b)
         .arg(&args.bias)
         .arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::ExactF32,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 exact N64 copy-plan: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm120_exact_n64"))
+        })
 }
 
-fn launch_sm120_copyplan_t256(
+fn launch_sm120_copyplan_t256<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     tile: InferenceTile,
+    observer: &mut O,
 ) -> Result<(), String> {
     if !fixed_sm120_tma_fma_force_physical_eligible(
         operands,
@@ -1586,15 +1649,40 @@ fn launch_sm120_copyplan_t256(
         .arg(&args.b)
         .arg(&args.bias)
         .arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::ExactF32,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("Fixed SM120 CopyPlan T256: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!(
+                "Inference terminal launch_sm120_copyplan_t256"
+            ))
+        })
 }
 
-fn launch_sm120_sliced(
+fn launch_sm120_sliced<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
+    observer: &mut O,
 ) -> Result<(), String> {
     let Some((args, grid)) =
         prepare_sm120_exact_n64_launch(operands, shape, ctx.compute_capability())?
@@ -1624,16 +1712,39 @@ fn launch_sm120_sliced(
         .arg(&args.b)
         .arg(&args.bias)
         .arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::ExactF32,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 sliced N64: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm120_sliced"))
+        })
 }
 
-fn launch_sm120_tma_fma(
+fn launch_sm120_tma_fma<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     tile: InferenceTile,
+    observer: &mut O,
 ) -> Result<(), String> {
     if !fixed_sm120_tma_fma_force_physical_eligible(
         operands,
@@ -1671,6 +1782,7 @@ fn launch_sm120_tma_fma(
             beta: 0.0,
         },
         physical_tile,
+        observer,
     )?;
     if !launched {
         return Err("Fixed SM120 exact-TMA symbol is not qualified on this context".into());
@@ -1678,11 +1790,12 @@ fn launch_sm120_tma_fma(
     Ok(())
 }
 
-fn launch_sm120_tma_postbias(
+fn launch_sm120_tma_postbias<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     tile: InferenceTile,
+    observer: &mut O,
 ) -> Result<(), String> {
     if !fixed_sm120_tma_fma_force_physical_eligible(
         operands,
@@ -1788,9 +1901,31 @@ fn launch_sm120_tma_postbias(
         .arg(&maps[1])
         .arg(&bias)
         .arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Sm120PostBias,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.ldc as u32,
+                params.splits as u32,
+                params.tiles_per_split as u32,
+                0,
+                0,
+            ],
+            maps: Some([maps[0].0.opaque, maps[1].0.opaque]),
+            auxiliary: [null_partials, null_flags],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 post-bias ({tile:?}): {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm120_tma_postbias"))
+        })
 }
 
 /// Exact F32 owns its compact ABI independently of the half and TF32 bundles.
@@ -1837,7 +1972,11 @@ const _: () = {
     assert!(std::mem::offset_of!(FixedSm89ExactF32Params, ldc) == 28);
 };
 
-fn launch_f32_n128_s2(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
+fn launch_f32_n128_s2<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    args: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
@@ -1872,9 +2011,36 @@ fn launch_f32_n128_s2(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
     builder.arg(&lda);
     builder.arg(&ldb);
     builder.arg(&ldc);
-    unsafe { builder.launch(config) }
+    let observation = identity::observation(
+        ctx,
+        observer,
+        &ctx.kernels.gemm_bi_f32_f32_n128_s2,
+        config,
+        || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Legacy,
+            words: [
+                alpha.to_bits(),
+                beta.to_bits(),
+                args.m as u32,
+                args.n as u32,
+                args.k as u32,
+                lda as u32,
+                ldb as u32,
+                ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        },
+    )?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi forced exact-f32 N128 S2: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_f32_n128_s2"))
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -2565,23 +2731,29 @@ fn fixed_pick_f32_exact(
     }
 }
 
-fn launch_tf32(
+fn launch_tf32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     args: &FixedArgs,
     allow_schedule_select: bool,
+    observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
     if tile == InferenceTile::Tf32RnaM128N96S3 {
-        return launch_tf32_rna_n96(ctx, args);
+        return launch_tf32_rna_n96(ctx, args, observer);
     }
     if matches!(
         tile,
         InferenceTile::Tf32M128N128S3 | InferenceTile::Tf32RnaM128N128S3
     ) {
-        return launch_tf32_wide(ctx, args, tile == InferenceTile::Tf32RnaM128N128S3);
+        return launch_tf32_wide(
+            ctx,
+            args,
+            tile == InferenceTile::Tf32RnaM128N128S3,
+            observer,
+        );
     }
     if matches!(
         tile,
@@ -2593,7 +2765,7 @@ fn launch_tf32(
             | InferenceTile::Tf32Sm120M64S2
             | InferenceTile::Tf32Sm120M64S2PairStore
     ) {
-        return launch_sm120_tf32(ctx, tile, args, allow_schedule_select);
+        return launch_sm120_tf32(ctx, tile, args, allow_schedule_select, observer);
     }
     let (function, bm, bn, threads, shared_mem_bytes) = match tile {
         InferenceTile::Tf32M128S2 => (
@@ -2640,12 +2812,36 @@ fn launch_tf32(
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Tf32,
+            words: [
+                params.m as u32,
+                params.k as u32,
+                params.n as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed TF32 ({tile:?}): {error:?}"))
+        .map_err(|error| error.with_driver_context(format_args!("Inference terminal launch_tf32")))
 }
 
-fn launch_tf32_rna_n96(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
+fn launch_tf32_rna_n96<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    args: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
     if ctx.compute_capability() != (8, 9) {
         return Err("Fixed Ada TF32 RNA N96 requires CC8.9".into());
     }
@@ -2710,12 +2906,39 @@ fn launch_tf32_rna_n96(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Tf32Wide,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.k as u32,
+                params.n as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi forced Fixed Ada TF32 RNA N96: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_tf32_rna_n96"))
+        })
 }
 
-fn launch_tf32_wide(ctx: &GpuCtx, args: &FixedArgs, fixed_rna: bool) -> Result<(), String> {
+fn launch_tf32_wide<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    args: &FixedArgs,
+    fixed_rna: bool,
+    observer: &mut O,
+) -> Result<(), String> {
     if args.k % 4 != 0 || args.n % 4 != 0 {
         return Err("Fixed TF32 wide requires K and N divisible by four".into());
     }
@@ -2782,12 +3005,29 @@ fn launch_tf32_wide(ctx: &GpuCtx, args: &FixedArgs, fixed_rna: bool) -> Result<(
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Tf32Wide,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.k as u32,
+                params.n as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| {
-            let route = if fixed_rna { "RNA-wide" } else { "Triad-wide" };
-            format!("gemm_bi forced Fixed TF32 {route}: {error:?}")
-        })
+        .map_err(|error| error.with_driver_context(format_args!("Inference TF32 wide")))
 }
 
 fn fixed_sm120_pair_store_schedule_cell(
@@ -2814,11 +3054,12 @@ fn fixed_sm120_pair_store_schedule_cell(
     }
 }
 
-fn launch_sm120_tf32(
+fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     args: &FixedArgs,
     allow_schedule_select: bool,
+    observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
         return Ok(());
@@ -2888,9 +3129,31 @@ fn launch_sm120_tf32(
     builder.arg(&maps[1]);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F32; 3],
+            abi: identity::AbiKind::Sm120Tf32,
+            words: [
+                params.m as u32,
+                params.k as u32,
+                params.n as u32,
+                params.ldc as u32,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            maps: Some([maps[0].0.opaque, maps[1].0.opaque]),
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 TF32 ({tile:?}): {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm120_tf32"))
+        })
 }
 
 fn fixed_sm120_half_eligible(ctx: &GpuCtx, args: &FixedArgs) -> bool {
@@ -3087,12 +3350,13 @@ fn fixed_pick_sm120_f32out(
     }
 }
 
-fn launch_sm120_half(
+fn launch_sm120_half<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceSm120HalfTile,
     input_dtype: WeightDtype,
     output_dtype: WeightDtype,
     args: &FixedArgs,
+    observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
         return Ok(());
@@ -3148,15 +3412,42 @@ fn launch_sm120_half(
     builder.arg(&maps[1]);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [
+                identity::policy_dtype(input_dtype),
+                identity::policy_dtype(input_dtype),
+                identity::policy_dtype(output_dtype),
+            ],
+            abi: identity::AbiKind::Sm120Half,
+            words: [
+                params.a_x as u32,
+                params.a_y as u32,
+                params.b_x as u32,
+                params.b_y as u32,
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.k as u32,
+                params.n as u32,
+                params.ldc as u32,
+            ],
+            maps: Some([maps[0].0.opaque, maps[1].0.opaque]),
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 half ({tile:?}): {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm120_half"))
+        })
 }
 
-fn launch_sm89_half_pipeline(
+fn launch_sm89_half_pipeline<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dtype: WeightDtype,
     args: &FixedArgs,
+    observer: &mut O,
 ) -> Result<(), String> {
     if ctx.compute_capability() != (8, 9) {
         return Err("Fixed Ada half pipeline requires CC8.9".into());
@@ -3226,15 +3517,39 @@ fn launch_sm89_half_pipeline(
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation = identity::observation(ctx, observer, kernels.get(dtype), config, || {
+        identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [identity::policy_dtype(dtype); 3],
+            abi: identity::AbiKind::HalfSm89,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        }
+    })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed Ada half pipeline: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm89_half_pipeline"))
+        })
 }
 
-fn launch_sm89_half_swizzle(
+fn launch_sm89_half_swizzle<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dtype: WeightDtype,
     args: &FixedArgs,
+    observer: &mut O,
 ) -> Result<(), String> {
     if ctx.compute_capability() != (8, 9) {
         return Err("Fixed Ada half swizzle requires CC8.9".into());
@@ -3300,9 +3615,32 @@ fn launch_sm89_half_swizzle(
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation = identity::observation(ctx, observer, kernels.get(dtype), config, || {
+        identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [identity::policy_dtype(dtype); 3],
+            abi: identity::AbiKind::HalfSm89,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        }
+    })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed Ada half swizzle: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm89_half_swizzle"))
+        })
 }
 
 fn validate_sm89_half_s3_k(k: i32) -> Result<(), &'static str> {
@@ -3325,7 +3663,12 @@ fn sm89_half_s3_rejects_overflow_in_unconditional_refill_index() {
     }
 }
 
-fn launch_sm89_half_s3(ctx: &GpuCtx, dtype: WeightDtype, args: &FixedArgs) -> Result<(), String> {
+fn launch_sm89_half_s3<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    args: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
     if ctx.compute_capability() != (8, 9) {
         return Err("Fixed Ada half s3 requires CC8.9".into());
     }
@@ -3384,12 +3727,40 @@ fn launch_sm89_half_s3(ctx: &GpuCtx, dtype: WeightDtype, args: &FixedArgs) -> Re
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation = identity::observation(ctx, observer, kernels.get(dtype), config, || {
+        identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [identity::policy_dtype(dtype); 3],
+            abi: identity::AbiKind::HalfSm89,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        }
+    })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed Ada half s3: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm89_half_s3"))
+        })
 }
 
-fn launch_sm89_half_n64(ctx: &GpuCtx, tile: InferenceTile, args: &FixedArgs) -> Result<(), String> {
+fn launch_sm89_half_n64<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    tile: InferenceTile,
+    args: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
     if ctx.compute_capability() != (8, 9) {
         return Err("Fixed Ada half N64 finalist requires CC8.9".into());
     }
@@ -3462,17 +3833,44 @@ fn launch_sm89_half_n64(ctx: &GpuCtx, tile: InferenceTile, args: &FixedArgs) -> 
     builder.arg(&args.b);
     builder.arg(&args.bias);
     builder.arg(&params);
-    unsafe { builder.launch(config) }
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage: [PolicyDtype::F16; 3],
+            abi: identity::AbiKind::HalfSm89,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi forced Fixed Ada half N64 ({tile:?}): {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_sm89_half_n64"))
+        })
 }
 
-fn launch_ladder(
+fn launch_ladder<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     dt: WeightDtype,
     args: &FixedArgs,
+    observer: &mut O,
 ) -> Result<(), String> {
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
+
     let func = match tile {
         InferenceTile::Tc128 => ctx.kernels.gemm_bi_nn_tc128_typed.get(dt),
         InferenceTile::TcWn64 => ctx.kernels.gemm_bi_nn_tcwn64_typed.get(dt),
@@ -3544,16 +3942,42 @@ fn launch_ladder(
     b.arg(&args.k);
     b.arg(&args.n);
     b.arg(&args.n);
-    unsafe { b.launch(cfg) }.map_err(|e| format!("gemm_bi fixed ladder ({tile:?}): {e:?}"))?;
+    let observation = identity::observation(ctx, observer, func, cfg, || identity::Arguments {
+        pointers: [args.c, args.a, args.b, args.bias],
+        storage: [identity::policy_dtype(dt); 3],
+        abi: identity::AbiKind::Legacy,
+        words: [
+            alpha.to_bits(),
+            beta.to_bits(),
+            args.m as u32,
+            args.n as u32,
+            args.k as u32,
+            args.k as u32,
+            args.n as u32,
+            args.n as u32,
+            0,
+            0,
+        ],
+        maps: None,
+        auxiliary: [0; 2],
+    })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut b, cfg, observation) }.map_err(
+        |error| error.with_driver_context(format_args!("Inference terminal launch_ladder")),
+    )?;
     Ok(())
 }
 
-fn launch_f32out_ladder(
+fn launch_f32out_ladder<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     input_dtype: WeightDtype,
     args: &FixedArgs,
+    observer: &mut O,
 ) -> Result<(), String> {
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
+
     let func = match tile {
         InferenceTile::Tc16 => ctx.kernels.gemm_bi_nn_tc16_f32out.get(input_dtype),
         InferenceTile::Tc64 => ctx.kernels.gemm_bi_nn_tc64_f32out.get(input_dtype),
@@ -3576,9 +4000,34 @@ fn launch_f32out_ladder(
     builder.arg(&args.k);
     builder.arg(&args.n);
     builder.arg(&args.n);
-    unsafe { builder.launch(cfg) }
+    let observation = identity::observation(ctx, observer, func, cfg, || identity::Arguments {
+        pointers: [args.c, args.a, args.b, args.bias],
+        storage: [
+            identity::policy_dtype(input_dtype),
+            identity::policy_dtype(input_dtype),
+            PolicyDtype::F32,
+        ],
+        abi: identity::AbiKind::Legacy,
+        words: [
+            alpha.to_bits(),
+            beta.to_bits(),
+            args.m as u32,
+            args.n as u32,
+            args.k as u32,
+            args.k as u32,
+            args.n as u32,
+            args.n as u32,
+            0,
+            0,
+        ],
+        maps: None,
+        auxiliary: [0; 2],
+    })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi fixed {tile:?} f32 output: {error:?}"))
+        .map_err(|error| {
+            error.with_driver_context(format_args!("Inference terminal launch_f32out_ladder"))
+        })
 }
 
 /// One-time verdict for an architecture-specific rung: enabled, and
@@ -3593,7 +4042,7 @@ fn launch_f32out_ladder(
 /// bit identity hold either way: the verdict is fixed at first use.
 static ARCH_RUNG_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-fn arch_rung_enabled(ctx: &GpuCtx, tile: InferenceTile) -> bool {
+fn probe_arch_rung(ctx: &GpuCtx, tile: InferenceTile) -> bool {
     *ARCH_RUNG_OK.get_or_init(|| {
         match std::env::var("MAMBA_RS_ARCH_RUNG") {
             Ok(value) if value.trim().eq_ignore_ascii_case("off") => {
@@ -3622,6 +4071,88 @@ fn arch_rung_enabled(ctx: &GpuCtx, tile: InferenceTile) -> bool {
             }
         }
     })
+}
+
+fn require_arch_rung_prepared(cold: bool, recording: bool, capturing: bool) -> Result<(), String> {
+    if cold && (recording || capturing) {
+        Err(
+            "Inference architecture rung must be prepared eagerly before recording or capture"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn loaded_arch_rung(ctx: &GpuCtx) -> Option<InferenceTile> {
+    if ctx.kernels.gemm_bi_nn_sm100_typed.is_some() {
+        Some(InferenceTile::Sm100Tcgen)
+    } else if ctx.kernels.gemm_bi_nn_sm90_typed.is_some() {
+        Some(InferenceTile::Sm90Wgmma)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn cold_architecture_probe_is_rejected_before_recording_or_capture() {
+    for (cold, recording, capturing, accepted) in [
+        (true, false, false, true),
+        (true, true, false, false),
+        (true, false, true, false),
+        (true, true, true, false),
+        (false, true, false, true),
+        (false, false, true, true),
+    ] {
+        let mut probe_reached = false;
+        let result =
+            require_arch_rung_prepared(cold, recording, capturing).map(|_| probe_reached = true);
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(probe_reached, accepted);
+    }
+}
+
+/// Resolves the existing once-only architecture probe before a serving trace.
+/// The probe's two temporary GEMMs are not part of a serving GEMM manifest.
+pub(crate) fn prepare_inference_arch_rung(ctx: &GpuCtx) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if ctx.gemm_mode() != super::context::GemmMode::Deterministic
+        || ctx.bi_gemm_family() != super::context::BiGemmFamily::Inference
+    {
+        return Ok(());
+    }
+    let Some(tile) = loaded_arch_rung(ctx) else {
+        return Ok(());
+    };
+    let capturing = ctx
+        .stream
+        .capture_status()
+        .map_err(|error| format!("query Inference preparation capture status: {error:?}"))?
+        != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+    if capturing {
+        return Err("Inference architecture preparation cannot run during CUDA capture".into());
+    }
+    require_arch_rung_prepared(
+        ARCH_RUNG_OK.get().is_none(),
+        ctx.gemm_route_recording_active()?,
+        capturing,
+    )?;
+    probe_arch_rung(ctx, tile);
+    Ok(())
+}
+
+fn arch_rung_enabled(ctx: &GpuCtx, tile: InferenceTile, recording: bool) -> Result<bool, String> {
+    if let Some(enabled) = ARCH_RUNG_OK.get() {
+        return Ok(*enabled);
+    }
+    let capturing = ctx
+        .stream
+        .capture_status()
+        .map_err(|error| format!("query Inference architecture capture status: {error:?}"))?
+        != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+    require_arch_rung_prepared(true, recording, capturing)?;
+    prepare_inference_arch_rung(ctx)?;
+    Ok(probe_arch_rung(ctx, tile))
 }
 
 fn arch_rung_self_check(ctx: &GpuCtx, tile: InferenceTile) -> Result<(), String> {
@@ -3656,7 +4187,7 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: InferenceTile) -> Result<(), String>
             n: n as i32,
             k: k as i32,
         };
-        launch_ladder(ctx, tile_sel, dt, &args)
+        launch_ladder(ctx, tile_sel, dt, &args, &mut NoPhysicalObserver)
     };
     run(InferenceTile::Tc128, &c_ref)?;
     run(tile, &c_arch)?;
@@ -3984,6 +4515,19 @@ pub fn inference_forward(
         k: n_in,
         n: n_out,
     };
+    inference_forward_observed(ctx, operands, shape, &mut NoPhysicalObserver)
+}
+
+pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    observer: &mut O,
+) -> Result<InferenceTile, String> {
+    ctx.ensure_gemm_usable()?;
+    let InferenceFwdOperands { c, x, w, bias_ptr } = operands;
+    let (batch, n_in, n_out) = (shape.m, shape.k, shape.n);
+    let dims = (batch, n_in, n_out);
     let args = FixedArgs::try_new(operands, shape)?;
     let homogeneous_f32 =
         c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32;
@@ -4038,7 +4582,7 @@ pub fn inference_forward(
                 ctx.kernels.compiler_identity().nvrtc_library_known,
             )
         };
-        launch_tf32(ctx, tile, &args, true)?;
+        launch_tf32(ctx, tile, &args, true, observer)?;
         return Ok(tile);
     }
     if homogeneous_f32 {
@@ -4067,6 +4611,7 @@ pub fn inference_forward(
                     beta: 0.0,
                 },
                 super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128,
+                observer,
             )? {
                 return Ok(tile);
             }
@@ -4087,7 +4632,7 @@ pub fn inference_forward(
                 .as_ref()
                 .map(|kernels| kernels.m128n64_t256.is_some()),
         ) {
-            launch_sm120_tma_postbias(ctx, operands, shape, tile)?;
+            launch_sm120_tma_postbias(ctx, operands, shape, tile, observer)?;
             return Ok(tile);
         } else if let Some(tile) = fixed_sm120_tma_fma_bc1_auto_tile(
             operands,
@@ -4101,7 +4646,7 @@ pub fn inference_forward(
             ctx.kernels.fixed_sm120_fma_postbias.is_some(),
             ctx.f32_triad_policy(),
         ) {
-            launch_sm120_tma_postbias(ctx, operands, shape, tile)?;
+            launch_sm120_tma_postbias(ctx, operands, shape, tile, observer)?;
             return Ok(tile);
         } else if fixed_sm120_tma_fma_b0_auto_eligible(
             operands,
@@ -4127,6 +4672,7 @@ pub fn inference_forward(
                     beta: 0.0,
                 },
                 super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
+                observer,
             )? {
                 return Ok(tile);
             }
@@ -4143,7 +4689,7 @@ pub fn inference_forward(
             ctx.kernels.fixed_sm120_f32_n64_sliced.is_some(),
             ctx.f32_triad_policy(),
         ) {
-            launch_sm120_sliced(ctx, operands, shape)?;
+            launch_sm120_sliced(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm120N64Sliced);
         }
         if fixed_sm120_exact_n64_auto_eligible(
@@ -4158,7 +4704,7 @@ pub fn inference_forward(
             ctx.kernels.fixed_sm120_f32_n64_copyplan.is_some(),
             ctx.f32_triad_policy(),
         ) {
-            launch_sm120_exact_n64(ctx, operands, shape)?;
+            launch_sm120_exact_n64(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm120N64CopyPlan);
         }
         if fixed_sm89_exact_n64_auto_eligible(
@@ -4173,7 +4719,7 @@ pub fn inference_forward(
             ctx.kernels.fixed_sm89_f32_n64_copyplan.is_some(),
             ctx.f32_triad_policy(),
         ) {
-            launch_sm89_exact_n64(ctx, operands, shape)?;
+            launch_sm89_exact_n64(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm89N64CopyPlan);
         }
         let tile = fixed_pick_f32_exact(
@@ -4186,9 +4732,9 @@ pub fn inference_forward(
             },
         );
         if tile == InferenceTile::F32N128S2 {
-            launch_f32_n128_s2(ctx, &args)?;
+            launch_f32_n128_s2(ctx, &args, observer)?;
         } else {
-            super::blas::fixed_legacy_forward(ctx, c, x, w, bias_ptr, dims)?;
+            super::blas::fixed_legacy_forward(ctx, operands, shape, observer)?;
         }
         return Ok(tile);
     }
@@ -4224,23 +4770,23 @@ pub fn inference_forward(
         });
         match selected {
             Some(InferenceTile::Tc128Sm89Pipeline) => {
-                launch_sm89_half_pipeline(ctx, c.dtype, &args)?;
+                launch_sm89_half_pipeline(ctx, c.dtype, &args, observer)?;
                 return Ok(InferenceTile::Tc128Sm89Pipeline);
             }
             Some(InferenceTile::Tc128Sm89Swizzle) => {
-                launch_sm89_half_swizzle(ctx, c.dtype, &args)?;
+                launch_sm89_half_swizzle(ctx, c.dtype, &args, observer)?;
                 return Ok(InferenceTile::Tc128Sm89Swizzle);
             }
             Some(InferenceTile::Tc128Sm89S3) => {
-                launch_sm89_half_s3(ctx, c.dtype, &args)?;
+                launch_sm89_half_s3(ctx, c.dtype, &args, observer)?;
                 return Ok(InferenceTile::Tc128Sm89S3);
             }
             Some(InferenceTile::TcM64N64Sm89S3) => {
-                launch_sm89_half_n64(ctx, InferenceTile::TcM64N64Sm89S3, &args)?;
+                launch_sm89_half_n64(ctx, InferenceTile::TcM64N64Sm89S3, &args, observer)?;
                 return Ok(InferenceTile::TcM64N64Sm89S3);
             }
             Some(InferenceTile::TcM128N64Sm89S2) => {
-                launch_sm89_half_n64(ctx, InferenceTile::TcM128N64Sm89S2, &args)?;
+                launch_sm89_half_n64(ctx, InferenceTile::TcM128N64Sm89S2, &args, observer)?;
                 return Ok(InferenceTile::TcM128N64Sm89S2);
             }
             Some(_) => unreachable!("Ada half AUTO selector returned a foreign tile"),
@@ -4269,7 +4815,7 @@ pub fn inference_forward(
         )
         .or_else(|| fixed_pick_sm120_half(batch, n_out, n_in, ctx.kernels.multiprocessor_count()))
     {
-        launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args)?;
+        launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args, observer)?;
         return Ok(InferenceTile::Sm120Half(tile));
     }
     if homogeneous_half && n_out >= 32 {
@@ -4277,18 +4823,12 @@ pub fn inference_forward(
             && n_out.is_multiple_of(8)
             && x.ptr.is_multiple_of(16)
             && w.ptr.is_multiple_of(16);
-        let arch_tile = if ctx.kernels.gemm_bi_nn_sm100_typed.is_some() {
-            Some(InferenceTile::Sm100Tcgen)
-        } else if ctx.kernels.gemm_bi_nn_sm90_typed.is_some() {
-            Some(InferenceTile::Sm90Wgmma)
-        } else {
-            None
-        };
+        let arch_tile = loaded_arch_rung(ctx);
         if let Some(tile) = arch_tile
             && aligned
-            && arch_rung_enabled(ctx, tile)
+            && arch_rung_enabled(ctx, tile, O::ENABLED || ctx.gemm_route_recording_active()?)?
         {
-            launch_ladder(ctx, tile, c.dtype, &args)?;
+            launch_ladder(ctx, tile, c.dtype, &args, observer)?;
             return Ok(tile);
         }
     }
@@ -4305,7 +4845,7 @@ pub fn inference_forward(
                 },
             )
         {
-            launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args)?;
+            launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args, observer)?;
             return Ok(InferenceTile::Sm120Half(tile));
         }
         let tile = fixed_pick_f32out_tile(
@@ -4317,7 +4857,7 @@ pub fn inference_forward(
                 compute_capability: ctx.compute_capability(),
             },
         );
-        launch_f32out_ladder(ctx, tile, x.dtype, &args)?;
+        launch_f32out_ladder(ctx, tile, x.dtype, &args, observer)?;
         return Ok(tile);
     }
     if homogeneous_half
@@ -4332,12 +4872,12 @@ pub fn inference_forward(
         )
     {
         let tile = fixed_adjust_arch_tile(tile, n_in, ctx.compute_capability());
-        launch_ladder(ctx, tile, c.dtype, &args)?;
+        launch_ladder(ctx, tile, c.dtype, &args, observer)?;
         return Ok(tile);
     }
     // Unsupported dtype triples retain the legacy implementation.
     let _ = args;
-    super::blas::fixed_legacy_forward(ctx, c, x, w, bias_ptr, dims)?;
+    super::blas::fixed_legacy_forward(ctx, operands, shape, observer)?;
     Ok(InferenceTile::Legacy)
 }
 
@@ -7882,5 +8422,459 @@ mod tests {
             fixed_adjust_arch_tile(InferenceTile::TcWn64, 2304, (12, 0)),
             InferenceTile::TcWn64
         );
+    }
+}
+
+#[cfg(test)]
+mod observed_inventory_cuda_tests {
+    use super::super::context::{BiGemmFamily, F32TriadPolicy, GemmMode};
+    use super::super::device::GpuDevice;
+    use super::super::gemm_bi_triad::{PhysicalArgumentRange, prepare_physical_observer};
+    use super::super::kernel_identity::{ModuleKind, finish_recording_physical_observer};
+    use super::*;
+
+    struct Case {
+        tile: Option<InferenceTile>,
+        dtype: WeightDtype,
+        output: WeightDtype,
+        shape: InferenceShape,
+        symbol: &'static str,
+        tf32: bool,
+    }
+
+    fn run_case(ctx: &GpuCtx, case: Case, bias: bool) {
+        ctx.set_f32_triad_policy(if case.tf32 {
+            F32TriadPolicy::AllowDeterministicTf32V1
+        } else {
+            F32TriadPolicy::ExactScalarFmaV1
+        });
+        let shape = case.shape;
+        let a_prefix = 256 / case.dtype.size_bytes();
+        let c_prefix = 256 / case.output.size_bytes();
+        let a_elements = shape.m * shape.k;
+        let b_elements = shape.k * shape.n;
+        let c_elements = shape.m * shape.n;
+        let mut a_host = vec![-19.0; a_prefix + a_elements + 16];
+        let mut b_host = vec![-23.0; a_prefix + b_elements + 16];
+        for (i, value) in a_host[a_prefix..a_prefix + a_elements]
+            .iter_mut()
+            .enumerate()
+        {
+            *value = (i % 7) as f32 / 8.0 - 0.375;
+        }
+        for (i, value) in b_host[a_prefix..a_prefix + b_elements]
+            .iter_mut()
+            .enumerate()
+        {
+            *value = (i % 11) as f32 / 8.0 - 0.625;
+        }
+        let c_host = vec![-29.0; c_prefix + c_elements + 16];
+        let a = DtypedBuf::zeros(&ctx.stream, a_host.len(), case.dtype).unwrap();
+        let b = DtypedBuf::zeros(&ctx.stream, b_host.len(), case.dtype).unwrap();
+        let c = DtypedBuf::zeros(&ctx.stream, c_host.len(), case.output).unwrap();
+        let bias_owner = DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32).unwrap();
+        a.upload_f32(&ctx.stream, &a_host).unwrap();
+        b.upload_f32(&ctx.stream, &b_host).unwrap();
+        c.upload_f32(&ctx.stream, &c_host).unwrap();
+        bias_owner
+            .upload_f32(&ctx.stream, &vec![0.125; shape.n])
+            .unwrap();
+        let operands = InferenceFwdOperands {
+            c: TypedPtr {
+                ptr: c.cached_ptr() + 256,
+                dtype: case.output,
+            },
+            x: TypedPtr {
+                ptr: if shape.k == 0 {
+                    0
+                } else {
+                    a.cached_ptr() + 256
+                },
+                dtype: case.dtype,
+            },
+            w: TypedPtr {
+                ptr: if shape.k == 0 {
+                    0
+                } else {
+                    b.cached_ptr() + 256
+                },
+                dtype: case.dtype,
+            },
+            bias_ptr: bias.then_some(bias_owner.cached_ptr()),
+        };
+        if let Some(tile) = case.tile {
+            inference_forward_with_tile(ctx, operands, shape, tile).unwrap();
+        } else {
+            inference_forward(
+                ctx,
+                operands.c,
+                operands.x,
+                operands.w,
+                operands.bias_ptr,
+                (shape.m, shape.k, shape.n),
+            )
+            .unwrap();
+        }
+        let mut expected = vec![0.0; c_host.len()];
+        c.download_f32(&ctx.stream, &mut expected).unwrap();
+        c.upload_f32(&ctx.stream, &c_host).unwrap();
+        let mut ranges = vec![PhysicalArgumentRange {
+            pointer: operands.c.ptr,
+            required_bytes: (c_elements * case.output.size_bytes()) as u64,
+        }];
+        if shape.k > 0 {
+            ranges.push(PhysicalArgumentRange {
+                pointer: operands.x.ptr,
+                required_bytes: (a_elements * case.dtype.size_bytes()) as u64,
+            });
+            ranges.push(PhysicalArgumentRange {
+                pointer: operands.w.ptr,
+                required_bytes: (b_elements * case.dtype.size_bytes()) as u64,
+            });
+        }
+        if bias {
+            ranges.push(PhysicalArgumentRange {
+                pointer: bias_owner.cached_ptr(),
+                required_bytes: (shape.n * 4) as u64,
+            });
+        }
+        let mut observer = prepare_physical_observer(ctx, 1, &ranges).unwrap();
+        let eager = ctx
+            .record_eager_gemm_trace(|| {
+                if let Some(tile) = case.tile {
+                    inference_forward_with_tile_observed(ctx, operands, shape, tile, &mut observer)
+                } else {
+                    inference_forward_observed(ctx, operands, shape, &mut observer).map(|_| ())
+                }
+            })
+            .unwrap();
+        assert_eq!(eager.routes().len(), 1, "{}", case.symbol);
+        let route = eager.routes()[0];
+        assert_eq!(route.symbol, case.symbol);
+        assert_eq!(route.shape, (shape.m, shape.k, shape.n));
+        assert_eq!(route.strides, (shape.k, shape.n, shape.n));
+        assert_eq!(route.dtype, identity::policy_dtype(case.dtype));
+        let expected_module = if case.tile == Some(InferenceTile::Tf32M128N128S3) {
+            ModuleKind::TriadSm80
+        } else {
+            ModuleKind::Fixed
+        };
+        assert_eq!(route.module_kind, expected_module);
+        let physical = finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
+        assert_eq!(physical.nodes().len(), 1);
+        let node = physical.nodes()[0];
+        assert_eq!(
+            node.gemm_route().unwrap().launch.arguments_digest,
+            node.launch.arguments_digest
+        );
+        assert_ne!(node.launch.arguments_digest, route.launch.arguments_digest);
+        if route.backend
+            == super::super::kernel_identity::PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+        {
+            use super::super::kernel_identity::ResolvedNumericContract;
+            let mut legacy = route;
+            legacy.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+            assert!(
+                ctx.validate_resolved_gemm_route(
+                    &legacy,
+                    "Inference rejects old backend22 numeric"
+                )
+                .is_err()
+            );
+            ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+            ctx.validate_resolved_gemm_route(&legacy, "retain old Triad backend22 pair")
+                .unwrap();
+            assert!(
+                ctx.validate_resolved_gemm_route(&route, "Triad rejects new backend22 numeric")
+                    .is_err()
+            );
+            ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        }
+        let mut actual = vec![0.0; c_host.len()];
+        c.download_f32(&ctx.stream, &mut actual).unwrap();
+        assert_eq!(
+            actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "{} bias={bias}",
+            case.symbol
+        );
+        assert!(
+            actual[..c_prefix]
+                .iter()
+                .chain(&actual[c_prefix + c_elements..])
+                .all(|v| *v == -29.0)
+        );
+        let mut actual_a = vec![0.0; a_host.len()];
+        a.download_f32(&ctx.stream, &mut actual_a).unwrap();
+        assert_eq!(actual_a, a_host);
+        let mut actual_b = vec![0.0; b_host.len()];
+        b.download_f32(&ctx.stream, &mut actual_b).unwrap();
+        assert_eq!(actual_b, b_host);
+        println!(
+            "INFERENCE_TERMINAL_PASS symbol={} input={:?} output={:?} bias={bias} shape={:?}",
+            case.symbol, case.dtype, case.output, shape
+        );
+    }
+
+    #[test]
+    #[ignore = "needs an Ada CUDA device"]
+    fn inference_observed_terminals_match_unrecorded_bits_on_ada() {
+        let device = GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new(&device).unwrap();
+        assert_eq!(ctx.compute_capability(), (8, 9));
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        // Inference's existing half dispatcher is independent of this Triad switch.
+        ctx.set_bi_tensor_cores(false);
+        prepare_inference_arch_rung(&ctx).unwrap();
+        for (dtype, suffix) in [(WeightDtype::Bf16, "bf16"), (WeightDtype::F16, "f16")] {
+            let auto_symbol = if dtype == WeightDtype::Bf16 {
+                "gemm_bi_nn_tc16_bf16"
+            } else {
+                "gemm_bi_nn_tc16_f16"
+            };
+            run_case(
+                &ctx,
+                Case {
+                    tile: None,
+                    dtype,
+                    output: dtype,
+                    shape: InferenceShape { m: 3, k: 37, n: 96 },
+                    symbol: auto_symbol,
+                    tf32: false,
+                },
+                false,
+            );
+            let mixed_symbol = if dtype == WeightDtype::Bf16 {
+                "gemm_bi_nn_tc16_f32out_bf16"
+            } else {
+                "gemm_bi_nn_tc16_f32out_f16"
+            };
+            run_case(
+                &ctx,
+                Case {
+                    tile: None,
+                    dtype,
+                    output: WeightDtype::F32,
+                    shape: InferenceShape { m: 3, k: 37, n: 96 },
+                    symbol: mixed_symbol,
+                    tf32: false,
+                },
+                false,
+            );
+            for (tile, bf16, f16) in [
+                (
+                    InferenceTile::Legacy,
+                    "gemm_bi_bf16_bf16",
+                    "gemm_bi_f16_f16",
+                ),
+                (
+                    InferenceTile::Tc16,
+                    "gemm_bi_nn_tc16_bf16",
+                    "gemm_bi_nn_tc16_f16",
+                ),
+                (
+                    InferenceTile::Tc64,
+                    "gemm_bi_nn_tc64_bf16",
+                    "gemm_bi_nn_tc64_f16",
+                ),
+                (
+                    InferenceTile::Tc128,
+                    "gemm_bi_nn_tc128_bf16",
+                    "gemm_bi_nn_tc128_f16",
+                ),
+                (
+                    InferenceTile::TcW64,
+                    "gemm_bi_nn_tcw64_bf16",
+                    "gemm_bi_nn_tcw64_f16",
+                ),
+                (
+                    InferenceTile::TcWn64,
+                    "gemm_bi_nn_tcwn64_bf16",
+                    "gemm_bi_nn_tcwn64_f16",
+                ),
+                (
+                    InferenceTile::Tc128Sm89Pipeline,
+                    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+                    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+                ),
+                (
+                    InferenceTile::Tc128Sm89Swizzle,
+                    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+                    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+                ),
+                (
+                    InferenceTile::Tc128Sm89S3,
+                    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+                    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+                ),
+            ] {
+                let symbol = if suffix == "bf16" { bf16 } else { f16 };
+                if ctx.kernels.inference_terminal_function(symbol).is_none() {
+                    println!("NOT_ADMITTED {symbol}");
+                    continue;
+                }
+                for bias in [false, true] {
+                    run_case(
+                        &ctx,
+                        Case {
+                            tile: Some(tile),
+                            dtype,
+                            output: dtype,
+                            shape: InferenceShape { m: 3, k: 64, n: 96 },
+                            symbol,
+                            tf32: false,
+                        },
+                        bias,
+                    );
+                }
+            }
+            for (tile, bf16, f16) in [
+                (InferenceTile::Legacy, "gemm_bi_bf16_f32", "gemm_bi_f16_f32"),
+                (
+                    InferenceTile::Tc16,
+                    "gemm_bi_nn_tc16_f32out_bf16",
+                    "gemm_bi_nn_tc16_f32out_f16",
+                ),
+                (
+                    InferenceTile::Tc64,
+                    "gemm_bi_nn_tc64_f32out_bf16",
+                    "gemm_bi_nn_tc64_f32out_f16",
+                ),
+                (
+                    InferenceTile::Tc128,
+                    "gemm_bi_nn_tc128_f32out_bf16",
+                    "gemm_bi_nn_tc128_f32out_f16",
+                ),
+            ] {
+                for bias in [false, true] {
+                    run_case(
+                        &ctx,
+                        Case {
+                            tile: Some(tile),
+                            dtype,
+                            output: WeightDtype::F32,
+                            shape: InferenceShape { m: 3, k: 64, n: 96 },
+                            symbol: if suffix == "bf16" { bf16 } else { f16 },
+                            tf32: false,
+                        },
+                        bias,
+                    );
+                }
+            }
+        }
+        run_case(
+            &ctx,
+            Case {
+                tile: None,
+                dtype: WeightDtype::F32,
+                output: WeightDtype::F32,
+                shape: InferenceShape { m: 3, k: 37, n: 96 },
+                symbol: "gemm_bi_f32_f32_s2",
+                tf32: false,
+            },
+            false,
+        );
+        for (tile, symbol, tf32) in [
+            (InferenceTile::Legacy, "gemm_bi_f32_f32_s2", false),
+            (InferenceTile::F32N128S2, "gemm_bi_f32_f32_n128_s2", false),
+            (
+                InferenceTile::F32Sm89N64CopyPlan,
+                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+                false,
+            ),
+            (
+                InferenceTile::Tf32M128S2,
+                "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+                true,
+            ),
+            (
+                InferenceTile::Tf32M128S3,
+                "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+                true,
+            ),
+            (
+                InferenceTile::Tf32M64S2,
+                "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+                true,
+            ),
+            (
+                InferenceTile::Tf32M64S3,
+                "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+                true,
+            ),
+            (
+                InferenceTile::Tf32M16S4,
+                "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+                true,
+            ),
+            (
+                InferenceTile::Tf32RnaM128N128S3,
+                "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                true,
+            ),
+            (
+                InferenceTile::Tf32RnaM128N96S3,
+                "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+                true,
+            ),
+            (
+                InferenceTile::Tf32M128N128S3,
+                "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+                true,
+            ),
+        ] {
+            if ctx.kernels.inference_terminal_function(symbol).is_none() {
+                println!("NOT_ADMITTED {symbol}");
+                continue;
+            }
+            for k in [0, 64] {
+                for bias in [false, true] {
+                    run_case(
+                        &ctx,
+                        Case {
+                            tile: Some(tile),
+                            dtype: WeightDtype::F32,
+                            output: WeightDtype::F32,
+                            shape: InferenceShape { m: 3, k, n: 96 },
+                            symbol,
+                            tf32,
+                        },
+                        bias,
+                    );
+                }
+            }
+        }
+        for (tile, k, n, symbol) in [
+            (
+                InferenceTile::TcM64N64Sm89S3,
+                768,
+                2304,
+                "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+            ),
+            (
+                InferenceTile::TcM128N64Sm89S2,
+                2304,
+                768,
+                "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+            ),
+        ] {
+            if ctx.kernels.inference_terminal_function(symbol).is_none() {
+                println!("NOT_ADMITTED {symbol}");
+                continue;
+            }
+            run_case(
+                &ctx,
+                Case {
+                    tile: Some(tile),
+                    dtype: WeightDtype::F16,
+                    output: WeightDtype::F16,
+                    shape: InferenceShape { m: 3, k, n },
+                    symbol,
+                    tf32: false,
+                },
+                false,
+            );
+        }
     }
 }
