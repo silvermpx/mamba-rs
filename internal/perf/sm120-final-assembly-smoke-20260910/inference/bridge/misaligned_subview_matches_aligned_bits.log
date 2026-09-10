@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/gemm_bi_fixed_bridge.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_fixed_bridge-bb79c566f5a4b178)
+
+running 1 test
+test misaligned_subview_matches_aligned_bits ... safety gate: misaligned subview == aligned bits
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 8.47s
+

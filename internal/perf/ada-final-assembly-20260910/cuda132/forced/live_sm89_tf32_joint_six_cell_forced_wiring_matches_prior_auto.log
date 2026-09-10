@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/gemm_bi_sm89_tf32_joint_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_sm89_tf32_joint_selector_qualification-636cb5c3927f86e5)
+
+running 1 test
+test live::sm89_tf32_joint_six_cell_forced_wiring_matches_prior_auto ... {"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"tn_d768_in","dims":[2048,768,3072],"forced_symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1","prior_auto_symbol":"gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2","forced_nodes":2,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+{"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"tn_d768_out","dims":[2048,1536,768],"forced_symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1","prior_auto_symbol":"gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2","forced_nodes":2,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+{"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"tn_prism","dims":[4621,384,1928],"forced_symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1","prior_auto_symbol":"gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3","forced_nodes":2,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+{"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"nn_prism","dims":[4621,384,1928],"forced_symbol":"gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1","prior_auto_symbol":"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3","forced_nodes":1,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+{"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"nn_d768_out","dims":[2048,1536,768],"forced_symbol":"gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1","prior_auto_symbol":"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3","forced_nodes":1,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+{"schema":"MambaTriadSm89Tf32JointWiringSmokeV1","case":"nt_d768_in","dims":[2048,768,3072],"forced_symbol":"gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1","prior_auto_symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","forced_nodes":1,"eager_graph_manifest_equal":true,"prior_auto_bits_equal":true,"repeatable":true,"inputs_unchanged":true,"guards_checked":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 12.77s
+

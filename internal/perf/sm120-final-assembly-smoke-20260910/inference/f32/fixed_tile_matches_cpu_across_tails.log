@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/gemm_bi_fixed_correctness.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_fixed_correctness-2d0c2176ddab5656)
+
+running 1 test
+test fixed_tile_matches_cpu_across_tails ... m=64    k=32   n=64    worst |gpu-cpu| = 1.192e-7 at (35, 51) (scale 4.820e-1)
+m=128   k=64   n=128   worst |gpu-cpu| = 1.788e-7 at (22, 40) (scale 9.728e-1)
+m=127   k=64   n=128   worst |gpu-cpu| = 1.788e-7 at (6, 89) (scale 9.490e-1)
+m=128   k=64   n=127   worst |gpu-cpu| = 1.788e-7 at (11, 86) (scale 9.056e-1)
+m=128   k=63   n=128   worst |gpu-cpu| = 1.788e-7 at (14, 21) (scale 9.303e-1)
+m=127   k=63   n=127   worst |gpu-cpu| = 1.788e-7 at (17, 40) (scale 8.893e-1)
+m=321   k=96   n=193   worst |gpu-cpu| = 3.576e-7 at (195, 102) (scale 1.355e0)
+m=4621  k=384  n=384   worst |gpu-cpu| = 1.431e-6 at (66, 144) (scale 4.742e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 9.29s
+

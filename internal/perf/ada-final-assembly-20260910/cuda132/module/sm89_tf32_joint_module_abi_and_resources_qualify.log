@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/gemm_bi_sm89_tf32_joint_module_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_sm89_tf32_joint_module_qualification-6976ad915cab51d6)
+
+running 1 test
+test sm89_tf32_joint_module_abi_and_resources_qualify ... {"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1","registers":124,"register_cap":131,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":86016,"threads":256,"active_ctas":1,"occupancy_gate":1}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1","registers":124,"register_cap":131,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":86016,"threads":256,"active_ctas":1,"occupancy_gate":1}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1","registers":110,"register_cap":131,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":86016,"threads":256,"active_ctas":1,"occupancy_gate":1}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1","registers":127,"register_cap":135,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":86016,"threads":256,"active_ctas":1,"occupancy_gate":1}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1","registers":83,"register_cap":83,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"threads":256,"active_ctas":2,"occupancy_gate":2}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1","registers":96,"register_cap":128,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":40960,"threads":256,"active_ctas":2,"occupancy_gate":2}
+{"schema":"MambaTriadSm89Tf32JointModuleSymbolV1","symbol":"gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1","registers":26,"register_cap":26,"local_bytes":0,"static_shared_bytes":4224,"dynamic_shared_bytes":0,"threads":256,"active_ctas":6,"occupancy_gate":null}
+{"schema":"MambaTriadSm89Tf32JointModuleIdentityV1","target":"sm_89","cc":[8,9],"compile_key":"ee50944348a8d2938cf444ab2bcea36df60481ec246ff7c24dc588a5f68687d7","artifact_digest":"a5a80a0af3026d0f5c1282ff0568d94405c93b1fbed035d460f30b1ae2e19d91","source_digest":"3dfaf482c5b8d13526cd72a28d3b2141bd04b63e5bd51edfeca98157bd2a50c0","invocation_digest":"ee50944348a8d2938cf444ab2bcea36df60481ec246ff7c24dc588a5f68687d7","header_manifest_digest":"65fba6b5398accb8514e9fbd59385bdbe9481ac33bd19236f0ef0a7b356ac4de","nvrtc_library_domain":"d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687","driver_build_digest":"d1edc5a5bc3e10a2688e21568dccbde5e280dc39144dd81e853843ca98b2d0e1","symbols":7}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 116.28s
+

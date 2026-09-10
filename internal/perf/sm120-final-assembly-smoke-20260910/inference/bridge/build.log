@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-triad-final-assembly.m1C7bi)
+    Finished `release` profile [optimized] target(s) in 0.62s
+  Executable tests/gemm_bi_fixed_bridge.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_fixed_bridge-bb79c566f5a4b178)

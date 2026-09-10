@@ -1,0 +1,58 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-triad-final-assembly.m1C7bi)
+    Finished `release` profile [optimized] target(s) in 47.27s
+     Running tests/gemm_bi_sm89_half_tn_source_contract.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_sm89_half_tn_source_contract-41fb1984c78a51e8)
+
+running 21 tests
+test four_specs_pin_tn_driver_abi_geometry_and_resource_bounds ... ok
+test frozen_compact::tests::compact_tn_layout_is_bijective_and_preserves_every_vector_chunk ... ok
+test frozen_compact::tests::missing_or_duplicated_tn_source_anchor_is_rejected ... ok
+test frozen_compact::tests::scalar_tail_staging_uses_disjoint_ring_slots_and_zero_fills_both_operands ... ok
+test frozen_compact::tests::source_changes_only_tn_layout_and_exports_while_preserving_math_and_epilogue ... ok
+test frozen_vec2::regpipe::compact::tests::compact_tn_layout_is_bijective_and_preserves_every_vector_chunk ... ok
+test frozen_vec2::regpipe::compact::tests::missing_or_duplicated_tn_source_anchor_is_rejected ... ok
+test frozen_vec2::regpipe::compact::tests::scalar_tail_staging_uses_disjoint_ring_slots_and_zero_fills_both_operands ... ok
+test frozen_vec2::regpipe::compact::tests::source_changes_only_tn_layout_and_exports_while_preserving_math_and_epilogue ... ok
+test frozen_vec2::regpipe::tests::ambiguous_reduction_loop_does_not_produce_a_partial_pipeline ... ok
+test frozen_vec2::regpipe::tests::malformed_source_is_rejected_instead_of_partially_transforming_a_kernel ... ok
+test frozen_vec2::regpipe::tests::only_register_lifetimes_change_and_original_loads_and_mma_operands_survive ... ok
+test frozen_vec2::regpipe::tests::source_primes_and_alternates_fragment_slots_without_changing_the_tn_epilogue ... ok
+test frozen_vec2::tests::malformed_parent_fails_closed ... ok
+test frozen_vec2::tests::reduction_pipeline_and_source_outside_epilogue_are_unchanged ... ok
+test frozen_vec2::tests::target_epilogue_uses_aligned_pairs_and_scalar_tail ... ok
+test owner_exports_only_the_four_retained_dtype_families ... ok
+test production_families_are_normalized_body_identical_to_retained_winners ... ok
+test production_half_module_registry_includes_all_retained_tn_winners ... ok
+test standalone_composition_supplies_each_retained_dependency_once ... ok
+test validation_rejects_duplicate_foreign_and_placeholder_exports ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/kernel_identity.rs (/root/target-sm120-final-sweep-cuda132/release/deps/kernel_identity-aadd6fa7a512249e)
+
+running 23 tests
+test artifact_set_is_ordered_and_rejects_duplicate_module_kinds ... ok
+test artifact_set_tracks_all_four_sm89_optional_modules_in_canonical_order ... ok
+test backend_contract_sets_match_reachable_dispatch_trees ... ok
+test cache_envelope_rejects_corruption_and_wrong_identity ... ok
+test canonical_ptx_requires_one_terminal_nul ... ok
+test compile_key_covers_every_invocation_field ... ok
+test deterministic_tf32_identity_variants_have_stable_distinct_discriminants ... ok
+test f32_triad_policy_parser_accepts_only_the_versioned_public_spellings ... ok
+test framed_sha256_has_unambiguous_boundaries ... ok
+test gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent ... ok
+test half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier ... ok
+test module_kind_discriminants_are_stable ... ok
+test physical_launch_kind_discriminants_are_stable ... ok
+test resolved_launch_guard_fails_closed_on_order_count_or_device_drift ... ok
+test resolved_launch_set_is_ordered_and_covers_every_physical_identity_field ... ok
+test resolved_launch_set_rejects_placeholder_or_incoherent_launches ... ok
+test route_guard_rejects_every_policy_artifact_and_device_field ... ok
+test scalar_split_m_identity_variants_have_stable_distinct_discriminants ... ok
+test scalar_wave_policy_v1_digest_covers_every_wave_and_device_field ... ok
+test sm120_route_identity_conversion_rejects_incoherent_inputs ... ok
+test sm120_route_identity_resolves_the_exact_production_route ... ok
+test sm80_tc_policy_v3_digest_covers_geometry_waves_device_and_deep_split_k ... ok
+test streaming_launch_set_builder_matches_slice_builder_and_fails_closed ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
