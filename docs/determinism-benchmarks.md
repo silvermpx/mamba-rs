@@ -264,7 +264,64 @@ weight-gradient shapes are not among its measured cells.
 
 ### Inference step
 
-{{INFERENCE_STEP_TABLE}}
+`GpuMambaBackbone::step` on the default synthetic model (d_model 128,
+3 layers, 366 K parameters), batches 1 to 128, twenty warmups, 2000 to
+5000 eager and 5000 to 10000 graph steps per batch, median of the four
+alternating runs of each tree, microseconds per step. Both trees run the
+inference family with `batch_invariant` on (`Fixed` in 0.6.9, `Inference`
+in 0.7.0); bf16 uses an identity input projection on both sides. The
+outputs of the two trees are bit-identical at every batch, step and path,
+and the CPU reference agrees (cosine 1.000000 in f32, at least 0.99998 in
+bf16).
+
+| storage | batch | path | 0.6.9 µs/step | 0.7.0 µs/step | speedup |
+|---|---:|---|---:|---:|---:|
+| f32 | 1 | eager | 238.5 | 238.2 | 1.00× |
+| f32 | 1 | graph | 199.6 | 196.9 | 1.01× |
+| f32 | 4 | eager | 245.9 | 246.4 | 1.00× |
+| f32 | 4 | graph | 206.1 | 204.3 | 1.01× |
+| f32 | 16 | eager | 246.7 | 253.1 | 0.97× |
+| f32 | 16 | graph | 207.8 | 212.1 | 0.98× |
+| f32 | 64 | eager | 271.0 | 262.1 | 1.03× |
+| f32 | 64 | graph | 232.6 | 222.8 | 1.04× |
+| f32 | 128 | eager | 296.8 | 286.5 | 1.04× |
+| f32 | 128 | graph | 259.4 | 250.0 | 1.04× |
+| bf16 | 1 | eager | 124.1 | 127.2 | 0.98× |
+| bf16 | 1 | graph | 93.9 | 96.6 | 0.97× |
+| bf16 | 4 | eager | 128.8 | 129.6 | 0.99× |
+| bf16 | 4 | graph | 97.8 | 100.3 | 0.98× |
+| bf16 | 16 | eager | 132.5 | 134.0 | 0.99× |
+| bf16 | 16 | graph | 102.1 | 103.2 | 0.99× |
+| bf16 | 64 | eager | 146.4 | 147.4 | 0.99× |
+| bf16 | 64 | graph | 117.8 | 119.6 | 0.98× |
+| bf16 | 128 | eager | 197.5 | 176.3 | 1.12× |
+| bf16 | 128 | graph | 167.5 | 146.6 | 1.14× |
+
+The same step on the training family with exact f32 kernels, the one
+route both trees share exactly (the digests are identical here too):
+
+| batch | path | 0.6.9 µs/step | 0.7.0 µs/step | speedup |
+|---:|---|---:|---:|---:|
+| 1 | eager | 141.6 | 143.7 | 0.985× |
+| 1 | graph | 102.8 | 104.0 | 0.988× |
+| 4 | eager | 146.4 | 147.0 | 0.996× |
+| 4 | graph | 106.7 | 107.5 | 0.992× |
+| 16 | eager | 150.9 | 151.6 | 0.995× |
+| 16 | graph | 112.0 | 112.4 | 0.997× |
+| 64 | eager | 208.3 | 203.0 | 1.026× |
+| 64 | graph | 164.9 | 159.8 | 1.032× |
+| 128 | eager | 279.5 | 271.5 | 1.030× |
+| 128 | graph | 237.2 | 229.4 | 1.034× |
+
+A model this small spends its step on kernel launches rather than on
+arithmetic (about 15 launches for 100 to 140 µs), so the new GEMM kernels
+do not show; the whole-step numbers move only where the batch is large
+enough for the multiplication to matter. The first measurement of this
+step on the release tree was 45 µs per graph replay slower than 0.6.9 at
+every batch; that was host-side work in the replay validation (a launch
+set digest rebuilt on every replay), fixed in 0.7.0 before release, and
+the numbers above are after the fix.
+
 
 
 ## How the numbers were taken

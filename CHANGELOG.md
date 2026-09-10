@@ -122,7 +122,16 @@ d768 model from 32.2 ms to 26.9 ms per step, within 10 percent of cuBLAS
 Fast; on the other three shapes no measured TF32 kernel exists yet and the
 exact kernels serve, so the time does not change.
 
-{{SET_B_SUMMARY}}
+**Whole inference step, 0.6.9 against 0.7.0** (RTX 6000 Ada, the
+`MambaConfig::default()` model with d_model 128 and 3 layers, one decode
+step, microseconds; median of four alternating runs of each tree): with
+the inference family in both trees the step is the same to within 3
+percent from batch 1 to batch 64 in f32 and bf16, and 12 to 14 percent
+faster at batch 128 in bf16 (197.5 → 176.3 µs eager, 167.5 → 146.6 µs
+graph). The outputs of the two trees are bit-identical at every batch and
+step. A model this small spends its step on kernel launches, not on
+arithmetic, so the new GEMM kernels cannot show here; the launch count is
+the next release's work.
 
 ### The GEMM mode API
 
@@ -208,6 +217,12 @@ exact kernels serve, so the time does not change.
 
 ### Fixed
 
+- A captured graph re-hashed its whole launch set on every replay to check
+  that nothing had changed since the capture. On a small decode step that
+  host work cost 45 microseconds per replay, half again the step. The
+  digest is now checked once when the plan is built; a replay checks the
+  route identity and the policy of each recorded route, and refuses a
+  changed route as before.
 - Exact f32 kernels keep their `__fmaf_rn` contract on every route; the
   measured SM89 deep-K split-K cells that are faster on the scalar kernels
   stay on them instead of taking the tensor-core contract.

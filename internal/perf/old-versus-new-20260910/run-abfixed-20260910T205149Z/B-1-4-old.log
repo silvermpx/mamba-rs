@@ -1,0 +1,282 @@
+MODEL d_model=128 layers=3 d_inner=256 d_state=16 params=366464
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=F32 batch=1 step=0 fnv1a=ec72af116e2a56a5
+DIGEST arm=eager dtype=F32 batch=1 step=1 fnv1a=38c268e7a41365ae
+DIGEST arm=eager dtype=F32 batch=1 step=2 fnv1a=aeb9559a00c94de9
+DIGEST arm=eager dtype=F32 batch=1 step=3 fnv1a=e19ae0d258bd24bf
+DIGEST arm=eager dtype=F32 batch=1 step=4 fnv1a=ba341ebb0f9c30e4
+DIGEST arm=eager dtype=F32 batch=1 step=5 fnv1a=727efc58c4087b75
+DIGEST arm=eager dtype=F32 batch=1 step=6 fnv1a=b1156657a59b89b9
+DIGEST arm=eager dtype=F32 batch=1 step=7 fnv1a=dfe0778eba164900
+CPU_PARITY batch=1 step=0 cos=1.000000 rel_l2=8.610e-7
+CPU_PARITY batch=1 step=1 cos=1.000000 rel_l2=1.035e-6
+CPU_PARITY batch=1 step=2 cos=1.000000 rel_l2=7.144e-7
+CPU_PARITY batch=1 step=3 cos=1.000000 rel_l2=7.490e-7
+CPU_PARITY batch=1 step=4 cos=1.000000 rel_l2=7.773e-7
+CPU_PARITY batch=1 step=5 cos=1.000000 rel_l2=8.145e-7
+CPU_PARITY batch=1 step=6 cos=1.000000 rel_l2=9.252e-7
+CPU_PARITY batch=1 step=7 cos=1.000000 rel_l2=7.587e-7
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=F32 batch=1 step=0 fnv1a=ec72af116e2a56a5
+DIGEST arm=graph dtype=F32 batch=1 step=1 fnv1a=38c268e7a41365ae
+DIGEST arm=graph dtype=F32 batch=1 step=2 fnv1a=aeb9559a00c94de9
+DIGEST arm=graph dtype=F32 batch=1 step=3 fnv1a=e19ae0d258bd24bf
+DIGEST arm=graph dtype=F32 batch=1 step=4 fnv1a=ba341ebb0f9c30e4
+DIGEST arm=graph dtype=F32 batch=1 step=5 fnv1a=727efc58c4087b75
+DIGEST arm=graph dtype=F32 batch=1 step=6 fnv1a=b1156657a59b89b9
+DIGEST arm=graph dtype=F32 batch=1 step=7 fnv1a=dfe0778eba164900
+TIMING arm=eager dtype=F32 batch=1 iters=5000 us_per_step=238.247
+TIMING arm=graph dtype=F32 batch=1 iters=10000 us_per_step=199.295
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=F32 batch=4 step=0 fnv1a=6a92a2cd64095d25
+DIGEST arm=eager dtype=F32 batch=4 step=1 fnv1a=1a35931c28bd3015
+DIGEST arm=eager dtype=F32 batch=4 step=2 fnv1a=c0b8f78e8a745d85
+DIGEST arm=eager dtype=F32 batch=4 step=3 fnv1a=8a4d39a9b17d5825
+DIGEST arm=eager dtype=F32 batch=4 step=4 fnv1a=196af001f93edc45
+DIGEST arm=eager dtype=F32 batch=4 step=5 fnv1a=04f1bbae0a3a9965
+DIGEST arm=eager dtype=F32 batch=4 step=6 fnv1a=10a89fef1ce2d075
+DIGEST arm=eager dtype=F32 batch=4 step=7 fnv1a=7f9a5d141fee7845
+CPU_PARITY batch=4 step=0 cos=1.000000 rel_l2=8.610e-7
+CPU_PARITY batch=4 step=1 cos=1.000000 rel_l2=1.035e-6
+CPU_PARITY batch=4 step=2 cos=1.000000 rel_l2=7.144e-7
+CPU_PARITY batch=4 step=3 cos=1.000000 rel_l2=7.490e-7
+CPU_PARITY batch=4 step=4 cos=1.000000 rel_l2=7.773e-7
+CPU_PARITY batch=4 step=5 cos=1.000000 rel_l2=8.145e-7
+CPU_PARITY batch=4 step=6 cos=1.000000 rel_l2=9.252e-7
+CPU_PARITY batch=4 step=7 cos=1.000000 rel_l2=7.587e-7
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=F32 batch=4 step=0 fnv1a=6a92a2cd64095d25
+DIGEST arm=graph dtype=F32 batch=4 step=1 fnv1a=1a35931c28bd3015
+DIGEST arm=graph dtype=F32 batch=4 step=2 fnv1a=c0b8f78e8a745d85
+DIGEST arm=graph dtype=F32 batch=4 step=3 fnv1a=8a4d39a9b17d5825
+DIGEST arm=graph dtype=F32 batch=4 step=4 fnv1a=196af001f93edc45
+DIGEST arm=graph dtype=F32 batch=4 step=5 fnv1a=04f1bbae0a3a9965
+DIGEST arm=graph dtype=F32 batch=4 step=6 fnv1a=10a89fef1ce2d075
+DIGEST arm=graph dtype=F32 batch=4 step=7 fnv1a=7f9a5d141fee7845
+TIMING arm=eager dtype=F32 batch=4 iters=5000 us_per_step=246.060
+TIMING arm=graph dtype=F32 batch=4 iters=10000 us_per_step=206.148
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=F32 batch=16 step=0 fnv1a=9dea0e824f3f0b25
+DIGEST arm=eager dtype=F32 batch=16 step=1 fnv1a=56d3a857610aece5
+DIGEST arm=eager dtype=F32 batch=16 step=2 fnv1a=3081d646c62788a5
+DIGEST arm=eager dtype=F32 batch=16 step=3 fnv1a=e4ee9e28914ef725
+DIGEST arm=eager dtype=F32 batch=16 step=4 fnv1a=7371c7b3ad1fb2a5
+DIGEST arm=eager dtype=F32 batch=16 step=5 fnv1a=d016d1c142206e25
+DIGEST arm=eager dtype=F32 batch=16 step=6 fnv1a=9eb5a577cc147a65
+DIGEST arm=eager dtype=F32 batch=16 step=7 fnv1a=d05491d9bb2cf3a5
+CPU_PARITY batch=16 step=0 cos=1.000000 rel_l2=8.610e-7
+CPU_PARITY batch=16 step=1 cos=1.000000 rel_l2=1.035e-6
+CPU_PARITY batch=16 step=2 cos=1.000000 rel_l2=7.144e-7
+CPU_PARITY batch=16 step=3 cos=1.000000 rel_l2=7.490e-7
+CPU_PARITY batch=16 step=4 cos=1.000000 rel_l2=7.773e-7
+CPU_PARITY batch=16 step=5 cos=1.000000 rel_l2=8.145e-7
+CPU_PARITY batch=16 step=6 cos=1.000000 rel_l2=9.252e-7
+CPU_PARITY batch=16 step=7 cos=1.000000 rel_l2=7.587e-7
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=F32 batch=16 step=0 fnv1a=9dea0e824f3f0b25
+DIGEST arm=graph dtype=F32 batch=16 step=1 fnv1a=56d3a857610aece5
+DIGEST arm=graph dtype=F32 batch=16 step=2 fnv1a=3081d646c62788a5
+DIGEST arm=graph dtype=F32 batch=16 step=3 fnv1a=e4ee9e28914ef725
+DIGEST arm=graph dtype=F32 batch=16 step=4 fnv1a=7371c7b3ad1fb2a5
+DIGEST arm=graph dtype=F32 batch=16 step=5 fnv1a=d016d1c142206e25
+DIGEST arm=graph dtype=F32 batch=16 step=6 fnv1a=9eb5a577cc147a65
+DIGEST arm=graph dtype=F32 batch=16 step=7 fnv1a=d05491d9bb2cf3a5
+TIMING arm=eager dtype=F32 batch=16 iters=2000 us_per_step=246.758
+TIMING arm=graph dtype=F32 batch=16 iters=5000 us_per_step=207.759
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=F32 batch=64 step=0 fnv1a=1e25b6006895c325
+DIGEST arm=eager dtype=F32 batch=64 step=1 fnv1a=4a602e526f507e25
+DIGEST arm=eager dtype=F32 batch=64 step=2 fnv1a=0bc07b19dcff0525
+DIGEST arm=eager dtype=F32 batch=64 step=3 fnv1a=e16e526a34d57325
+DIGEST arm=eager dtype=F32 batch=64 step=4 fnv1a=dbca19f80afd6925
+DIGEST arm=eager dtype=F32 batch=64 step=5 fnv1a=c26565369d1b4f25
+DIGEST arm=eager dtype=F32 batch=64 step=6 fnv1a=743bacd8aeeebe25
+DIGEST arm=eager dtype=F32 batch=64 step=7 fnv1a=67b052f1207f6525
+CPU_PARITY batch=64 step=0 cos=1.000000 rel_l2=8.610e-7
+CPU_PARITY batch=64 step=1 cos=1.000000 rel_l2=1.035e-6
+CPU_PARITY batch=64 step=2 cos=1.000000 rel_l2=7.144e-7
+CPU_PARITY batch=64 step=3 cos=1.000000 rel_l2=7.490e-7
+CPU_PARITY batch=64 step=4 cos=1.000000 rel_l2=7.773e-7
+CPU_PARITY batch=64 step=5 cos=1.000000 rel_l2=8.145e-7
+CPU_PARITY batch=64 step=6 cos=1.000000 rel_l2=9.252e-7
+CPU_PARITY batch=64 step=7 cos=1.000000 rel_l2=7.587e-7
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=F32 batch=64 step=0 fnv1a=1e25b6006895c325
+DIGEST arm=graph dtype=F32 batch=64 step=1 fnv1a=4a602e526f507e25
+DIGEST arm=graph dtype=F32 batch=64 step=2 fnv1a=0bc07b19dcff0525
+DIGEST arm=graph dtype=F32 batch=64 step=3 fnv1a=e16e526a34d57325
+DIGEST arm=graph dtype=F32 batch=64 step=4 fnv1a=dbca19f80afd6925
+DIGEST arm=graph dtype=F32 batch=64 step=5 fnv1a=c26565369d1b4f25
+DIGEST arm=graph dtype=F32 batch=64 step=6 fnv1a=743bacd8aeeebe25
+DIGEST arm=graph dtype=F32 batch=64 step=7 fnv1a=67b052f1207f6525
+TIMING arm=eager dtype=F32 batch=64 iters=2000 us_per_step=270.722
+TIMING arm=graph dtype=F32 batch=64 iters=5000 us_per_step=232.506
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=F32 batch=128 step=0 fnv1a=30da20d38d096325
+DIGEST arm=eager dtype=F32 batch=128 step=1 fnv1a=aea56c12907ed925
+DIGEST arm=eager dtype=F32 batch=128 step=2 fnv1a=2a132429f9dbe725
+DIGEST arm=eager dtype=F32 batch=128 step=3 fnv1a=0908ee7e8588c325
+DIGEST arm=eager dtype=F32 batch=128 step=4 fnv1a=c02ab9751dd8af25
+DIGEST arm=eager dtype=F32 batch=128 step=5 fnv1a=e2b621310e147b25
+DIGEST arm=eager dtype=F32 batch=128 step=6 fnv1a=94abbd7b8fbb5925
+DIGEST arm=eager dtype=F32 batch=128 step=7 fnv1a=b259ac0940dca725
+CPU_PARITY batch=128 step=0 cos=1.000000 rel_l2=8.610e-7
+CPU_PARITY batch=128 step=1 cos=1.000000 rel_l2=1.035e-6
+CPU_PARITY batch=128 step=2 cos=1.000000 rel_l2=7.144e-7
+CPU_PARITY batch=128 step=3 cos=1.000000 rel_l2=7.490e-7
+CPU_PARITY batch=128 step=4 cos=1.000000 rel_l2=7.773e-7
+CPU_PARITY batch=128 step=5 cos=1.000000 rel_l2=8.145e-7
+CPU_PARITY batch=128 step=6 cos=1.000000 rel_l2=9.252e-7
+CPU_PARITY batch=128 step=7 cos=1.000000 rel_l2=7.587e-7
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=F32 batch=128 step=0 fnv1a=30da20d38d096325
+DIGEST arm=graph dtype=F32 batch=128 step=1 fnv1a=aea56c12907ed925
+DIGEST arm=graph dtype=F32 batch=128 step=2 fnv1a=2a132429f9dbe725
+DIGEST arm=graph dtype=F32 batch=128 step=3 fnv1a=0908ee7e8588c325
+DIGEST arm=graph dtype=F32 batch=128 step=4 fnv1a=c02ab9751dd8af25
+DIGEST arm=graph dtype=F32 batch=128 step=5 fnv1a=e2b621310e147b25
+DIGEST arm=graph dtype=F32 batch=128 step=6 fnv1a=94abbd7b8fbb5925
+DIGEST arm=graph dtype=F32 batch=128 step=7 fnv1a=b259ac0940dca725
+TIMING arm=eager dtype=F32 batch=128 iters=2000 us_per_step=296.101
+TIMING arm=graph dtype=F32 batch=128 iters=5000 us_per_step=258.960
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=Bf16 batch=1 step=0 fnv1a=7d0442f4468fc458
+DIGEST arm=eager dtype=Bf16 batch=1 step=1 fnv1a=6d8554c355d5639c
+DIGEST arm=eager dtype=Bf16 batch=1 step=2 fnv1a=0ef729e78e87a2b4
+DIGEST arm=eager dtype=Bf16 batch=1 step=3 fnv1a=c946bf8c5f14a6d1
+DIGEST arm=eager dtype=Bf16 batch=1 step=4 fnv1a=e2a22eab451b7afa
+DIGEST arm=eager dtype=Bf16 batch=1 step=5 fnv1a=ee11e25dac9ed4a3
+DIGEST arm=eager dtype=Bf16 batch=1 step=6 fnv1a=899899b72b6226a5
+DIGEST arm=eager dtype=Bf16 batch=1 step=7 fnv1a=f15f80a65b928e11
+CPU_PARITY batch=1 step=0 cos=0.999933 rel_l2=1.161e-2
+CPU_PARITY batch=1 step=1 cos=0.999975 rel_l2=7.099e-3
+CPU_PARITY batch=1 step=2 cos=0.999979 rel_l2=6.541e-3
+CPU_PARITY batch=1 step=3 cos=0.999983 rel_l2=5.809e-3
+CPU_PARITY batch=1 step=4 cos=0.999981 rel_l2=6.235e-3
+CPU_PARITY batch=1 step=5 cos=0.999959 rel_l2=9.024e-3
+CPU_PARITY batch=1 step=6 cos=0.999964 rel_l2=8.559e-3
+CPU_PARITY batch=1 step=7 cos=0.999977 rel_l2=6.756e-3
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=Bf16 batch=1 step=0 fnv1a=7d0442f4468fc458
+DIGEST arm=graph dtype=Bf16 batch=1 step=1 fnv1a=6d8554c355d5639c
+DIGEST arm=graph dtype=Bf16 batch=1 step=2 fnv1a=0ef729e78e87a2b4
+DIGEST arm=graph dtype=Bf16 batch=1 step=3 fnv1a=c946bf8c5f14a6d1
+DIGEST arm=graph dtype=Bf16 batch=1 step=4 fnv1a=e2a22eab451b7afa
+DIGEST arm=graph dtype=Bf16 batch=1 step=5 fnv1a=ee11e25dac9ed4a3
+DIGEST arm=graph dtype=Bf16 batch=1 step=6 fnv1a=899899b72b6226a5
+DIGEST arm=graph dtype=Bf16 batch=1 step=7 fnv1a=f15f80a65b928e11
+TIMING arm=eager dtype=Bf16 batch=1 iters=5000 us_per_step=124.497
+TIMING arm=graph dtype=Bf16 batch=1 iters=10000 us_per_step=93.777
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=Bf16 batch=4 step=0 fnv1a=d2bd9da163034f25
+DIGEST arm=eager dtype=Bf16 batch=4 step=1 fnv1a=2e018dccda881f25
+DIGEST arm=eager dtype=Bf16 batch=4 step=2 fnv1a=787dfb9ededf85ad
+DIGEST arm=eager dtype=Bf16 batch=4 step=3 fnv1a=d88e4b6170100e75
+DIGEST arm=eager dtype=Bf16 batch=4 step=4 fnv1a=3777dd33db2ebf95
+DIGEST arm=eager dtype=Bf16 batch=4 step=5 fnv1a=7cfabc6cbb67050d
+DIGEST arm=eager dtype=Bf16 batch=4 step=6 fnv1a=dcd841854bd6b925
+DIGEST arm=eager dtype=Bf16 batch=4 step=7 fnv1a=27044ec1d28d4f05
+CPU_PARITY batch=4 step=0 cos=0.999933 rel_l2=1.161e-2
+CPU_PARITY batch=4 step=1 cos=0.999975 rel_l2=7.099e-3
+CPU_PARITY batch=4 step=2 cos=0.999979 rel_l2=6.541e-3
+CPU_PARITY batch=4 step=3 cos=0.999983 rel_l2=5.809e-3
+CPU_PARITY batch=4 step=4 cos=0.999981 rel_l2=6.235e-3
+CPU_PARITY batch=4 step=5 cos=0.999959 rel_l2=9.024e-3
+CPU_PARITY batch=4 step=6 cos=0.999964 rel_l2=8.559e-3
+CPU_PARITY batch=4 step=7 cos=0.999977 rel_l2=6.756e-3
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=Bf16 batch=4 step=0 fnv1a=d2bd9da163034f25
+DIGEST arm=graph dtype=Bf16 batch=4 step=1 fnv1a=2e018dccda881f25
+DIGEST arm=graph dtype=Bf16 batch=4 step=2 fnv1a=787dfb9ededf85ad
+DIGEST arm=graph dtype=Bf16 batch=4 step=3 fnv1a=d88e4b6170100e75
+DIGEST arm=graph dtype=Bf16 batch=4 step=4 fnv1a=3777dd33db2ebf95
+DIGEST arm=graph dtype=Bf16 batch=4 step=5 fnv1a=7cfabc6cbb67050d
+DIGEST arm=graph dtype=Bf16 batch=4 step=6 fnv1a=dcd841854bd6b925
+DIGEST arm=graph dtype=Bf16 batch=4 step=7 fnv1a=27044ec1d28d4f05
+TIMING arm=eager dtype=Bf16 batch=4 iters=5000 us_per_step=129.031
+TIMING arm=graph dtype=Bf16 batch=4 iters=10000 us_per_step=97.127
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=Bf16 batch=16 step=0 fnv1a=7d9f9af520a6d325
+DIGEST arm=eager dtype=Bf16 batch=16 step=1 fnv1a=720e82bd9aba1325
+DIGEST arm=eager dtype=Bf16 batch=16 step=2 fnv1a=de0157449ea49605
+DIGEST arm=eager dtype=Bf16 batch=16 step=3 fnv1a=b04a71104800dce5
+DIGEST arm=eager dtype=Bf16 batch=16 step=4 fnv1a=0f1de034a368e6e5
+DIGEST arm=eager dtype=Bf16 batch=16 step=5 fnv1a=1a7945aa189dfe05
+DIGEST arm=eager dtype=Bf16 batch=16 step=6 fnv1a=b69eefe933747b25
+DIGEST arm=eager dtype=Bf16 batch=16 step=7 fnv1a=dabd59eea0492aa5
+CPU_PARITY batch=16 step=0 cos=0.999933 rel_l2=1.161e-2
+CPU_PARITY batch=16 step=1 cos=0.999975 rel_l2=7.099e-3
+CPU_PARITY batch=16 step=2 cos=0.999979 rel_l2=6.541e-3
+CPU_PARITY batch=16 step=3 cos=0.999983 rel_l2=5.809e-3
+CPU_PARITY batch=16 step=4 cos=0.999981 rel_l2=6.235e-3
+CPU_PARITY batch=16 step=5 cos=0.999959 rel_l2=9.024e-3
+CPU_PARITY batch=16 step=6 cos=0.999964 rel_l2=8.559e-3
+CPU_PARITY batch=16 step=7 cos=0.999977 rel_l2=6.756e-3
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=Bf16 batch=16 step=0 fnv1a=7d9f9af520a6d325
+DIGEST arm=graph dtype=Bf16 batch=16 step=1 fnv1a=720e82bd9aba1325
+DIGEST arm=graph dtype=Bf16 batch=16 step=2 fnv1a=de0157449ea49605
+DIGEST arm=graph dtype=Bf16 batch=16 step=3 fnv1a=b04a71104800dce5
+DIGEST arm=graph dtype=Bf16 batch=16 step=4 fnv1a=0f1de034a368e6e5
+DIGEST arm=graph dtype=Bf16 batch=16 step=5 fnv1a=1a7945aa189dfe05
+DIGEST arm=graph dtype=Bf16 batch=16 step=6 fnv1a=b69eefe933747b25
+DIGEST arm=graph dtype=Bf16 batch=16 step=7 fnv1a=dabd59eea0492aa5
+TIMING arm=eager dtype=Bf16 batch=16 iters=2000 us_per_step=131.713
+TIMING arm=graph dtype=Bf16 batch=16 iters=5000 us_per_step=101.960
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=Bf16 batch=64 step=0 fnv1a=95b410f90634e325
+DIGEST arm=eager dtype=Bf16 batch=64 step=1 fnv1a=d3d239c4ae81e325
+DIGEST arm=eager dtype=Bf16 batch=64 step=2 fnv1a=f06ceefd4df177a5
+DIGEST arm=eager dtype=Bf16 batch=64 step=3 fnv1a=5e8c1ac02238c225
+DIGEST arm=eager dtype=Bf16 batch=64 step=4 fnv1a=d02a19f2aade0c25
+DIGEST arm=eager dtype=Bf16 batch=64 step=5 fnv1a=bbc63d0ab202f4a5
+DIGEST arm=eager dtype=Bf16 batch=64 step=6 fnv1a=ca7cd610496b8325
+DIGEST arm=eager dtype=Bf16 batch=64 step=7 fnv1a=62bfb8cafdcd6d25
+CPU_PARITY batch=64 step=0 cos=0.999933 rel_l2=1.161e-2
+CPU_PARITY batch=64 step=1 cos=0.999975 rel_l2=7.099e-3
+CPU_PARITY batch=64 step=2 cos=0.999979 rel_l2=6.541e-3
+CPU_PARITY batch=64 step=3 cos=0.999983 rel_l2=5.809e-3
+CPU_PARITY batch=64 step=4 cos=0.999981 rel_l2=6.235e-3
+CPU_PARITY batch=64 step=5 cos=0.999959 rel_l2=9.024e-3
+CPU_PARITY batch=64 step=6 cos=0.999964 rel_l2=8.559e-3
+CPU_PARITY batch=64 step=7 cos=0.999977 rel_l2=6.756e-3
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=Bf16 batch=64 step=0 fnv1a=95b410f90634e325
+DIGEST arm=graph dtype=Bf16 batch=64 step=1 fnv1a=d3d239c4ae81e325
+DIGEST arm=graph dtype=Bf16 batch=64 step=2 fnv1a=f06ceefd4df177a5
+DIGEST arm=graph dtype=Bf16 batch=64 step=3 fnv1a=5e8c1ac02238c225
+DIGEST arm=graph dtype=Bf16 batch=64 step=4 fnv1a=d02a19f2aade0c25
+DIGEST arm=graph dtype=Bf16 batch=64 step=5 fnv1a=bbc63d0ab202f4a5
+DIGEST arm=graph dtype=Bf16 batch=64 step=6 fnv1a=ca7cd610496b8325
+DIGEST arm=graph dtype=Bf16 batch=64 step=7 fnv1a=62bfb8cafdcd6d25
+TIMING arm=eager dtype=Bf16 batch=64 iters=2000 us_per_step=146.680
+TIMING arm=graph dtype=Bf16 batch=64 iters=5000 us_per_step=117.952
+CONTEXT arm=eager batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=eager dtype=Bf16 batch=128 step=0 fnv1a=804fe4930847a325
+DIGEST arm=eager dtype=Bf16 batch=128 step=1 fnv1a=72c6a54458e1a325
+DIGEST arm=eager dtype=Bf16 batch=128 step=2 fnv1a=5ed4ba76a32b0825
+DIGEST arm=eager dtype=Bf16 batch=128 step=3 fnv1a=1923b0407e4f6125
+DIGEST arm=eager dtype=Bf16 batch=128 step=4 fnv1a=7c3245052399f525
+DIGEST arm=eager dtype=Bf16 batch=128 step=5 fnv1a=0558c00bdb866225
+DIGEST arm=eager dtype=Bf16 batch=128 step=6 fnv1a=898f677eceb4e325
+DIGEST arm=eager dtype=Bf16 batch=128 step=7 fnv1a=7840e01d0b78b725
+CPU_PARITY batch=128 step=0 cos=0.999933 rel_l2=1.161e-2
+CPU_PARITY batch=128 step=1 cos=0.999975 rel_l2=7.099e-3
+CPU_PARITY batch=128 step=2 cos=0.999979 rel_l2=6.541e-3
+CPU_PARITY batch=128 step=3 cos=0.999983 rel_l2=5.809e-3
+CPU_PARITY batch=128 step=4 cos=0.999981 rel_l2=6.235e-3
+CPU_PARITY batch=128 step=5 cos=0.999959 rel_l2=9.024e-3
+CPU_PARITY batch=128 step=6 cos=0.999964 rel_l2=8.559e-3
+CPU_PARITY batch=128 step=7 cos=0.999977 rel_l2=6.756e-3
+CONTEXT arm=graph batch_invariant=true family=Fixed tensor_cores=false fast_gemm=false tf32=true
+DIGEST arm=graph dtype=Bf16 batch=128 step=0 fnv1a=804fe4930847a325
+DIGEST arm=graph dtype=Bf16 batch=128 step=1 fnv1a=72c6a54458e1a325
+DIGEST arm=graph dtype=Bf16 batch=128 step=2 fnv1a=5ed4ba76a32b0825
+DIGEST arm=graph dtype=Bf16 batch=128 step=3 fnv1a=1923b0407e4f6125
+DIGEST arm=graph dtype=Bf16 batch=128 step=4 fnv1a=7c3245052399f525
+DIGEST arm=graph dtype=Bf16 batch=128 step=5 fnv1a=0558c00bdb866225
+DIGEST arm=graph dtype=Bf16 batch=128 step=6 fnv1a=898f677eceb4e325
+DIGEST arm=graph dtype=Bf16 batch=128 step=7 fnv1a=7840e01d0b78b725
+TIMING arm=eager dtype=Bf16 batch=128 iters=2000 us_per_step=196.690
+TIMING arm=graph dtype=Bf16 batch=128 iters=5000 us_per_step=167.174
+DONE

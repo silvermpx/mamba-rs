@@ -225,3 +225,54 @@ handle math mode against `GemmEx` with an explicit compute type).
 | inference | hot_e | 2048 × 2304 × 768 | NN | F32 exact | 361.35 | 249.24 | 1.45× | 113.82 | 254.73 | 0.46× | 1.02× |
 | inference | hot_b | 4621 × 768 × 2304 | NN | F32 exact | 888.70 | 604.26 | 1.47× | 275.58 | 626.88 | 0.46× | 1.04× |
 
+
+## Sets A and B again, on the corrected release tree (`cce73716`)
+
+`adapter/run-set-ab-fixed.sh` with `/root/mamba-rs-new-cce73716` (a
+snapshot of the committed tree plus the two adapters) as the new endpoint;
+logs in `run-abfixed-20260910T205149Z/`. Digests identical between the
+trees in both sets and both storages, as before.
+
+Set A (exact f32, Triad lane), median of four:
+
+| batch | arm | old main µs/step (median of 4) | 0.7.0 µs/step (median of 4) | old / new |
+|---:|---|---:|---:|---:|
+| 1 | eager | 141.6 | 143.7 | 0.985× |
+| 1 | graph | 102.8 | 104.0 | 0.988× |
+| 4 | eager | 146.4 | 147.0 | 0.996× |
+| 4 | graph | 106.7 | 107.5 | 0.992× |
+| 16 | eager | 150.9 | 151.6 | 0.995× |
+| 16 | graph | 112.0 | 112.4 | 0.997× |
+| 64 | eager | 208.3 | 203.0 | 1.026× |
+| 64 | graph | 164.9 | 159.8 | 1.032× |
+| 128 | eager | 279.5 | 271.5 | 1.030× |
+| 128 | graph | 237.2 | 229.4 | 1.034× |
+
+Set B (inference family, f32 and bf16), median of four:
+
+| storage | batch | path | 0.6.9 (Fixed) µs/step | 0.7.0 (Inference) µs/step | 0.6.9 / 0.7.0 |
+|---|---:|---|---:|---:|---:|
+| f32 | 1 | eager | 238.5 | 238.2 | 1.00× |
+| f32 | 1 | graph | 199.6 | 196.9 | 1.01× |
+| f32 | 4 | eager | 245.9 | 246.4 | 1.00× |
+| f32 | 4 | graph | 206.1 | 204.3 | 1.01× |
+| f32 | 16 | eager | 246.7 | 253.1 | 0.97× |
+| f32 | 16 | graph | 207.8 | 212.1 | 0.98× |
+| f32 | 64 | eager | 271.0 | 262.1 | 1.03× |
+| f32 | 64 | graph | 232.6 | 222.8 | 1.04× |
+| f32 | 128 | eager | 296.8 | 286.5 | 1.04× |
+| f32 | 128 | graph | 259.4 | 250.0 | 1.04× |
+| bf16 | 1 | eager | 124.1 | 127.2 | 0.98× |
+| bf16 | 1 | graph | 93.9 | 96.6 | 0.97× |
+| bf16 | 4 | eager | 128.8 | 129.6 | 0.99× |
+| bf16 | 4 | graph | 97.8 | 100.3 | 0.98× |
+| bf16 | 16 | eager | 132.5 | 134.0 | 0.99× |
+| bf16 | 16 | graph | 102.1 | 103.2 | 0.99× |
+| bf16 | 64 | eager | 146.4 | 147.4 | 0.99× |
+| bf16 | 64 | graph | 117.8 | 119.6 | 0.98× |
+| bf16 | 128 | eager | 197.5 | 176.3 | 1.12× |
+| bf16 | 128 | graph | 167.5 | 146.6 | 1.14× |
+
+The graph replay is back at the 0.6.9 level from batch 1 (104.0 against
+102.8 µs) and ahead of it from batch 64; the per-replay launch-set digest
+rebuild was the whole difference.
