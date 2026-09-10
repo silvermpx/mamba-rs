@@ -145,63 +145,6 @@ extern "C" __global__ void m3_split(
 }
 
 // ============================================================================
-// 2. bcnorm_fwd -- RMSNorm on B (or C) with weight, no bias
-// ============================================================================
-//
-// Per-(sample, head_group) RMSNorm: out = x / rms(x) * weight
-// where rms(x) = sqrt(mean(x^2) + eps).
-// Weight is [ds], tiled across groups (weight[i % ds] for group element i).
-//
-// Input:  B_raw[N * ng * ds], weight[ds]
-// Output: B_normed[N * ng * ds], rms_val[N * ng] (saved for backward)
-// Grid: N * ng blocks, ds threads per block
-// Shared memory: ds floats for parallel reduction
-extern "C" __global__ void bcnorm_fwd(
-    float* __restrict__ B_normed,   // [N * ng * ds]
-    float* __restrict__ rms_val,    // [N * ng] -- saved rms for backward
-    const float* __restrict__ B_raw,// [N * ng * ds]
-    const float* __restrict__ weight, // [ds]
-    int N, int ng, int ds,
-    float eps                       // config-driven eps (was a compile-time #define)
-) {
-    int block_id = blockIdx.x;       // sample * ng + group
-    if (block_id >= N * ng) return;
-    int d = threadIdx.x;
-    if (d >= ds) return;
-
-    int base = block_id * ds;
-    float val = B_raw[base + d];
-
-    // Shared memory reduction for sum(x^2)
-    extern __shared__ float sdata[];
-    sdata[d] = val * val;
-    __syncthreads();
-
-    // Tree reduction — start at next power of 2 (safe for non-power-of-2 ds)
-    int stride = 1;
-    while (stride < ds) stride <<= 1;
-    stride >>= 1;
-    for (; stride > 0; stride >>= 1) {
-        if (d < stride && (d + stride) < ds) {
-            sdata[d] += sdata[d + stride];
-        }
-        __syncthreads();
-    }
-
-    float rms = sqrtf(sdata[0] / (float)ds + eps);
-    // Finite-guard: parallel to the fix in norms.cu DEFINE_RMSNORM_FWD —
-    // on deep bf16 models a single overflowed bf16 activation can make rms
-    // non-finite and NaN-cascade into every subsequent layer.
-    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;
-    if (d == 0) rms_val[block_id] = rms;
-    __syncthreads();
-
-    // Normalize and scale
-    float inv_rms = 1.0f / rms;
-    B_normed[base + d] = val * inv_rms * weight[d];
-}
-
-// ============================================================================
 // 3. bcnorm_bwd -- RMSNorm backward for B (or C)
 // ============================================================================
 //
@@ -1238,8 +1181,8 @@ DEFINE_M3_SPLIT(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_SPLIT(f16,  __half,        from_f_f16)
 
 // ------- bcnorm_fwd_bc fused (B + C in one launch) -------
-// Same per-(sample, group) RMSNorm as bcnorm_fwd, but processes B and C
-// concurrently via gridDim.y ∈ {0, 1}. Saves a kernel launch per layer
+// Per-(sample, group) RMSNorm of B and C in one launch: gridDim.y picks
+// the operand. One kernel launch per layer instead of two
 // per step (~3-5 µs each on Ada). Identical math to two sequential bcnorm
 // calls; tested via finite-diff parity with the unfused path.
 #define DEFINE_BCNORM_FWD_BC(SUFFIX, T_ACT, FROM_F)                            \

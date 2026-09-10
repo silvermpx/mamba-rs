@@ -575,41 +575,30 @@ impl Mamba3Prefill {
                 unsafe { b.launch(cfg) }
                     .map_err(|e| format!("prefill bcnorm typed L{l}: {e:?}"))?;
             } else {
-                for (out, rms, raw, w, tag) in [
-                    (
-                        &mut tgt.b_normed,
-                        &mut tgt.b_rms,
-                        &tgt.b_raw,
-                        lw.b_norm_weight,
-                        "B",
-                    ),
-                    (
-                        &mut tgt.c_normed,
-                        &mut tgt.c_rms,
-                        &tgt.c_raw,
-                        lw.c_norm_weight,
-                        "C",
-                    ),
-                ] {
-                    let n_i = bt as i32;
-                    let cfg = cudarc::driver::LaunchConfig {
-                        grid_dim: ((bt * ng) as u32, 1, 1),
-                        block_dim: (ds as u32, 1, 1),
-                        shared_mem_bytes: ds as u32 * 4,
-                    };
-                    let eps: f32 = dims.rms_norm_eps;
-                    let mut b = ctx.stream.launch_builder(&m3k.bcnorm_fwd);
-                    b.arg(out.inner_mut());
-                    b.arg(rms.inner_mut());
-                    b.arg(raw.inner());
-                    b.arg(&w);
-                    b.arg(&n_i);
-                    b.arg(&ng_i);
-                    b.arg(&ds_i);
-                    b.arg(&eps);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill bcnorm {tag} L{l}: {e:?}"))?;
-                }
+                // BCNorm of B and C in one launch (grid y picks the operand).
+                let n_i = bt as i32;
+                let cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: ((bt * ng) as u32, 2, 1),
+                    block_dim: (ds as u32, 1, 1),
+                    shared_mem_bytes: ds as u32 * 4,
+                };
+                let eps: f32 = dims.rms_norm_eps;
+                let bnw = lw.b_norm_weight;
+                let cnw = lw.c_norm_weight;
+                let mut b = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
+                b.arg(tgt.b_normed.inner_mut());
+                b.arg(tgt.c_normed.inner_mut());
+                b.arg(tgt.b_rms.inner_mut());
+                b.arg(tgt.c_rms.inner_mut());
+                b.arg(tgt.b_raw.inner());
+                b.arg(tgt.c_raw.inner());
+                b.arg(&bnw);
+                b.arg(&cnw);
+                b.arg(&n_i);
+                b.arg(&ng_i);
+                b.arg(&ds_i);
+                b.arg(&eps);
+                unsafe { b.launch(cfg) }.map_err(|e| format!("prefill bcnorm B+C L{l}: {e:?}"))?;
             }
             // RoPE angle accumulation continues from the persistent
             // accumulator (zeroed above for a stateless window).

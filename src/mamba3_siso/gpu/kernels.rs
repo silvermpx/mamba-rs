@@ -35,7 +35,6 @@ pub struct Mamba3Kernels {
     // ── Shared ops (mamba3_ops.cu) ──
     pub m3_split: CudaFunction,
     pub m3_split_bwd: CudaFunction,
-    pub bcnorm_fwd: CudaFunction,
     pub bcnorm_bwd: CudaFunction,
     pub bc_bias_add: CudaFunction,
     pub bc_bias_add_bwd: CudaFunction,
@@ -439,7 +438,6 @@ impl Mamba3Kernels {
             // Shared ops
             m3_split: get("m3_split")?,
             m3_split_bwd: get("m3_split_bwd")?,
-            bcnorm_fwd: get("bcnorm_fwd")?,
             bcnorm_bwd: get("bcnorm_bwd")?,
             bc_bias_add: get("bc_bias_add")?,
             bc_bias_add_bwd: get("bc_bias_add_bwd")?,

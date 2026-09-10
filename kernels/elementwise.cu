@@ -67,15 +67,41 @@ extern "C" __global__ void bias_broadcast(
     y[idx] = bias[j];
 }
 
+// Column sum over the rows, one thread per column. The adds stay one
+// serial chain in ascending row order (the sum's bits depend on it); the
+// loads are issued eight at a time so the chain no longer waits on each
+// load in turn. On the narrow columns (a few dozen threads walking ten
+// thousand rows) that wait was the whole kernel.
 extern "C" __global__ void colsum_accumulate(
     float* db, const float* dy,
     int batch, int n_out
 ) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n_out) return;
+    const float* col = dy + j;
+    long long stride = n_out;
     float sum = 0.0f;
-    for (int b = 0; b < batch; b++) {
-        sum += dy[b * n_out + j];
+    int b = 0;
+    for (; b + 8 <= batch; b += 8) {
+        float s0 = col[(long long)(b + 0) * stride];
+        float s1 = col[(long long)(b + 1) * stride];
+        float s2 = col[(long long)(b + 2) * stride];
+        float s3 = col[(long long)(b + 3) * stride];
+        float s4 = col[(long long)(b + 4) * stride];
+        float s5 = col[(long long)(b + 5) * stride];
+        float s6 = col[(long long)(b + 6) * stride];
+        float s7 = col[(long long)(b + 7) * stride];
+        sum += s0;
+        sum += s1;
+        sum += s2;
+        sum += s3;
+        sum += s4;
+        sum += s5;
+        sum += s6;
+        sum += s7;
+    }
+    for (; b < batch; b++) {
+        sum += col[(long long)b * stride];
     }
     db[j] += sum;
 }
@@ -96,10 +122,31 @@ extern "C" __global__ void colsum_segments(
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int s = blockIdx.y;
     if (j >= n_out || s >= segments) return;
-    const float* base = src + (size_t)s * (size_t)seg_len * (size_t)n_out;
+    const float* base = src + (size_t)s * (size_t)seg_len * (size_t)n_out + j;
+    size_t stride = (size_t)n_out;
     float sum = 0.0f;
-    for (int t = 0; t < seg_len; t++) {
-        sum += base[(size_t)t * (size_t)n_out + j];
+    /* Same ascending serial chain as colsum_accumulate, loads eight deep. */
+    int t = 0;
+    for (; t + 8 <= seg_len; t += 8) {
+        float s0 = base[(size_t)(t + 0) * stride];
+        float s1 = base[(size_t)(t + 1) * stride];
+        float s2 = base[(size_t)(t + 2) * stride];
+        float s3 = base[(size_t)(t + 3) * stride];
+        float s4 = base[(size_t)(t + 4) * stride];
+        float s5 = base[(size_t)(t + 5) * stride];
+        float s6 = base[(size_t)(t + 6) * stride];
+        float s7 = base[(size_t)(t + 7) * stride];
+        sum += s0;
+        sum += s1;
+        sum += s2;
+        sum += s3;
+        sum += s4;
+        sum += s5;
+        sum += s6;
+        sum += s7;
+    }
+    for (; t < seg_len; t++) {
+        sum += base[(size_t)t * stride];
     }
     out[(size_t)s * (size_t)n_out + j] = sum;
 }

@@ -401,51 +401,34 @@ pub fn gpu_forward_mamba3_layer(
         unsafe { builder.launch(grid_1d(bt * ip)) }.map_err(|e| format!("m3_split F3: {:?}", e))?;
     }
 
-    // F4a: BCNorm B
+    // F4a/b: BCNorm of B and C in one launch (grid y picks the operand),
+    // the same per-row arithmetic the two separate launches ran.
     {
         let bn_ptr = lw.b_norm_weight.raw_ptr(&ctx.stream);
-        let n_i = bt as i32;
-        let ng_i = ng as i32;
-        let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * ng) as u32, 1, 1),
-            block_dim: (ds as u32, 1, 1),
-            shared_mem_bytes: ds as u32 * 4,
-        };
-        let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd);
-        builder.arg(acts.b_normed.inner_mut());
-        builder.arg(acts.b_rms.inner_mut());
-        builder.arg(acts.b_raw.inner());
-        builder.arg(&bn_ptr);
-        builder.arg(&n_i);
-        builder.arg(&ng_i);
-        builder.arg(&ds_i);
-        let eps_g5: f32 = dims.rms_norm_eps;
-        builder.arg(&eps_g5);
-        unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd B F4a: {:?}", e))?;
-    }
-    // F4b: BCNorm C
-    {
         let cn_ptr = lw.c_norm_weight.raw_ptr(&ctx.stream);
         let n_i = bt as i32;
         let ng_i = ng as i32;
         let ds_i = ds as i32;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * ng) as u32, 1, 1),
+            grid_dim: ((bt * ng) as u32, 2, 1),
             block_dim: (ds as u32, 1, 1),
             shared_mem_bytes: ds as u32 * 4,
         };
-        let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd);
+        let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
+        builder.arg(acts.b_normed.inner_mut());
         builder.arg(acts.c_normed.inner_mut());
+        builder.arg(acts.b_rms.inner_mut());
         builder.arg(acts.c_rms.inner_mut());
+        builder.arg(acts.b_raw.inner());
         builder.arg(acts.c_raw.inner());
+        builder.arg(&bn_ptr);
         builder.arg(&cn_ptr);
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
         let eps_g5: f32 = dims.rms_norm_eps;
         builder.arg(&eps_g5);
-        unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd C F4b: {:?}", e))?;
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd B+C F4: {:?}", e))?;
     }
     // F5: angle accumulation (chunk-parallel; see gpu_angle_chunked_fwd)
     if na > 0 {
@@ -1037,39 +1020,22 @@ pub fn gpu_forward_mamba3_target_burnin(
                 .map_err(|e| format!("m3_split tgt L{l}: {:?}", e))?;
         }
         {
+            // BCNorm of B and C in one launch (grid y picks the operand).
             let bn_ptr = lw.b_norm_weight.raw_ptr(&ctx.stream);
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((bt * ng) as u32, 1, 1),
-                block_dim: (ds as u32, 1, 1),
-                shared_mem_bytes: ds as u32 * 4,
-            };
-            let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd);
-            builder.arg(tgt.b_normed.inner_mut());
-            builder.arg(tgt.b_rms.inner_mut());
-            builder.arg(tgt.b_raw.inner());
-            builder.arg(&bn_ptr);
-            let n_i = bt as i32;
-            let ng_i = ng as i32;
-            let ds_i = ds as i32;
-            builder.arg(&n_i);
-            builder.arg(&ng_i);
-            builder.arg(&ds_i);
-            let eps_g5: f32 = dims.rms_norm_eps;
-            builder.arg(&eps_g5);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("bcnorm_fwd B tgt L{l}: {:?}", e))?;
-        }
-        {
             let cn_ptr = lw.c_norm_weight.raw_ptr(&ctx.stream);
             let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((bt * ng) as u32, 1, 1),
+                grid_dim: ((bt * ng) as u32, 2, 1),
                 block_dim: (ds as u32, 1, 1),
                 shared_mem_bytes: ds as u32 * 4,
             };
-            let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd);
+            let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
+            builder.arg(tgt.b_normed.inner_mut());
             builder.arg(tgt.c_normed.inner_mut());
+            builder.arg(tgt.b_rms.inner_mut());
             builder.arg(tgt.c_rms.inner_mut());
+            builder.arg(tgt.b_raw.inner());
             builder.arg(tgt.c_raw.inner());
+            builder.arg(&bn_ptr);
             builder.arg(&cn_ptr);
             let n_i = bt as i32;
             let ng_i = ng as i32;
@@ -1080,7 +1046,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             let eps_g5: f32 = dims.rms_norm_eps;
             builder.arg(&eps_g5);
             unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("bcnorm_fwd C tgt L{l}: {:?}", e))?;
+                .map_err(|e| format!("bcnorm_fwd B+C tgt L{l}: {:?}", e))?;
         }
         {
             let bb_ptr = lw.b_bias.raw_ptr(&ctx.stream);
