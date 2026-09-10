@@ -425,16 +425,6 @@ extern "C" __global__ void gather_bc_cols_tmajor_tiled(
     }
 }
 
-extern "C" __global__ void softplus_copy(
-    float* dst, const float* src, int n
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    float x = src[i];
-    // Numerically stable softplus using exp2f (matches softplus_forward in activations.cu)
-    dst[i] = (x > 20.0f) ? x : log1pf(exp2f(x * 1.4426950408889634f));
-}
-
 // ===========================================================================
 // Templated variants for activation-touching kernels.
 // Suffix _f32/_bf16/_f16 — Rust dispatch selects by ctx.activation_dtype.
@@ -712,28 +702,6 @@ extern "C" __global__ void elementwise_mul_v_##SUFFIX(                        \
 DEFINE_ELEMENTWISE_MUL_V(f32,  float,         from_f_f32)
 DEFINE_ELEMENTWISE_MUL_V(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_ELEMENTWISE_MUL_V(f16,  __half,        from_f_f16)
-
-#define DEFINE_SOFTPLUS_COPY_V(SUFFIX, T, FROM_F)                             \
-extern "C" __global__ void softplus_copy_v_##SUFFIX(                          \
-    T* __restrict__ dst, const T* __restrict__ src, int n_vec                 \
-) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n_vec) return;                                                   \
-    const int NPV = 16 / (int)sizeof(T);                                      \
-    uint4 sv = reinterpret_cast<const uint4*>(src)[i];                        \
-    uint4 ov;                                                                 \
-    const T* sp = reinterpret_cast<const T*>(&sv);                            \
-    T* op = reinterpret_cast<T*>(&ov);                                        \
-    for (int k = 0; k < NPV; k++) {                                           \
-        float x = to_f(sp[k]);                                                \
-        op[k] = FROM_F((x > 20.0f) ? x : log1pf(exp2f(x * LOG2E)));           \
-    }                                                                         \
-    reinterpret_cast<uint4*>(dst)[i] = ov;                                    \
-}
-
-DEFINE_SOFTPLUS_COPY_V(f32,  float,         from_f_f32)
-DEFINE_SOFTPLUS_COPY_V(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SOFTPLUS_COPY_V(f16,  __half,        from_f_f16)
 
 #define DEFINE_SOFTPLUS_COPY(SUFFIX, T, FROM_F)                               \
 extern "C" __global__ void softplus_copy_##SUFFIX(                            \

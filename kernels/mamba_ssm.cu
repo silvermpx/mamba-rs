@@ -82,22 +82,25 @@ extern "C" __global__ void ssm_step_forward(
     y[idx] = y_d;
 }
 
-// SSM step with fused B/C gather + final gating multiplication. Replaces
-// the (gather_bc + ssm_step + elementwise_mul gate_silu) triplet with a
-// single kernel — saves 2 launches per layer per step. Output y already
-// includes the y *= gate_silu post-multiplication.
+// The decode SSM step with its neighbours folded in: softplus on the
+// dt_proj output, B and C read straight from xdbl, and the gate read from
+// the in_proj output with the SiLU recomputed. One launch replaces the
+// softplus, gather, step and gating kernels. Every folded value is
+// spelled as the kernel it replaces spelled it, including the rounding
+// each deleted store applied (the to_f(FROM_F(..)) round trips), so the
+// outputs keep their bits; for f32 those round trips are identities.
 //
-// gate_silu must have the same [batch * d_inner] shape and T_ACT dtype.
-// Math: same as ssm_step_forward_gather followed by y *= gate_silu in
-// elementwise_mul_typed.
-#define DEFINE_SSM_STEP_FWD_GATHER_GATE(SUFFIX, T, FROM_F)                 \
-extern "C" __global__ void ssm_step_forward_gather_gate_##SUFFIX(           \
+// proj_gate points at the in_proj output [batch, gate_stride]; the gate of
+// channel d sits at column d_inner + d.
+#define DEFINE_SSM_STEP_FWD_FUSED(SUFFIX, T, FROM_F)                       \
+extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float* h,                                                              \
     T* y,                                                                  \
-    const T* delta,                                                        \
+    const T* delta_raw,                                                    \
     const T* u,                                                            \
     const T* xdbl,                                                         \
-    const T* gate_silu,                                                    \
+    const T* proj_gate,                                                    \
+    int gate_stride,                                                       \
     const float* a_neg,                                                    \
     const float* D,                                                        \
     int batch, int d_inner, int d_state,                                   \
@@ -110,14 +113,17 @@ extern "C" __global__ void ssm_step_forward_gather_gate_##SUFFIX(           \
     int d = idx % d_inner;                                                 \
     int h_base = (b * d_inner + d) * d_state;                              \
     int xdbl_base = b * xdbl_stride;                                       \
-    float h_local[MAMBA_RS_STATE_CAP];                                                     \
-    float a_local[MAMBA_RS_STATE_CAP];                                                     \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
+    float h_local[MAMBA_RS_STATE_CAP];                                     \
+    float a_local[MAMBA_RS_STATE_CAP];                                     \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                              \
     for (int n = 0; n < d_state; n++) {                                    \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
     }                                                                      \
-    float delta_d = to_f(delta[idx]);                                      \
+    /* Softplus as the standalone kernel spelled it, then its store. */    \
+    float raw = to_f(delta_raw[idx]);                                      \
+    float sp = (raw > 20.0f) ? raw : log1pf(exp2f(raw * LOG2E));           \
+    float delta_d = to_f(FROM_F(sp));                                      \
     float u_d = to_f(u[idx]);                                              \
     float delta_u_d = delta_d * u_d;                                       \
     float y_d = D[d] * u_d;                                                \
@@ -130,14 +136,15 @@ extern "C" __global__ void ssm_step_forward_gather_gate_##SUFFIX(           \
     }                                                                      \
     for (int n = 0; n < d_state; n++)                                      \
         h[h_base + n] = h_local[n];                                        \
-    /* Fused gating: y *= gate_silu */                                     \
-    float gated = y_d * to_f(gate_silu[idx]);                              \
-    y[idx] = FROM_F(gated);                                                \
+    /* The gate's SiLU as the split kernel spelled it, then its store. */  \
+    float g = to_f(proj_gate[b * gate_stride + d_inner + d]);              \
+    float gp = to_f(FROM_F(g / (1.0f + exp2f(-g * LOG2E))));               \
+    y[idx] = FROM_F(y_d * gp);                                             \
 }
 
-DEFINE_SSM_STEP_FWD_GATHER_GATE(f32,  float,         from_f_f32)
-DEFINE_SSM_STEP_FWD_GATHER_GATE(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_STEP_FWD_GATHER_GATE(f16,  __half,        from_f_f16)
+DEFINE_SSM_STEP_FWD_FUSED(f32,  float,         from_f_f32)
+DEFINE_SSM_STEP_FWD_FUSED(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_STEP_FWD_FUSED(f16,  __half,        from_f_f16)
 
 // SSM burn-in forward (T>1): iterate T steps for each (batch, d_inner) thread.
 // Saves h_saved[B*(T+1)*d_inner*d_state] for backward BPTT and

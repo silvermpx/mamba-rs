@@ -33,7 +33,10 @@
 extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     T* __restrict__ out,                                                   \
     float* __restrict__ state,                                             \
+    /* Row stride of new_x: d_inner for a packed input, 2 * d_inner when   \
+       the kernel reads the x half of the in_proj output directly. */      \
     const T* __restrict__ new_x,                                           \
+    int x_stride,                                                          \
     const float* __restrict__ weight,                                      \
     const float* __restrict__ bias,                                        \
     int batch, int d_inner, int d_conv                                     \
@@ -43,13 +46,14 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     if (idx >= total) return;                                              \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
+    int x_idx = b * x_stride + d;                                          \
     int state_base = (b * d_inner + d) * d_conv;                           \
     /* Registerized d_conv == 4 fast path - see the note above. */          \
     if (d_conv == 4) {                                                     \
         float s0 = state[state_base + 1];                                  \
         float s1 = state[state_base + 2];                                  \
         float s2 = state[state_base + 3];                                  \
-        float s3 = to_f(new_x[idx]);                                       \
+        float s3 = to_f(new_x[x_idx]);                                     \
         state[state_base] = s0;                                            \
         state[state_base + 1] = s1;                                        \
         state[state_base + 2] = s2;                                        \
@@ -66,7 +70,7 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     for (int k = 0; k < d_conv - 1; k++) {                                 \
         state[state_base + k] = state[state_base + k + 1];                 \
     }                                                                      \
-    state[state_base + d_conv - 1] = to_f(new_x[idx]);                     \
+    state[state_base + d_conv - 1] = to_f(new_x[x_idx]);                   \
     float sum = bias[d];                                                   \
     for (int k = 0; k < d_conv; k++) {                                     \
         sum += state[state_base + k] * weight[d * d_conv + k];             \

@@ -156,6 +156,76 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
 DEFINE_RMSNORM_FWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_FWD_F32IN(f16,  __half,        from_f_f16)
 
+// The residual add of one layer fused into the next layer's RMSNorm: the
+// f32 residual takes the branch output (typed) in place, and the norm reads
+// the sum from the same registers. The stored sum is `resid + to_f(branch)`
+// in that order, exactly what the standalone residual add wrote, and an
+// f32 held in a register carries the bits a global round trip would return,
+// so the normalized output is the one the two-kernel chain produced. The
+// squared-sum expression is spelled as in the plain kernel so it contracts
+// the same way. `y` may alias `branch`: every thread reads its branch
+// elements before the block's reduction barrier and writes `y` after it.
+#define DEFINE_RMSNORM_FWD_RESADD_F32IN(SUFFIX, T_OUT, FROM_F)               \
+extern "C" __global__ void rmsnorm_forward_resadd_f32in_##SUFFIX(            \
+    T_OUT* y, float* rms_out,                                                \
+    float* resid, const T_OUT* branch, const float* scale,                   \
+    int batch, int dim, float eps                                            \
+) {                                                                          \
+    int b = blockIdx.x;                                                      \
+    if (b >= batch) return;                                                  \
+    int d = threadIdx.x;                                                     \
+    extern __shared__ float sdata[];                                         \
+    int off = b * dim;                                                       \
+    float xh[RMSN_HOLD];                                                     \
+    float sum = 0.0f;                                                        \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        float v = 0.0f;                                                      \
+        if (i < dim) {                                                       \
+            v = resid[off + i] + to_f(branch[off + i]);                      \
+            resid[off + i] = v;                                              \
+        }                                                                    \
+        xh[k] = v;                                                           \
+        sum += xh[k] * xh[k];                                                \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        float v = resid[off + i] + to_f(branch[off + i]);                    \
+        resid[off + i] = v;                                                  \
+        sum += v * v;                                                        \
+    }                                                                        \
+    sdata[d] = sum;                                                          \
+    __syncthreads();                                                         \
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {                 \
+        if (d < s) sdata[d] += sdata[d + s];                                 \
+        __syncthreads();                                                     \
+    }                                                                        \
+    if (d < 32) {                                                            \
+        float v = sdata[d];                                                  \
+        if (d + 32 < blockDim.x) v += sdata[d + 32];                         \
+        v = warp_reduce_sum(v);                                              \
+        if (d == 0) sdata[0] = v;                                            \
+    }                                                                        \
+    __syncthreads();                                                         \
+    float rms = sqrtf(sdata[0] / (float)dim + eps);                          \
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                          \
+    if (d == 0) rms_out[b] = rms;                                            \
+    __syncthreads();                                                         \
+    float inv_rms = 1.0f / rms;                                              \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        if (i < dim) y[off + i] = FROM_F(xh[k] * inv_rms * scale[i]);        \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        y[off + i] = FROM_F(resid[off + i] * inv_rms * scale[i]);            \
+    }                                                                        \
+}
+
+DEFINE_RMSNORM_FWD_RESADD_F32IN(f32,  float,         from_f_f32)
+DEFINE_RMSNORM_FWD_RESADD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_FWD_RESADD_F32IN(f16,  __half,        from_f_f16)
+
 // Rule B (no atomicAdd): per-sample per-dim write to `d_scale_partials[b*dim + i]`.
 // Caller MUST follow with `reduce_sum_axis0(d_scale, partials, batch, dim, accumulate=1)`
 // to finalize the gradient deterministically.

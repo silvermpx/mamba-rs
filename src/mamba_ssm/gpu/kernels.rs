@@ -204,8 +204,6 @@ pub struct MambaKernels {
     pub gating_backward: CudaFunction,
     /// Residual add: `out[i] += residual[i]`.
     pub residual_add: CudaFunction,
-    /// Copy with softplus: `out[i] = ln(1 + exp(in[i]))`.
-    pub softplus_copy: CudaFunction,
     /// Gather the last timestep from `[B*T*D]` into `[B*D]`.
     pub gather_last_timestep: CudaFunction,
 
@@ -258,6 +256,10 @@ pub struct MambaKernels {
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub softplus_fwd_typed: TypedKernel,
+    /// RMSNorm that first adds a typed branch output into the f32 residual
+    /// in place: the previous layer's residual add and this layer's norm in
+    /// one launch on the decode routes. The f32 entry takes an f32 branch.
+    pub rmsnorm_fwd_resadd_typed: TypedKernel,
     pub bias_broadcast_typed: TypedKernel,
     pub elementwise_mul_typed: TypedKernel,
     pub residual_add_typed: TypedKernel,
@@ -278,11 +280,10 @@ pub struct MambaKernels {
     /// pointer allow it.
     pub gate_mul_silu_v_typed: TypedKernel,
     pub elementwise_mul_v_typed: TypedKernel,
-    pub softplus_copy_v_typed: TypedKernel,
     pub softplus_copy_typed: TypedKernel,
-    /// SSM step that reads B and C straight from xdbl and multiplies the
-    /// gate into y before the store: the decode routes' only step kernel.
-    pub ssm_step_fwd_gather_gate_typed: TypedKernel,
+    /// The decode SSM step with softplus, the B/C gather and the gating
+    /// folded in: the decode routes' only step kernel.
+    pub ssm_step_fwd_fused_typed: TypedKernel,
     /// Conv1d step with the SiLU fused into its store: the decode routes'
     /// only conv step kernel, one launch per layer.
     pub conv1d_step_fwd_silu_typed: TypedKernel,
@@ -1284,7 +1285,6 @@ impl MambaKernels {
             gate_mul_silu: get("gate_mul_silu")?,
             gating_backward: get("gating_backward")?,
             residual_add: get("residual_add")?,
-            softplus_copy: get("softplus_copy")?,
             gather_last_timestep: get("gather_last_timestep")?,
 
             // mixed precision casts
@@ -1470,6 +1470,7 @@ impl MambaKernels {
 
             // typed inference kernels
             softplus_fwd_typed: load_typed("softplus_forward")?,
+            rmsnorm_fwd_resadd_typed: load_typed("rmsnorm_forward_resadd_f32in")?,
             bias_broadcast_typed: load_typed("bias_broadcast")?,
             elementwise_mul_typed: load_typed("elementwise_mul")?,
             residual_add_typed: load_typed("residual_add")?,
@@ -1482,9 +1483,8 @@ impl MambaKernels {
             gate_mul_silu_typed: load_typed("gate_mul_silu")?,
             gate_mul_silu_v_typed: load_typed("gate_mul_silu_v")?,
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
-            softplus_copy_v_typed: load_typed("softplus_copy_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
-            ssm_step_fwd_gather_gate_typed: load_typed("ssm_step_forward_gather_gate")?,
+            ssm_step_fwd_fused_typed: load_typed("ssm_step_forward_fused")?,
             conv1d_step_fwd_silu_typed: load_typed("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
