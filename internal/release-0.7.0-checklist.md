@@ -181,6 +181,13 @@ Select their actual supported cases and prerequisites before executing them.
   does not prove model-wide dispatch. Preserve mixed half-input/F32-output
   precision rather than adding a silent half-output round-trip.
   Source map: `internal/release-mode-surface-audit-20260910.md`.
+  Context foundation committed as0dcfe167: canonical GemmMode, deterministic
+  constructor default, fallible capture-aware transitions, env resolution,
+  actual vendor compute mapping and IDE Rustdoc. Ada focused tests/real handle
+  checks, capture rejection, host identity, Rustdoc/doctests and84 non-CUDA
+  tests pass; independent Task901 spec/quality review approved. High-level constructors and
+  direct model dispatch seams still block completion of this release item.
+  Evidence: `internal/perf/gemm-mode-api-20260910/report.md`.
 - [ ] Document the public API in Rustdoc alongside implementation, not only
   in README: IDE hover/completion must explain each mode, defaults, arguments,
   return values, errors, numeric/determinism scope and graph restrictions.
@@ -189,6 +196,10 @@ Select their actual supported cases and prerequisites before executing them.
   as part of API work on 2026-09-10.
   Use plain, concise technical language: what the API does and how to use it.
   No marketing, filler, "magic" or AI-style boilerplate.
+  Pre-API Rustdoc baseline on Ada/CUDA13.2 succeeds with broken links denied
+  (2.26s), but has one existing public-to-private link warning at
+  gemm_bi_triad/contract.rs:2834 (`tf32_route_specs_for`). Fix that reference in
+  the documentation phase. Receipt: `internal/perf/gemm-mode-api-20260910/doc-baseline/`.
 - [ ] Review the two old Codex-owned Split8 WIP files; deliberately retain,
   redesign or retire them rather than staging them as performance evidence.
 - [ ] Keep useful regression and reproducible qualification tests. Archive
@@ -206,6 +217,12 @@ Select their actual supported cases and prerequisites before executing them.
   deltas in the changelog; do not multiply unrelated discovery ratios.
 - [ ] Refresh README, docs, API docstrings, examples and benchmark tables;
   remove obsolete comparisons, unsupported claims and filler.
+  Plain-language audit anchors: Cargo.toml package description still promises
+  an opt-in tier that beats cuBLAS; README:422 labels vendor F32 inherently
+  nondeterministic; device.rs:231 promises approximately8x; blas.rs:3380
+  retains an obsolete throughput/dispatch narrative. Replace these with the
+  implemented contracts and explicitly scoped current measurements. Line
+  numbers are audit-time anchors, not frozen references.
   In particular replace stale SM120 half18-cell descriptions (current source
   has60 tiled/12 stream-K entries), do not extend CC12.0 evidence toCC12.1,
   and distinguish measured overrides from guarded SM90a/SM100 heuristics.

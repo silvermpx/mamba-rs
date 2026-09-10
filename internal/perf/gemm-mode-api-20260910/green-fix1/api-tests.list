@@ -1,0 +1,8 @@
+gemm_mode_names_and_default: test
+gpu_context_constructors_use_explicit_modes_and_deterministic_defaults: test
+gpu_context_supports_all_nine_canonical_mode_transitions: test
+gpu_module_reexports_the_canonical_gemm_mode: test
+legacy_mode_adapters_preserve_the_documented_call_order: test
+vendor_mode_round_trip_preserves_custom_deterministic_policy: test
+
+6 tests, 0 benchmarks

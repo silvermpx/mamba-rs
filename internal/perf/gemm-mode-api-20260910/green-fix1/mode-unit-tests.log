@@ -1,0 +1,15 @@
+
+running 10 tests
+test mamba_ssm::gpu::context::tests::gemm_mode_environment_rejects_conflicts_and_vendor_custom_controls ... ok
+test mamba_ssm::gpu::context::tests::gemm_mode_environment_rejects_non_unicode_canonical_value ... ok
+test mamba_ssm::gpu::context::tests::gemm_mode_environment_resolves_canonical_and_legacy_tables ... ok
+test mamba_ssm::gpu::gemm_mode::tests::failed_math_update_restores_a_changed_handle ... ok
+test mamba_ssm::gpu::gemm_mode::tests::failed_math_update_with_unchanged_handle_is_recoverable ... ok
+test mamba_ssm::gpu::gemm_mode::tests::legacy_adapter_table_is_complete ... ok
+test mamba_ssm::gpu::gemm_mode::tests::math_transition_publishes_only_after_successful_update ... ok
+test mamba_ssm::gpu::gemm_mode::tests::math_transition_stops_on_initial_query_failure ... ok
+test mamba_ssm::gpu::gemm_mode::tests::unverified_math_rollback_marks_the_transition_unusable ... ok
+test mamba_ssm::gpu::gemm_mode::tests::vendor_compute_mapping_is_literal_for_all_modes ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.00s
+

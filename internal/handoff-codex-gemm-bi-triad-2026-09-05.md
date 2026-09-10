@@ -2842,3 +2842,199 @@ branches, push, merge, publish or delete evidence. No allow(dead_code) or new
 blanket warning suppression. Subsequent phases cover high-level mode
 constructors, direct model GEMM bypasses (including true F32 mixed logits), M3
 physical graph manifests, benchmark migration, full documentation and packaging.
+
+## Task 902: Context-routed borrowed F32 GEMMs (2026-09-10)
+
+Execute after Task901 review. Design/source map:
+`internal/deterministic-routing-closure-design-20260910.md`, section1.
+This closes the raw-pointer F32 NN/NT and M3 projection dispatch seams without
+changing any CUDA bytes. Typed tied-head F32-output composition and complete
+Inference/M3 graph inventory are the following separate tasks.
+
+Files: `src/mamba_ssm/gpu/gemm_bi_triad/launch.rs`, its `mod.rs` exports,
+`src/mamba_ssm/gpu/blas.rs`, `src/mamba3_siso/gpu/inference.rs`,
+`src/module/gpu_lm3.rs`; regression target `tests/gemm_context_routing.rs` and
+focused colocated tests where a private real operation must be exercised.
+Consume `GpuCtx::ensure_gemm_usable(&self) -> Result<(), String>`, GemmMode
+and Task901's central context-aware vendor compute mapping.
+
+Produce these crate-private borrowed-pointer seams (`CUptr` is CUdeviceptr):
+
+```rust
+pub(crate) unsafe fn launch_cached_f32_forward_ptrs(
+    ctx: &GpuCtx, y: CUptr, x: CUptr, w: CUptr, bias: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String>;
+pub(crate) unsafe fn launch_cached_f32_backward_dx_ptrs(
+    ctx: &GpuCtx, dx: CUptr, dy: CUptr, w: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String>;
+pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
+    ctx: &GpuCtx, y: CUptr, x: CUptr, w: CUptr, bias: Option<CUptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String>;
+```
+
+- [ ] Tests first. Hold real GpuBuffer owners. In a Deterministic/Triad context,
+  allocate X[3,37], W[37,96] and Y[3,96], call the existing public
+  `gpu_gemm_bi_forward_ptr` inside `record_eager_gemm_trace`, then assert the
+  call succeeds and `!trace.routes().is_empty()`. Repeat for the existing tied
+  F32 wrapper with embedding[96,37], raw output pointer, dims B=3,D=37,Vpad=96;
+  require NT routes and strides (37,37,96). Before this task the bypass either
+  returns Task901's explicit no-vendor error or records no custom launch; root
+  must observe that RED on Ada before authorizing production changes.
+
+- [ ] Factor the existing scalar/prepared NN and NT bodies down to borrowed
+  pointers. Keep the buffer-taking interfaces as thin adapters. Preserve
+  `ScalarLaunchController`, prepared request/operand checks, exact argument
+  bytes/order, zero-reduction behavior, split/transpose/reduce branches and
+  scratch ownership. Replace buffer argument submission with the equivalent
+  pointer argument in every affected branch, not just one fallback. Do not
+  duplicate the dispatcher, construct fake owning buffers, transmute lifetimes,
+  allocate/copy F32 operands or add an alternate arithmetic implementation.
+  Keep selection-bearing private helpers, including ExactScalar, reusable by
+  the subsequent typed tied-head composition.
+
+- [ ] The central F32 NN pointer seam checks context health and selected mode.
+  Deterministic follows the selected family: Inference calls existing
+  inference_forward with F32 TypedPtrs; Triad calls the raw cached NN core.
+  Vendor modes use the existing SGEMM branch under their configured handle.
+  `gpu_gemm_bi_forward_raw`, `gpu_gemm_bi_forward_ptr`, and all-F32 input/output
+  `gpu_gemm_typed_forward_raw` delegate to this same implementation. Bias
+  remains F32 and is applied exactly once; beta remains zero without bias.
+
+- [ ] Tied F32 heads use cached Triad NT for either deterministic family:
+  Triad dims are `(batch,vocab_padded,d_model)`, not `(batch,d_model,vocab_padded)`.
+  A=hidden[B,D], B=embedding[Vpad,D], C=logits[B,Vpad]; alpha1,beta0,no bias.
+  Preserve the selected automatic F32 numeric policy for F32 inputs. Route the
+  existing Inference-family dX fallback through this cached NT core as well.
+  An Inference NN kernel must never receive an NT operation.
+
+- [ ] Replace all three M3 F32 private no-bias helper calls with context-routed
+  NN. Replace its typed no-bias projections and M3 untied heads with
+  `gpu_gemm_typed_forward_raw(ctx,c,x,w,None,dims)`. Add a narrow crate-visible
+  `GpuMamba3Backbone::ctx()` accessor over the existing F32/mixed engine match.
+  Replace M3 tied `_blas` calls with their context-aware `_raw` wrappers. The
+  half tied wrapper may still return the tracked unsupported-custom error until
+  the following typed-output task; do not keep a hidden vendor path to make it
+  pass. Existing standalone vendor helpers must be documented as vendor-only,
+  and no high-level model path may use them after this task.
+
+- [ ] Cover numerical/layout behavior with asymmetric deterministic integer
+  fixtures and CPU NN/NT sums, plus repeated output bits. Compare borrowed and
+  buffer wrappers under the same family/policy, including an interior input
+  pointer, guarded output subspan where the public signature allows it, NN
+  bias, zero reduction and existing invalid-shape/null rejection. Run both
+  families for output/guard checks. Require nonempty NN route inventory for
+  Triad and NT inventory for both families. Inference NN full route recording
+  is a known later-task dependency: do not fake a route or weaken its later
+  acceptance requirement to satisfy this task's test. Preserve prepared
+  argument/launch identities with the existing focused launch-control tests;
+  update source-boundary test anchors only to match the factored real bodies.
+
+- [ ] Add plain Rustdoc at the changed raw boundaries: row-major dimensions,
+  input/output representations, pointer span/alignment assumptions, aliasing,
+  owner/stream/captured-replay lifetimes and errors. New raw internal seams are
+  unsafe. Do not claim that a safe compatibility wrapper validates arbitrary
+  foreign allocation ownership when it does not; record any remaining public
+  raw-pointer safety migration for the API audit.
+  Rewrite the stale M=1/matvec, M>=2/cuBLAS default overview in the touched
+  typed-forward dispatcher around the actual deterministic/vendor modes
+  (Task901 review minor, `blas.rs` near3448).
+
+- [ ] Root verifies all CUDA/header bytes unchanged, focused Ada raw-wrapper
+  correctness/repeat/guards/route checks and covering prepared-control tests.
+  Compile affected LM modules with CUDA+HF as well as the CUDA-only target;
+  HF-gated M3 call sites must not escape compilation. One focused regression
+  batch, no performance tournament. Freeze source/report, root commit and
+  independent spec/quality review. Root owns GPU/index/commits; sole implementer,
+  no child agents, new branches, push/merge/publish or allow(dead_code).
+
+## Task 903: Deterministic half-input tied heads with true F32 logits (2026-09-10)
+
+Execute after Task902 review. Consume its borrowed NT core and canonical
+context modes. Design: `internal/deterministic-routing-closure-design-20260910.md`,
+section2. No new CUDA kernel or performance tournament: compose existing exact
+input casts and ExactScalar NT, preserving caller-owned F32 output.
+
+Files: `src/mamba_ssm/gpu/blas.rs`,
+`src/mamba_ssm/gpu/gemm_bi_triad/launch.rs` and its exports,
+`src/module/gpu_lm.rs`, `src/module/gpu_lm3.rs`;
+test `tests/gemm_tied_f32_output.rs` plus colocated observer/model tests.
+
+Interfaces (CUptr is CUdeviceptr):
+
+```rust
+fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx, logits: CUptr, temporal: TypedPtr, embed: TypedPtr,
+    dims: TiedLmDims, observer: &mut O,
+) -> Result<(), String>;
+pub(crate) fn presize_tied_lm_head_scratch(
+    ctx: &GpuCtx, dtype: WeightDtype, dims: TiedLmDims,
+) -> Result<(), String>;
+```
+
+- [ ] Tests first: hold real typed input/output owners and call the existing
+  `gpu_gemm_ex_tied_lm_head_raw` in Deterministic mode, B=2,D=1,Vpad=96,
+  once for BF16 and once F16. Inputs are exactly representable:
+
+```rust
+let p = if dtype == WeightDtype::Bf16 { 7 } else { 10 };
+let input = 1.0f32 + 2.0f32.powi(-p);
+let expected_bits = (input * input).to_bits();
+```
+
+  Every F32 output must equal expected_bits. Its low product bit is lost if
+  the output was rounded to half first. Existing custom mode rejects the
+  vendor boundary; root must observe that RED before production edits.
+
+- [ ] Keep the public raw wrapper signature. Check context health first.
+  F32 inputs delegate to Task902's tied F32 wrapper. Vendor modes retain the
+  existing GemmEx body with the canonical context compute type. For matching
+  BF16/F16 inputs in Deterministic, compute checked B*D, Vpad*D and B*Vpad
+  products, validate dimensions/spans, and reserve scratch `(B*D,Vpad*D,0)`.
+  Convert both inputs with `bi_upcast_to_f32`; execute exact scalar F32 NT
+  directly into logits. Triad dims `(B,Vpad,D)`, strides `(D,D,Vpad)`, alpha1,
+  beta0, no bias. Preserve this exact F32-output contract even if the context's
+  ordinary F32 policy permits TF32; do not mutate the global policy to do it.
+
+- [ ] Reuse `record_physical_exact_scalar_f32_backward_dx` by factoring its
+  existing observer/prepared body to borrowed pointers, keeping its owned-buffer
+  wrapper thin. Do not create fake GpuBuffers or a second NT dispatcher.
+  The observed composition records two InputUpcast operations and every real
+  NT sublaunch, binds the caller's F32 output allocation, and has zero
+  OutputDowncast operations. No temporary logits output or converted-weight
+  cache. Untied native half-to-F32 Inference paths remain unchanged.
+
+- [ ] Implement the no-launch scratch-reservation helper with the same checked
+  products and current mode/dtype semantics. It is a no-op for vendor mode or
+  F32 inputs. In both LM `capture_graph` methods, for half EmbedStorage with
+  `lm_head:None`, call it before `backbone.capture_graph()` with existing batch,
+  d_model and vocab_size_padded fields. Do not change generic GpuCtx defaults.
+  The head remains eager outside the backbone graph. Its scratch is shared:
+  reserving before backbone freeze prevents later tied-head scratch growth.
+
+- [ ] Extend the public low-bit regression to irregular D=37, asymmetric
+  inputs, output guards and repeated exact bits under both families. Observer
+  tests call the real observed composition, assert the two upcasts/NT order
+  and no downcast, and include a multi-launch scalar NT fixture. Add a frozen
+  scratch test: reserve, record pointers, freeze, execute same-size head again,
+  check stable pointers; a larger request must fail before any enqueue.
+  Cover zero reduction using existing epilogue semantics without zero-grid
+  cast launches; validate overflow/null/unsupported dtype before execution.
+
+- [ ] Add CUDA+HF colocated tests using small synthetic owned M1/M3 models,
+  half tied embeddings and vocabulary larger than backbone scratch. Reserve
+  through the actual LM capture wrapper, capture after a warm step, run logits
+  again and verify no scratch-growth error and stable addresses. No downloads
+  or public testing API. Complete model no-vendor tripwire and Inference/M3
+  physical inventory remain the following graph task, not claimed here.
+
+- [ ] Write plain Rustdoc covering F32 output, dimensions, pointer lifetimes,
+  exact input conversion and fixed F32 reduction, errors and capture reservation.
+  State extra scratch `(B+Vpad)*D*4` bytes and two input casts; do not claim a
+  new speedup or equality to every half tensor-core route. Root verifies CUDA
+  bytes unchanged, focused Ada bits/observer/scratch tests, CUDA+HF compilation
+  and changed Rustdoc examples. Freeze/report, root commit, independent review.
+  Sole implementer; root owns GPU/index/commits; no children, new branches,
+  publish, evidence deletion, CUDA body changes or allow(dead_code).

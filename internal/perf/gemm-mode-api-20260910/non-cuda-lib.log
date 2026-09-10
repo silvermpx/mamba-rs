@@ -1,0 +1,94 @@
+FLOTILLA-JOB: id=01a08b05-9e9f-7ad2-b55f-b2d2a893c716 worker=ada
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/mamba_rs-dd42b46fc3e05aa1)
+
+running 84 tests
+test dist::bootstrap::tests::barrier_times_out_without_peers ... ok
+test dist::bootstrap::tests::child_env_carries_the_full_contract ... ok
+test dist::bootstrap::tests::env_rank_parses_all_launcher_conventions ... ok
+test dist::bootstrap::tests::file_barrier_two_threads_meet ... ok
+test dist::bootstrap::tests::job_id_validation_rejects_escapes ... ok
+test dist::config::tests::device_grammar ... ok
+test dist::context::tests::reference_mean_validates_like_its_sibling ... ok
+test dist::context::tests::shard_is_the_strided_slice_law ... ok
+test dist::fold::tests::reference_fold_is_ascending_rank_order ... ok
+test dist::fold::tests::remainder_goes_to_lowest_ranks ... ok
+test dist::fold::tests::shards_cover_everything_once_in_rank_order ... ok
+test dist::seed::tests::derivations_are_nonzero_and_domain_separated ... ok
+test dist::seed::tests::same_inputs_same_outputs ... ok
+test dist::watchdog::tests::deadline_errors_when_blocked ... ok
+test dist::watchdog::tests::deadline_returns_result_when_fast ... ok
+test dist::watchdog::tests::disarm_is_immediate_not_poll_paced ... ok
+test dist::watchdog::tests::watchdog_fires_on_deadline_and_reports_through_disarm ... ok
+test dist::watchdog::tests::watchdog_stays_quiet_when_disarmed_in_time ... ok
+test mamba3_siso::config::tests::test_chunked_backward_smem_budget_rejected_loudly ... ok
+test mamba3_siso::config::tests::test_d_state_reference_range ... ok
+test mamba3_siso::config::tests::test_default_config_valid ... ok
+test mamba3_siso::config::tests::test_gated_norm_d_inner_cap_rejected_loudly ... ok
+test mamba3_siso::config::tests::test_invalid_headdim ... ok
+test mamba3_siso::config::tests::test_invalid_rms_norm_eps ... ok
+test mamba3_siso::config::tests::test_invalid_rope_fraction ... ok
+test mamba3_siso::config::tests::test_scan_mode_resolver_pins ... ok
+test mamba3_siso::cpu::backward::tests::test_backward_no_panic ... ok
+test mamba3_siso::cpu::backward::tests::test_gradients_finite ... ok
+test mamba3_siso::cpu::dims::tests::test_dims_bt ... ok
+test mamba3_siso::cpu::dims::tests::test_dims_from_default_config ... ok
+test mamba3_siso::cpu::flat::tests::test_flat_allocation ... ok
+test mamba3_siso::cpu::flat::tests::test_offsets_monotonic ... ok
+test mamba3_siso::cpu::forward::tests::test_forward_no_panic ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_bcnorm_unit_weight ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_deterministic ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_rope_angles_accumulate ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_single_step_nonzero ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_state_carries ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_state_reset_reproduces ... ok
+test mamba3_siso::cpu::inference::tests::test_mamba3_step_batch_matches_sequential ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_backward_deterministic ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_backward_matches_sequential ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_forward_no_panic ... ok
+test mamba3_siso::serialize::tests::test_self_describing_checkpoint_roundtrip ... ok
+test mamba3_siso::serialize::tests::test_serialize_roundtrip ... ok
+test mamba3_siso::state::tests::test_state_reset ... ok
+test mamba3_siso::state::tests::test_state_zeros ... ok
+test mamba3_siso::weights::tests::test_init_deterministic ... ok
+test mamba3_siso::weights::tests::test_init_valid ... ok
+test mamba3_siso::weights::tests::test_zeros_valid ... ok
+test mamba_ssm::cpu::flat::tests::test_backbone_flat_allocation ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_gated_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_post_norm_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_u_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_xdbl_dt_all ... ok
+test mamba_ssm::cpu::flat::tests::test_field_accessor_roundtrip ... ok
+test mamba_ssm::cpu::flat::tests::test_field_offsets_no_overlap ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_backward_bit_identical_across_runs ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_backward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_forward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_target_forward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_thread_scratch_allocation ... ok
+test mamba_ssm::cpu::parallel::tests::test_thread_scratch_reuse ... ok
+test module::sample::tests::test_deterministic_with_seed ... ok
+test module::sample::tests::test_different_seed_different_output ... ok
+test module::sample::tests::test_greedy_argmax ... ok
+test module::sample::tests::test_minp_filters_by_fraction ... ok
+test module::sample::tests::test_repetition_penalty_negative_multiplies ... ok
+test module::sample::tests::test_repetition_penalty_positive_divides ... ok
+test module::sample::tests::test_temperature_scaling ... ok
+test module::sample::tests::test_topk_k1_is_argmax ... ok
+test module::sample::tests::test_topk_k2_excludes_rest ... ok
+test module::sample::tests::test_topp_filters_tail ... ok
+test ops::blas::tests::test_sgemm_backward_gradient ... ok
+test ops::blas::tests::test_sgemm_forward_identity ... ok
+test ops::blas::tests::test_sgemm_forward_with_bias ... ok
+test ops::dims::tests::test_mamba_dims_defaults ... ok
+test ops::dims::tests::test_mamba_dims_from_config ... ok
+test ops::fast_math::tests::test_fast_exp_edge_cases ... ok
+test ops::fast_math::tests::test_fast_exp_inplace_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_scalar_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_ssm_range ... ok
+test ops::norms::tests::test_bcnorm_per_group ... ok
+test ops::norms::tests::test_rms_norm_weighted_unit_weight ... ok
+
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+FLOTILLA-OK: exit=0 worker=ada tree=f468976f wall=3.8s
+flotilla: cargo ran on ada (linux) - no pin matches this command and no `platform` key - any platform, the fleet default

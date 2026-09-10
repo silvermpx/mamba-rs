@@ -1,0 +1,11 @@
+
+running 6 tests
+test gemm_mode_names_and_default ... ok
+test gpu_context_constructors_use_explicit_modes_and_deterministic_defaults ... ok
+test gpu_context_supports_all_nine_canonical_mode_transitions ... ok
+test gpu_module_reexports_the_canonical_gemm_mode ... ok
+test legacy_mode_adapters_preserve_the_documented_call_order ... ok
+test vendor_mode_round_trip_preserves_custom_deterministic_policy ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.70s
+

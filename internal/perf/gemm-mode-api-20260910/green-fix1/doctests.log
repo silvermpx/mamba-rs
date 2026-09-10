@@ -1,0 +1,30 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+   Doc-tests mamba_rs
+
+running 9 tests
+test src/mamba_ssm/gpu/adamw.rs - mamba_ssm::gpu::adamw (line 16) ... ignored
+test src/mamba_ssm/gpu/context.rs - mamba_ssm::gpu::context::GpuCtx::new (line 625) - compile ... ok
+test src/mamba_ssm/gpu/context.rs - mamba_ssm::gpu::context::GpuCtx::new_with_mode (line 645) - compile ... ok
+test src/mamba_ssm/gpu/context.rs - mamba_ssm::gpu::context::GpuCtx::set_gemm_mode (line 1077) - compile ... ok
+test src/mamba_ssm/gpu/inference.rs - mamba_ssm::gpu::inference::BackboneEngine (line 1656) - compile ... ok
+test src/mamba_ssm/gpu/loss_scaler.rs - mamba_ssm::gpu::loss_scaler (line 29) ... ignored
+test src/mamba_ssm/gpu/trainer.rs - mamba_ssm::gpu::trainer (line 16) ... ignored
+test src/mamba_ssm/gpu/inference.rs - mamba_ssm::gpu::inference::GpuMambaBackbone (line 1712) - compile ... ok
+test src/module/backbone.rs - module::backbone::MambaBackbone (line 11) ... ok
+
+test result: ok. 6 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+test src/mamba_ssm/gpu/training_graph.rs - mamba_ssm::gpu::training_graph::GpuMambaF32TrainingStepGraph (line 588) - compile fail ... ok
+test src/mamba_ssm/gpu/device.rs - mamba_ssm::gpu::device::GpuDevice (line 14) - compile fail ... ok
+test src/mamba_ssm/gpu/training_graph.rs - mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph (line 159) - compile fail ... ok
+test src/mamba3_siso/gpu/training_graph.rs - mamba3_siso::gpu::training_graph::GpuMamba3TrainingStepGraph (line 86) - compile fail ... ok
+test src/mamba3_siso/gpu/training_graph.rs - mamba3_siso::gpu::training_graph::GpuMamba3F32TrainingStepGraph (line 459) - compile fail ... ok
+test src/mamba_ssm/gpu/trainer.rs - mamba_ssm::gpu::trainer::MambaTrainer::grad_arena (line 480) - compile fail ... ok
+test src/mamba3_siso/gpu/trainer.rs - mamba3_siso::gpu::trainer::Mamba3Trainer::grad_arena (line 340) - compile fail ... ok
+test src/mamba_ssm/gpu/context.rs - mamba_ssm::gpu::context::GpuCtx (line 510) - compile fail ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+all doctests ran in 0.28s; merged doctests compilation took 0.23s

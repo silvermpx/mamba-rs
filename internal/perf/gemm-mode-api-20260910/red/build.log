@@ -1,0 +1,145 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-gemm-mode-red.fd3iEy)
+error[E0432]: unresolved import `mamba_rs::mamba_ssm::gpu::context::GemmMode`
+ --> tests/gemm_mode_api.rs:5:35
+  |
+5 |     BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy,
+  |                                   ^^^^^^^^ no `GemmMode` in `mamba_ssm::gpu::context`
+
+error[E0432]: unresolved import `mamba_rs::mamba_ssm::gpu::context::GemmMode`
+  --> tests/gemm_mode_api.rs:11:9
+   |
+11 |     use mamba_rs::mamba_ssm::gpu::context::GemmMode;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------
+   |                                            |
+   |                                            no `GemmMode` in `mamba_ssm::gpu::context`
+
+error[E0425]: cannot find type `GemmMode` in module `mamba_rs::mamba_ssm::gpu`
+  --> tests/gemm_mode_api.rs:32:41
+   |
+32 | ...ssm::gpu::GemmMode = GemmMode::CublasPedantic;
+   |              ^^^^^^^^ not found in `mamba_rs::mamba_ssm::gpu`
+
+error[E0599]: no method named `gemm_mode` found for reference `&GpuCtx` in the current scope
+  --> tests/gemm_mode_api.rs:54:20
+   |
+54 |     assert_eq!(ctx.gemm_mode(), expected, "canonical mode");
+   |                    ^^^^^^^^^
+   |
+help: there is a method `gemm_route` with a similar name
+   |
+54 -     assert_eq!(ctx.gemm_mode(), expected, "canonical mode");
+54 +     assert_eq!(ctx.gemm_route(), expected, "canonical mode");
+   |
+
+error[E0599]: no associated function or constant named `new_with_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:92:17
+    |
+ 92 |         GpuCtx::new_with_mode(&device, GemmMode::CublasFast).expect("ex...
+    |                 ^^^^^^^^^^^^^ associated function or constant not found in `GpuCtx`
+    |
+note: if you're trying to build a new `GpuCtx` consider using one of the following associated functions:
+      GpuCtx::new
+      GpuCtx::new_from_env
+      GpuCtx::new_from_env_with_state_cap
+      GpuCtx::new_with_state_cap
+   --> src/mamba_ssm/gpu/context.rs:506:5
+    |
+506 |       pub fn new(device: &GpuDevice) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+514 |       pub fn new_from_env(device: &GpuDevice) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+521 | /     pub fn new_from_env_with_state_cap(
+522 | |         device: &GpuDevice,
+523 | |         state_cap: usize,
+524 | |     ) -> Result<Self, String> {
+    | |_____________________________^
+...
+565 |       pub fn new_with_state_cap(device: &GpuDevice, state_cap: usize) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `new_with_state_cap_and_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:96:23
+    |
+ 96 | ...et ctx = GpuCtx::new_with_state_cap_and_mode(&device, 96, GemmMode::...
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `GpuCtx`
+    |
+note: if you're trying to build a new `GpuCtx` consider using one of the following associated functions:
+      GpuCtx::new
+      GpuCtx::new_from_env
+      GpuCtx::new_from_env_with_state_cap
+      GpuCtx::new_with_state_cap
+   --> src/mamba_ssm/gpu/context.rs:506:5
+    |
+506 |       pub fn new(device: &GpuDevice) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+514 |       pub fn new_from_env(device: &GpuDevice) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+521 | /     pub fn new_from_env_with_state_cap(
+522 | |         device: &GpuDevice,
+523 | |         state_cap: usize,
+524 | |     ) -> Result<Self, String> {
+    | |_____________________________^
+...
+565 |       pub fn new_with_state_cap(device: &GpuDevice, state_cap: usize) -> Result<Self, String> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `new_with_state_cap` with a similar name
+   --> src/mamba_ssm/gpu/context.rs:565:5
+    |
+565 |     pub fn new_with_state_cap(device: &GpuDevice, state_cap: usize) -> Result<Self, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:114:13
+    |
+114 |         ctx.set_gemm_mode(from).expect("select source mode");
+    |             ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:117:17
+    |
+117 |             ctx.set_gemm_mode(from).expect("restore source mode");
+    |                 ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:118:17
+    |
+118 |             ctx.set_gemm_mode(to).expect("transition to target mode");
+    |                 ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:138:9
+    |
+138 |     ctx.set_gemm_mode(GemmMode::CublasPedantic)
+    |         ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:144:9
+    |
+144 |     ctx.set_gemm_mode(GemmMode::Deterministic)
+    |         ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:150:9
+    |
+150 |     ctx.set_gemm_mode(GemmMode::CublasPedantic)
+    |         ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:174:13
+    |
+174 |         ctx.set_gemm_mode(vendor_mode).expect("select vendor mode");
+    |             ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+error[E0599]: no method named `set_gemm_mode` found for struct `GpuCtx` in the current scope
+   --> tests/gemm_mode_api.rs:176:13
+    |
+176 |         ctx.set_gemm_mode(GemmMode::Deterministic)
+    |             ^^^^^^^^^^^^^ method not found in `GpuCtx`
+
+Some errors have detailed explanations: E0425, E0432, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `mamba-rs` (test "gemm_mode_api") due to 14 previous errors
