@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/inference_graph_route.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/inference_graph_route-a9a7a6afbdbb01a1)
+
+running 1 test
+test decode_graphs_reject_complete_route_drift ... mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.76s
+

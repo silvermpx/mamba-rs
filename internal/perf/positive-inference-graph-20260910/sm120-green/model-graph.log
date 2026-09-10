@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/inference_graph_route.rs (/root/target-sm120-final-sweep-cuda132/release/deps/inference_graph_route-a9a7a6afbdbb01a1)
+
+running 1 test
+test decode_graphs_reject_complete_route_drift ... mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: no measured SM120 half cell for Nn Bf16 Sm120Shape { m: 1, k: 32, n: 128, lda: 32, ldb: 128, ldc: 128 }; the portable tensor-core tiles serve it (reported once; later uncovered shapes are silent)
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 92.32s
+

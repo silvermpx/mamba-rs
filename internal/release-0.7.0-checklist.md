@@ -81,6 +81,13 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   exact oracles, physical manifests, guards and paired once7 p50/p95 gates.
   Both d768-in tournaments retain vec2; compact remains selected for F16 out
   and both Prism rows. Production exports/admission and post-AUTO now pass.
+- [x] Current RTX5090 TF32 retained routes admitted on CUDA12.8/13.0/13.2:
+  23 measured keys per toolkit, including six portable routes. True G10 stays
+  exact because its candidate lost on all three toolkits; G11 remains live.
+  Actual AUTO checks all24 cases on each toolkit, with identical full-output
+  digest records across toolkits and eager/repeat/graph bit equality.
+  Independent review and final test-only corrections pass host20 plus a
+  repeated live24 check. Evidence: `internal/perf/sm120-current-cohorts-20260910/`.
 - [ ] Reconcile every retained-winner report with production dispatch and the
   qualification harness. No candidate disappears because it loses to Fast.
 - [x] Independent retained-winner census finds no further omitted Triad winner
@@ -89,6 +96,9 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   d768-out/large-deep and its A-only-ldmatrix body for d768-in/Prism. The
   separate inference F16 NN d768-in N96/S3 experiment lacks an actual-AUTO
   comparison; keep it labelled as unqualified, not a missing Triad admission.
+- [x] Reconcile all66 actual Ada paired-Triad physical routes against retained
+  assembly decisions: zero omitted accepted winners, foreign symbols or
+  unexplained fallthroughs. Review: `internal/perf/final-auto-benchmarks-20260910/ada-triad-reachability-review.md`.
 - [ ] Preserve or justify every route from the saved RTX 5090 inference and
   Triad snapshots; investigate any newly observed route or speed regression.
   The 66-cell assembly smoke passes132 eager/graph rows;65 physical routes
@@ -102,17 +112,25 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   cases, bias/no-bias, guards, tails, repeated bits and actual physical routes.
 - [ ] Triad: NN/TN/NT, every supported precision and covered shape, exact
   selector identity, eager and prepared/captured graph correctness.
-- [ ] Paired eager and whole-graph performance against cuBLAS Fast; also
+- [x] Paired eager and whole-graph performance against cuBLAS Fast; also
   cuBLAS Pedantic for exact F32, with numerical contracts clearly labelled.
   Full paired acquisition is complete on Ada and RTX5090/CUDA13.2:
   Inference280 records per board; Triad324 records per board. Raw statistics
   and completion metadata replay independently. Results and exact measured
   source identities are in `internal/perf/final-auto-benchmarks-20260910/`.
-  Final-source preservation/release aggregation remains part of this item;
-  the tables do not claim that all cases beat cuBLAS Fast.
+  Current assembly preserves the measured CUDA13.2 routes: only lower-toolkit
+  SM120 TF32 admission and removal of G10 (absent from the66-cell benchmark)
+  changed in production. Keep actual measured732c1146 source identities, not
+  a later commit label. The tables do not claim that all cases beat cuBLAS Fast.
+  Subsequent API/rename/cleanup changes still require an affected-route audit.
 - [ ] Real model integration: Mamba and Mamba-3 inference graph replay,
   training graph parity/safety, and trainer full-step replay. The split
   `forward`/`backward_step` API is intentionally eager for external losses.
+- [x] Positive deterministic-mode decode graph replay on Ada and RTX5090:
+  Mamba/Mamba-3 × F32/BF16, explicit complete policy, graph presence, finite
+  output after poison, then rejection of route drift. Tests-first RED and
+  both GREEN runs archived in `internal/perf/positive-inference-graph-20260910/`.
+  This is not whole-model eager/graph bit equivalence or a throughput claim.
 - [ ] Confirm architecture/toolkit portability and fallback coverage for the
   advertised SM80–SM120 families, distinguishing compile-only from live tests.
 
@@ -126,6 +144,9 @@ Select their actual supported cases and prerequisites before executing them.
 
 - [ ] Rename `gemm_bi_fixed` / Fixed to `gemm_bi_inference` / Inference in a
   separate mechanical phase after the kernels are assembled.
+  Preserve frozen CUDA bytes, virtual compiler filenames and artifact/module
+  identities. Changing them can invalidate measured cohorts; audit first and
+  requalify affected artifacts if necessary, never clear admission as a workaround.
 - [ ] Public modes: `Deterministic`, `CublasFast`, `CublasPedantic`; verify
   defaults, setters/builders, captured-policy invalidation and documentation.
 - [ ] Review the two old Codex-owned Split8 WIP files; deliberately retain,

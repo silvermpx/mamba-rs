@@ -12,15 +12,6 @@ use mamba_rs::weights::MambaWeights;
 
 const OUTPUT_POISON_BITS: u32 = 0x7fc0_d00d;
 
-fn configure_decode_route(ctx: &GpuCtx, tensor_cores: bool) {
-    ctx.set_fast_gemm(false);
-    ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_bi_tensor_cores(tensor_cores);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
-}
-
 fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool) {
     let route = ctx.gemm_route();
     assert!(
@@ -105,7 +96,6 @@ fn decode_graphs_reject_complete_route_drift() {
     weights.input_proj_b.clear();
 
     let mut f32 = GpuMambaInference::new(&device, &weights, cfg, cfg.d_model, 1).expect("M1 f32");
-    configure_decode_route(f32.ctx(), false);
     assert_decode_route(f32.ctx(), "M1 f32", false);
     let captured_route = f32.ctx().gemm_route();
     let mut state = f32.alloc_state().expect("M1 f32 state");
@@ -131,7 +121,6 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut mixed =
         GpuMambaInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
             .expect("M1 mixed");
-    configure_decode_route(mixed.ctx(), true);
     assert_decode_route(mixed.ctx(), "M1 BF16", true);
     let captured_route = mixed.ctx().gemm_route();
     let mut state = mixed.alloc_state().expect("M1 mixed state");
@@ -169,7 +158,6 @@ fn decode_graphs_reject_complete_route_drift() {
 
     let mut f32 =
         Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).expect("M3 f32");
-    configure_decode_route(f32.ctx(), false);
     assert_decode_route(f32.ctx(), "M3 f32", false);
     let captured_route = f32.ctx().gemm_route();
     let mut state = f32.alloc_state().expect("M3 f32 state");
@@ -195,7 +183,6 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut mixed =
         Mamba3GpuInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
             .expect("M3 mixed");
-    configure_decode_route(mixed.engine_ref().ctx(), true);
     assert_decode_route(mixed.engine_ref().ctx(), "M3 BF16", true);
     let captured_route = mixed.engine_ref().ctx().gemm_route();
     let mut state = mixed.alloc_state().expect("M3 mixed state");
