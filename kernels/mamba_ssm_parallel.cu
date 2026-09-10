@@ -57,6 +57,47 @@
 #define MAX_DSTATE 256
 
 // ============================================================================
+// Eight consecutive B or C values of one (b, n) row, t0 .. t0+7, as f32.
+// The rows are t-contiguous, so a thread's eight items are one 32-byte
+// (f32) or 16-byte (half) span. When that span lies inside the row and is
+// 16-byte aligned it comes in as vector loads, at 8-byte alignment as
+// half-width vectors, otherwise element by element with the tail past T
+// zero-filled. The values are the same either way; only the number of
+// load instructions changes.
+// ============================================================================
+template <typename T>
+__device__ __forceinline__ void load_row8(
+    const T* __restrict__ row, int t0, int T_len, float out[NITEMS]
+) {
+    const T* p = row + t0;
+    unsigned long long addr = (unsigned long long)p;
+    bool whole = (t0 + NITEMS <= T_len);
+    if (whole && (addr & 15ull) == 0) {
+        constexpr int PER16 = 16 / (int)sizeof(T);
+        #pragma unroll
+        for (int k = 0; k < NITEMS / PER16; k++) {
+            uint4 v = reinterpret_cast<const uint4*>(p)[k];
+            const T* e = reinterpret_cast<const T*>(&v);
+            #pragma unroll
+            for (int j = 0; j < PER16; j++) out[k * PER16 + j] = to_f(e[j]);
+        }
+    } else if (whole && (addr & 7ull) == 0) {
+        constexpr int PER8 = 8 / (int)sizeof(T);
+        #pragma unroll
+        for (int k = 0; k < NITEMS / PER8; k++) {
+            uint2 v = reinterpret_cast<const uint2*>(p)[k];
+            const T* e = reinterpret_cast<const T*>(&v);
+            #pragma unroll
+            for (int j = 0; j < PER8; j++) out[k * PER8 + j] = to_f(e[j]);
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < NITEMS; i++)
+            out[i] = (t0 + i < T_len) ? to_f(p[i]) : 0.0f;
+    }
+}
+
+// ============================================================================
 // Warp-level inclusive scan of (a, b) pairs using warp shuffle.
 // After return, lane k holds compose(pair_0, ..., pair_k) within its warp.
 // ============================================================================
@@ -394,6 +435,9 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             // directly (barrier diet — see the delta/u note above).
             float thread_a[NITEMS];
             float thread_b[NITEMS];
+            float b_row[NITEMS];
+            load_row8(B + (bid * d_state + n) * T,
+                      chunk_start + threadIdx.x * NITEMS, T, b_row);
 
             #pragma unroll
             for (int i = 0; i < NITEMS; i++) {
@@ -401,7 +445,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                 if (t < T) {
                     // a_dn already has LOG2E folded in, so exp2f gives exp(delta*a)
                     float da = exp2f(delta_vals[i] * a_dn);
-                    float b_t = B[(bid * d_state + n) * T + t];
+                    float b_t = b_row[i];
                     thread_a[i] = da;
                     thread_b[i] = delta_u_vals[i] * b_t;
                     // No da saved: backward recomputes da from delta
@@ -473,7 +517,9 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             }
 
             // Compute h[t] for each element and accumulate y[t] += h[t] * C[t,n]
-            // (C read directly — barrier diet, values unchanged)
+            float c_row[NITEMS];
+            load_row8(C + (bid * d_state + n) * T,
+                      chunk_start + threadIdx.x * NITEMS, T, c_row);
             #pragma unroll
             for (int i = 0; i < NITEMS; i++) {
                 int t = chunk_start + threadIdx.x * NITEMS + i;
@@ -508,7 +554,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                     }
 
                     // Single-pass Y accumulation (C read directly)
-                    float c_t = C[(bid * d_state + n) * T + t];
+                    float c_t = c_row[i];
                     out_vals[i] += h_t * c_t;
                 }
             }
@@ -622,6 +668,9 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
 
             float thread_a[NITEMS];
             float thread_b[NITEMS];
+            float b_row[NITEMS];
+            load_row8(B + (bid * d_state + n) * T,
+                      chunk_start + threadIdx.x * NITEMS, T, b_row);
 
             #pragma unroll
             for (int i = 0; i < NITEMS; i++) {
@@ -629,7 +678,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                 if (t < T) {
                     // a_dn already has LOG2E folded in, so exp2f gives exp(delta*a)
                     float da = exp2f(delta_vals[i] * a_dn);
-                    float b_t = B[(bid * d_state + n) * T + t];
+                    float b_t = b_row[i];
                     thread_a[i] = da;
                     thread_b[i] = delta_u_vals[i] * b_t;
                 } else {
@@ -679,7 +728,9 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                 smem_run_b[n] = block_a * run_b + block_b;
             }
 
-            // C read directly, the same elements the staging delivered.
+            float c_row[NITEMS];
+            load_row8(C + (bid * d_state + n) * T,
+                      chunk_start + threadIdx.x * NITEMS, T, c_row);
             #pragma unroll
             for (int i = 0; i < NITEMS; i++) {
                 int t = chunk_start + threadIdx.x * NITEMS + i;
@@ -690,7 +741,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                     float final_b = comp_a * run_b + comp_b;
                     float h_t = final_a * h_0 + final_b;
 
-                    float c_t = C[(bid * d_state + n) * T + t];
+                    float c_t = c_row[i];
                     out_vals[i] += h_t * c_t;
                 }
             }
@@ -839,13 +890,15 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             float a_dn = a_neg[did * d_state + n] * LOG2E;                    \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
+            float b_row[NITEMS];                                              \
+            load_row8(B + (bid * d_state + n) * T,                            \
+                      chunk_start + threadIdx.x * NITEMS, T, b_row);          \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
-                    float b_t =                                               \
-                        to_f(B[(bid * d_state + n) * T + t]);                 \
+                    float b_t = b_row[i];                                     \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -894,7 +947,9 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 smem_run_b[n] = block_a * run_b + block_b;                    \
             }                                                                 \
             __syncthreads();                                                  \
-                                                             \
+            float c_row[NITEMS];                                              \
+            load_row8(C + (bid * d_state + n) * T,                            \
+                      chunk_start + threadIdx.x * NITEMS, T, c_row);          \
             _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
@@ -916,8 +971,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                                      * (T + 1) + (t + 1);                     \
                         h_saved[hs_idx] = h_t;                                \
                     }                                                         \
-                    float c_t =                                               \
-                        to_f(C[(bid * d_state + n) * T + t]);                 \
+                    float c_t = c_row[i];                                     \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
@@ -1010,13 +1064,16 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             float a_dn = a_neg[did * d_state + n] * LOG2E;                    \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
+            float b_row[NITEMS];                                              \
+            load_row8(B + (bid * d_state + n) * T,                            \
+                      chunk_start + threadIdx.x * NITEMS, T, b_row);          \
                                                              \
             _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
-                    float b_t = to_f(B[(bid * d_state + n) * T + t]);         \
+                    float b_t = b_row[i];                                     \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -1057,7 +1114,9 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
                 smem_run_a[n] = block_a * run_a;                              \
                 smem_run_b[n] = block_a * run_b + block_b;                    \
             }                                                                 \
-            /* C read directly, the same elements the staging delivered. */   \
+            float c_row[NITEMS];                                              \
+            load_row8(C + (bid * d_state + n) * T,                            \
+                      chunk_start + threadIdx.x * NITEMS, T, c_row);          \
             _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
@@ -1067,7 +1126,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
                     float final_a = comp_a * run_a;                           \
                     float final_b = comp_a * run_b + comp_b;                  \
                     float h_t = final_a * h_0 + final_b;                      \
-                    float c_t = to_f(C[(bid * d_state + n) * T + t]);         \
+                    float c_t = c_row[i];                                     \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
@@ -1247,21 +1306,11 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             float a_dn = a_neg[did * d_state + n];                            \
             float a_dn_log2 = a_dn * LOG2E;                                   \
             float b_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
-                b_vals[i] = (t < T)                                           \
-                    ? to_f(B_in[(bid * d_state + n) * T + t])                 \
-                    : 0.0f;                                                   \
-            }                                                                 \
+            load_row8(B_in + (bid * d_state + n) * T,                         \
+                      chunk_start + threadIdx.x * NITEMS, T, b_vals);         \
             float c_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
-                c_vals[i] = (t < T)                                           \
-                    ? to_f(C_in[(bid * d_state + n) * T + t])                 \
-                    : 0.0f;                                                   \
-            }                                                                 \
+            load_row8(C_in + (bid * d_state + n) * T,                         \
+                      chunk_start + threadIdx.x * NITEMS, T, c_vals);         \
             /* Per-i: da[i] = exp2(delta * a_neg), d_local[i] = dy * c */     \
             float da_vals[NITEMS];                                            \
             float d_local[NITEMS];                                            \
@@ -1713,21 +1762,11 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
         }                                                                     \
         for (int n = 0; n < d_state; n++) {                                   \
             float b_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
-                b_vals[i] = (t < T)                                           \
-                    ? to_f(B_in[(bid * d_state + n) * T + t])                 \
-                    : 0.0f;                                                   \
-            }                                                                 \
+            load_row8(B_in + (bid * d_state + n) * T,                         \
+                      chunk_start + threadIdx.x * NITEMS, T, b_vals);         \
             float c_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
-                c_vals[i] = (t < T)                                           \
-                    ? to_f(C_in[(bid * d_state + n) * T + t])                 \
-                    : 0.0f;                                                   \
-            }                                                                 \
+            load_row8(C_in + (bid * d_state + n) * T,                         \
+                      chunk_start + threadIdx.x * NITEMS, T, c_vals);         \
             float acc_B[NITEMS];                                              \
             float acc_C[NITEMS];                                              \
             _Pragma("unroll")                                                 \
