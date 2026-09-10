@@ -9,7 +9,7 @@ it produces is data, not scrollback.
 ## Targets and lanes
 
 Every target is declared in `Cargo.toml` (`autotests` and `autobenches` are
-off) and takes exactly one lane in `qual/lanes.toml`. The host-side census
+off) and takes exactly one lane in `qual/lanes.toml`. The host-side check
 `tests/qual_lane_census.rs` runs in CI and fails when a declared target has
 no lane, a gate file hides an ignored arm, a bench is not harness-free under
 `benches/`, a qualification tool is not under `tools/qualification/` behind
@@ -23,7 +23,7 @@ from the manifest.
 | contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`; the first red stops) |
 | record | manual instruments that need model assets or foreign hardware, still under `tests/` | `qual/run.sh record` lists them; run one at a time |
 | bench | timing instruments under `benches/`, no verdict | `cargo bench --features cuda --bench <name> [-- <instrument>]` |
-| qualification | hardware, toolkit and census instruments under `tools/qualification/` | `cargo test --release --features "cuda hf qualification" --test <name> -- --ignored`, one per board and toolkit |
+| qualification | hardware, toolkit and inventory instruments under `tools/qualification/` | `cargo test --release --features "cuda hf qualification" --test <name> -- --ignored`, one per board and toolkit |
 
 Kernel-candidate stands, scouts and diagnostics live under
 `internal/experiments/` with an index of their origin; they are outside the

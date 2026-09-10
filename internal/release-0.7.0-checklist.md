@@ -260,7 +260,7 @@ Select their actual supported cases and prerequisites before executing them.
   `internal/perf/release-layout-20260910/report.md`.
 - [~] Benchmark unchanged monolithic `main` versus the release tree on the
   RTX 6000 Ada with one adapter per lane and identical settings
-  (`internal/perf/monolith-baseline-20260910/`, `report.md`). Done: set A
+  (`internal/perf/old-versus-new-20260910/`, `report.md`). Done: set A
   (inference step, exact f32, Triad lane: eager equal, graph replay 20 to 30
   percent slower on the release tree), set C (training step, all three GEMM
   settings, 2 to 17 percent faster like for like, cuBLAS arms agree between

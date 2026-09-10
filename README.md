@@ -405,7 +405,7 @@ Every target is declared in `Cargo.toml` and has a lane in
   `cargo bench --features cuda --bench <name>`, optionally followed by
   `-- <instrument>`.
 - **Qualification tools** (`tools/qualification/`): hardware, toolkit and
-  census instruments that need a specific board, built with
+  inventory instruments that need a specific board, built with
   `--features "cuda hf qualification"` and run by name with `-- --ignored`.
 
 `qual/run.sh <lane>` runs or lists one lane;

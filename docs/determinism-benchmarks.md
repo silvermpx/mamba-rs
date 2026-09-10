@@ -283,7 +283,7 @@ the production automatic selection with no forced tile; the kernel name in
 each row is the symbol that actually ran.
 
 The old-versus-new kernel tables use one adapter compiled against both
-trees (`internal/perf/monolith-baseline-20260910/adapter/`), timing the
+trees (`internal/perf/old-versus-new-20260910/adapter/`), timing the
 deterministic route, cuBLAS Fast and cuBLAS Pedantic in the same process
 with the same event protocol, in mirrored blocks of separate processes
 (old, new, new, old). The whole-model tables use the same block layout with
@@ -291,7 +291,7 @@ one benchmark-only program per tree.
 
 The raw records, the verification scripts and the run metadata are kept
 under `internal/perf/final-auto-benchmarks-20260910/` and
-`internal/perf/monolith-baseline-20260910/` in the repository.
+`internal/perf/old-versus-new-20260910/` in the repository.
 
 ## Per-kernel tables: Inference family
 
@@ -817,4 +817,4 @@ cargo bench --features cuda --bench gemm_bi_trainer_step_bench
 
 The old-versus-new runs need the 0.6.9 tree checked out beside the release
 tree; the adapters and the runner scripts are in
-`internal/perf/monolith-baseline-20260910/adapter/`.
+`internal/perf/old-versus-new-20260910/adapter/`.
