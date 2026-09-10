@@ -2441,6 +2441,7 @@ fn native_half_seal_projection(
 
 fn validate_native_half_branch(
     seal: HalfNativeBranchSeal,
+    production_routes: &[ResolvedGemmRoute],
     nodes: &[ResolvedPhysicalKernelLaunch],
 ) -> Result<(), String> {
     let [node] = nodes else {
@@ -2450,6 +2451,30 @@ fn validate_native_half_branch(
     if node.kind() != PhysicalLaunchKind::Gemm || native_half_seal_projection(seal)? != physical {
         return Err(format!(
             "native half production seal differs from physical preflight: seal={seal:?}, physical={physical:?}"
+        ));
+    }
+    // The production launch inventories the half route it really enqueued,
+    // exactly as a model context records it for graph replay. That route
+    // must be the one physical preflight resolved. Only the argument digest
+    // may differ: production binds the real operand spans, while preflight
+    // retains allocation identities.
+    let [production] = production_routes else {
+        return Err(format!(
+            "native half production branch must record exactly one production route: actual={production_routes:?}"
+        ));
+    };
+    let mut physical_route = node
+        .gemm_route()
+        .ok_or_else(|| "native half physical node has no GEMM route".to_string())?;
+    if production.dtype == PolicyDtype::F32 {
+        return Err("native half production branch unexpectedly recorded an F32 route".into());
+    }
+    let mut production = *production;
+    production.launch.arguments_digest = [0; 32];
+    physical_route.launch.arguments_digest = [0; 32];
+    if production != physical_route {
+        return Err(format!(
+            "native half production route differs from physical preflight: production={production:?}, physical={physical_route:?}"
         ));
     }
     Ok(())
@@ -2906,12 +2931,7 @@ fn summarize_physical_evidence(
         }
         ProductionBranchSeal::Half(branch) => match branch.seal {
             HalfPolicyBranchSeal::Native(seal) => {
-                if !branch.production_routes.is_empty() {
-                    return Err(
-                        "native half production branch unexpectedly recorded F32 routes".into(),
-                    );
-                }
-                validate_native_half_branch(seal, trace.nodes())?;
+                validate_native_half_branch(seal, &branch.production_routes, trace.nodes())?;
             }
             HalfPolicyBranchSeal::Sm120(seal) => validate_sm120_half_branch(
                 seal,
