@@ -93,6 +93,7 @@ pub use dispatch::{
 pub(in crate::mamba_ssm::gpu) use dispatch::{
     Sm120AutoRequest, tc_half_policy_prefers_scalar_forward,
 };
+pub(in crate::mamba_ssm::gpu) use launch::record_physical_exact_scalar_f32_backward_dx_ptrs;
 pub(in crate::mamba_ssm::gpu) use launch::validate_f32_triad_pointer_request;
 pub use launch::*;
 pub(crate) use launch::{

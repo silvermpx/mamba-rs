@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::mamba_ssm::gpu::blas::{
     TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
-    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw,
+    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -262,6 +262,22 @@ impl GpuMambaLM {
     /// step) before capture so cuBLAS settles. The lm_head GEMM runs
     /// eagerly outside the graph; only the backbone step is captured.
     pub fn capture_graph(&mut self) -> Result<(), String> {
+        if let EmbedStorage::Half {
+            lm_head: None,
+            dtype,
+            ..
+        } = &self.embed_storage
+        {
+            presize_tied_lm_head_scratch(
+                self.backbone.ctx(),
+                *dtype,
+                TiedLmDims {
+                    batch: self.batch,
+                    d_model: self.d_model,
+                    vocab_padded: self.vocab_size_padded,
+                },
+            )?;
+        }
         self.backbone.capture_graph()
     }
 
@@ -736,5 +752,75 @@ mod pad_tests {
         let mut flat = vec![0.0f32; 8];
         flat[..6].copy_from_slice(&lm);
         assert_ne!(got, flat, "flat copy must differ - that was the M3 bug");
+    }
+}
+
+#[cfg(test)]
+mod tied_head_capture_tests {
+    use super::*;
+    use crate::config::{MambaConfig, ScanMode};
+    use crate::mamba_ssm::gpu::context::GemmMode;
+    use crate::weights::MambaWeights;
+
+    #[test]
+    #[ignore = "needs a CUDA device and NVRTC"]
+    fn tied_bf16_m1_capture_reserves_head_scratch_before_freeze() {
+        const D_MODEL: usize = 16;
+        const VOCAB_PADDED: usize = 512;
+        let cfg = MambaConfig {
+            d_model: D_MODEL,
+            d_state: 4,
+            d_conv: 2,
+            expand: 1,
+            n_layers: 1,
+            scan_mode: ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
+        };
+        let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x9031);
+        weights.input_proj_w.clear();
+        weights.input_proj_b.clear();
+        let backbone =
+            GpuMambaBackbone::new_with_dtype(0, &weights, cfg, D_MODEL, 1, WeightDtype::Bf16)
+                .unwrap();
+        let stream = backbone.stream().clone();
+        let embed_cpu = vec![0.125; VOCAB_PADDED * D_MODEL];
+        let embed = GpuByteBuffer::zeros(&stream, embed_cpu.len() * 2).unwrap();
+        upload_f32_as_dtype(
+            &stream,
+            &embed,
+            0,
+            &embed_cpu,
+            embed_cpu.len(),
+            WeightDtype::Bf16,
+        )
+        .unwrap();
+        let mut lm = GpuMambaLM {
+            backbone,
+            embed_storage: EmbedStorage::Half {
+                embed,
+                lm_head: None,
+                dtype: WeightDtype::Bf16,
+            },
+            embed_cpu,
+            input_cpu: vec![0.0; D_MODEL],
+            gpu_logits: GpuBuffer::zeros(&stream, VOCAB_PADDED).unwrap(),
+            logits_padded_cpu: vec![0.0; VOCAB_PADDED],
+            logits_cpu: vec![0.0; VOCAB_PADDED],
+            vocab_size: VOCAB_PADDED,
+            vocab_size_padded: VOCAB_PADDED,
+            d_model: D_MODEL,
+            batch: 1,
+        };
+        lm.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
+
+        // Warm only the backbone. A prior head call would hide a missing
+        // reservation in the LM capture wrapper.
+        lm.backbone.step_gpu_only(&vec![0.25; D_MODEL]).unwrap();
+        lm.capture_graph().unwrap();
+        let reserved = lm.ctx().bi_upcast_scratch_ptrs();
+        assert_ne!(reserved[0], 0);
+        assert_ne!(reserved[1], 0);
+        lm.compute_logits().unwrap();
+        assert_eq!(lm.ctx().bi_upcast_scratch_ptrs(), reserved);
     }
 }

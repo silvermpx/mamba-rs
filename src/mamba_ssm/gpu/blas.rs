@@ -6,7 +6,9 @@
 //!   C^T = B^T @ A^T  (in cuBLAS column-major convention)
 //!   gemm(N, N, n_out, batch, n_in, 1.0, W, n_out, X, n_in, beta, Y, n_out)
 
-use super::buffers::{GpuBuffer, GradSlice};
+use super::buffers::{
+    GpuBuffer, GradSlice, ManagedAllocationEpochStamp, managed_allocation_epoch_for_ranges,
+};
 use super::context::{GemmMode, GpuCtx};
 use super::dtype::WeightDtype;
 use super::gemm_bi_triad::{PhysicalArgumentRange, prepare_physical_observer};
@@ -3059,6 +3061,291 @@ mod physical_graph_tests {
             .unwrap();
         ctx.stream.synchronize().unwrap();
     }
+
+    fn record_tied_half_f32_trace(dtype: WeightDtype, dims: TiedLmDims) -> RecordedPhysicalTrace {
+        use super::super::buffers::DtypedBuf;
+        use super::super::context::{BiGemmFamily, GemmMode};
+        use super::super::device::GpuDevice;
+
+        let device = GpuDevice::new(0).expect("CUDA device");
+        let ctx = GpuCtx::new(&device).expect("GPU context");
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        let checked = checked_tied_lm_dims(dims).unwrap();
+        let temporal = DtypedBuf::zeros(&ctx.stream, checked.temporal_elements, dtype).unwrap();
+        let embed = DtypedBuf::zeros(&ctx.stream, checked.embed_elements, dtype).unwrap();
+        let logits = GpuBuffer::zeros(&ctx.stream, checked.logits_elements).unwrap();
+        let temporal = TypedPtr {
+            ptr: temporal.cached_ptr(),
+            dtype,
+        };
+        let embed = TypedPtr {
+            ptr: embed.cached_ptr(),
+            dtype,
+        };
+
+        let eager = ctx
+            .record_eager_gemm_trace(|| {
+                let mut observer = NoPhysicalObserver;
+                gemm_bi_tied_half_f32_in(
+                    &ctx,
+                    logits.cached_ptr(),
+                    temporal,
+                    embed,
+                    dims,
+                    &mut observer,
+                )
+            })
+            .unwrap();
+        let scratch = ctx.bi_upcast_scratch_ptrs();
+        let mut ranges = vec![
+            PhysicalArgumentRange {
+                pointer: logits.cached_ptr(),
+                required_bytes: physical_argument_bytes(checked.logits_elements, 4, "tied logits")
+                    .unwrap(),
+            },
+            PhysicalArgumentRange {
+                pointer: temporal.ptr,
+                required_bytes: physical_argument_bytes(
+                    checked.temporal_elements,
+                    dtype.size_bytes(),
+                    "tied temporal",
+                )
+                .unwrap(),
+            },
+            PhysicalArgumentRange {
+                pointer: embed.ptr,
+                required_bytes: physical_argument_bytes(
+                    checked.embed_elements,
+                    dtype.size_bytes(),
+                    "tied embed",
+                )
+                .unwrap(),
+            },
+            PhysicalArgumentRange {
+                pointer: scratch[0],
+                required_bytes: physical_argument_bytes(
+                    checked.temporal_elements,
+                    4,
+                    "tied temporal scratch",
+                )
+                .unwrap(),
+            },
+            PhysicalArgumentRange {
+                pointer: scratch[1],
+                required_bytes: physical_argument_bytes(
+                    checked.embed_elements,
+                    4,
+                    "tied embed scratch",
+                )
+                .unwrap(),
+            },
+        ];
+        ranges.retain(|range| range.required_bytes != 0);
+        let conversion_count =
+            usize::from(checked.temporal_elements != 0) + usize::from(checked.embed_elements != 0);
+        let mut observer =
+            prepare_physical_observer(&ctx, conversion_count + eager.routes().len(), &ranges)
+                .expect("prepare tied physical observer");
+        gemm_bi_tied_half_f32_in(
+            &ctx,
+            logits.cached_ptr(),
+            temporal,
+            embed,
+            dims,
+            &mut observer,
+        )
+        .expect("record tied half-to-F32 composition");
+        let trace = finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
+        ctx.stream.synchronize().unwrap();
+        trace
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn tied_half_f32_observer_records_two_upcasts_all_nt_launches_and_no_downcast() {
+        let dims = TiedLmDims {
+            batch: 32,
+            d_model: 128,
+            vocab_padded: 96,
+        };
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let trace = record_tied_half_f32_trace(dtype, dims);
+            let nodes = trace.nodes();
+            assert_eq!(nodes[0].kind(), PhysicalLaunchKind::InputUpcast);
+            assert_eq!(nodes[1].kind(), PhysicalLaunchKind::InputUpcast);
+            assert!(
+                nodes.len() > 3,
+                "fixture must select a multi-launch NT route"
+            );
+            assert!(nodes[2..].iter().all(|node| {
+                node.kind() == PhysicalLaunchKind::Gemm
+                    && node.logical_op() == ResolvedGemmOp::Nt
+                    && node.execution_dtype() == PolicyDtype::F32
+                    && node.shape() == (dims.batch, dims.vocab_padded, dims.d_model)
+                    && node.strides() == (dims.d_model, dims.d_model, dims.vocab_padded)
+            }));
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|node| node.kind() == PhysicalLaunchKind::OutputDowncast)
+                    .count(),
+                0
+            );
+            let expected_logical_dtype = match dtype {
+                WeightDtype::Bf16 => PolicyDtype::Bf16,
+                WeightDtype::F16 => PolicyDtype::F16,
+                WeightDtype::F32 => unreachable!(),
+            };
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| node.logical_dtype() == expected_logical_dtype)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn tied_half_f32_zero_reduction_observer_records_only_f32_epilogue() {
+        let dims = TiedLmDims {
+            batch: 2,
+            d_model: 0,
+            vocab_padded: 96,
+        };
+        let trace = record_tied_half_f32_trace(WeightDtype::Bf16, dims);
+        assert_eq!(trace.nodes().len(), 1);
+        let epilogue = &trace.nodes()[0];
+        assert_eq!(epilogue.kind(), PhysicalLaunchKind::Gemm);
+        assert_eq!(epilogue.logical_op(), ResolvedGemmOp::Nt);
+        assert_eq!(epilogue.execution_dtype(), PolicyDtype::F32);
+        assert_eq!(epilogue.shape(), (2, 96, 0));
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn tied_half_f32_scratch_freeze_reuses_reserved_pointers_and_rejects_growth() {
+        use super::super::buffers::DtypedBuf;
+        use super::super::context::GemmMode;
+        use super::super::device::GpuDevice;
+
+        let device = GpuDevice::new(0).expect("CUDA device");
+        let ctx = GpuCtx::new(&device).expect("GPU context");
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        let dims = TiedLmDims {
+            batch: 2,
+            d_model: 37,
+            vocab_padded: 96,
+        };
+        presize_tied_lm_head_scratch(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let temporal =
+            DtypedBuf::zeros(&ctx.stream, dims.batch * dims.d_model, WeightDtype::Bf16).unwrap();
+        let embed = DtypedBuf::zeros(
+            &ctx.stream,
+            dims.vocab_padded * dims.d_model,
+            WeightDtype::Bf16,
+        )
+        .unwrap();
+        let logits = GpuBuffer::zeros(&ctx.stream, dims.batch * dims.vocab_padded).unwrap();
+        let before = ctx.bi_upcast_scratch_ptrs();
+        ctx.freeze_graph_scratch();
+        gpu_gemm_ex_tied_lm_head_raw(
+            &ctx,
+            logits.cached_ptr(),
+            temporal.cached_ptr(),
+            embed.cached_ptr(),
+            WeightDtype::Bf16,
+            dims,
+        )
+        .expect("same-size tied head after freeze");
+        assert_eq!(ctx.bi_upcast_scratch_ptrs(), before);
+
+        let sentinel = vec![321.5; dims.batch * dims.vocab_padded];
+        let larger_logits = GpuBuffer::from_cpu(&ctx.stream, &sentinel).unwrap();
+        let larger = TiedLmDims {
+            d_model: dims.d_model + 1,
+            ..dims
+        };
+        let larger_temporal = DtypedBuf::zeros(
+            &ctx.stream,
+            larger.batch * larger.d_model,
+            WeightDtype::Bf16,
+        )
+        .unwrap();
+        let larger_embed = DtypedBuf::zeros(
+            &ctx.stream,
+            larger.vocab_padded * larger.d_model,
+            WeightDtype::Bf16,
+        )
+        .unwrap();
+        let error = gpu_gemm_ex_tied_lm_head_raw(
+            &ctx,
+            larger_logits.cached_ptr(),
+            larger_temporal.cached_ptr(),
+            larger_embed.cached_ptr(),
+            WeightDtype::Bf16,
+            larger,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot grow after CUDA graph capture"),
+            "{error}"
+        );
+        assert_eq!(larger_logits.to_cpu(&ctx.stream).unwrap(), sentinel);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn tied_half_f32_rejects_mismatched_and_f32_private_inputs_before_execution() {
+        use super::super::context::GemmMode;
+        use super::super::device::GpuDevice;
+
+        let device = GpuDevice::new(0).expect("CUDA device");
+        let ctx = GpuCtx::new(&device).expect("GPU context");
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        let dims = TiedLmDims {
+            batch: 2,
+            d_model: 1,
+            vocab_padded: 96,
+        };
+        let mut observer = NoPhysicalObserver;
+        let mismatch = gemm_bi_tied_half_f32_in(
+            &ctx,
+            0,
+            TypedPtr {
+                ptr: 0,
+                dtype: WeightDtype::Bf16,
+            },
+            TypedPtr {
+                ptr: 0,
+                dtype: WeightDtype::F16,
+            },
+            dims,
+            &mut observer,
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("dtypes must match"), "{mismatch}");
+        let unsupported = gemm_bi_tied_half_f32_in(
+            &ctx,
+            0,
+            TypedPtr {
+                ptr: 0,
+                dtype: WeightDtype::F32,
+            },
+            TypedPtr {
+                ptr: 0,
+                dtype: WeightDtype::F32,
+            },
+            dims,
+            &mut observer,
+        )
+        .unwrap_err();
+        assert!(
+            unsupported.contains("requires bf16 or f16"),
+            "{unsupported}"
+        );
+    }
 }
 
 /// Typed device pointer: raw ptr + element dtype.
@@ -3076,8 +3363,224 @@ pub struct TiedLmDims {
     pub vocab_padded: usize,
 }
 
-/// Half-precision twin of `gpu_gemm_bi_tied_lm_head_raw` for bf16/f16 embed.
-/// `temporal_ptr` input activations must already be in `dtype` (not f32).
+#[derive(Copy, Clone)]
+struct CheckedTiedLmDims {
+    temporal_elements: usize,
+    embed_elements: usize,
+    logits_elements: usize,
+}
+
+fn checked_tied_lm_dims(dims: TiedLmDims) -> Result<CheckedTiedLmDims, String> {
+    let shape = super::gemm_bi_triad::F32TriadShape::contiguous(
+        ResolvedGemmOp::Nt,
+        (dims.batch, dims.vocab_padded, dims.d_model),
+    );
+    shape.validate(ResolvedGemmOp::Nt)?;
+    Ok(CheckedTiedLmDims {
+        temporal_elements: dims
+            .batch
+            .checked_mul(dims.d_model)
+            .ok_or_else(|| "tied lm_head B*D element count overflows usize".to_string())?,
+        embed_elements: dims
+            .vocab_padded
+            .checked_mul(dims.d_model)
+            .ok_or_else(|| "tied lm_head Vpad*D element count overflows usize".to_string())?,
+        logits_elements: dims
+            .batch
+            .checked_mul(dims.vocab_padded)
+            .ok_or_else(|| "tied lm_head B*Vpad element count overflows usize".to_string())?,
+    })
+}
+
+fn tied_lm_byte_span(elements: usize, width: usize, label: &str) -> Result<u64, String> {
+    u64::try_from(elements)
+        .ok()
+        .and_then(|elements| {
+            u64::try_from(width)
+                .ok()
+                .and_then(|width| elements.checked_mul(width))
+        })
+        .ok_or_else(|| format!("tied lm_head {label} byte span overflows u64"))
+}
+
+fn tied_lm_ranges_overlap(a: (u64, u64), b: (u64, u64)) -> Result<bool, String> {
+    let a_end =
+        a.0.checked_add(a.1)
+            .ok_or_else(|| "tied lm_head pointer range overflows u64".to_string())?;
+    let b_end =
+        b.0.checked_add(b.1)
+            .ok_or_else(|| "tied lm_head pointer range overflows u64".to_string())?;
+    Ok(a.0 < b_end && b.0 < a_end)
+}
+
+fn validate_tied_half_f32_ranges(
+    ctx: &GpuCtx,
+    logits: cudarc::driver::sys::CUdeviceptr,
+    temporal: TypedPtr,
+    embed: TypedPtr,
+    checked: CheckedTiedLmDims,
+) -> Result<ManagedAllocationEpochStamp, String> {
+    if logits == 0 || !logits.is_multiple_of(4) {
+        return Err("tied lm_head F32 logits pointer must be non-null and 4-byte aligned".into());
+    }
+    for (name, input, elements) in [
+        ("temporal", temporal, checked.temporal_elements),
+        ("embed", embed, checked.embed_elements),
+    ] {
+        if elements != 0 && (input.ptr == 0 || !input.ptr.is_multiple_of(2)) {
+            return Err(format!(
+                "tied lm_head {name} pointer must be non-null and 2-byte aligned"
+            ));
+        }
+    }
+
+    let logits_range = (
+        logits,
+        tied_lm_byte_span(checked.logits_elements, 4, "logits")?,
+    );
+    let temporal_range = (
+        temporal.ptr,
+        tied_lm_byte_span(
+            checked.temporal_elements,
+            temporal.dtype.size_bytes(),
+            "temporal",
+        )?,
+    );
+    let embed_range = (
+        embed.ptr,
+        tied_lm_byte_span(checked.embed_elements, embed.dtype.size_bytes(), "embed")?,
+    );
+    for (name, input_range) in [("temporal", temporal_range), ("embed", embed_range)] {
+        if input_range.1 != 0 && tied_lm_ranges_overlap(logits_range, input_range)? {
+            return Err(format!(
+                "tied lm_head {name} input overlaps F32 logits output"
+            ));
+        }
+    }
+
+    let mut ranges = vec![logits_range];
+    if temporal_range.1 != 0 {
+        ranges.push(temporal_range);
+    }
+    if embed_range.1 != 0 {
+        ranges.push(embed_range);
+    }
+    managed_allocation_epoch_for_ranges(ctx.stream.context().cu_ctx() as usize, &ranges).ok_or_else(
+        || {
+            "tied lm_head pointers are not covered by live allocations in the CUDA context"
+                .to_string()
+        },
+    )
+}
+
+fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    logits: cudarc::driver::sys::CUdeviceptr,
+    temporal: TypedPtr,
+    embed: TypedPtr,
+    dims: TiedLmDims,
+    observer: &mut O,
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if temporal.dtype != embed.dtype {
+        return Err("tied lm_head temporal and embed dtypes must match".into());
+    }
+    if temporal.dtype == WeightDtype::F32 {
+        return Err("deterministic tied half-to-F32 path requires bf16 or f16 inputs".into());
+    }
+    if ctx.gemm_mode() != GemmMode::Deterministic {
+        return Err("tied half-to-F32 composition requires deterministic GEMM mode".into());
+    }
+    let checked = checked_tied_lm_dims(dims)?;
+    let _allocation_epoch = validate_tied_half_f32_ranges(ctx, logits, temporal, embed, checked)?;
+    let physical = HalfPhysicalContext {
+        op: ResolvedGemmOp::Nt,
+        dtype: temporal.dtype,
+        dims: (dims.batch, dims.vocab_padded, dims.d_model),
+    };
+
+    ctx.with_bi_upcast_scratch(
+        (checked.temporal_elements, checked.embed_elements, 0),
+        |temporal_f32, embed_f32, _| {
+            if checked.temporal_elements != 0 {
+                bi_upcast_to_f32(
+                    ctx,
+                    temporal,
+                    temporal_f32.cached_ptr(),
+                    checked.temporal_elements,
+                    physical,
+                    observer,
+                )?;
+            }
+            if checked.embed_elements != 0 {
+                bi_upcast_to_f32(
+                    ctx,
+                    embed,
+                    embed_f32.cached_ptr(),
+                    checked.embed_elements,
+                    physical,
+                    observer,
+                )?;
+            }
+            unsafe {
+                super::gemm_bi_triad::record_physical_exact_scalar_f32_backward_dx_ptrs(
+                    ctx,
+                    observer,
+                    logits,
+                    temporal_f32.cached_ptr(),
+                    embed_f32.cached_ptr(),
+                    super::gemm_bi_triad::ScalarFallbackPhysicalContext {
+                        dims: physical.dims,
+                        dtype: physical.dtype,
+                    },
+                )
+            }
+        },
+    )
+}
+
+/// Reserves deterministic tied-head conversion scratch without launching work.
+///
+/// BF16/F16 tied heads produce caller-owned F32 logits by casting the two
+/// inputs once and reducing with the exact-scalar F32 NT route. The persistent
+/// scratch footprint is `(B + Vpad) * D * 4` bytes. Call this before freezing
+/// CUDA-graph-visible scratch; vendor modes and F32 heads need no reservation.
+#[cfg(any(feature = "hf", test))]
+pub(crate) fn presize_tied_lm_head_scratch(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    dims: TiedLmDims,
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if dtype == WeightDtype::F32 || ctx.gemm_mode() != GemmMode::Deterministic {
+        return Ok(());
+    }
+    let checked = checked_tied_lm_dims(dims)?;
+    ctx.with_bi_upcast_scratch(
+        (checked.temporal_elements, checked.embed_elements, 0),
+        |_, _, _| Ok(()),
+    )
+}
+
+/// Computes a tied LM head into caller-owned F32 logits.
+///
+/// The row-major operation is `logits[B,Vpad] = temporal[B,D] * embed[Vpad,D]^T`.
+/// `temporal_ptr` and `embed_ptr` must be matching `dtype` spans with `B*D`
+/// and `Vpad*D` elements; `logits_ptr` must be an F32 span with `B*Vpad`
+/// elements. All allocations must belong to `ctx` and remain live until the
+/// context stream completes (and through every replay that uses the pointers).
+///
+/// In deterministic mode BF16/F16 inputs are each cast once into persistent
+/// F32 scratch, then reduced by the exact-scalar F32 NT route directly into
+/// `logits_ptr`; there is no half output round trip. This requires
+/// `(B + Vpad) * D * 4` bytes of shared conversion scratch. Call
+/// `presize_tied_lm_head_scratch` before graph capture can freeze scratch
+/// addresses. F32 delegates to [`gpu_gemm_bi_tied_lm_head_raw`], while vendor
+/// modes retain GemmEx with the context's canonical compute type.
+///
+/// Returns an error before enqueue for unhealthy context state, invalid or
+/// overflowing dimensions, null/misaligned/unmanaged spans, output overlap,
+/// unsupported deterministic input types, or scratch growth after capture.
 pub fn gpu_gemm_ex_tied_lm_head_raw(
     ctx: &GpuCtx,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -3086,6 +3589,35 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     dtype: WeightDtype,
     dims: TiedLmDims,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if dtype == WeightDtype::F32 {
+        return gpu_gemm_bi_tied_lm_head_raw(
+            ctx,
+            logits_ptr,
+            temporal_ptr,
+            embed_ptr,
+            dims.batch,
+            dims.d_model,
+            dims.vocab_padded,
+        );
+    }
+    if ctx.gemm_mode() == GemmMode::Deterministic {
+        let mut observer = NoPhysicalObserver;
+        return gemm_bi_tied_half_f32_in(
+            ctx,
+            logits_ptr,
+            TypedPtr {
+                ptr: temporal_ptr,
+                dtype,
+            },
+            TypedPtr {
+                ptr: embed_ptr,
+                dtype,
+            },
+            dims,
+            &mut observer,
+        );
+    }
     let compute = effective_compute(ctx, dtype)?;
     gpu_gemm_ex_tied_lm_head_with_compute(
         &ctx.blas,

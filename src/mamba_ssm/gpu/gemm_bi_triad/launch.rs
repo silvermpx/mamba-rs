@@ -6239,15 +6239,31 @@ pub(in crate::mamba_ssm::gpu) fn record_physical_exact_scalar_f32_backward_dx<
     w_ptr: CUptr,
     physical: ScalarFallbackPhysicalContext,
 ) -> Result<(), String> {
+    record_physical_exact_scalar_f32_backward_dx_with_arguments(
+        ctx, observer, dx, dy, w_ptr, physical,
+    )
+}
+
+fn record_physical_exact_scalar_f32_backward_dx_with_arguments<
+    O: PhysicalLaunchObserver,
+    Output: ScalarOutputArgument,
+    Input: ScalarInputArgument,
+>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    output: &mut Output,
+    input: &Input,
+    w_ptr: CUptr,
+    physical: ScalarFallbackPhysicalContext,
+) -> Result<(), String> {
     let ScalarFallbackPhysicalContext { dims, dtype } = physical;
-    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims);
     let request = F32TriadRequest {
         op: ResolvedGemmOp::Nt,
-        shape,
+        shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
     };
     let operands = F32TriadOperands {
-        output: dx.raw_ptr(&ctx.stream),
-        a: dy.raw_ptr(&ctx.stream),
+        output: output.scalar_ptr(),
+        a: input.scalar_ptr(),
         b: w_ptr,
         bias: None,
         alpha: 1.0,
@@ -6265,8 +6281,8 @@ pub(in crate::mamba_ssm::gpu) fn record_physical_exact_scalar_f32_backward_dx<
                 gemm_bi_backward_dx_with_control(
                     &ctx.stream,
                     &ctx.kernels,
-                    dx,
-                    dy,
+                    output,
+                    input,
                     w_ptr,
                     dims,
                     Some(control),
@@ -6283,13 +6299,40 @@ pub(in crate::mamba_ssm::gpu) fn record_physical_exact_scalar_f32_backward_dx<
             gemm_bi_backward_dx_with_control(
                 &ctx.stream,
                 &ctx.kernels,
-                dx,
-                dy,
+                output,
+                input,
                 w_ptr,
                 dims,
                 Some(control),
             )
         },
+    )
+}
+
+pub(in crate::mamba_ssm::gpu) unsafe fn record_physical_exact_scalar_f32_backward_dx_ptrs<
+    O: PhysicalLaunchObserver,
+>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    dx: CUptr,
+    dy: CUptr,
+    w_ptr: CUptr,
+    physical: ScalarFallbackPhysicalContext,
+) -> Result<(), String> {
+    let dims = physical.dims;
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims);
+    let reduction_is_zero = shape.reduction(ResolvedGemmOp::Nt) == 0;
+    let dy = if reduction_is_zero { 0 } else { dy };
+    let w_ptr = if reduction_is_zero { 0 } else { w_ptr };
+    let mut output = RawScalarArgument(dx);
+    let input = RawScalarArgument(dy);
+    record_physical_exact_scalar_f32_backward_dx_with_arguments(
+        ctx,
+        observer,
+        &mut output,
+        &input,
+        w_ptr,
+        physical,
     )
 }
 
