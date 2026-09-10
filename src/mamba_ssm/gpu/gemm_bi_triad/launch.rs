@@ -1829,6 +1829,61 @@ struct ScalarLaunchArgs<'a> {
     preparation_error: Option<String>,
 }
 
+/// Argument submission used by the shared scalar bodies. Owned arguments keep
+/// cudarc's per-slice wait/record hooks; raw arguments submit the same pointer
+/// bytes for `GpuCtx`, whose stream has event tracking disabled.
+trait ScalarInputArgument {
+    fn scalar_ptr(&self) -> CUptr;
+    fn submit<'a>(&'a self, builder: &mut LaunchArgs<'a>);
+}
+
+trait ScalarOutputArgument {
+    fn scalar_ptr(&self) -> CUptr;
+    fn submit<'a>(&'a mut self, builder: &mut LaunchArgs<'a>);
+}
+
+struct RawScalarArgument(CUptr);
+
+impl ScalarInputArgument for GpuBuffer {
+    fn scalar_ptr(&self) -> CUptr {
+        self.cached_ptr()
+    }
+
+    fn submit<'a>(&'a self, builder: &mut LaunchArgs<'a>) {
+        builder.arg(self.inner());
+    }
+}
+
+impl ScalarOutputArgument for GpuBuffer {
+    fn scalar_ptr(&self) -> CUptr {
+        self.cached_ptr()
+    }
+
+    fn submit<'a>(&'a mut self, builder: &mut LaunchArgs<'a>) {
+        builder.arg(self.inner_mut());
+    }
+}
+
+impl ScalarInputArgument for RawScalarArgument {
+    fn scalar_ptr(&self) -> CUptr {
+        self.0
+    }
+
+    fn submit<'a>(&'a self, builder: &mut LaunchArgs<'a>) {
+        builder.arg(&self.0);
+    }
+}
+
+impl ScalarOutputArgument for RawScalarArgument {
+    fn scalar_ptr(&self) -> CUptr {
+        self.0
+    }
+
+    fn submit<'a>(&'a mut self, builder: &mut LaunchArgs<'a>) {
+        builder.arg(&self.0);
+    }
+}
+
 impl<'a> ScalarLaunchArgs<'a> {
     fn new(
         stream: &'a Arc<CudaStream>,
@@ -1859,15 +1914,18 @@ impl<'a> ScalarLaunchArgs<'a> {
         self
     }
 
-    fn arg_buffer(&mut self, buffer: &'a GpuBuffer) -> &mut Self {
-        self.capture_argument(buffer.cached_ptr());
-        self.builder.arg(buffer.inner());
+    fn arg_buffer<Input: ScalarInputArgument>(&mut self, buffer: &'a Input) -> &mut Self {
+        self.capture_argument(buffer.scalar_ptr());
+        buffer.submit(&mut self.builder);
         self
     }
 
-    fn arg_buffer_mut(&mut self, buffer: &'a mut GpuBuffer) -> &mut Self {
-        self.capture_argument(buffer.cached_ptr());
-        self.builder.arg(buffer.inner_mut());
+    fn arg_buffer_mut<Output: ScalarOutputArgument>(
+        &mut self,
+        buffer: &'a mut Output,
+    ) -> &mut Self {
+        self.capture_argument(buffer.scalar_ptr());
+        buffer.submit(&mut self.builder);
         self
     }
 
@@ -3247,6 +3305,24 @@ fn validate_f32_triad_operands(
             Err("f32 Triad NT requires no bias and beta == 0.0".into())
         }
         _ => Ok(()),
+    }
+}
+
+pub(in crate::mamba_ssm::gpu) fn validate_f32_triad_pointer_request(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+) -> Result<(), String> {
+    request.shape.validate(request.op)?;
+    validate_f32_triad_operands(request, operands)?;
+    let allocation_domain = validated_allocation_domain(&ctx.stream, &ctx.kernels, "f32 Triad")?;
+    let resources = F32LaunchResourceSnapshot::query_output(request, operands, allocation_domain)?;
+    if request.shape.reduction(request.op) == 0 {
+        Ok(())
+    } else {
+        resources
+            .with_inputs(request, operands, allocation_domain)
+            .map(|_| ())
     }
 }
 
@@ -5105,10 +5181,10 @@ where
     })
 }
 
-fn launch_cached_f32_forward_selected(
+unsafe fn launch_cached_f32_forward_ptrs_selected(
     ctx: &GpuCtx,
-    y: &mut GpuBuffer,
-    x: &GpuBuffer,
+    y: CUptr,
+    x: CUptr,
     w_ptr: CUptr,
     bias_ptr: CUptr,
     dims: (usize, usize, usize),
@@ -5120,12 +5196,8 @@ fn launch_cached_f32_forward_selected(
         shape,
     };
     let reduction_is_zero = shape.reduction(request.op) == 0;
-    let output = y.raw_ptr(&ctx.stream);
-    let x_ptr = if reduction_is_zero {
-        0
-    } else {
-        x.raw_ptr(&ctx.stream)
-    };
+    let output = y;
+    let x_ptr = if reduction_is_zero { 0 } else { x };
     let w_ptr = if reduction_is_zero { 0 } else { w_ptr };
     let operands = F32TriadOperands {
         output,
@@ -5141,11 +5213,12 @@ fn launch_cached_f32_forward_selected(
         w_ptr,
         bias_ptr,
     };
+    let mut output_arg = RawScalarArgument(output);
     launch_cached_f32_triad(ctx, selection, request, operands, |control| {
         gemm_bi_forward_sub_with_control(
             &ctx.stream,
             &ctx.kernels,
-            y,
+            &mut output_arg,
             &scalar_operands,
             dims,
             Some(control),
@@ -5153,6 +5226,43 @@ fn launch_cached_f32_forward_selected(
     })
 }
 
+/// Launches row-major `Y[B,N] = X[B,K] @ W[K,N] + bias[N]` through the
+/// context's cached deterministic Triad route.
+///
+/// `dims` is `(B,K,N)` and all pointers represent F32 elements. `y`, `x`,
+/// `w`, and a nonzero `bias` must be naturally aligned spans in the context's
+/// managed allocation domain with lengths `B*N`, `B*K`, `K*N`, and `N`.
+/// Inputs must not overlap the output. The allocation owners must remain alive
+/// on `ctx.stream` through stream completion and every captured graph replay.
+/// Zero reduction permits null `x` and `w`. Invalid shapes, spans, alignment,
+/// prepared bindings, or context state return an error before enqueue.
+///
+/// # Safety
+///
+/// The caller must uphold the pointer, aliasing, allocation-domain, stream,
+/// and replay-lifetime requirements above.
+pub(crate) unsafe fn launch_cached_f32_forward_ptrs(
+    ctx: &GpuCtx,
+    y: CUptr,
+    x: CUptr,
+    w: CUptr,
+    bias: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    unsafe {
+        launch_cached_f32_forward_ptrs_selected(
+            ctx,
+            y,
+            x,
+            w,
+            bias,
+            dims,
+            F32PreparedSelection::Automatic,
+        )
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn launch_cached_f32_forward(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,
@@ -5161,15 +5271,9 @@ pub(crate) fn launch_cached_f32_forward(
     bias_ptr: CUptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    launch_cached_f32_forward_selected(
-        ctx,
-        y,
-        x,
-        w_ptr,
-        bias_ptr,
-        dims,
-        F32PreparedSelection::Automatic,
-    )
+    unsafe {
+        launch_cached_f32_forward_ptrs(ctx, y.cached_ptr(), x.cached_ptr(), w_ptr, bias_ptr, dims)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -6042,10 +6146,10 @@ pub(in crate::mamba_ssm::gpu) fn record_physical_exact_scalar_f32_backward_dw<
     )
 }
 
-fn launch_cached_f32_backward_dx_selected(
+unsafe fn launch_cached_f32_backward_dx_ptrs_selected(
     ctx: &GpuCtx,
-    dx: &mut GpuBuffer,
-    dy: &GpuBuffer,
+    dx: CUptr,
+    dy: CUptr,
     w_ptr: CUptr,
     dims: (usize, usize, usize),
     selection: F32PreparedSelection,
@@ -6057,28 +6161,60 @@ fn launch_cached_f32_backward_dx_selected(
     };
     let reduction_is_zero = shape.reduction(request.op) == 0;
     let operands = F32TriadOperands {
-        output: dx.raw_ptr(&ctx.stream),
-        a: if reduction_is_zero {
-            0
-        } else {
-            dy.raw_ptr(&ctx.stream)
-        },
+        output: dx,
+        a: if reduction_is_zero { 0 } else { dy },
         b: if reduction_is_zero { 0 } else { w_ptr },
         bias: None,
         alpha: 1.0,
         beta: 0.0,
     };
+    let mut output_arg = RawScalarArgument(dx);
+    let input_arg = RawScalarArgument(operands.a);
     launch_cached_f32_triad(ctx, selection, request, operands, |control| {
         gemm_bi_backward_dx_with_control(
             &ctx.stream,
             &ctx.kernels,
-            dx,
-            dy,
+            &mut output_arg,
+            &input_arg,
             w_ptr,
             dims,
             Some(control),
         )
     })
+}
+
+/// Launches row-major `dX[B,K] = dY[B,N] @ W[K,N]^T` through the context's
+/// cached deterministic Triad NT route.
+///
+/// `dims` is `(B,K,N)` and all pointers represent F32 elements. `dx`, `dy`,
+/// and `w` must be naturally aligned spans in the context's managed allocation
+/// domain with lengths `B*K`, `B*N`, and `K*N`. Inputs must not overlap `dx`.
+/// Owners must remain alive on `ctx.stream` through stream completion and all
+/// captured graph replays. Zero reduction permits null `dy` and `w`. Invalid
+/// shapes, spans, alignment, prepared bindings, or context state return an
+/// error before enqueue.
+///
+/// # Safety
+///
+/// The caller must uphold the pointer, aliasing, allocation-domain, stream,
+/// and replay-lifetime requirements above.
+pub(crate) unsafe fn launch_cached_f32_backward_dx_ptrs(
+    ctx: &GpuCtx,
+    dx: CUptr,
+    dy: CUptr,
+    w: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    unsafe {
+        launch_cached_f32_backward_dx_ptrs_selected(
+            ctx,
+            dx,
+            dy,
+            w,
+            dims,
+            F32PreparedSelection::Automatic,
+        )
+    }
 }
 
 pub(crate) fn launch_cached_f32_backward_dx(
@@ -6088,14 +6224,9 @@ pub(crate) fn launch_cached_f32_backward_dx(
     w_ptr: CUptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    launch_cached_f32_backward_dx_selected(
-        ctx,
-        dx,
-        dy,
-        w_ptr,
-        dims,
-        F32PreparedSelection::Automatic,
-    )
+    unsafe {
+        launch_cached_f32_backward_dx_ptrs(ctx, dx.cached_ptr(), dy.cached_ptr(), w_ptr, dims)
+    }
 }
 
 pub(in crate::mamba_ssm::gpu) fn record_physical_exact_scalar_f32_backward_dx<
@@ -8215,10 +8346,10 @@ fn enqueue_scalar_forward<C: ScalarLaunchController>(
     unsafe { enqueue_with_physical_observation(&mut observer, builder.launch_args(), config, None) }
 }
 
-fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
+fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOutputArgument>(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
-    y: &mut GpuBuffer,
+    y: &mut Output,
     operands: &GemmBiFwdSubOperands,
     dims: (usize, usize, usize),
     mut control: Option<&mut C>,
@@ -8251,10 +8382,8 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
         .as_ref()
         .map(|control| control.operands().beta)
         .unwrap_or(0.0);
-    use cudarc::driver::DevicePtr;
-    let (output, _) = y.inner().device_ptr(stream);
     let actual_operands = F32TriadOperands {
-        output,
+        output: y.scalar_ptr(),
         a: x_ptr,
         b: w_ptr,
         bias: (bias_ptr != 0).then_some(bias_ptr),
@@ -9575,11 +9704,15 @@ pub fn gemm_bi_backward_dx(
     )
 }
 
-fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
+fn gemm_bi_backward_dx_with_control<
+    C: ScalarLaunchController,
+    Output: ScalarOutputArgument,
+    Input: ScalarInputArgument,
+>(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
-    dx: &mut GpuBuffer,
-    dy: &GpuBuffer,
+    dx: &mut Output,
+    dy: &Input,
     w_ptr: CUptr,
     dims: (usize, usize, usize),
     mut control: Option<&mut C>,
@@ -9591,8 +9724,8 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
         .map(|control| control.operands().alpha)
         .unwrap_or(1.0);
     let operands = F32TriadOperands {
-        output: dx.raw_ptr(stream),
-        a: dy.raw_ptr(stream),
+        output: dx.scalar_ptr(),
+        a: dy.scalar_ptr(),
         b: w_ptr,
         bias: None,
         alpha,
@@ -9620,11 +9753,10 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
             block_dim: (super::contract::SCALAR_NT_M2N16_THREADS, 1, 1),
             shared_mem_bytes: super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES,
         };
-        let dy_ptr = dy.raw_ptr(stream);
         let mut builder =
             scalar_launch_builder(stream, &kernels.gemm_bi_nt_m2n16_bk64_splitk32_v1, &control);
         builder.arg_buffer_mut(dx);
-        builder.arg(&dy_ptr);
+        builder.arg_buffer(dy);
         builder.arg(&w_ptr);
         builder.arg(&alpha);
         builder.arg(&checked_dims.m_i32);
@@ -9740,7 +9872,6 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
             },
         };
         let bias = 0_u64;
-        let dy_ptr = dy.raw_ptr(stream);
         let (m64_function, m64_symbol) = if uses_fixed_copyplan {
             (
                 kernels
@@ -9762,7 +9893,7 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
         };
         let mut m64 = scalar_launch_builder(stream, m64_function, &control);
         m64.arg_buffer_mut(dx);
-        m64.arg(&dy_ptr);
+        m64.arg_buffer(dy);
         m64.arg(&w_t_ptr);
         m64.arg(&bias);
         m64.arg(&params);
@@ -10228,10 +10359,8 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
         // x_tail_ptr = dY[:, n_main] (offset n_main floats into base).
         // w_tail_ptr = W_T[n_main, :] (offset n_main * n_in floats into W_T base).
         let (dy_tail_ptr, wt_tail_ptr): (u64, u64) = if n_tail_nt > 0 {
-            use cudarc::driver::DevicePtr;
-            let (dy_base, _r_dy) = dy.inner().device_ptr(stream);
             let dyp = checked_ptr_add(
-                dy_base,
+                dy.scalar_ptr(),
                 checked_byte_offset(n_main_nt, std::mem::size_of::<f32>(), "dY tail")?,
                 "dY tail",
             )?;
@@ -13515,14 +13644,44 @@ mod prepared_f32_launch_tests {
             !helper.contains("physical.launch.arguments_digest ="),
             "physical TF32 projection must preserve the semantic kernel-argument digest"
         );
-        let production = &source[..source.find("#[cfg(test)]").expect("test module boundary")];
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod prepared_f32_launch_tests {")
+            .map(|(production, _)| production)
+            .expect("prepared F32 launch test-module boundary");
+        for caller in [
+            "fn prepare_prepared_f32_direct_graph_sequence",
+            "fn prepare_sm89_tf32_tn_pre_rna_graph_sequence",
+            "fn prepare_tf32_splitk_direct_graph_sequence",
+            "fn enqueue_sm89_tf32_tn_pre_rna",
+            "fn enqueue_tf32_splitk_f32",
+            "fn enqueue_validated_prepared_f32_triad_observed",
+        ] {
+            assert!(
+                production.contains(caller),
+                "missing physical F32 route producer {caller}"
+            );
+        }
         assert_eq!(
             production
                 .matches("physical_prepared_f32_route(prepared,")
                 .count(),
-            4,
+            6,
             "eager observation and direct graph preparation must share the physical route"
         );
+        for (call, expected) in [
+            (
+                "physical_prepared_f32_route(prepared, prepared.routes[0])",
+                1,
+            ),
+            ("physical_prepared_f32_route(prepared, *resolved)", 4),
+            ("physical_prepared_f32_route(prepared, resolved)", 1),
+        ] {
+            assert_eq!(
+                production.matches(call).count(),
+                expected,
+                "physical F32 route call form changed: {call}"
+            );
+        }
     }
 
     #[test]

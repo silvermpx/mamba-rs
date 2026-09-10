@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::hf::embed::embed_lookup;
 use crate::mamba_ssm::gpu::blas::{
-    TiedLmDims, TypedPtr, gpu_gemm_bi_tied_lm_head_blas, gpu_gemm_ex_tied_lm_head_blas,
-    gpu_gemm_typed_raw_no_bias,
+    TiedLmDims, TypedPtr, gpu_gemm_bi_tied_lm_head_raw, gpu_gemm_ex_tied_lm_head_raw,
+    gpu_gemm_typed_forward_raw,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -474,7 +474,7 @@ impl GpuMamba3LM {
 
     fn compute_logits(&mut self) -> Result<(), String> {
         let stream = self.backbone.stream().clone();
-        let blas = self.backbone.blas();
+        let ctx = self.backbone.ctx();
         let temporal_ptr = self.backbone.temporal_ptr();
         let b = self.batch;
         let d = self.d_model;
@@ -487,8 +487,8 @@ impl GpuMamba3LM {
                     // (temporal_ptr) — feed it directly; the old path bounced
                     // it through host memory (D2H + H2D) on EVERY decoded
                     // token. M1 removed this exact bounce earlier.
-                    gpu_gemm_typed_raw_no_bias(
-                        blas,
+                    gpu_gemm_typed_forward_raw(
+                        ctx,
                         TypedPtr {
                             ptr: self.gpu_logits.cached_ptr(),
                             dtype: WeightDtype::F32,
@@ -501,11 +501,12 @@ impl GpuMamba3LM {
                             ptr: lm.cached_ptr(),
                             dtype: WeightDtype::F32,
                         },
+                        None,
                         (b, d, self.vocab_size_padded),
                     )?;
                 } else {
-                    gpu_gemm_bi_tied_lm_head_blas(
-                        blas,
+                    gpu_gemm_bi_tied_lm_head_raw(
+                        ctx,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,
                         embed.cached_ptr(),
@@ -528,8 +529,8 @@ impl GpuMamba3LM {
 
                 if let Some(lm) = lm_head {
                     // Untied half path — same padded stride as F32 path above.
-                    gpu_gemm_typed_raw_no_bias(
-                        blas,
+                    gpu_gemm_typed_forward_raw(
+                        ctx,
                         TypedPtr {
                             ptr: self.gpu_logits.cached_ptr(),
                             dtype: WeightDtype::F32,
@@ -542,11 +543,12 @@ impl GpuMamba3LM {
                             ptr: lm.cached_ptr(),
                             dtype: *dtype,
                         },
+                        None,
                         (b, d, self.vocab_size_padded),
                     )?;
                 } else {
-                    gpu_gemm_ex_tied_lm_head_blas(
-                        blas,
+                    gpu_gemm_ex_tied_lm_head_raw(
+                        ctx,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,
                         embed.cached_ptr(),

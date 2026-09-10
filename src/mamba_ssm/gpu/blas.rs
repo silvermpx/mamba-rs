@@ -7,7 +7,7 @@
 //!   gemm(N, N, n_out, batch, n_in, 1.0, W, n_out, X, n_in, beta, Y, n_out)
 
 use super::buffers::{GpuBuffer, GradSlice};
-use super::context::GpuCtx;
+use super::context::{GemmMode, GpuCtx};
 use super::dtype::WeightDtype;
 use super::gemm_bi_triad::{PhysicalArgumentRange, prepare_physical_observer};
 use super::kernel_identity::{
@@ -34,85 +34,101 @@ fn effective_compute(
         .vendor_compute()
 }
 
-pub fn gpu_gemm_bi_forward_raw(
+/// Routes row-major F32 `Y[B,N] = X[B,K] @ W[K,N] + bias[N]` using `ctx`.
+///
+/// `dims` is `(B,K,N)`. All pointers represent naturally aligned F32 spans in
+/// the context's managed allocation domain: `y[B*N]`, `x[B*K]`, `w[K*N]`, and
+/// optional `bias[N]`. Inputs must not overlap `y`. Their owners must remain
+/// alive on `ctx.stream` through stream completion and every captured replay.
+/// Zero reduction permits null `x` and `w`. Invalid context state, dimensions,
+/// spans, alignment, aliasing, or unsupported selected routes return an error.
+///
+/// # Safety
+///
+/// The caller must uphold the pointer, allocation-domain, aliasing, stream,
+/// and captured-replay lifetime requirements above.
+pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     ctx: &GpuCtx,
-    y: &mut GpuBuffer,
-    x: &GpuBuffer,
-    w_ptr: cudarc::driver::sys::CUdeviceptr,
-    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    y: cudarc::driver::sys::CUdeviceptr,
+    x: cudarc::driver::sys::CUdeviceptr,
+    w: cudarc::driver::sys::CUdeviceptr,
+    bias: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
     let (batch, n_in, n_out) = dims;
-
-    // Opt-in deterministic path, family-selected (`set_bi_gemm_family`).
-    if ctx.batch_invariant() {
+    let shape = super::gemm_bi_triad::F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims);
+    let request = super::gemm_bi_triad::F32TriadRequest {
+        op: ResolvedGemmOp::Nn,
+        shape,
+    };
+    let reduction_is_zero = shape.reduction(request.op) == 0;
+    let x = if reduction_is_zero { 0 } else { x };
+    let w = if reduction_is_zero { 0 } else { w };
+    let operands = super::gemm_bi_triad::F32TriadOperands {
+        output: y,
+        a: x,
+        b: w,
+        bias,
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    if ctx.gemm_mode() == GemmMode::Deterministic {
         return match ctx.bi_gemm_family() {
-            // The triad dispatcher; bias is fused into its kernels (no
-            // separate broadcast launch).
-            super::context::BiGemmFamily::Triad => super::gemm_bi_triad::launch_cached_f32_forward(
-                ctx,
-                y,
-                x,
-                w_ptr,
-                bias_ptr.unwrap_or(0),
-                (batch, n_in, n_out),
-            ),
-            // Fixed-tile, invariant by construction. f32 operands take the
-            // CUDA-core FMA instantiation.
+            super::context::BiGemmFamily::Triad => unsafe {
+                super::gemm_bi_triad::launch_cached_f32_forward_ptrs(
+                    ctx,
+                    y,
+                    x,
+                    w,
+                    bias.unwrap_or(0),
+                    dims,
+                )
+            },
             super::context::BiGemmFamily::Inference => {
-                let y_ptr = {
-                    use cudarc::driver::DevicePtr;
-                    let (p, _r) = y.inner().device_ptr(&ctx.stream);
-                    p
-                };
-                let x_ptr = {
-                    use cudarc::driver::DevicePtr;
-                    let (p, _r) = x.inner().device_ptr(&ctx.stream);
-                    p
-                };
+                super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
                 gemm_bi_forward_raw(
                     ctx,
                     TypedPtr {
-                        ptr: y_ptr,
+                        ptr: y,
                         dtype: WeightDtype::F32,
                     },
                     TypedPtr {
-                        ptr: x_ptr,
+                        ptr: x,
                         dtype: WeightDtype::F32,
                     },
                     TypedPtr {
-                        ptr: w_ptr,
+                        ptr: w,
                         dtype: WeightDtype::F32,
                     },
-                    bias_ptr,
-                    (batch, n_in, n_out),
+                    bias,
+                    dims,
                 )
             }
         };
     }
 
-    ctx.ensure_vendor_gemm("gpu_gemm_bi_forward_raw")?;
-    let beta = if let Some(b_ptr) = bias_ptr {
+    super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
+    ctx.ensure_vendor_gemm("gpu_gemm_f32_forward_ptrs")?;
+    let beta = if let Some(b_ptr) = bias {
         let b_i = batch as i32;
         let n_i = n_out as i32;
-        let y_ptr = y.cached_ptr();
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
-        builder.arg(&y_ptr); // raw ptr — no SyncOnDrop, CUDA Graph safe
+        builder.arg(&y);
         builder.arg(&b_ptr);
         builder.arg(&b_i);
         builder.arg(&n_i);
         unsafe { builder.launch(grid_1d(batch * n_out)) }
-            .map_err(|e| format!("bias_broadcast_raw: {:?}", e))?;
+            .map_err(|e| format!("bias_broadcast_ptrs: {e:?}"))?;
         1.0f32
     } else {
         0.0f32
     };
 
     let alpha: f32 = 1.0;
-    let w_raw = w_ptr as *const f32;
-    let x_raw = x.raw_ptr(&ctx.stream) as *const f32;
-    let y_raw = y.raw_ptr(&ctx.stream) as *mut f32;
+    let w_raw = w as *const f32;
+    let x_raw = x as *const f32;
+    let y_raw = y as *mut f32;
 
     unsafe {
         cudarc::cublas::result::sgemm(
@@ -131,10 +147,21 @@ pub fn gpu_gemm_bi_forward_raw(
             y_raw,
             n_out as c_int,
         )
-        .map_err(|e| format!("cuBLAS sgemm_forward_raw failed: {e:?}"))?;
+        .map_err(|e| format!("cuBLAS sgemm_forward_ptrs failed: {e:?}"))?;
     }
 
     Ok(())
+}
+
+pub fn gpu_gemm_bi_forward_raw(
+    ctx: &GpuCtx,
+    y: &mut GpuBuffer,
+    x: &GpuBuffer,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    unsafe { gpu_gemm_f32_forward_ptrs(ctx, y.cached_ptr(), x.cached_ptr(), w_ptr, bias_ptr, dims) }
 }
 
 /// Same as [`gpu_gemm_bi_forward_raw`] but the input is a raw device pointer
@@ -148,51 +175,7 @@ pub fn gpu_gemm_bi_forward_ptr(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    ctx.ensure_gemm_usable()?;
-    ctx.ensure_vendor_gemm("gpu_gemm_bi_forward_ptr")?;
-    let (batch, n_in, n_out) = dims;
-    let beta = if let Some(b_ptr) = bias_ptr {
-        let b_i = batch as i32;
-        let n_i = n_out as i32;
-        let y_ptr = y.cached_ptr();
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
-        builder.arg(&y_ptr);
-        builder.arg(&b_ptr);
-        builder.arg(&b_i);
-        builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(batch * n_out)) }
-            .map_err(|e| format!("bias_broadcast_ptr: {:?}", e))?;
-        1.0f32
-    } else {
-        0.0f32
-    };
-
-    let alpha: f32 = 1.0;
-    let w_raw = w_ptr as *const f32;
-    let x_raw = x_ptr as *const f32;
-    let y_raw = y.raw_ptr(&ctx.stream) as *mut f32;
-
-    unsafe {
-        cudarc::cublas::result::sgemm(
-            *ctx.blas.handle(),
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
-            &alpha as *const f32,
-            w_raw,
-            n_out as c_int,
-            x_raw,
-            n_in as c_int,
-            &beta as *const f32,
-            y_raw,
-            n_out as c_int,
-        )
-        .map_err(|e| format!("cuBLAS sgemm_forward_ptr failed: {e:?}"))?;
-    }
-
-    Ok(())
+    unsafe { gpu_gemm_f32_forward_ptrs(ctx, y.cached_ptr(), x_ptr, w_ptr, bias_ptr, dims) }
 }
 
 /// Input gradient: `dX[B,K] = dY[B,N] @ W^T[N,K]`.
@@ -217,14 +200,15 @@ pub fn gpu_gemm_bi_backward_dx_raw(
                     (batch, n_in, n_out),
                 )
             }
-            super::context::BiGemmFamily::Inference => super::gemm_bi_triad::gemm_bi_backward_dx(
-                &ctx.stream,
-                &ctx.kernels,
-                dx,
-                dy,
-                w_ptr,
-                (batch, n_in, n_out),
-            ),
+            super::context::BiGemmFamily::Inference => {
+                super::gemm_bi_triad::launch_cached_f32_backward_dx(
+                    ctx,
+                    dx,
+                    dy,
+                    w_ptr,
+                    (batch, n_in, n_out),
+                )
+            }
         };
     }
     ctx.ensure_vendor_gemm("gpu_gemm_bi_backward_dx_raw")?;
@@ -2317,6 +2301,32 @@ pub fn gpu_gemm_bi_tied_lm_head_raw(
     d_model: usize,
     vocab_padded: usize,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    let dims = (batch, vocab_padded, d_model);
+    let request = super::gemm_bi_triad::F32TriadRequest {
+        op: ResolvedGemmOp::Nt,
+        shape: super::gemm_bi_triad::F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+    };
+    let operands = super::gemm_bi_triad::F32TriadOperands {
+        output: logits_ptr,
+        a: temporal_ptr,
+        b: embed_ptr,
+        bias: None,
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    if ctx.gemm_mode() == GemmMode::Deterministic {
+        return unsafe {
+            super::gemm_bi_triad::launch_cached_f32_backward_dx_ptrs(
+                ctx,
+                logits_ptr,
+                temporal_ptr,
+                embed_ptr,
+                dims,
+            )
+        };
+    }
+    super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
     ctx.ensure_vendor_gemm("gpu_gemm_bi_tied_lm_head_raw")?;
     gpu_gemm_bi_tied_lm_head_blas(
         &ctx.blas,
@@ -2329,9 +2339,10 @@ pub fn gpu_gemm_bi_tied_lm_head_raw(
     )
 }
 
-/// No-context twin of `gpu_gemm_bi_tied_lm_head_raw` — takes only the cuBLAS
-/// handle so callers without a `GpuCtx` (e.g., Mamba-3 LLM wrapper) can use
-/// the same OP_T row-major trick without synthesizing a context.
+/// Vendor-only no-context twin of [`gpu_gemm_bi_tied_lm_head_raw`].
+///
+/// This compatibility boundary always uses cuBLAS and therefore must not be
+/// called by high-level model paths that own a [`GpuCtx`].
 pub fn gpu_gemm_bi_tied_lm_head_blas(
     blas: &cudarc::cublas::CudaBlas,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -3087,7 +3098,10 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     )
 }
 
-/// No-context twin of `gpu_gemm_ex_tied_lm_head_raw` — blas-only variant.
+/// Vendor-only no-context twin of [`gpu_gemm_ex_tied_lm_head_raw`].
+///
+/// This compatibility boundary always uses cuBLAS and therefore must not be
+/// called by high-level model paths that own a [`GpuCtx`].
 pub fn gpu_gemm_ex_tied_lm_head_blas(
     blas: &cudarc::cublas::CudaBlas,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -3186,7 +3200,7 @@ pub fn gpu_gemm_ex_forward_raw(
     )
 }
 
-/// Fully typed GEMM forward: `C[B,N] = A[B,K] @ W[K,N] + bias[N]`.
+/// Vendor-only fully typed GEMM forward: `C[B,N] = A[B,K] @ W[K,N]`.
 ///
 /// All three operand dtypes are independent (`a.dtype`, `w.dtype`, `c.dtype`).
 /// This helper has no [`GpuCtx`], so it uses the dtype's fixed cuBLAS compute
@@ -3196,11 +3210,9 @@ pub fn gpu_gemm_ex_forward_raw(
 /// broadcast into C via the typed `bias_broadcast_<c.dtype>` kernel,
 /// which upcasts bias to f32, adds f32, and downcasts to `c.dtype`.
 ///
-/// Used for end-to-end bf16/f16 activation paths where GEMM writes
-/// directly to half-precision output without a staging f32 copy.
-/// No-context twin of `gpu_gemm_typed_forward_raw` for callers that don't
-/// hold a `GpuCtx` (e.g., the Mamba-3 engine has its own blas/kernels and
-/// never passes a bias through this helper). Takes only the cuBLAS handle.
+/// This no-context compatibility boundary always uses cuBLAS. High-level
+/// model paths that own a [`GpuCtx`] must call [`gpu_gemm_typed_forward_raw`]
+/// so the selected deterministic or vendor mode is honored.
 pub fn gpu_gemm_typed_raw_no_bias(
     blas: &cudarc::cublas::CudaBlas,
     c: TypedPtr,
@@ -3445,19 +3457,18 @@ pub fn gpu_gemm_typed_forward_raw(
     ctx.ensure_gemm_usable()?;
     let (batch, n_in, n_out) = dims;
 
-    // Dispatch:
-    //   M=1   → batch-invariant matvec (decode hot path; ~1000 tok/s
-    //           target, same as cuBLAS gemv, PLUS trivially deterministic
-    //           because M=1 has no batch dim).
-    //   M≥2   → cuBLAS GemmEx (fast Tensor-Core path; deterministic for
-    //           fixed M within a process — sufficient for fixed-batch RL
-    //           and prefill workloads).
-    //
-    // The `gemm_bi_*` WMMA kernels are registered but not in the default
-    // path — they hit ~30% of cuBLAS throughput in this form; the
-    // fixed-tile family is the fast deterministic path. Keep the
-    // reference alive for the compiler.
+    // Canonical routing is mode-first. All-F32 delegates to the shared NN
+    // seam: deterministic mode follows the selected Inference/Triad family,
+    // while cuBLAS Fast/Pedantic use the configured vendor handle. Remaining
+    // deterministic homogeneous-half triples follow the selected fixed-tile,
+    // Triad, or matvec coverage below; unsupported mixed triples fail closed.
+    // Vendor modes reach GemmEx only after those deterministic branches are
+    // dormant. Keep the registered legacy selector referenced.
     let _ = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype);
+
+    if c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32 {
+        return unsafe { gpu_gemm_f32_forward_ptrs(ctx, c.ptr, x.ptr, w.ptr, bias_ptr, dims) };
+    }
 
     // The matvec kernel handles any M ≥ 1 via a 2D grid (CTA per
     // (m_row, col_chunk)) and gives strict cross-batch bit-identity.

@@ -14,53 +14,15 @@
 
 use super::kernels::Mamba3Kernels;
 use super::weights::GpuMamba3WeightsInf;
+use crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
-use std::ffi::c_int;
 use std::sync::Arc;
 
 type Stream = Arc<cudarc::driver::CudaStream>;
-
-/// Inline SGEMM: Y[B,N] = X[B,K] @ W[K,N], beta=0 (no bias).
-/// Uses raw cuBLAS — no GpuCtx dependency.
-fn sgemm_no_bias(
-    blas: &cudarc::cublas::CudaBlas,
-    y: &GpuBuffer,
-    x: &GpuBuffer,
-    w_ptr: cudarc::driver::sys::CUdeviceptr,
-    batch: usize,
-    n_in: usize,
-    n_out: usize,
-) -> Result<(), String> {
-    let alpha: f32 = 1.0;
-    let beta: f32 = 0.0;
-    let w_raw = w_ptr as *const f32;
-    let x_raw = x.cached_ptr() as *const f32;
-    let y_raw = y.cached_ptr() as *mut f32;
-    unsafe {
-        cudarc::cublas::result::sgemm(
-            *blas.handle(),
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
-            &alpha as *const f32,
-            w_raw,
-            n_out as c_int,
-            x_raw,
-            n_in as c_int,
-            &beta as *const f32,
-            y_raw,
-            n_out as c_int,
-        )
-        .map_err(|e| format!("cuBLAS sgemm failed: {e:?}"))?;
-    }
-    Ok(())
-}
 
 /// Persistent recurrent state for GPU Mamba-3 inference (all layers).
 pub struct Mamba3GpuInferenceState {
@@ -339,11 +301,10 @@ pub struct Mamba3GpuInferenceEngine {
     /// Full CUDA execution context (stream + cuBLAS with its Graph-safe
     /// workspace and GEMM route). One context for step, prefill and the
     /// lm-head GEMMs alike. Flag scope: the handle-level math mode
-    /// (`disable_tf32`) governs every cuBLAS call made through this
-    /// context; the batch-invariant / bi-tensor-core flags route only the
-    /// dispatches that consult them (the training/eval paths in
-    /// `mamba_ssm::gpu::blas`) — this engine's projections and lm-head use
-    /// the ctx-free raw cuBLAS twins and stay on the plain cuBLAS tier.
+    /// (`disable_tf32`) governs every vendor call made through this context;
+    /// deterministic mode and its family/policy settings route the engine's
+    /// projections and downstream lm-head through the same context-aware
+    /// GEMM boundaries as Mamba-1.
     pub ctx: GpuCtx,
     pub cfg: Mamba3Config,
     pub batch: usize,
@@ -556,15 +517,16 @@ impl Mamba3GpuInferenceEngine {
                 .copy_from_raw(&scratch.gpu_input, &self.ctx.stream)?;
         } else {
             // Input projection SGEMM
-            sgemm_no_bias(
-                &self.ctx.blas,
-                &scratch.temporal,
-                &scratch.gpu_input,
-                self.weights.input_proj_w.ptr(),
-                b,
-                self.input_dim,
-                dm,
-            )?;
+            unsafe {
+                gpu_gemm_f32_forward_ptrs(
+                    &self.ctx,
+                    scratch.temporal.cached_ptr(),
+                    scratch.gpu_input.cached_ptr(),
+                    self.weights.input_proj_w.ptr(),
+                    None,
+                    (b, self.input_dim, dm),
+                )
+            }?;
             // Add bias
             {
                 let n = b * dm;
@@ -678,15 +640,16 @@ impl Mamba3GpuInferenceEngine {
         }
 
         // F2: in_proj SGEMM [batch, d_model] → [batch, in_proj_dim]
-        sgemm_no_bias(
-            &self.ctx.blas,
-            &scratch.proj,
-            &scratch.post_norm,
-            lw.in_proj_w.ptr(),
-            b,
-            dm,
-            ip,
-        )?;
+        unsafe {
+            gpu_gemm_f32_forward_ptrs(
+                &self.ctx,
+                scratch.proj.cached_ptr(),
+                scratch.post_norm.cached_ptr(),
+                lw.in_proj_w.ptr(),
+                None,
+                (b, dm, ip),
+            )
+        }?;
 
         // F3: m3_split (8-way + fused softplus/sigmoid)
         {
@@ -877,15 +840,16 @@ impl Mamba3GpuInferenceEngine {
         // F8: out_proj SGEMM [batch, d_inner] → [batch, d_model] - lands
         // in post_norm (dead since F2 consumed it), keeping the residual
         // stream in temporal.
-        sgemm_no_bias(
-            &self.ctx.blas,
-            &scratch.post_norm,
-            &scratch.gated,
-            lw.out_proj_w.ptr(),
-            b,
-            di,
-            dm,
-        )?;
+        unsafe {
+            gpu_gemm_f32_forward_ptrs(
+                &self.ctx,
+                scratch.post_norm.cached_ptr(),
+                scratch.gated.cached_ptr(),
+                lw.out_proj_w.ptr(),
+                None,
+                (b, di, dm),
+            )
+        }?;
 
         // F9: Residual add - temporal (pre-norm stream) += block output.
         {
@@ -988,7 +952,7 @@ impl Mamba3GpuInferenceEngine {
 // residual stream stay f32 for numerical stability.
 // ═══════════════════════════════════════════════════════════════════
 
-use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_raw_no_bias};
+use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 
 pub struct Mamba3GpuInferenceMixed {
@@ -1210,8 +1174,8 @@ impl Mamba3GpuInferenceMixed {
             }
 
             // F2: in_proj GEMM typed (bf16 × bf16 → bf16).
-            gpu_gemm_typed_raw_no_bias(
-                &engine.ctx.blas,
+            gpu_gemm_typed_forward_raw(
+                &engine.ctx,
                 TypedPtr {
                     ptr: scratch.proj.cached_ptr(),
                     dtype: dt,
@@ -1224,6 +1188,7 @@ impl Mamba3GpuInferenceMixed {
                     ptr: lw.in_proj_w.ptr(),
                     dtype: lw.in_proj_w.dtype(),
                 },
+                None,
                 (b, dm, ip),
             )?;
 
@@ -1470,8 +1435,8 @@ impl Mamba3GpuInferenceMixed {
             }
 
             // F8: out_proj GEMM typed.
-            gpu_gemm_typed_raw_no_bias(
-                &engine.ctx.blas,
+            gpu_gemm_typed_forward_raw(
+                &engine.ctx,
                 TypedPtr {
                     ptr: scratch.temporal.cached_ptr(),
                     dtype: dt,
@@ -1484,6 +1449,7 @@ impl Mamba3GpuInferenceMixed {
                     ptr: lw.out_proj_w.ptr(),
                     dtype: lw.out_proj_w.dtype(),
                 },
+                None,
                 (b, di, dm),
             )?;
 
@@ -1905,7 +1871,15 @@ impl GpuMamba3Backbone {
         }
     }
 
-    /// Access the cuBLAS handle (for downstream lm_head GEMM).
+    /// Shared execution context for downstream projections such as lm_head.
+    pub(crate) fn ctx(&self) -> &GpuCtx {
+        match &self.engine {
+            M3BackboneEngine::F32(e) => &e.ctx,
+            M3BackboneEngine::Mixed(e) => &e.engine_ref().ctx,
+        }
+    }
+
+    /// Access the vendor handle for explicit vendor-only compatibility code.
     pub fn blas(&self) -> &cudarc::cublas::CudaBlas {
         match &self.engine {
             M3BackboneEngine::F32(e) => &e.ctx.blas,
