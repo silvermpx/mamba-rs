@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-tied-head-green.qhBBIV)
+    Finished `release` profile [optimized] target(s) in 54.42s
+  Executable tests/gemm_tied_f32_output.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_tied_f32_output-cb43e3c4c05eddb3)

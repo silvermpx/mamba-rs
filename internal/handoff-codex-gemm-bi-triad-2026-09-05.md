@@ -3030,7 +3030,8 @@ let expected_bits = (input * input).to_bits();
 
 - [ ] Add CUDA+HF colocated tests using small synthetic owned M1/M3 models,
   half tied embeddings and vocabulary larger than backbone scratch. Reserve
-  through the actual LM capture wrapper, capture after a warm step, run logits
+  through the actual LM capture wrapper, capture after a backbone-only warm
+  step (no prior head call that would already reserve vocabulary scratch), run logits
   again and verify no scratch-growth error and stable addresses. No downloads
   or public testing API. Complete model no-vendor tripwire and Inference/M3
   physical inventory remain the following graph task, not claimed here.
@@ -3043,3 +3044,178 @@ let expected_bits = (input * input).to_bits();
   and changed Rustdoc examples. Freeze/report, root commit, independent review.
   Sole implementer; root owns GPU/index/commits; no children, new branches,
   publish, evidence deletion, CUDA body changes or allow(dead_code).
+
+## Task 904: Complete Inference terminal launch identities (2026-09-10)
+
+Execute after Task903 review. This is the first independently verifiable half
+of the remaining graph work: instrument every existing Inference terminal and
+the typed Fixed matvec fallback, without changing selection or arithmetic.
+The next task consumes these records to strengthen M1/M3 graph guards and
+prove model-wide absence of vendor GEMMs. Public constructor/default propagation
+follows those guards, not this task.
+
+Specs, read completely:
+`internal/inference-m3-physical-recording-design-20260910.md` sections A/B and
+the direct-launch test inventory;
+`internal/inference-identity-vocabulary-20260910.md` (exact append-only tags,
+numeric definitions, symbol tables, ABI/dtype/permission rules);
+`internal/deterministic-routing-closure-design-20260910.md` section3.
+
+Files and responsibilities:
+
+- `src/mamba_ssm/gpu/gemm_bi_inference.rs`: existing dispatch/terminal builders,
+  observed adapters and observer propagation; selectors remain single-source.
+- New private `src/mamba_ssm/gpu/gemm_bi_inference/identity.rs`: closed terminal
+  specification, fieldwise argument binding and terminal validation. Keep this
+  cohesive table out of the already large launch file; it is not another
+  selector or a public API. Include focused colocated tests here.
+- `src/mamba_ssm/gpu/kernel_identity.rs`: append-only tags and Inference physical
+  observation payload/resolve. Existing Triad encodings remain intact.
+- `src/mamba_ssm/gpu/context.rs`: live backend/numeric/function validation and
+  a cheap private route-recorder-active query for the non-recording fast path.
+- `src/mamba_ssm/gpu/kernels.rs`: exhaustive access to the actual loaded Fixed
+  holders where needed; no symbol generation, compiler or artifact changes.
+- `src/mamba_ssm/gpu/blas.rs`: observed legacy terminal and typed matvec boundary.
+- `src/mamba_ssm/gpu/gemm_bi_triad/launch.rs` and `mod.rs`: observer forwarding
+  through the existing SM120 exact cached bridge, counted once.
+- `tests/kernel_identity_cuda.rs` or new bounded
+  `tests/gemm_inference_route_inventory.rs`: real public-route regressions.
+  Do not rewrite model engines, public constructors, docs unrelated to touched
+  contracts, CUDA/header files, qualification receipts or AUTO tables.
+
+Produced interfaces use existing GPU-private types:
+
+```rust
+pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx, operands: InferenceFwdOperands, shape: InferenceShape,
+    observer: &mut O,
+) -> Result<InferenceTile, String>;
+
+// On GpuCtx; fail on a conflicting recorder borrow rather than treating it
+// as inactive. This does not change recorder ownership or expose public state.
+pub(crate) fn gemm_route_recording_active(&self) -> Result<bool, String>;
+
+// Eager preparation for the following model-manifest task. Reuse the existing
+// once-only architecture probe and its disabled-rung/portable fallback verdict.
+pub(crate) fn prepare_inference_arch_rung(ctx: &GpuCtx) -> Result<(), String>;
+```
+
+The existing public `inference_forward` and forced-tile entry remain adapters
+through `NoPhysicalObserver`. Give the forced adapter the same internal
+observer seam so tests exercise production builders rather than reconstructing
+launches. Keep helper parameter count at most seven by threading existing
+operand/shape structs, not adding lint allowances or a generic executor object.
+
+- [ ] Tests first: on a real Deterministic/Inference context, record an ordinary
+  F32 public forward with owned X[3,37],W[37,96],Y[3,96]. Its unchanged route
+  currently launches successfully but has an empty trace. Assert a nonempty
+  trace and the actual selected NN shape/strides. Add the same assertion for
+  a homogeneous BF16 portable case with N>=32 and a BF16-to-F32 case. Use
+  `record_eager_gemm_trace` around the existing production call:
+
+```rust
+let trace = ctx.record_eager_gemm_trace(|| {
+    gpu_gemm_typed_forward_raw(&ctx, output, input, weight, None, (3, 37, 96))
+})?;
+assert!(!trace.routes().is_empty(), "Inference NN launch must be inventoried");
+assert!(trace.routes().iter().all(|r| {
+    r.op == ResolvedGemmOp::Nn && r.shape == (3, 37, 96)
+        && r.strides == (37, 96, 96)
+}));
+```
+
+  Fixture variables are real registered owners and their TypedPtrs, not fake
+  allocations. Root freezes tests-only and observes the intended empty-route
+  RED on Ada before production changes. Prepare exact commands and test names;
+  root owns Cargo, GPU, immutable source copies, commits and evidence.
+
+- [ ] Append the vocabulary's exact backend31–40, numeric25–27, WmmaApi5 and
+  FIXED_DETERMINISTIC_TF32_V1 bit10. Preserve all existing discriminants and
+  numeric meanings. Use the exact terminal membership/tuple tables, not suffix
+  acceptance. New backends use Fixed artifact/compiler, global tuning45 and
+  schedule8; backend22, borrowed half-ulp wide and exact cached Triad bridge
+  retain their actual module and existing scoped identity rules. Do not label
+  WMMA as inline MMA, post-dot bias as seeded bias, or half-to-F32 as half output.
+
+- [ ] Bind a selected terminal from the same actual function/config/arguments
+  submitted to its builder. Record once immediately before its real enqueue.
+  Cover all terminal helper families listed in the specs, including forced
+  rungs, pair-store, SM120 post-bias, all half-to-F32 forms and typed matvec.
+  The cached exact bridge forwards the observer into the existing prepared
+  path and never emits an additional Inference alias. Preserve enqueue order
+  and zero-output no-op behavior. Nonempty K0 records its actual terminal.
+
+- [ ] Fast path ruling: instrumentation must not add per-launch SHA hashing,
+  allocation queries, registry locking or identity-table construction when
+  neither observer nor context recorder is active. Check context usability,
+  then branch on this existing-operation need before constructing metadata:
+
+```rust
+let record = O::ENABLED || ctx.gemm_route_recording_active()?;
+// Existing selection, arguments, and launch are shared by both branches.
+// The metadata/observation is built only when record is true.
+```
+
+  Do not create a parallel fast selector. An active context recorder with
+  `NoPhysicalObserver` still receives every route. Record fieldwise pointer/
+  scalar/parameter/map bindings in the context route under an explicit framed
+  domain. Its pointer-bound digest serves the existing GEMM manifest; the
+  physical observer resolves the stronger allocation-bound digest using its
+  prevalidated allocation resolver. Keep these distinct contracts explicit.
+  After physical resolution, BOTH `node.launch.arguments_digest` and the
+  contained `node.gemm_route().launch.arguments_digest` must be identical to
+  the new allocation-bound digest; never leave the contained route stale.
+  The context GEMM trace is not an allocation-liveness proof and must not be
+  documented as the conversion-inclusive physical trace.
+
+- [ ] Hash ABI fields individually, never Rust padding. Include exact symbol,
+  full storage triple, scalar bits, dimensions/strides, null mask, actual map
+  fields/bindings and post-bias null auxiliary slots. Use the vocabulary's
+  closed ABI kinds. Validate output/input/bias spans with checked arithmetic;
+  K0 does not require fictitious zero-length input identities. Retain existing
+  launch alignment/domain guards and owner lifetimes. Resolve cold maps and
+  prepared resources eagerly; existing capture-time cold misses fail before
+  enqueue. Do not allocate CUDA scratch or introduce a cache of converted weights.
+  Expose the no-capture architecture preparation seam above, sharing the
+  existing loaded SM100-before-SM90 choice and ARCH_RUNG_OK probe. When an
+  eligible AUTO architecture route would need its first self-check while a
+  context/physical recorder or CUDA capture is active, reject before the probe
+  and require eager preparation. Never silently omit its two temporary-buffer
+  GEMMs from a claimed complete trace. Ordinary unrecorded first-use behavior
+  stays unchanged; preparation is a no-op outside Deterministic/Inference or
+  when neither architecture module is loaded. Include a focused cold-guard
+  test and expose no public testing API.
+
+- [ ] Extend validation by `(backend,numeric,symbol,live family)` and real
+  function-holder membership. Inference half rungs remain valid with the TC
+  boolean false because their existing dispatcher ignores that Triad-tier
+  switch. Fixed matvec is a Triad-family fallback with TC both off/on. New
+  Fixed TF32 requires its own bit and AllowDeterministicTf32V1. Preserve exact
+  backend22 family/numeric pairs and the two real Triad bridge exceptions.
+  Existing Triad MMA still requires its live permissions. Update only touched
+  setter Rustdoc needed to explain this already-existing switch scope.
+
+- [ ] Host tests cover every terminal-table row, old/new tag values, exact
+  module/numeric/instruction/conversion/storage/geometry pairings and permission
+  matrix. Negative cases mutate one bound field at a time; assert the enqueue
+  callback was not reached. Include wrong-but-valid Fixed symbol, pair-store
+  substitution, output dtype, alpha/beta/ABI field, map, null input, span overflow,
+  launch config and stale contained route digest. A test for disabled recording
+  proves the metadata-building callback is not invoked; it must exercise the
+  same conditional seam used by production, not a test-only reconstruction.
+
+- [ ] Root runs one grouped actual Ada batch after coherent implementation:
+  public AUTO F32/BF16/F16 and native half-to-F32; portable forced legacy/WMMA,
+  Tc16/Tc64/Tc128/TcW64/TcWn64; available SM89 exact/half/TF32 specialists;
+  borrowed half-ulp wide; Triad half/mixed matvec. Compare output bits between
+  recording-disabled and recording-enabled calls, validate exact routes, and
+  cover K0/zero-output/guards. Architecture-incompatible rungs are enumerated
+  by host tests and reported not live-tested, not counted as GPU passes.
+  Preserve saved5090 performance evidence; no currently reachable5090 is assumed.
+
+- [ ] Run the focused identity/validator host groups, CUDA-only and CUDA+HF
+  compilation, scoped rustfmt/diff checks, and prove all CUDA/header bytes,
+  selectors, retained admission and compiler identities unchanged. Record
+  actual test counts/commands/source hashes. Commit the coherent block and
+  obtain independent spec+quality review before model guard integration.
+  No performance tournament or global release gate during this wiring task.

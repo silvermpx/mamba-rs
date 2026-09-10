@@ -192,9 +192,13 @@ Select their actual supported cases and prerequisites before executing them.
   projection/head dispatch. Ada routing7/7 and prepared-control54/54 pass;
   six existing GPU-ignored unit cases are not included as passes. CUDA+HF
   compilation and Rustdoc pass. Independent spec/quality review approved
-  without findings. Half-input
-  tied F32 heads and complete Inference/M3 physical graph inventory remain
-  explicit follow-up tasks; no model-wide completion claim yet.
+  without findings. Half-input tied F32 heads are now committed21a3f0e5:
+  two exact input casts plus existing ExactScalar NT directly into F32 logits,
+  with pre-capture M1/M3 scratch reservation. Ada12/12 actual tests, CUDA-only
+  and CUDA+HF compilation, Rustdoc and independent review pass. Evidence:
+  `internal/perf/gemm-tied-f32-output-20260910/report.md`.
+  Complete Inference/M3 physical graph inventory and model-wide no-vendor
+  acceptance remain explicit follow-up tasks; no model-wide completion claim yet.
   Evidence: `internal/perf/gemm-context-routing-20260910/report.md`.
 - [ ] Document the public API in Rustdoc alongside implementation, not only
   in README: IDE hover/completion must explain each mode, defaults, arguments,

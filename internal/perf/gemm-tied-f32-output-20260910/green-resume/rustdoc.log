@@ -1,0 +1,13 @@
+ Documenting mamba-rs v0.6.9 (/root/mamba-tied-head-green.qhBBIV)
+warning: public documentation for `SM80_TF32_WIDE_ROUTE_SPECS` links to private item `tf32_route_specs_for`
+    --> src/mamba_ssm/gpu/gemm_bi_triad/contract.rs:2834:53
+     |
+2834 | ...it through [`tf32_route_specs_for`].
+     |                 ^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+     = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: `mamba-rs` (lib doc) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 2.51s
+   Generated /root/target-ada-finalist-aldmatrix-cuda132-20260910/doc/mamba_rs/index.html

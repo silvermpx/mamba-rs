@@ -1,0 +1,15 @@
+
+running 1 test
+test deterministic_tied_bf16_inputs_preserve_true_f32_product_bits ... 
+thread 'deterministic_tied_bf16_inputs_preserve_true_f32_product_bits' (2931441) panicked at tests/gemm_tied_f32_output.rs:47:6:
+deterministic tied half-input GEMM with direct F32 output: "context-aware GemmEx: deterministic GEMM mode reached a cuBLAS dispatch boundary"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deterministic_tied_bf16_inputs_preserve_true_f32_product_bits
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.91s
+
