@@ -1,3 +1,5 @@
+#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_finalist_source.rs"]
+mod finalist;
 #[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_tf32_joint_source.rs"]
 mod joint;
 
@@ -5,19 +7,27 @@ mod joint;
 mod nn_direct;
 #[path = "support/triad_nn_n96_source.rs"]
 mod nn_parent;
+#[path = "support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs"]
+mod nt_a_ldmatrix_n96;
 #[path = "support/triad_tf32_tn_transpose_rna_m64n64_source.rs"]
 mod tn_m64n64;
+#[path = "support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs"]
+mod tn_m64n96_s2;
 #[path = "support/triad_tf32_tn_transpose_rna_n96_source.rs"]
 mod tn_n96;
 #[path = "support/triad_tn_transpose_n96_source.rs"]
 mod tn_raw;
 
+const NT_A_LDMATRIX_N96_SECTION: &str = "NT_A_LDMATRIX_N96";
+
 const FIXED_N96: &str = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
 const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_fixed/common.cuh");
+const SM80_TF32: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 
 const TN_N96_SECTION: &str = "TN_N96";
 const TN_M64N64_SECTION: &str = "TN_M64N64";
+const TN_M64N96_S2_SECTION: &str = "TN_M64N96_S2";
 const NN_DIRECT_N96_SECTION: &str = "NN_DIRECT_N96";
 
 fn retained_tn_n96() -> String {
@@ -30,10 +40,58 @@ fn retained_tn_m64n64() -> String {
     tn_m64n64::candidate_source(&raw).expect("compose retained pre-RNA TN M64N64")
 }
 
+fn retained_tn_m64n96_s2() -> String {
+    let composed = tn_m64n96_s2::compose_candidate_source(joint::PRIMITIVES, joint::SOURCE)
+        .expect("compose proven TN M64N96/S2 candidate");
+    let namespace = "namespace sm89_tf32_test_tn_m64n96_s2 {";
+    let body = composed
+        .rsplit_once(namespace)
+        .expect("missing proven TN M64N96/S2 candidate namespace")
+        .1
+        .strip_prefix('\n')
+        .expect("missing proven TN M64N96/S2 candidate namespace newline")
+        .strip_suffix("}\n")
+        .expect("missing proven TN M64N96/S2 candidate namespace terminator");
+    body.replace(
+        "// Test-only Ada TF32 TN M64xN96/BK32/S2 candidate.",
+        "// Ada TF32 TN M64xN96/BK32/S2 Prism winner for CUDA 13.2.",
+    )
+    .replace(
+        tn_m64n96_s2::GEMM_SYMBOL,
+        joint::TN_PRE_RNA_M64N96_S2_SYMBOL,
+    )
+}
+
 fn retained_nn_direct_n96() -> String {
     let add_half =
         nn_parent::compose_triad_nn_n96_source(FIXED_N96).expect("compose add-half NN N96");
     nn_direct::compose_candidate_source(&add_half).expect("compose retained direct NN N96")
+}
+
+fn retained_nt_a_ldmatrix_n96() -> String {
+    nt_a_ldmatrix_n96::candidate_source()
+        .strip_prefix(SM80_TF32)
+        .expect("measured NT N96 candidate must retain the SM80 parent prefix")
+        .strip_prefix('\n')
+        .expect("measured NT N96 body must follow the parent with one newline")
+        .strip_prefix('\n')
+        .expect("measured NT N96 raw string must begin with one newline")
+        .replace(nt_a_ldmatrix_n96::SYMBOL, joint::NT_A_LDMATRIX_N96_SYMBOL)
+        .replace("Sm80Tf32KernelParams", "GbfTf32NtN96Params")
+        .replace("gemm_bi_cp_async_source", "nt_n96_cp_async_source")
+        .replace("gemm_bi_tf32_cp_async_zfill", "nt_n96_cp_async_zfill")
+        .replace("gemm_bi_tf32_rna", "nt_n96_rna")
+        .replace("gemm_bi_tf32_mma_m16n8k8", "gbf_tf32_mma_m16n8k8")
+}
+
+fn retained_nt_a_ldmatrix_n96_production_body() -> String {
+    extract_section(joint::SOURCE, NT_A_LDMATRIX_N96_SECTION)
+        .split_once("// BEGIN MEASURED NT_A_LDMATRIX_N96 BODY\n")
+        .expect("production NT N96 section must delimit its standalone dependencies")
+        .1
+        .strip_suffix("// END MEASURED NT_A_LDMATRIX_N96 BODY\n")
+        .expect("production NT N96 section must close its measured body delimiter")
+        .to_owned()
 }
 
 fn extract_section(source: &str, label: &str) -> String {
@@ -128,6 +186,39 @@ fn extract_device_function<'a>(source: &'a str, name: &str) -> &'a str {
         }
     }
     panic!("unterminated device function {name}")
+}
+
+#[test]
+fn finalist_maps_all_dispatch_admitted_nt_cells_to_a_only_ldmatrix_body() {
+    let source = finalist::compose_sm89_finalist_source().expect("compose finalist source");
+    let expected_gate = concat!(
+        "bool use_stage_sliced =\n",
+        "                (params.m == 2048 && params.k == 1536 && params.n == 768\n",
+        "                    && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)\n",
+        "                || (params.m == 4096 && params.k == 3072 && params.n == 1536\n",
+        "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);"
+    );
+    assert!(source.contains(expected_gate));
+    let generic_compute = extract_device_function(&source, "gemm_bi_tf32_compute_stage");
+    assert!(generic_compute.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));
+    assert!(
+        generic_compute
+            .contains("if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2)")
+    );
+    assert!(!source.contains(concat!(
+        "bool use_stage_sliced =\n",
+        "                (params.m == 2048 && params.k == 768 && params.n == 3072"
+    )));
+    assert!(!source.contains(concat!(
+        "|| (params.m == 4621 && params.k == 384 && params.n == 1928\n",
+        "                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384)"
+    )));
+    assert_eq!(
+        source
+            .matches("gemm_bi_tf32_nt_compact_sliced_mainloop(")
+            .count(),
+        2
+    );
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -317,12 +408,30 @@ fn materialized_sections_are_normalized_retained_bodies_only() {
         extract_section(joint::SOURCE, TN_M64N64_SECTION),
         expected_tn_m64n64
     );
+    assert_eq!(
+        extract_section(joint::SOURCE, TN_M64N96_S2_SECTION),
+        retained_tn_m64n96_s2(),
+    );
 
     let expected_nn =
         retained_nn_direct_n96().replace(nn_direct::SYMBOL, joint::NN_ADD_HALF_DIRECT_N96_SYMBOL);
     assert_eq!(
         extract_section(joint::SOURCE, NN_DIRECT_N96_SECTION),
         expected_nn
+    );
+    assert_eq!(
+        retained_nt_a_ldmatrix_n96_production_body(),
+        retained_nt_a_ldmatrix_n96(),
+        "production NT N96 must be the measured body with only standalone dependency, ABI, and symbol normalization",
+    );
+}
+
+#[test]
+fn nt_a_ldmatrix_n96_materialization_matches_the_measured_body_after_normalization() {
+    assert_eq!(
+        retained_nt_a_ldmatrix_n96_production_body(),
+        retained_nt_a_ldmatrix_n96(),
+        "production NT N96 must retain the measured arithmetic, copy schedule, safe zero-fill, cache hints, and epilogue",
     );
 }
 
@@ -371,13 +480,13 @@ fn sealed_validator_rejects_extra_exports_and_discovery_markers() {
 }
 
 #[test]
-fn composed_source_contains_only_the_five_sealed_exports() {
+fn composed_source_contains_only_the_seven_sealed_exports() {
     let composed = joint::compose_source().expect("compose standalone joint source");
     assert_eq!(
         joint::export_inventory(&composed).unwrap(),
         joint::SM89_TF32_JOINT_SYMBOLS
     );
-    assert_eq!(composed.matches("extern \"C\"").count(), 5);
+    assert_eq!(composed.matches("extern \"C\"").count(), 7);
     assert!(composed.starts_with(joint::PRIMITIVES));
     joint::validate_source_text(&composed).expect("composed inventory remains sealed");
 }
@@ -485,10 +594,10 @@ fn typed_params_match_the_frozen_driver_abi() {
 }
 
 #[test]
-fn five_typed_specs_bind_symbols_abi_and_retained_resources() {
+fn seven_typed_specs_bind_symbols_abi_and_retained_resources() {
     use joint::Sm89Tf32JointKernelKind as Kind;
 
-    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 5);
+    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 7);
     let expected = [
         (
             joint::NN_ADD_HALF_DIRECT_N96_SYMBOL,
@@ -535,6 +644,28 @@ fn five_typed_specs_bind_symbols_abi_and_retained_resources() {
             64,
         ),
         (
+            joint::TN_PRE_RNA_M64N96_S2_SYMBOL,
+            Kind::TnPreRnaM64N96Bk32S2,
+            (256, 1, 1),
+            40_960,
+            0,
+            128,
+            Some(2),
+            5,
+            64,
+        ),
+        (
+            joint::NT_A_LDMATRIX_N96_SYMBOL,
+            Kind::NtALdmatrixM128N96Bk32S3,
+            (256, 1, 1),
+            86_016,
+            0,
+            110,
+            Some(1),
+            5,
+            64,
+        ),
+        (
             joint::TN_PRE_RNA_TRANSPOSE_SYMBOL,
             Kind::TnPreRnaTranspose32x32,
             (32, 8, 1),
@@ -564,4 +695,27 @@ fn five_typed_specs_bind_symbols_abi_and_retained_resources() {
         joint::SM89_TF32_JOINT_SYMBOLS
     );
     assert!(joint::kernel_spec("gemm_bi_unknown").is_none());
+}
+
+#[test]
+fn nt_a_ldmatrix_n96_is_a_sealed_joint_export_with_the_direct_nt_layout() {
+    use joint::Sm89Tf32JointKernelKind as Kind;
+
+    assert_eq!(
+        joint::NT_A_LDMATRIX_N96_SYMBOL,
+        "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1"
+    );
+    let body = extract_section(joint::SOURCE, NT_A_LDMATRIX_N96_SECTION);
+    assert!(body.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));
+    assert!(
+        body.contains("valid == 0 ? 0 : (long long)global_column * params.ldb + global_reduction")
+    );
+    assert!(body.contains("const int k_offsets[4] = {0, 8, 16, 24}"));
+    assert!(body.contains("nt_n96_rna(__uint_as_float(raw0))"));
+    assert_eq!(
+        joint::kernel_spec(joint::NT_A_LDMATRIX_N96_SYMBOL)
+            .expect("NT A-ldmatrix joint spec")
+            .kind,
+        Kind::NtALdmatrixM128N96Bk32S3
+    );
 }

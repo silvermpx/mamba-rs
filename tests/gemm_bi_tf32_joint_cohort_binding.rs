@@ -1,5 +1,4 @@
-//! Pre-admission performance qualification for the five retained Ada TF32
-//! joint cells.
+//! Pre-admission performance qualification for retained Ada TF32 joint cells.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PairOrder {
@@ -167,6 +166,27 @@ mod live {
                 stages: Tf32PortableStages::S3,
             }),
             prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+        },
+    ];
+
+    const NEW_PRODUCTION_BODY_CASES: [Case; 2] = [
+        Case {
+            name: "nt_d768_in_new_body",
+            op: ResolvedGemmOp::Nt,
+            dims: (2_048, 768, 3_072),
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        },
+        Case {
+            name: "tn_prism_new_body",
+            op: ResolvedGemmOp::Tn,
+            dims: (4_621, 384, 1_928),
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
+            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+            prior_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1",
         },
     ];
 
@@ -401,6 +421,112 @@ mod live {
             portable.device.driver.build_sources,
             digest_hex(&portable.device.driver.build_digest),
         );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an idle RTX 6000 Ada with CUDA 13.2"]
+    fn sm89_tf32_joint_two_new_production_bodies_once3_then_once7() -> Result<(), String> {
+        let candidate_device = GpuDevice::new(0)?;
+        let comparator_device = GpuDevice::new(0)?;
+        for device in [&candidate_device, &comparator_device] {
+            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+                return Err(format!(
+                    "new-body timing requires exact CC8.9/142SM, got {:?}/{}SM",
+                    device.compute_capability,
+                    device.multiprocessor_count(),
+                ));
+            }
+        }
+        let candidate_ctx = GpuCtx::new(&candidate_device)?;
+        let comparator_ctx = GpuCtx::new(&comparator_device)?;
+        configure(&candidate_ctx);
+        configure(&comparator_ctx);
+        let nvrtc = candidate_ctx
+            .kernels
+            .triad_sm89_tf32_joint_compiler_identity()
+            .ok_or_else(|| "TriadSm89Tf32Joint compiler identity is absent".to_string())?
+            .nvrtc_version;
+        if nvrtc != (13, 2) {
+            return Err(format!("new-body timing requires CUDA 13.2, got {nvrtc:?}"));
+        }
+
+        let candidate_requests = NEW_PRODUCTION_BODY_CASES.map(|case| request(case, true));
+        let comparator_requests = NEW_PRODUCTION_BODY_CASES.map(|case| request(case, false));
+        presize_physical_qualification_suite(&candidate_ctx, &candidate_requests)?;
+        presize_physical_qualification_suite(&comparator_ctx, &comparator_requests)?;
+
+        for (index, case) in NEW_PRODUCTION_BODY_CASES.into_iter().enumerate() {
+            let mut candidate = qualify_physical_launch(&candidate_ctx, candidate_requests[index])?;
+            let mut comparator =
+                qualify_physical_launch(&comparator_ctx, comparator_requests[index])?;
+            let candidate_evidence = candidate.evidence();
+            let comparator_evidence = comparator.evidence();
+            if !candidate_evidence.eager_graph_equal()
+                || candidate_evidence.uniform_module_kind() != Some(case.route.module_kind())
+                || candidate_evidence.nodes().last().map(|node| node.symbol)
+                    != Some(case.candidate_symbol)
+                || !comparator_evidence.eager_graph_equal()
+                || comparator_evidence.uniform_module_kind() != Some(case.prior_route.module_kind())
+                || comparator_evidence.nodes().last().map(|node| node.symbol)
+                    != Some(case.prior_symbol)
+            {
+                return Err(format!(
+                    "{} production binding drifted: candidate={:?} comparator={:?}",
+                    case.name,
+                    candidate_evidence.nodes(),
+                    comparator_evidence.nodes(),
+                ));
+            }
+
+            for path in [Path::Eager, Path::Graph] {
+                let mut screens_pass = true;
+                for order in [PairOrder::Abba, PairOrder::Baab] {
+                    let screen = run_phase(
+                        case,
+                        &candidate_ctx,
+                        &mut candidate,
+                        &comparator_ctx,
+                        &mut comparator,
+                        path,
+                        order,
+                        "production_screen_once3",
+                        SCREEN_WINDOWS,
+                        0x89_7f_3230_u64 ^ index as u64,
+                    )?;
+                    screens_pass &= phase_passed(&screen);
+                }
+                if !screens_pass {
+                    return Err(format!(
+                        "{} {} production screen once3 failed",
+                        case.name,
+                        path.as_str(),
+                    ));
+                }
+                for order in [PairOrder::Abba, PairOrder::Baab] {
+                    let official = run_phase(
+                        case,
+                        &candidate_ctx,
+                        &mut candidate,
+                        &comparator_ctx,
+                        &mut comparator,
+                        path,
+                        order,
+                        "production_official_once7",
+                        OFFICIAL_WINDOWS,
+                        0x89_7f_3270_u64 ^ index as u64,
+                    )?;
+                    if !phase_passed(&official) {
+                        return Err(format!(
+                            "{} {}/{} production official once7 failed",
+                            case.name,
+                            path.as_str(),
+                            order.as_str(),
+                        ));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

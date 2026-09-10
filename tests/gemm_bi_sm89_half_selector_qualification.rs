@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-//! Live actual-AUTO qualification for the exact 11 frozen Ada half-Triad cells.
+//! Live actual-AUTO qualification for the exact 18 frozen Ada half-Triad cells.
 
 use mamba_rs::mamba_ssm::gpu::context::{GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -43,9 +43,9 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             artifact.module_kind
         ));
     }
-    if SM89_HALF_AUTO_CELLS.len() != 11 {
+    if SM89_HALF_AUTO_CELLS.len() != 18 {
         return Err(format!(
-            "SM89 half AUTO registry has {} cells instead of 11",
+            "SM89 half AUTO registry has {} cells instead of 18",
             SM89_HALF_AUTO_CELLS.len()
         ));
     }
@@ -72,6 +72,14 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
         let static_shared_bytes = function
             .shared_size_bytes()
             .map_err(|error| format!("query {} shared memory: {error:?}", spec.symbol))?;
+        let static_shared_bytes = u32::try_from(static_shared_bytes)
+            .map_err(|_| format!("{} returned negative static shared memory", spec.symbol))?;
+        if static_shared_bytes != spec.static_shared_bytes {
+            return Err(format!(
+                "{} uses {} static shared bytes instead of {}",
+                spec.symbol, static_shared_bytes, spec.static_shared_bytes
+            ));
+        }
         let occupancy = function
             .occupancy_max_active_blocks_per_multiprocessor(
                 spec.threads,
@@ -114,7 +122,11 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 dims,
                 PhysicalQualificationRoute::HalfForced {
                     dtype,
-                    tile: TcTile::Tile128,
+                    tile: if op == mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn {
+                        TcTile::Tile64
+                    } else {
+                        TcTile::Tile128
+                    },
                 },
             )
         })
@@ -131,13 +143,12 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             .iter()
             .find(|spec| spec.route == route && spec.dtype == dtype)
             .ok_or_else(|| format!("missing spec for {op:?}/{dtype:?}/{dims:?}/{route:?}"))?;
-        let expected_columns =
-            if op == mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn {
-                dims.2
-            } else {
-                dims.1
-            };
-        let expected_grid = u32::try_from(dims.0.div_ceil(spec.tile.0 as usize))
+        let (expected_rows, expected_columns) = match op {
+            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn => (dims.0, dims.2),
+            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn => (dims.1, dims.2),
+            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt => (dims.0, dims.1),
+        };
+        let expected_grid = u32::try_from(expected_rows.div_ceil(spec.tile.0 as usize))
             .ok()
             .and_then(|rows| {
                 u32::try_from(expected_columns.div_ceil(spec.tile.1 as usize))
@@ -185,6 +196,14 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
             ) => "gemm_bi_nn_tc_bf16",
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+            ) => "gemm_bi_tn_tc64_f16",
+            (
+                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+            ) => "gemm_bi_tn_tc64_bf16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
@@ -238,6 +257,12 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             return Err(format!("{} eager launch modified A or B", spec.symbol));
         }
 
+        // TN is an accumulating dW route (`beta = 1`). Restore the same
+        // deterministic output and operands before comparing graph replay
+        // with the one-launch eager oracle; otherwise this would compare the
+        // second accumulation with the first one.
+        qualified.seed_half_operands(&ctx, salt)?;
+        reference.seed_half_operands(&reference_ctx, salt)?;
         qualified.measure_graph_window_ms(&ctx, 1)?;
         reference.measure_graph_window_ms(&reference_ctx, 1)?;
         let graph = qualified.half_output_bits(&ctx)?;

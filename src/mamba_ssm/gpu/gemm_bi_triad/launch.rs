@@ -3245,8 +3245,10 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => ctx.kernels.f32_triad_availability().finalist,
         Tf32PhysicalRoute::Sm89TnPreRnaN96V1
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
         | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1 => ctx.kernels.f32_triad_availability().joint,
+        | Tf32PhysicalRoute::Sm89NnN96V1
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => ctx.kernels.f32_triad_availability().joint,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3311,17 +3313,22 @@ fn tf32_params(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
         | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1 => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-            alpha: operands.alpha,
-            beta: operands.beta,
-            m,
-            k,
-            n,
-            lda: checked_i32(shape.lda, "lda")?,
-            ldb: checked_i32(shape.ldb, "ldb")?,
-            ldc,
-        }),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => {
+        | Tf32PhysicalRoute::Sm89NnN96V1
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => {
+            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+                alpha: operands.alpha,
+                beta: operands.beta,
+                m,
+                k,
+                n,
+                lda: checked_i32(shape.lda, "lda")?,
+                ldb: checked_i32(shape.ldb, "ldb")?,
+                ldc,
+            })
+        }
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => {
             return Err("Ada TF32 TN parameters require the two-node pre-RNA pipeline".into());
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
@@ -3670,13 +3677,19 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::Sm89MmaTf32Compact8V1,
             ResolvedNumericContract::MmaTf32RnaV1,
         ),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => (
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => (
             PhysicalGemmBackend::Sm89MmaTf32PreRnaV1,
             ResolvedNumericContract::MmaTf32PreRnaAV1,
         ),
         Tf32PhysicalRoute::Sm89NnDirectN96V1 | Tf32PhysicalRoute::Sm89NnN96V1 => (
             PhysicalGemmBackend::Sm89MmaTf32AddHalfV1,
             ResolvedNumericContract::MmaTf32AddHalfUlpV1,
+        ),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => (
+            PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1,
+            ResolvedNumericContract::MmaTf32RnaV1,
         ),
         Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
             PhysicalGemmBackend::MmaTf32RnaSplitK2V1,
@@ -4095,7 +4108,9 @@ fn prepare_tf32_f32(
     }
     if matches!(
         route,
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
     ) {
         return prepare_sm89_tf32_tn_pre_rna(ctx, request, operands, output_resources, route);
     }
@@ -4127,6 +4142,7 @@ fn prepare_tf32_f32(
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
             | Tf32PhysicalRoute::Sm89NnDirectN96V1
             | Tf32PhysicalRoute::Sm89NnN96V1
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
     ) {
         None
     } else {
@@ -4201,8 +4217,10 @@ fn validate_sm89_tf32_joint_operands(
         route,
         Tf32PhysicalRoute::Sm89TnPreRnaN96V1
             | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
             | Tf32PhysicalRoute::Sm89NnDirectN96V1
             | Tf32PhysicalRoute::Sm89NnN96V1
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
     ) {
         return Ok(());
     }
@@ -5402,7 +5420,8 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                     Tf32PhysicalRoute::MmaTf32RnaV1(_)
                     | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
                     | Tf32PhysicalRoute::Sm89NnDirectN96V1
-                    | Tf32PhysicalRoute::Sm89NnN96V1,
+                    | Tf32PhysicalRoute::Sm89NnN96V1
+                    | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -6503,7 +6522,8 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             Tf32PhysicalRoute::MmaTf32RnaV1(_)
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
             | Tf32PhysicalRoute::Sm89NnDirectN96V1
-            | Tf32PhysicalRoute::Sm89NnN96V1,
+            | Tf32PhysicalRoute::Sm89NnN96V1
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {
@@ -10408,6 +10428,8 @@ impl HalfKernelIdentity {
         let module_kind = if matches!(
             base,
             "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
+                | "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1"
+                | "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1"
                 | "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
                 | "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
         ) {
@@ -10479,6 +10501,18 @@ impl HalfKernelIdentity {
             }
             ("gemm_bi_nn_sm89_m128n128_bk64_s3_v1", WeightDtype::F16) => {
                 "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16"
+            }
+            ("gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1", WeightDtype::Bf16) => {
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16"
+            }
+            ("gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1", WeightDtype::F16) => {
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16"
+            }
+            ("gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1", WeightDtype::Bf16) => {
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16"
+            }
+            ("gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1", WeightDtype::F16) => {
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16"
             }
             ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::Bf16) => {
                 "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16"
@@ -10709,7 +10743,16 @@ fn half_gemm_arguments_digest<O: PhysicalLaunchObserver>(
 }
 
 fn half_gemm_resources_digest(identity: HalfKernelIdentity, config: LaunchConfig) -> Sha256Digest {
-    FramedSha256::new(b"triad-half-kernel-resources.v1")
+    let static_shared_bytes = if identity.module_kind == ModuleKind::TriadSm89Half {
+        super::sm89_half_source::SM89_HALF_KERNEL_SPECS
+            .iter()
+            .find(|spec| spec.symbol == identity.symbol)
+            .map(|spec| spec.static_shared_bytes)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    FramedSha256::new(b"triad-half-kernel-resources.v2")
         .required(b"symbol", identity.symbol.as_bytes())
         .required(b"module-kind", &[identity.module_kind as u8])
         .required(
@@ -10719,6 +10762,10 @@ fn half_gemm_resources_digest(identity: HalfKernelIdentity, config: LaunchConfig
         .required(
             b"dynamic-shared-memory-bytes",
             &config.shared_mem_bytes.to_le_bytes(),
+        )
+        .required(
+            b"static-shared-memory-bytes",
+            &static_shared_bytes.to_le_bytes(),
         )
         .finish()
 }
@@ -10764,7 +10811,14 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
                     .artifacts
                     .sm89_half
                     .ok_or_else(|| "SM89 half route has no artifact identity".to_string())?,
-                PhysicalGemmBackend::Sm89Mma16HalfS3V1,
+                if identity
+                    .symbol
+                    .starts_with("gemm_bi_tn_sm89_m64n64_bk64_s2_")
+                {
+                    PhysicalGemmBackend::Sm89Mma16HalfS2V1
+                } else {
+                    PhysicalGemmBackend::Sm89Mma16HalfS3V1
+                },
                 ResolvedNumericContract::MmaSyncF32V1,
                 ResolvedInstructionFamily::MmaSync,
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
@@ -10968,6 +11022,26 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                 )
                 .ok_or_else(|| "prepared SM89 half NN symbol is unavailable".to_string())?,
         ),
+        "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_function(
+                    super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor,
+                    request.dtype,
+                )
+                .ok_or_else(|| "prepared SM89 half TN compact symbol is unavailable".to_string())?,
+        ),
+        "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_function(
+                    super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+                    request.dtype,
+                )
+                .ok_or_else(|| {
+                    "prepared SM89 half TN regpipe+vec2 symbol is unavailable".to_string()
+                })?,
+        ),
         "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1" => HalfKernelChoice::new(
             base,
             ctx.kernels
@@ -11071,6 +11145,12 @@ fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRoute) -> &'static str
         super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => {
             "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
         }
+        super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor => {
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1"
+        }
+        super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1"
+        }
         super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor => {
             "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
         }
@@ -11084,15 +11164,15 @@ fn sm89_half_launch_config(
     spec: &super::sm89_half_source::Sm89HalfKernelSpec,
     dims: (usize, usize, usize),
 ) -> Result<LaunchConfig, String> {
-    let output_columns = match spec.op {
-        ResolvedGemmOp::Nn => dims.2,
-        ResolvedGemmOp::Nt => dims.1,
-        ResolvedGemmOp::Tn => return Err("SM89 half AUTO has no TN route".into()),
+    let (output_rows, output_columns) = match spec.op {
+        ResolvedGemmOp::Nn => (dims.0, dims.2),
+        ResolvedGemmOp::Tn => (dims.1, dims.2),
+        ResolvedGemmOp::Nt => (dims.0, dims.1),
     };
     Ok(LaunchConfig {
         grid_dim: (
             checked_tile_grid(
-                checked_u32(dims.0, "SM89 half output rows")?,
+                checked_u32(output_rows, "SM89 half output rows")?,
                 spec.tile.0,
                 checked_u32(output_columns, "SM89 half output columns")?,
                 spec.tile.1,
@@ -11184,12 +11264,88 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLa
                 dims,
                 strides: (shape.lda, shape.ldb, shape.ldc),
                 tile: spec.tile,
-                bk_stages: (64, 3),
+                bk_stages: (spec.bk, spec.stages),
                 arguments: HalfGemmArguments {
                     output: ops.y.ptr,
                     a: ops.x.ptr,
                     b: ops.w.ptr,
                     bias: ops.bias_ptr,
+                },
+            },
+            format_args!("{base}"),
+        )
+    }?;
+    Ok(Some(seal))
+}
+
+pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    dw_ptr: CUptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<Option<HalfNativeBranchSeal>, String> {
+    require_half(dy.dtype, "dY")?;
+    if x_saved.dtype != dy.dtype {
+        return Err("SM89 half TN AUTO: mixed dtypes not supported".into());
+    }
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims);
+    let operands = F32TriadOperands {
+        output: dw_ptr,
+        a: x_saved.ptr,
+        b: dy.ptr,
+        bias: None,
+        alpha: 1.0,
+        beta: 1.0,
+    };
+    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
+        sm89_half_auto_context(ctx),
+        super::sm89_half_source::Sm89HalfAutoRequest {
+            request: F32TriadRequest {
+                op: ResolvedGemmOp::Tn,
+                shape,
+            },
+            operands,
+            dtype: dy.dtype,
+        },
+    ) else {
+        return Ok(None);
+    };
+    let Some(function) = ctx.kernels.triad_sm89_half_function(spec.route, dy.dtype) else {
+        return Ok(None);
+    };
+    let cfg = sm89_half_launch_config(spec, dims)?;
+    let checked = GemmDims::tn(dims)?;
+    let alpha = 1.0_f32;
+    let base = sm89_half_base(spec.route);
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&dw_ptr);
+    builder.arg(&x_saved.ptr);
+    builder.arg(&dy.ptr);
+    builder.arg(&alpha);
+    builder.arg(&checked.m_i32);
+    builder.arg(&checked.k_i32);
+    builder.arg(&checked.n_i32);
+    let seal = unsafe {
+        enqueue_half_gemm(
+            observer,
+            &ctx.kernels,
+            &mut builder,
+            cfg,
+            HalfGemmObservation {
+                base,
+                op: ResolvedGemmOp::Tn,
+                dtype: dy.dtype,
+                dims,
+                strides: (shape.lda, shape.ldb, shape.ldc),
+                tile: spec.tile,
+                bk_stages: (spec.bk, spec.stages),
+                arguments: HalfGemmArguments {
+                    output: dw_ptr,
+                    a: x_saved.ptr,
+                    b: dy.ptr,
+                    bias: 0,
                 },
             },
             format_args!("{base}"),
@@ -11260,7 +11416,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLa
                 dims,
                 strides: (shape.lda, shape.ldb, shape.ldc),
                 tile: spec.tile,
-                bk_stages: (64, 3),
+                bk_stages: (spec.bk, spec.stages),
                 arguments: HalfGemmArguments {
                     output: dx.ptr,
                     a: dy.ptr,
@@ -15872,6 +16028,22 @@ mod half_physical_trace_tests {
                 384,
                 86_016,
             ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+                WeightDtype::F16,
+                (2048, 768, 3072),
+                576,
+                128,
+                0,
+            ),
+            (
+                super::super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor,
+                WeightDtype::Bf16,
+                (4621, 384, 1928),
+                186,
+                128,
+                0,
+            ),
         ] {
             let spec = super::super::sm89_half_source::kernel_spec(route, dtype).unwrap();
             let config = sm89_half_launch_config(spec, dims).unwrap();
@@ -15911,6 +16083,14 @@ mod half_physical_trace_tests {
             ("gemm_bi_nt_tc64", ModuleKind::TriadSm80),
             (
                 "gemm_bi_nn_sm89_m128n128_bk64_s3_v1",
+                ModuleKind::TriadSm89Half,
+            ),
+            (
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1",
+                ModuleKind::TriadSm89Half,
+            ),
+            (
+                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1",
                 ModuleKind::TriadSm89Half,
             ),
             (
@@ -16100,11 +16280,11 @@ mod sm89_tf32_joint_route_tests {
             ),
             (
                 (4_621, 384, 1_928),
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
                 4_624,
                 1_775_616,
                 (384, 4_621, 1_928),
-                186,
+                126,
             ),
         ] {
             let request = request(ResolvedGemmOp::Tn, dims);
@@ -16141,7 +16321,7 @@ mod sm89_tf32_joint_route_tests {
             (
                 ResolvedGemmOp::Tn,
                 (4_621, 384, 1_928),
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
             ),
             (
                 ResolvedGemmOp::Nn,
@@ -16152,6 +16332,11 @@ mod sm89_tf32_joint_route_tests {
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
                 Tf32PhysicalRoute::Sm89NnN96V1,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
             ),
         ] {
             let request = request(op, dims);

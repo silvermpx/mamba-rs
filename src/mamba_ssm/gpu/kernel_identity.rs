@@ -2942,13 +2942,15 @@ pub enum PhysicalGemmBackend {
     ScalarFmaSm89ExactF32DirectSplitMPartialV1 = 25,
     Sm89MmaTf32PreRnaV1 = 26,
     Sm89MmaTf32AddHalfV1 = 27,
+    Sm89Mma16HalfS2V1 = 28,
+    Sm89MmaTf32NtALdmatrixV1 = 29,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
 /// Fixed CopyPlan kernel. This must not invalidate unrelated tuning-45 routes.
 pub(crate) const SM89_FIXED_COPYPLAN_ROUTE_REVISION: u16 = 1;
-/// Scoped route epoch for the isolated Ada half-Triad S3 AUTO cohort.
-pub(crate) const SM89_HALF_ROUTE_REVISION: u16 = 1;
+/// Scoped route epoch for the isolated Ada half-Triad S2/S3 AUTO cohort.
+pub(crate) const SM89_HALF_ROUTE_REVISION: u16 = 2;
 /// Scoped route epoch for the isolated Ada exact-F32 large-TN family.
 pub(crate) const SM89_EXACT_F32_TN_ROUTE_REVISION: u16 = 1;
 
@@ -5378,6 +5380,8 @@ mod physical_launch_tests {
         );
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32PreRnaV1 as u8, 26);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 as u8, 27);
+        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8, 28);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 as u8, 29);
         assert_eq!(
             ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
             21

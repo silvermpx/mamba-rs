@@ -25,6 +25,51 @@ const WIDE_BRANCH: &str = r#"    if (wide_a && wide_b) {
             storage, problem, tile_count, thread_plan, accumulators);
     } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
 
+const A_LOAD: &str = r#"#pragma unroll
+        for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+            int row = warp_m + m_atom * 16 + group;
+            a_fragments[m_atom][0] =
+                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+            a_fragments[m_atom][1] =
+                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+            a_fragments[m_atom][2] =
+                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+            a_fragments[m_atom][3] =
+                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+        }
+"#;
+
+const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
+        for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+            if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {
+                int lane = (int)threadIdx.x & 31;
+                int row = warp_m + m_atom * 16 + (lane & 15);
+                int reduction = k8 + ((lane >> 4) << 2);
+                unsigned address = (unsigned)__cvta_generic_to_shared(
+                    &gemm_bi_tf32_a_slot<Op>(storage, stage, row, reduction));
+                unsigned raw0, raw1, raw2, raw3;
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                    : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
+                    : "r"(address));
+                a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
+                a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
+                a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
+                a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+            } else {
+                int row = warp_m + m_atom * 16 + group;
+                a_fragments[m_atom][0] =
+                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+                a_fragments[m_atom][1] =
+                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+                a_fragments[m_atom][2] =
+                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+                a_fragments[m_atom][3] =
+                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+            }
+        }
+"#;
+
 const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
         if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {
             bool use_stage_sliced =
@@ -191,7 +236,7 @@ struct Transformation {
     to: &'static str,
 }
 
-const TRANSFORMATIONS: [Transformation; 8] = [
+const TRANSFORMATIONS: [Transformation; 9] = [
     Transformation {
         label: "compact finalist storage",
         from: concat!(
@@ -287,6 +332,11 @@ const TRANSFORMATIONS: [Transformation; 8] = [
             "        : (BM == 128 ? (warp >> 1) * 64\n",
             "        : (BM == 64 ? (warp >> 1) * 32 : 0));"
         ),
+    },
+    Transformation {
+        label: "compact finalist A-only ldmatrix load",
+        from: A_LOAD,
+        to: A_LDMATRIX_LOAD,
     },
     Transformation {
         label: "compact finalist target export",
@@ -454,8 +504,6 @@ mod tests {
     #[cfg(not(feature = "cuda"))]
     const TEST_HELPER_NAME: &str = "gemm_bi_nt_test_compact_xor_k";
     #[cfg(not(feature = "cuda"))]
-    const TEST_SYMBOL: &str = "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
-    #[cfg(not(feature = "cuda"))]
     const FROZEN_HELPER: &str = include_str!("../../../../tests/gemm_bi_tf32_nt_compact_xor.cu");
     const FROZEN_SLICED_ADAPTER: &str =
         include_str!("../../../../tests/support/triad_tf32_nt_compact_a_ldmatrix_sliced_source.rs");
@@ -464,18 +512,24 @@ mod tests {
     mod frozen_candidate {
         include!("../../../../tests/gemm_bi_tf32_nt_compact_xor.rs");
 
-        pub(super) fn compact_eight_warp_s2_source() -> Result<String, String> {
-            compact_eight_warp_s2_candidate_source()
+        pub(super) fn compact_a_ldmatrix_source() -> Result<String, String> {
+            let compact = compact_eight_warp_s2_candidate_source()?;
+            triad_tf32_nt_compact_a_ldmatrix_source::candidate_source(&compact)
         }
     }
 
     #[cfg(not(feature = "cuda"))]
     fn normalized_frozen_candidate() -> String {
-        frozen_candidate::compact_eight_warp_s2_source()
-            .expect("compose frozen CompactEightWarpS2 candidate")
+        let mut source = frozen_candidate::compact_a_ldmatrix_source()
+            .expect("compose frozen compact A-only ldmatrix candidate")
             .replacen(FROZEN_HELPER, COMPACT_HELPER, 1)
             .replace(TEST_HELPER_NAME, "gemm_bi_nt_compact8_xor_k")
-            .replace(TEST_SYMBOL, SM89_FINALIST_SYMBOL)
+            .replace(
+                "gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2",
+                SM89_FINALIST_SYMBOL,
+            );
+        install_stage_sliced_winners(&mut source).expect("install frozen stage-sliced winners");
+        source
     }
 
     #[test]
@@ -596,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn finalist_slices_only_the_two_proven_contiguous_shapes() {
+    fn finalist_uses_a_only_ldmatrix_for_all_cells_and_slices_only_proven_shapes() {
         let body = finalist_body_from(COMPACT_HELPER, SM80_SOURCE).unwrap();
         let expected_gate = concat!(
             "bool use_stage_sliced =\n",
@@ -606,6 +660,9 @@ mod tests {
             "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);"
         );
         assert!(body.contains(expected_gate));
+        assert!(body.contains(A_LDMATRIX_LOAD));
+        assert!(!body.contains("params.m == 2048 && params.k == 768 && params.n == 3072"));
+        assert!(!body.contains("params.m == 4621 && params.k == 384 && params.n == 1928"));
         assert!(body.contains(
             "static_assert(sizeof(Sm80Tf32KernelParams) == 32, \"TF32 parameter ABI drift\");"
         ));

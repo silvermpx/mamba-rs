@@ -4,7 +4,7 @@ pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_tf
 pub const PRIMITIVES: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89_tf32_joint_primitives.cuh");
 
-pub const SOURCE_SHA256: &str = "e1e8a2ad1d2d03b4d0e02730f087eab1c26cfc7712f867fbbead13b032e3624c";
+pub const SOURCE_SHA256: &str = "c0f147ce21f56ba2d4a1d8a1b8b5e73708bed292a36e929c46abc2d84356e7da";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
 
@@ -15,15 +15,19 @@ pub const ALIGNMENT_PRIMITIVE: &str = "gbf_aligned16";
 pub const TN_PRE_RNA_TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
 pub const TN_PRE_RNA_N96_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1";
 pub const TN_PRE_RNA_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
+pub const TN_PRE_RNA_M64N96_S2_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1";
 pub const NN_ADD_HALF_DIRECT_N96_SYMBOL: &str =
     "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
 pub const NN_ADD_HALF_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
+pub const NT_A_LDMATRIX_N96_SYMBOL: &str = "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1";
 
-pub const SM89_TF32_JOINT_SYMBOLS: [&str; 5] = [
+pub const SM89_TF32_JOINT_SYMBOLS: [&str; 7] = [
     NN_ADD_HALF_DIRECT_N96_SYMBOL,
     NN_ADD_HALF_N96_SYMBOL,
+    NT_A_LDMATRIX_N96_SYMBOL,
     TN_PRE_RNA_N96_SYMBOL,
     TN_PRE_RNA_M64N64_SYMBOL,
+    TN_PRE_RNA_M64N96_S2_SYMBOL,
     TN_PRE_RNA_TRANSPOSE_SYMBOL,
 ];
 
@@ -92,8 +96,10 @@ pub const GEMM_TERMINAL_ARGUMENT: u32 = 5;
 pub enum Sm89Tf32JointKernelKind {
     NnAddHalfDirectM128N96Bk32S3,
     NnAddHalfM128N96Bk32S3,
+    NtALdmatrixM128N96Bk32S3,
     TnPreRnaM128N96Bk32S3,
     TnPreRnaM64N64Bk32S3,
+    TnPreRnaM64N96Bk32S2,
     TnPreRnaTranspose32x32,
 }
 
@@ -142,9 +148,10 @@ const fn gemm_spec(
 
 // Register caps cover the largest spill-free allocation observed across the
 // supported CUDA 12.8, 13.0, and 13.2 JITs. CUDA 13.2 allocates 124/124/127
-// registers for the N96 kernels; CUDA 12.8 and 13.0 allocate 131/131/135.
+// registers for the original N96 kernels; CUDA 12.8 and 13.0 allocate
+// 131/131/135. The NT A-ldmatrix route allocates 108/108/110 respectively.
 // Occupancy remains sealed independently below.
-pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 5] = [
+pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
     gemm_spec(
         NN_ADD_HALF_DIRECT_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
@@ -160,6 +167,13 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 5] = [
         1,
     ),
     gemm_spec(
+        NT_A_LDMATRIX_N96_SYMBOL,
+        Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3,
+        86_016,
+        110,
+        1,
+    ),
+    gemm_spec(
         TN_PRE_RNA_N96_SYMBOL,
         Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3,
         86_016,
@@ -171,6 +185,13 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 5] = [
         Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3,
         49_152,
         83,
+        2,
+    ),
+    gemm_spec(
+        TN_PRE_RNA_M64N96_S2_SYMBOL,
+        Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2,
+        40_960,
+        128,
         2,
     ),
     Sm89Tf32JointKernelSpec {

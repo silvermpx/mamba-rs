@@ -7,6 +7,33 @@ mod production;
 
 const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 
+#[test]
+#[cfg(feature = "cuda")]
+fn production_half_module_registry_includes_all_retained_tn_winners() {
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfRoute,
+    };
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+
+    assert_eq!(SM89_HALF_KERNEL_SPECS.len(), 10);
+    assert_eq!(SM89_HALF_AUTO_CELLS.len(), 18);
+    assert_eq!(
+        SM89_HALF_AUTO_CELLS
+            .iter()
+            .filter(|(op, _, _, _)| *op == ResolvedGemmOp::Tn)
+            .count(),
+        6,
+    );
+    assert!(SM89_HALF_KERNEL_SPECS.iter().any(|spec| {
+        spec.route == Sm89HalfRoute::TnM64N64Bk64S2CompactBxor
+            && spec.symbol == production::COMPACT_F16_SYMBOL
+    }));
+    assert!(SM89_HALF_KERNEL_SPECS.iter().any(|spec| {
+        spec.route == Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2
+            && spec.symbol == production::REGPIPE_VEC2_BF16_SYMBOL
+    }));
+}
+
 fn normalized(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -100,7 +127,7 @@ fn standalone_composition_supplies_each_retained_dependency_once() {
 
 #[test]
 fn four_specs_pin_tn_driver_abi_geometry_and_resource_bounds() {
-    use production::{Sm89HalfTnKernelKind, SM89_HALF_TN_KERNEL_SPECS};
+    use production::{SM89_HALF_TN_KERNEL_SPECS, Sm89HalfTnKernelKind};
 
     assert_eq!(SM89_HALF_TN_KERNEL_SPECS.len(), 4);
     for (symbol, kind) in [

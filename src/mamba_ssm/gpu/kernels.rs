@@ -905,14 +905,18 @@ impl MambaKernels {
             static TRANSPOSE: std::sync::Once = std::sync::Once::new();
             static TN_N96: std::sync::Once = std::sync::Once::new();
             static TN_M64N64: std::sync::Once = std::sync::Once::new();
+            static TN_M64N96_S2: std::sync::Once = std::sync::Once::new();
             static NN_N96: std::sync::Once = std::sync::Once::new();
             static NN_N96_BASELINE: std::sync::Once = std::sync::Once::new();
+            static NT_A_LDMATRIX_N96: std::sync::Once = std::sync::Once::new();
             let once = match exclusion.symbol {
                 super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL => &TRANSPOSE,
                 super::gemm_bi_triad::TN_PRE_RNA_N96_SYMBOL => &TN_N96,
                 super::gemm_bi_triad::TN_PRE_RNA_M64N64_SYMBOL => &TN_M64N64,
+                super::gemm_bi_triad::TN_PRE_RNA_M64N96_S2_SYMBOL => &TN_M64N96_S2,
                 super::gemm_bi_triad::NN_ADD_HALF_DIRECT_N96_SYMBOL => &NN_N96,
                 super::gemm_bi_triad::NN_ADD_HALF_N96_SYMBOL => &NN_N96_BASELINE,
+                super::gemm_bi_triad::NT_A_LDMATRIX_N96_SYMBOL => &NT_A_LDMATRIX_N96,
                 _ => continue,
             };
             super::diagnostics::warn_once(once, || {

@@ -1401,6 +1401,13 @@ impl QualifiedHalfOutput {
             Self::F32(buffer) => buffer.to_cpu(&ctx.stream),
         }
     }
+
+    fn upload_f32(&mut self, ctx: &GpuCtx, values: &[f32]) -> Result<(), String> {
+        match self {
+            Self::Typed(buffer) => buffer.upload_f32(&ctx.stream, values),
+            Self::F32(buffer) => buffer.upload(&ctx.stream, values),
+        }
+    }
 }
 
 struct QualifiedHalfResources {
@@ -1838,13 +1845,17 @@ impl QualifiedPhysicalLaunch<'_> {
         self.resources.validate_red_zones(ctx)
     }
 
-    /// Replaces both half-precision input operands with a deterministic finite pattern.
-    pub fn seed_half_operands(&self, ctx: &GpuCtx, salt: usize) -> Result<(), String> {
+    /// Restores the output and both half-precision inputs to one deterministic state.
+    pub fn seed_half_operands(&mut self, ctx: &GpuCtx, salt: usize) -> Result<(), String> {
         self.policy.validate(ctx)?;
         self.resources.validate()?;
-        let QualifiedPhysicalResources::Half(resources) = &self.resources else {
+        let QualifiedPhysicalResources::Half(resources) = &mut self.resources else {
             return Err("half operand seeding requires a half qualification route".into());
         };
+        resources.output.upload_f32(
+            ctx,
+            &seeded_half_values(resources.storage.output, salt ^ 0x91),
+        )?;
         resources.a.upload_f32(
             &ctx.stream,
             &seeded_half_values(resources.storage.a, salt ^ 0x2d),
@@ -6654,10 +6665,10 @@ mod tests {
 
         let finalist = capture_forced_route(&ctx, spec, (129, 65, 36), 0x89c3_2000)
             .expect("capture actual finalist route");
-        assert_eq!(finalist.tuning_table_revision, 2);
-        ctx.validate_resolved_gemm_route(&finalist, "live finalist revision 2")
+        assert_eq!(finalist.tuning_table_revision, 3);
+        ctx.validate_resolved_gemm_route(&finalist, "live finalist revision 3")
             .unwrap();
-        for revision in [0, 1, 3] {
+        for revision in [0, 1, 2, 4] {
             let mut stale = finalist;
             stale.tuning_table_revision = revision;
             assert!(
@@ -6708,9 +6719,10 @@ mod tests {
             );
         }
         println!(
-            "{{\"kind\":\"sm89_nt_finalist_k0_revisions\",\"zero_digest\":\"{}\",\"exceptional_digest\":\"{}\",\"finalist_revision\":2,\"portable_revision\":{},\"shared_route_revision\":{}}}",
+            "{{\"kind\":\"sm89_nt_finalist_k0_revisions\",\"zero_digest\":\"{}\",\"exceptional_digest\":\"{}\",\"finalist_revision\":{},\"portable_revision\":{},\"shared_route_revision\":{}}}",
             digest_hex(&zero),
             digest_hex(&exceptional),
+            super::super::contract::SM89_FINALIST_TUNING_REVISION,
             portable.tuning_table_revision,
             ctx.gemm_route().tuning_table_revision,
         );

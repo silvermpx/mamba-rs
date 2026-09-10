@@ -958,6 +958,8 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
         13
     );
     assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 as u8, 15);
+    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3V1 as u8, 23);
+    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8, 28);
     assert_eq!(
         PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
         24

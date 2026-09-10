@@ -1,4 +1,4 @@
-//! First live wiring smoke for the five retained Ada TF32 joint cells.
+//! First live wiring smoke for the six retained Ada TF32 joint cells.
 //!
 //! This test intentionally stops before timing and cohort admission. It proves
 //! the forced production launch manifest and compares its exact bits with the
@@ -10,14 +10,34 @@
 enum LiteralOp {
     Nn,
     Tn,
+    Nt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiteralRoute {
     TnN96,
     TnM64N64,
+    TnM64N96S2,
     NnDirectN96,
     NnN96,
+    NtALdmatrixN96,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiteralModule {
+    Sm80,
+    Sm89Finalist,
+    Sm89Joint,
+}
+
+impl LiteralModule {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sm80 => "TriadSm80",
+            Self::Sm89Finalist => "TriadSm89Finalist",
+            Self::Sm89Joint => "TriadSm89Tf32Joint",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,14 +57,16 @@ struct LiteralCase {
 
 const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
 const TN_N96_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1";
-const TN_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
+const TN_M64N96_S2_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1";
+const LOWER_TN_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
 const NN_DIRECT_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
 const NN_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
+const NT_A_LDMATRIX_N96_SYMBOL: &str = "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1";
 const OLD_TN_M64N64_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2";
 const OLD_TN_M128N64_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const OLD_NN_M128N128_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
 
-const CASES: [LiteralCase; 5] = [
+const CASES: [LiteralCase; 6] = [
     LiteralCase {
         name: "tn_d768_in",
         op: LiteralOp::Tn,
@@ -75,14 +97,14 @@ const CASES: [LiteralCase; 5] = [
         name: "tn_prism",
         op: LiteralOp::Tn,
         dims: (4_621, 384, 1_928),
-        route: LiteralRoute::TnM64N64,
-        gemm_symbol: TN_M64N64_SYMBOL,
+        route: LiteralRoute::TnM64N96S2,
+        gemm_symbol: TN_M64N96_S2_SYMBOL,
         old_auto_symbol: OLD_TN_M128N64_SYMBOL,
         transform_symbol: Some(TRANSPOSE_SYMBOL),
         transpose_grid: Some((12, 145, 1)),
-        gemm_grid: (186, 1, 1),
-        gemm_tile: (64, 64),
-        gemm_shared_bytes: 49_152,
+        gemm_grid: (126, 1, 1),
+        gemm_tile: (64, 96),
+        gemm_shared_bytes: 40_960,
     },
     LiteralCase {
         name: "nn_prism",
@@ -110,16 +132,45 @@ const CASES: [LiteralCase; 5] = [
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
+    LiteralCase {
+        name: "nt_d768_in",
+        op: LiteralOp::Nt,
+        dims: (2_048, 768, 3_072),
+        route: LiteralRoute::NtALdmatrixN96,
+        gemm_symbol: NT_A_LDMATRIX_N96_SYMBOL,
+        old_auto_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        transform_symbol: None,
+        transpose_grid: None,
+        gemm_grid: (128, 1, 1),
+        gemm_tile: (128, 96),
+        gemm_shared_bytes: 86_016,
+    },
 ];
 
+fn post_admission_symbol_and_module(
+    case: LiteralCase,
+    nvrtc: (i32, i32),
+) -> (&'static str, LiteralModule) {
+    if matches!(nvrtc, (12, 8) | (13, 0)) {
+        return match case.name {
+            "tn_prism" => (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
+            "nn_prism" => (case.old_auto_symbol, LiteralModule::Sm80),
+            "nt_d768_in" => (case.old_auto_symbol, LiteralModule::Sm89Finalist),
+            _ => (case.gemm_symbol, LiteralModule::Sm89Joint),
+        };
+    }
+    (case.gemm_symbol, LiteralModule::Sm89Joint)
+}
+
 #[test]
-fn five_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
+fn six_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
     let expected_keys = [
         ("tn_d768_in", LiteralOp::Tn, (2_048, 768, 3_072)),
         ("tn_d768_out", LiteralOp::Tn, (2_048, 1_536, 768)),
         ("tn_prism", LiteralOp::Tn, (4_621, 384, 1_928)),
         ("nn_prism", LiteralOp::Nn, (4_621, 384, 1_928)),
         ("nn_d768_out", LiteralOp::Nn, (2_048, 1_536, 768)),
+        ("nt_d768_in", LiteralOp::Nt, (2_048, 768, 3_072)),
     ];
     assert_eq!(
         CASES.map(|case| (case.name, case.op, case.dims)),
@@ -131,6 +182,7 @@ fn five_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
         let (output_rows, output_columns) = match case.op {
             LiteralOp::Nn => (case.dims.0, case.dims.2),
             LiteralOp::Tn => (case.dims.1, case.dims.2),
+            LiteralOp::Nt => (case.dims.0, case.dims.1),
         };
         let expected_grid = (
             u32::try_from(output_rows.div_ceil(case.gemm_tile.0 as usize)).unwrap()
@@ -154,6 +206,57 @@ fn five_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
     }
 }
 
+#[test]
+fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
+    for (nvrtc, expected) in [
+        (
+            (12, 8),
+            [
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
+                (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
+                (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (
+                    "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+                    LiteralModule::Sm89Finalist,
+                ),
+            ],
+        ),
+        (
+            (13, 0),
+            [
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
+                (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
+                (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (
+                    "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+                    LiteralModule::Sm89Finalist,
+                ),
+            ],
+        ),
+        (
+            (13, 2),
+            [
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (TN_M64N96_S2_SYMBOL, LiteralModule::Sm89Joint),
+                (NN_DIRECT_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (NT_A_LDMATRIX_N96_SYMBOL, LiteralModule::Sm89Joint),
+            ],
+        ),
+    ] {
+        assert_eq!(
+            CASES.map(|case| post_admission_symbol_and_module(case, nvrtc)),
+            expected,
+            "CUDA {nvrtc:?} AUTO winner map",
+        );
+    }
+}
+
 #[cfg(feature = "cuda")]
 mod live {
     use super::*;
@@ -173,6 +276,7 @@ mod live {
         match case.op {
             LiteralOp::Nn => ResolvedGemmOp::Nn,
             LiteralOp::Tn => ResolvedGemmOp::Tn,
+            LiteralOp::Nt => ResolvedGemmOp::Nt,
         }
     }
 
@@ -180,9 +284,22 @@ mod live {
         match case.route {
             LiteralRoute::TnN96 => Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
             LiteralRoute::TnM64N64 => Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+            LiteralRoute::TnM64N96S2 => Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
             LiteralRoute::NnDirectN96 => Tf32PhysicalRoute::Sm89NnDirectN96V1,
             LiteralRoute::NnN96 => Tf32PhysicalRoute::Sm89NnN96V1,
+            LiteralRoute::NtALdmatrixN96 => Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
         }
+    }
+
+    fn auto_expected_case(mut case: LiteralCase, nvrtc: (i32, i32)) -> LiteralCase {
+        if case.name == "tn_prism" && matches!(nvrtc, (12, 8) | (13, 0)) {
+            case.route = LiteralRoute::TnM64N64;
+            case.gemm_symbol = LOWER_TN_M64N64_SYMBOL;
+            case.gemm_grid = (186, 1, 1);
+            case.gemm_tile = (64, 64);
+            case.gemm_shared_bytes = 49_152;
+        }
+        case
     }
 
     fn prior_route(case: LiteralCase) -> Tf32PhysicalRoute {
@@ -190,9 +307,21 @@ mod live {
             OLD_TN_M64N64_SYMBOL => (Tf32PortableTile::M64N64, Tf32PortableStages::S2),
             OLD_TN_M128N64_SYMBOL => (Tf32PortableTile::M128N64, Tf32PortableStages::S3),
             OLD_NN_M128N128_SYMBOL => (Tf32PortableTile::M128N128, Tf32PortableStages::S3),
+            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2" => {
+                return Tf32PhysicalRoute::Sm89MmaTf32Compact8V1;
+            }
             symbol => panic!("unknown prior TF32 route symbol {symbol}"),
         };
         Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute { tile, stages })
+    }
+
+    fn literal_module(module: ModuleKind) -> Option<LiteralModule> {
+        match module {
+            ModuleKind::TriadSm80 => Some(LiteralModule::Sm80),
+            ModuleKind::TriadSm89Finalist => Some(LiteralModule::Sm89Finalist),
+            ModuleKind::TriadSm89Tf32Joint => Some(LiteralModule::Sm89Joint),
+            _ => None,
+        }
     }
 
     fn request(case: LiteralCase, forced: bool) -> PhysicalQualificationRequest {
@@ -245,7 +374,10 @@ mod live {
             ));
         }
 
-        let logical_strides = (case.dims.1, case.dims.2, case.dims.2);
+        let logical_strides = match case.op {
+            LiteralOp::Nn | LiteralOp::Tn => (case.dims.1, case.dims.2, case.dims.2),
+            LiteralOp::Nt => (case.dims.2, case.dims.2, case.dims.1),
+        };
         let gemm = evidence
             .nodes()
             .last()
@@ -253,6 +385,7 @@ mod live {
         let expected_numeric = match case.op {
             LiteralOp::Tn => ResolvedNumericContract::MmaTf32PreRnaAV1,
             LiteralOp::Nn => ResolvedNumericContract::MmaTf32AddHalfUlpV1,
+            LiteralOp::Nt => ResolvedNumericContract::MmaTf32RnaV1,
         };
         if gemm.kind != PhysicalLaunchKind::Gemm
             || gemm.symbol != case.gemm_symbol
@@ -314,7 +447,7 @@ mod live {
         if !evidence.eager_graph_equal()
             || node.kind != PhysicalLaunchKind::Gemm
             || node.symbol != case.old_auto_symbol
-            || node.module_kind != ModuleKind::TriadSm80
+            || node.module_kind != prior_route(case).module_kind()
             || node.logical_op != op(case)
             || node.logical_dtype != PolicyDtype::F32
             || node.execution_dtype != PolicyDtype::F32
@@ -374,7 +507,7 @@ mod live {
 
     #[test]
     #[ignore = "requires an idle RTX 6000 Ada and explicit CUDA toolkit selection"]
-    fn sm89_tf32_joint_five_cell_forced_wiring_matches_prior_auto() -> Result<(), String> {
+    fn sm89_tf32_joint_six_cell_forced_wiring_matches_prior_auto() -> Result<(), String> {
         let forced_device = GpuDevice::new(0)?;
         let forced_ctx = GpuCtx::new(&forced_device)?;
         let auto_device = GpuDevice::new(0)?;
@@ -389,14 +522,19 @@ mod live {
                 identity.device.compute_capability, identity.device.multiprocessor_count,
             ));
         }
-        if forced_ctx
+        let compiler = forced_ctx
             .kernels
             .triad_sm89_tf32_joint_compiler_identity()
-            .is_none()
-        {
+            .ok_or_else(|| {
+                format!(
+                    "TriadSm89Tf32Joint did not bind: {:?}",
+                    forced_ctx.kernels.triad_sm89_tf32_joint_rejection(),
+                )
+            })?;
+        if compiler.nvrtc_version != (13, 2) {
             return Err(format!(
-                "TriadSm89Tf32Joint did not bind: {:?}",
-                forced_ctx.kernels.triad_sm89_tf32_joint_rejection(),
+                "M64N96/S2 wiring smoke requires CUDA 13.2, got {:?}",
+                compiler.nvrtc_version,
             ));
         }
 
@@ -496,11 +634,21 @@ mod live {
         for (index, case) in CASES.into_iter().enumerate() {
             let mut auto = qualify_physical_launch(&auto_ctx, auto_requests[index])?;
             let mut prior = qualify_physical_launch(&prior_ctx, prior_requests[index])?;
-            let keeps_portable = case.name == "nn_prism" && matches!(nvrtc, (12, 8) | (13, 0));
-            if keeps_portable {
+            let expected_case = auto_expected_case(case, nvrtc);
+            let (expected_symbol, expected_module) = post_admission_symbol_and_module(case, nvrtc);
+            let keeps_prior = expected_symbol == case.old_auto_symbol;
+            if keeps_prior {
                 assert_prior_auto_manifest(case, &auto)?;
             } else {
-                assert_forced_manifest(case, &auto)?;
+                assert_forced_manifest(expected_case, &auto)?;
+            }
+            if auto
+                .evidence()
+                .uniform_module_kind()
+                .and_then(literal_module)
+                != Some(expected_module)
+            {
+                return Err(format!("{} AUTO module drifted", case.name));
             }
             assert_prior_auto_manifest(case, &prior)?;
 
@@ -541,16 +689,8 @@ mod live {
                 nvrtc.0,
                 nvrtc.1,
                 case.name,
-                if keeps_portable {
-                    case.old_auto_symbol
-                } else {
-                    case.gemm_symbol
-                },
-                if keeps_portable {
-                    "TriadSm80"
-                } else {
-                    "TriadSm89Tf32Joint"
-                },
+                expected_symbol,
+                expected_module.as_str(),
             );
         }
         Ok(())

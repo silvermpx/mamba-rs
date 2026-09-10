@@ -878,6 +878,11 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         {
             return Ok(HalfPolicyBranchSeal::Sm90a(seal));
         }
+        if let Some(seal) = super::gemm_bi_triad::launch_sm89_half_tn_auto_observed(
+            ctx, observer, dw_ptr, dy, x_saved, dims,
+        )? {
+            return Ok(HalfPolicyBranchSeal::Native(seal));
+        }
         match super::gemm_bi_triad::gemm_bi_backward_dw_tc_observed(
             ctx, observer, dw_ptr, dy, x_saved, dims,
         ) {

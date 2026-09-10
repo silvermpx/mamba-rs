@@ -1704,28 +1704,44 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         } else {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
-        let (loads, opposite_x2) = match spec.route {
+        let (async_copy, loads, opposite_x4, opposite_x2) = match spec.route {
             super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => (
+                "cp.async.cg.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                     "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
                 ],
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ),
+            super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor
+            | super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => (
+                "cp.async.ca.shared.global",
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                ],
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
             ),
             super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
             | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => (
+                "cp.async.cg.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                     "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
                 ],
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
             ),
         };
-        require_ptx_entry_tokens("TriadSm89Half", entry, &["cp.async.cg.shared.global", mma])?;
+        require_ptx_entry_tokens("TriadSm89Half", entry, &[async_copy, mma])?;
         require_ptx_entry_tokens("TriadSm89Half", entry, &loads)?;
-        if ptx_has_unquoted_token(&entry.body, |token| token == opposite_x2) {
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == opposite_x4 || token == opposite_x2
+        }) {
             return Err(format!(
-                "TriadSm89Half/{} PTX contains route-incompatible {opposite_x2}",
+                "TriadSm89Half/{} PTX contains a route-incompatible ldmatrix form",
                 spec.symbol
             ));
         }
@@ -1738,6 +1754,8 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 || token.starts_with("wgmma.")
                 || token.starts_with("tcgen05.")
                 || token.starts_with("cp.async.bulk.tensor.")
+                || token.starts_with("ld.local.")
+                || token.starts_with("st.local.")
         }) {
             return Err(format!(
                 "TriadSm89Half {} contains a forbidden instruction family",
@@ -1923,12 +1941,26 @@ fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 }
             }
             Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
-            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3 => {
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2 => {
                 require_ptx_entry_tokens(
                     "TriadSm89Tf32Joint pre-RNA GEMM",
                     entry,
                     &[
                         "cp.async.cg.shared.global.L2::128B",
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+            }
+            Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint NT A-ldmatrix GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global",
+                        "cp.async.ca.shared.global",
                         "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                         "cvt.rna.tf32.f32",
                         "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
@@ -2568,10 +2600,12 @@ fn validate_sm89_half_driver_abi(
 ) -> Result<(), String> {
     const NN: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
     const NT: [(usize, usize); 7] = [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)];
+    let tn = super::sm89_half_tn_source::HALF_TN_DRIVER_ABI
+        .map(|(offset, size)| (offset as usize, size as usize));
     let expected: &[(usize, usize)] = match spec.op {
         ResolvedGemmOp::Nn => &NN,
+        ResolvedGemmOp::Tn => &tn,
         ResolvedGemmOp::Nt => &NT,
-        ResolvedGemmOp::Tn => return Err("TriadSm89Half owns no TN kernel".into()),
     };
     if abi.parameter_count() != expected.len()
         || !abi
@@ -2624,7 +2658,13 @@ fn census_sm89_half_driver_abi(
                     spec.symbol
                 )
             })?;
-            let count = if spec.op == ResolvedGemmOp::Nn { 5 } else { 7 };
+            let count = match spec.op {
+                ResolvedGemmOp::Nn => 5,
+                ResolvedGemmOp::Tn => {
+                    super::sm89_half_tn_source::HALF_TN_TERMINAL_ARGUMENT as usize
+                }
+                ResolvedGemmOp::Nt => 7,
+            };
             let abi =
                 query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
                     get(function, index, offset, size)
@@ -7951,10 +7991,14 @@ fn load_sm89_half_functions(
     for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
         let loaded = (|| {
             validate_sm89_half_driver_abi(spec, sm89_half_abi_for_symbol(abi, spec.symbol)?)?;
-            if optin_shared < spec.dynamic_shared_bytes {
+            let total_shared_bytes = spec
+                .static_shared_bytes
+                .checked_add(spec.dynamic_shared_bytes)
+                .ok_or_else(|| format!("{} shared memory overflows u32", spec.symbol))?;
+            if optin_shared < total_shared_bytes {
                 return Err(format!(
-                    "{} needs {} dynamic shared bytes, device exposes {optin_shared}",
-                    spec.symbol, spec.dynamic_shared_bytes
+                    "{} needs {total_shared_bytes} total shared bytes, device exposes {optin_shared}",
+                    spec.symbol
                 ));
             }
             let function = load_function(&module.module, ModuleKind::TriadSm89Half, spec.symbol)?;
@@ -7981,10 +8025,10 @@ fn load_sm89_half_functions(
                     format!("query {} static shared memory: {error:?}", spec.symbol)
                 })?)
                 .map_err(|_| format!("{} returned negative static shared memory", spec.symbol))?;
-            if static_shared_bytes != 0 {
+            if static_shared_bytes != spec.static_shared_bytes {
                 return Err(format!(
-                    "{} uses {static_shared_bytes} static shared bytes, expected zero",
-                    spec.symbol
+                    "{} uses {static_shared_bytes} static shared bytes, expected {}",
+                    spec.symbol, spec.static_shared_bytes
                 ));
             }
             let max_threads = function
@@ -10474,6 +10518,12 @@ mod tests {
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
             ],
+            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                ]
+            }
             Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => [
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
@@ -10488,9 +10538,27 @@ mod tests {
 
         match route {
             Sm89HalfRoute::NnM128N128Bk64S3 => "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16"
+            }
             Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => {
                 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"
             }
+        }
+    }
+
+    fn sm89_half_validator_opposite_x4(
+        route: super::super::sm89_half_source::Sm89HalfRoute,
+    ) -> &'static str {
+        use super::super::sm89_half_source::Sm89HalfRoute;
+
+        match route {
+            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
+            }
+            Sm89HalfRoute::NnM128N128Bk64S3
+            | Sm89HalfRoute::NtM128N128Bk64S3Bxor
+            | Sm89HalfRoute::NtM96N128Bk64S3 => "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
         }
     }
 
@@ -10510,12 +10578,17 @@ mod tests {
         format!(
             ".visible .entry {}() {{\n\
              .reg .b32 %r<8>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<8>;\n\
-             cp.async.cg.shared.global [%r0], [%rd0], 16;\n\
+             {} [%r0], [%rd0], 16;\n\
              {a_load} {{%r0,%r1,%r2,%r3}}, [%r4];\n\
              {b_load} {{%r4,%r5}}, [%r6];\n\
              {mma} {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
              ret;\n}}\n",
             spec.symbol,
+            if spec.op == ResolvedGemmOp::Tn {
+                "cp.async.ca.shared.global"
+            } else {
+                "cp.async.cg.shared.global"
+            },
         )
     }
 
@@ -10534,7 +10607,7 @@ mod tests {
     #[test]
     fn sm89_half_validator_accepts_exact_route_specific_ldmatrix_pairs() {
         super::validate_sm89_half_ptx("sm_89", &sm89_half_validator_test_ptx())
-            .expect("the six exact route-specific half entries must validate");
+            .expect("the ten exact route-specific half entries must validate");
     }
 
     #[test]
@@ -10581,6 +10654,18 @@ mod tests {
             let coexisting = baseline.replacen(&entry, &coexisting_entry, 1);
             super::validate_sm89_half_ptx("sm_89", &coexisting).expect_err(&format!(
                 "{:?}/{:?} must reject coexisting opposite {opposite_x2}",
+                spec.route, spec.dtype
+            ));
+
+            let opposite_x4 = sm89_half_validator_opposite_x4(spec.route);
+            let coexisting_entry = entry.replacen(
+                "ret;",
+                &format!("{opposite_x4} {{%r0,%r1,%r2,%r3}}, [%r4];\nret;"),
+                1,
+            );
+            let coexisting = baseline.replacen(&entry, &coexisting_entry, 1);
+            super::validate_sm89_half_ptx("sm_89", &coexisting).expect_err(&format!(
+                "{:?}/{:?} must reject coexisting opposite {opposite_x4}",
                 spec.route, spec.dtype
             ));
         }
@@ -10827,8 +10912,12 @@ mod tests {
         let body = match spec.kind {
             Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => "cvt.rna.tf32.f32 %r0, %f0;\n",
             Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
-            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3 => {
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2 => {
                 "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
+            Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3 => {
+                "cp.async.cg.shared.global [%r0], [%rd0], 16;\ncp.async.ca.shared.global [%r0], [%rd0], 4;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
             }
             Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3
             | Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3 => {
@@ -10858,7 +10947,7 @@ mod tests {
         assert_eq!(
             super::super::contract::tf32_route_specs(ModuleKind::TriadSm89Tf32Joint),
             &super::super::contract::SM89_TF32_JOINT_ROUTE_SPECS,
-            "the joint artifact must expose exactly its four GEMM routes; the fifth export is the TN input transform"
+            "the joint artifact must expose exactly its six GEMM routes; the seventh export is the TN input transform"
         );
         let source = compose_module_source_for(ModuleKind::TriadSm89Tf32Joint, "sm_89").unwrap();
         assert_eq!(
@@ -10879,7 +10968,7 @@ mod tests {
     }
 
     #[test]
-    fn sm89_tf32_joint_validator_accepts_only_five_typed_entries() {
+    fn sm89_tf32_joint_validator_accepts_only_seven_typed_entries() {
         let baseline = sm89_tf32_joint_test_ptx();
         super::validate_sm89_tf32_joint_ptx("sm_89", &baseline).unwrap();
         assert!(super::validate_sm89_tf32_joint_ptx("compute_89", &baseline).is_err());
@@ -11019,11 +11108,12 @@ mod tests {
                 );
             }
 
-            let loaded = if index == 3 {
-                Err("resource gate failed".to_string())
-            } else {
-                Ok(index as u8)
-            };
+            let loaded =
+                if spec.symbol == super::super::sm89_tf32_joint_source::TN_PRE_RNA_M64N64_SYMBOL {
+                    Err("resource gate failed".to_string())
+                } else {
+                    Ok(index as u8)
+                };
             super::retain_sm89_tf32_joint_symbol(
                 &mut functions,
                 &mut exclusions,
@@ -11032,7 +11122,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(functions.len(), 4);
+        assert_eq!(functions.len(), 6);
         assert_eq!(exclusions.len(), 1);
         assert_eq!(
             exclusions[0].symbol,

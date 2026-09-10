@@ -1,6 +1,6 @@
 # v0.7.0 assembly and release checklist
 
-Updated 2026-09-09. Worktree: `internal/worktrees/gemm-bi-triad-sm80`;
+Updated 2026-09-10. Worktree: `internal/worktrees/gemm-bi-triad-sm80`;
 branch: `codex/gemm-bi-triad-sm80`. This is the active execution checklist;
 the detailed historical evidence remains in `internal/perf/` and the handoff.
 
@@ -53,19 +53,25 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 - [x] Retained-winner audit recovers TF32 NN d768-out baseline N96, missing
   from the four-cell plan; joint source now has five exports. Add the required
   frozen alignment helper. All five-body/source contracts pass 28/28.
-- [ ] TF32 joint module, NN/TN routes, transform/scratch ownership and admission.
-  Module-only wiring now compiles on Ada/CUDA13.2 and passes seven focused
-  composition, ABI/resource-validator and artifact-identity tests. The five-cell
-  launch/selector layer remains pending.
-- [x] TF32 joint module live CUDA13.2 loading/ABI/resources: all five symbols
-  bound with local0 and no exclusions; 1/1 module test passes. Five-cell
-  selector/launch integration and the combined admission batch remain open.
-- [ ] Remaining half improvements beyond the eleven Fast-winning cells:
-  integrate F16 NN d768-in and the retained half TN compact/regpipe/vec2 cells.
+- [x] Original five-cell TF32 joint module, NN/TN routes, transform/scratch
+  ownership and toolkit-specific admission (`efb38c38`, `08736549`, `fdda603b`).
+- [x] Integrate the two later TF32 additions: NT d768-in A-ldmatrix N96/S3 and
+  TN Prism pre-RNA M64N96/S2. Faithful source promotion, all three compiler
+  identities and six-cell actual AUTO pass. CUDA13.2 paired production timing
+  retains ~7.1% and ~19.3–19.4% lower time against the prior selected bodies.
+  Lower toolkits retain their measured routes; no new Fast-win claim.
+- [x] Final seven-export TF32 joint module passes loading/ABI/resources on
+  CUDA12.8/13.0/13.2, local0, no exclusions. Six-cell post-admission AUTO,
+  eager/graph bits and guards pass on all three. Evidence:
+  `internal/perf/ada-final-assembly-20260910/report.md`.
+- [x] Remaining half improvements beyond the eleven Fast-winning cells:
+  F16 NN d768-in and half TN compact/regpipe/vec2 are assembled. Actual AUTO
+  passes all18 cells/ten symbols on all three toolkits. Lower-toolkit checks
+  prove correctness and selection, not fresh half performance comparisons.
 - [x] Missing half actual-AUTO comparison: seven rows pass CUDA13.2 eager/graph
   exact oracles, physical manifests, guards and paired once7 p50/p95 gates.
   Both d768-in tournaments retain vec2; compact remains selected for F16 out
-  and both Prism rows. New TN production exports/admission remain pending.
+  and both Prism rows. Production exports/admission and post-AUTO now pass.
 - [ ] Reconcile every retained-winner report with production dispatch and the
   qualification harness. No candidate disappears because it loses to Fast.
 - [x] Independent retained-winner census finds no further omitted Triad winner
@@ -76,6 +82,9 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   comparison; keep it labelled as unqualified, not a missing Triad admission.
 - [ ] Preserve or justify every route from the saved RTX 5090 inference and
   Triad snapshots; investigate any newly observed route or speed regression.
+  The 66-cell assembly smoke passes132 eager/graph rows;65 physical routes
+  match the saved snapshot. The remaining TN underfill change is the retained
+  M16N32/S4 winner, not an Ada route replacing a 5090 winner.
 
 ## Combined validation on Ada and RTX 5090
 
@@ -109,6 +118,8 @@ Select their actual supported cases and prerequisites before executing them.
 - [ ] Keep useful regression and reproducible qualification tests. Archive
   useful discovery tools; remove proven duplicate/dead artifacts only after
   retaining their source and conclusions. Audit published crate contents.
+  Repository-wide formatting still flags older discovery files; scoped
+  formatting of this assembly block is green. Resolve the former in cleanup.
 - [ ] Benchmark unchanged monolithic `main` versus final new inference/Triad
   with one immutable harness and identical settings. Use reproducible measured
   deltas in the changelog; do not multiply unrelated discovery ratios.
@@ -118,10 +129,10 @@ Select their actual supported cases and prerequisites before executing them.
 - [ ] Complete release tests and independent final review, then merge `main`.
 - [ ] Stop before publication until the owner explicitly approves the release.
 
-## Current external dependency
+## Current GPU lanes
 
-Ada is accessible via `ssh ada`. The owner supplied the new RTX 5090 endpoint
-`ssh -p 53066 root@113.207.71.6`. Its SSH service is reachable but currently
-rejects the existing default key with `Permission denied (publickey)`.
-The owner has been asked to attach the Ada key or identify the intended local
-key. Ada work and local assembly continue while access is being configured.
+Both hosts were reachable on 2026-09-10: Ada via `ssh ada`, RTX 5090 via
+`ssh -p 18481 root@61.32.91.194`. Earlier rental endpoints are historical.
+The 5090 CUDA13.2 production snapshot is recorded in
+`internal/perf/sm120-triad-head-5090-20260909/report.md`; it is not a final
+validation of subsequent WIP. Recheck utilization and free VRAM before each run.

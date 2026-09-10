@@ -73,7 +73,7 @@ pub const F32_TF32_TUNING_REVISION: u16 = TUNING_TABLE_REVISION;
 pub const TF32_TENSOR_MAP_REVISION: u16 = 1;
 pub const TF32_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
 pub const TF32_PORTABLE_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
-pub const SM89_FINALIST_TUNING_REVISION: u16 = 2;
+pub const SM89_FINALIST_TUNING_REVISION: u16 = 3;
 pub const ZERO_REDUCTION_MAP_REVISION: u16 = 1;
 pub const ZERO_REDUCTION_DIGEST_DOMAIN: &[u8] = b"tf32-zero-reduction-maps.v1";
 pub const SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES: u32 = 33_376;
@@ -803,6 +803,8 @@ pub(super) fn append_tf32_route_digest(
         Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => digest.required(b"route-family", &[12]),
         Tf32PhysicalRoute::Sm89NnDirectN96V1 => digest.required(b"route-family", &[13]),
         Tf32PhysicalRoute::Sm89NnN96V1 => digest.required(b"route-family", &[14]),
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => digest.required(b"route-family", &[15]),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => digest.required(b"route-family", &[16]),
     }
 }
 
@@ -1232,8 +1234,10 @@ pub(super) fn tf32_tensor_map_plan(
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
         | Tf32PhysicalRoute::Sm89TnPreRnaN96V1
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
         | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1 => {
+        | Tf32PhysicalRoute::Sm89NnN96V1
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => {
             return Err("portable TF32 does not use tensor maps".into());
         }
     };
@@ -1759,10 +1763,14 @@ pub enum Tf32PhysicalRoute {
     Sm89TnPreRnaN96V1,
     /// Ada TN Prism after an explicit, separately observed RNA+transpose of A.
     Sm89TnPreRnaM64N64V1,
+    /// Ada TN Prism M64xN96/BK32/S2 after an explicit RNA+transpose of A.
+    Sm89TnPreRnaM64N96S2V1,
     /// Ada NN Prism with retained add-half conversion and direct full-tile stores.
     Sm89NnDirectN96V1,
     /// Ada NN d768-out with retained add-half conversion and shared epilogue.
     Sm89NnN96V1,
+    /// Ada NT d768-in direct A-ldmatrix N96 winner.
+    Sm89NtALdmatrixN96V1,
 }
 
 impl Tf32PhysicalRoute {
@@ -1780,8 +1788,10 @@ impl Tf32PhysicalRoute {
             Self::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
             Self::Sm89TnPreRnaN96V1
             | Self::Sm89TnPreRnaM64N64V1
+            | Self::Sm89TnPreRnaM64N96S2V1
             | Self::Sm89NnDirectN96V1
             | Self::Sm89NnN96V1 => ModuleKind::TriadSm89Tf32Joint,
+            Self::Sm89NtALdmatrixN96V1 => ModuleKind::TriadSm89Tf32Joint,
         }
     }
 
@@ -2678,9 +2688,9 @@ pub const SM89_FINALIST_TF32_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec 
 }];
 
 /// Scoped route epoch for the isolated Ada retained-winner TF32 module.
-pub const SM89_TF32_JOINT_TUNING_REVISION: u16 = 1;
+pub const SM89_TF32_JOINT_TUNING_REVISION: u16 = 3;
 
-pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 4] = [
+pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     Tf32KernelSpec {
         op: ResolvedGemmOp::Nn,
         route: Tf32PhysicalRoute::Sm89NnDirectN96V1,
@@ -2733,6 +2743,23 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 4] = [
         schedule_revision: TF32_SCHEDULE_REVISION,
     },
     Tf32KernelSpec {
+        op: ResolvedGemmOp::Nt,
+        route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        symbol: super::sm89_tf32_joint_source::NT_A_LDMATRIX_N96_SYMBOL,
+        module_kind: ModuleKind::TriadSm89Tf32Joint,
+        instruction_family: ResolvedInstructionFamily::MmaSync,
+        instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+        tile: (128, 96),
+        bk: 32,
+        map_bk: 32,
+        stages: 3,
+        threads: 256,
+        dynamic_shared_bytes: 86_016,
+        tensor_map_revision: 0,
+        schedule_revision: TF32_SCHEDULE_REVISION,
+    },
+    Tf32KernelSpec {
         op: ResolvedGemmOp::Tn,
         route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
         symbol: super::sm89_tf32_joint_source::TN_PRE_RNA_M64N64_SYMBOL,
@@ -2746,6 +2773,23 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 4] = [
         stages: 3,
         threads: 256,
         dynamic_shared_bytes: 49_152,
+        tensor_map_revision: 0,
+        schedule_revision: TF32_SCHEDULE_REVISION,
+    },
+    Tf32KernelSpec {
+        op: ResolvedGemmOp::Tn,
+        route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+        symbol: super::sm89_tf32_joint_source::TN_PRE_RNA_M64N96_S2_SYMBOL,
+        module_kind: ModuleKind::TriadSm89Tf32Joint,
+        instruction_family: ResolvedInstructionFamily::MmaSync,
+        instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+        operand_conversion: ResolvedOperandConversion::PreRnaAThenRegisterCvtRnaBV1,
+        tile: (64, 96),
+        bk: 32,
+        map_bk: 32,
+        stages: 2,
+        threads: 256,
+        dynamic_shared_bytes: 40_960,
         tensor_map_revision: 0,
         schedule_revision: TF32_SCHEDULE_REVISION,
     },
@@ -7281,7 +7325,7 @@ mod tests {
         let expected = [
             (ModuleKind::TriadSm80, 18, [6, 6, 6]),
             (ModuleKind::TriadSm89Finalist, 1, [0, 0, 1]),
-            (ModuleKind::TriadSm89Tf32Joint, 4, [2, 2, 0]),
+            (ModuleKind::TriadSm89Tf32Joint, 6, [2, 3, 1]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
@@ -7312,8 +7356,10 @@ mod tests {
                     | super::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaN96V1
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
+                    | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
                     | super::Tf32PhysicalRoute::Sm89NnDirectN96V1
                     | super::Tf32PhysicalRoute::Sm89NnN96V1
+                    | super::Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
