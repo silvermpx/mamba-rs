@@ -205,6 +205,36 @@ impl GpuMamba3LM {
         })
     }
 
+    /// Batch-1 construction with explicit storage and an explicit GEMM mode.
+    ///
+    /// `dtype` controls storage and `mode` controls GEMM execution; the GEMM
+    /// environment variables are ignored, as in [`Self::build_with_mode`],
+    /// which this shortcut calls with batch 1.
+    pub fn from_weights_with_dtype_and_mode(
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::build_with_mode(
+            Mamba3LmBuild {
+                cpu_weights,
+                cfg,
+                embed,
+                lm_head,
+                vocab_size,
+                gpu_ordinal,
+                dtype,
+                batch: 1,
+            },
+            mode,
+        )
+    }
+
     /// Full constructor.
     ///
     /// `embed`: `[vocab_size_padded * d_model]` row-major; `lm_head` (if

@@ -107,6 +107,38 @@ impl Mamba3Trainer {
         )
     }
 
+    /// Construct an M3 trainer with default Adam settings and an explicit
+    /// GEMM execution mode.
+    ///
+    /// The storage `dtype` and the `mode` are independent choices; the GEMM
+    /// environment variables are ignored, as in [`Self::new_full_with_mode`],
+    /// which this shortcut calls with the default optimizer settings.
+    pub fn new_with_dtype_and_mode(
+        gpu_ordinal: usize,
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_full_with_mode(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            TrainSessionCfg {
+                input_dim,
+                batch,
+                seq_len,
+                lr: 1e-3,
+                weight_decay: 1e-2,
+            },
+            dtype,
+            mode,
+        )
+    }
+
     /// Construct an M3 trainer with session settings and env-selected GEMMs.
     ///
     /// Missing selectors use Deterministic + Triad. An explicit environment

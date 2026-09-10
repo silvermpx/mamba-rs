@@ -333,6 +333,22 @@ fn explicit_overloads_bypass_conflicting_environment() {
     .expect("M1 explicit f16 trainer");
     assert_route(m1_trainer.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     assert_eq!(m1_trainer.ctx().state_cap(), 16);
+    let m1_default_session = MambaTrainer::new_with_dtype_and_mode(
+        0,
+        &m1_train,
+        m1_cfg,
+        m1_cfg.d_model,
+        1,
+        4,
+        WeightDtype::Bf16,
+        GemmMode::CublasPedantic,
+    )
+    .expect("M1 explicit bf16 trainer with default optimizer settings");
+    assert_route(
+        m1_default_session.ctx(),
+        GemmMode::CublasPedantic,
+        BiGemmFamily::Triad,
+    );
 
     let m3_cfg = small_m3_cfg();
     let m3_model = m3_weights(&m3_cfg, true);
@@ -408,6 +424,22 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasPedantic,
         BiGemmFamily::Triad,
     );
+    let m3_default_session = Mamba3Trainer::new_with_dtype_and_mode(
+        0,
+        &m3_weights(&m3_cfg, true),
+        m3_cfg,
+        m3_cfg.d_model,
+        1,
+        4,
+        WeightDtype::Bf16,
+        GemmMode::CublasFast,
+    )
+    .expect("M3 explicit bf16 trainer with default optimizer settings");
+    assert_route(
+        m3_default_session.ctx(),
+        GemmMode::CublasFast,
+        BiGemmFamily::Triad,
+    );
 
     #[cfg(feature = "hf")]
     exercise_lm_overloads();
@@ -470,6 +502,18 @@ fn exercise_lm_overloads() {
         GemmMode::CublasPedantic,
         BiGemmFamily::Inference,
     );
+    let m3_f16 = GpuMamba3LM::from_weights_with_dtype_and_mode(
+        &weights,
+        cfg,
+        embed.clone(),
+        None,
+        vocab,
+        0,
+        WeightDtype::F16,
+        GemmMode::CublasFast,
+    )
+    .expect("M3 LM f16 explicit");
+    assert_route(m3_f16.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
     let m3_bf16 = GpuMamba3LM::build_with_mode(
         Mamba3LmBuild {
             cpu_weights: &weights,

@@ -146,12 +146,14 @@ the next release's work.
   `GpuMambaBackbone::new_with_mode` and `new_with_dtype_and_mode`,
   `GpuMamba3Backbone::new_with_mode` and `new_with_dtype_and_mode`,
   `GpuMambaLM::from_hf_with_mode`, `from_hf_with_dtype_and_mode` and
-  `from_hf_with_dtype_batch_and_mode`, `GpuMamba3LM::from_weights_with_mode`
-  and `Mamba3LmBuild::build_with_mode`, `MambaTrainer::new_full_with_mode`,
-  `Mamba3Trainer::new_full_with_mode`, and `new_with_mode` on the four
-  inference engines. The plain constructors read `MAMBA_RS_GEMM_MODE`
-  (`deterministic`, `cublas-fast`, `cublas-pedantic`) and default to
-  `Deterministic`; the explicit ones ignore the GEMM environment.
+  `from_hf_with_dtype_batch_and_mode`, `GpuMamba3LM::from_weights_with_mode`,
+  `from_weights_with_dtype_and_mode` and `Mamba3LmBuild::build_with_mode`,
+  `MambaTrainer::new_with_dtype_and_mode` and `new_full_with_mode`,
+  `Mamba3Trainer::new_with_dtype_and_mode` and `new_full_with_mode`, and
+  `new_with_mode` on the four inference engines. The plain constructors read
+  `MAMBA_RS_GEMM_MODE` (`deterministic`, `cublas-fast`, `cublas-pedantic`)
+  and default to `Deterministic`; the explicit ones ignore the GEMM
+  environment.
 - Two policies inside the deterministic mode, both new: `F32TriadPolicy`
   (`exact`, the default, or `tf32`, which permits the measured deterministic
   TF32 kernels and stays exact elsewhere) through `set_f32_triad_policy` and

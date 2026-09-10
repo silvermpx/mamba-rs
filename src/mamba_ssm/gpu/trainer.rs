@@ -307,6 +307,38 @@ impl MambaTrainer {
         )
     }
 
+    /// Construct a trainer with default Adam settings and an explicit GEMM
+    /// execution mode.
+    ///
+    /// The storage `dtype` and the `mode` are independent choices; the GEMM
+    /// environment variables are ignored, as in [`Self::new_full_with_mode`],
+    /// which this shortcut calls with the default optimizer settings.
+    pub fn new_with_dtype_and_mode(
+        gpu_ordinal: usize,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::new_full_with_mode(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            TrainSessionCfg {
+                input_dim,
+                batch,
+                seq_len,
+                lr: 1e-3,
+                weight_decay: 1e-2,
+            },
+            dtype,
+            mode,
+        )
+    }
+
     /// Construct a trainer with explicit session settings and env-selected GEMMs.
     ///
     /// Missing selectors use Deterministic + Triad. An explicit environment
@@ -353,6 +385,10 @@ impl MambaTrainer {
         dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
+        // The kernels assume the dimensions the config validator checks
+        // (a d_inner divisible by four above all); an unchecked config used
+        // to reach the launchers and pick inconsistent kernel pairs.
+        cfg.validate()?;
         super::launch::validate_kernel_arg_capacity(
             session.batch,
             session.seq_len,
