@@ -5,6 +5,24 @@ mod production;
 
 const DISCOVERY_OWNER: &str = include_str!("gemm_bi_scalar_tn_underfill_direct_experiment.cu");
 
+#[test]
+fn forced_routes_select_their_independent_production_symbols() {
+    use production::Sm89ExactF32D128Route;
+
+    assert_eq!(
+        Sm89ExactF32D128Route::D128InDirectFold.symbol(),
+        "gemm_bi_tn_sm89_f32_d128_in_m16n16_f64fold_v1"
+    );
+    assert_eq!(
+        Sm89ExactF32D128Route::D128OutDirectFold.symbol(),
+        "gemm_bi_tn_sm89_f32_d128_out_m8n16_f64fold_v1"
+    );
+    assert_ne!(
+        Sm89ExactF32D128Route::D128InDirectFold.symbol(),
+        Sm89ExactF32D128Route::D128OutDirectFold.symbol()
+    );
+}
+
 fn normalized(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }

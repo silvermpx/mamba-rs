@@ -1,0 +1,24 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-d128-assembly.mD8m3k)
+error[E0004]: non-exhaustive patterns: `PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1` not covered
+    --> src/mamba_ssm/gpu/context.rs:1667:11
+     |
+1667 |     match backend {
+     |           ^^^^^^^ pattern `PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1` not covered
+     |
+note: `PhysicalGemmBackend` defined here
+    --> src/mamba_ssm/gpu/kernel_identity.rs:2934:10
+     |
+2934 | pub enum PhysicalGemmBackend {
+     |          ^^^^^^^^^^^^^^^^^^^
+...
+2962 |     ScalarFmaTnDirectF64FoldSm89V1 = 30,
+     |     ------------------------------ not covered
+     = note: the matched value is of type `PhysicalGemmBackend`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+     |
+1699 ~         | PhysicalGemmBackend::Sm120TmaFmaExactV1 => ModuleKind::TriadSm120,
+1700 ~         PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 => todo!(),
+     |
+
+For more information about this error, try `rustc --explain E0004`.
+error: could not compile `mamba-rs` (lib) due to 1 previous error

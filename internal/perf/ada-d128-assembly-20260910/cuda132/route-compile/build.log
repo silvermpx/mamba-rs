@@ -1,0 +1,6 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-d128-assembly.mD8m3k)
+    Finished `release` profile [optimized] target(s) in 42.45s
+  Executable unittests src/lib.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/mamba_rs-4cd14b3dbbbe9ca1)
+  Executable tests/gemm_bi_sm89_exact_f32_d128_module_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_sm89_exact_f32_d128_module_qualification-beb4433fd3dde5bd)
+  Executable tests/gemm_bi_sm89_exact_f32_d128_source_contract.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_sm89_exact_f32_d128_source_contract-88f379e8a5b3d7ee)
+  Executable tests/kernel_identity.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/kernel_identity-aadd6fa7a512249e)

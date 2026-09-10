@@ -16,11 +16,11 @@ use crate::mamba_ssm::gpu::kernel_identity::{
     ResolvedInputTransform, ResolvedInstructionFamily, ResolvedInstructionShape,
     ResolvedKernelLaunch, ResolvedNumericContract, ResolvedOperandConversion,
     ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch, ResolvedTransformOutputOwnership,
-    SCHEDULE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION, SM89_FIXED_COPYPLAN_ROUTE_REVISION,
-    SM89_HALF_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION, build_resolved_gemm_launch_set,
-    build_zero_reduction_route_identity, enqueue_prepared_physical_launch,
-    enqueue_with_physical_observation, prepare_recording_physical_observer,
-    resolve_physical_launch_observation,
+    SCHEDULE_REVISION, SM89_EXACT_F32_D128_ROUTE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION,
+    SM89_FIXED_COPYPLAN_ROUTE_REVISION, SM89_HALF_ROUTE_REVISION, Sha256Digest,
+    TUNING_TABLE_REVISION, build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
+    enqueue_prepared_physical_launch, enqueue_with_physical_observation,
+    prepare_recording_physical_observer, resolve_physical_launch_observation,
 };
 use cudarc::driver::{
     CudaFunction, CudaStream, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg,
@@ -2125,6 +2125,8 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified => (41, 1_024, 2),
         ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => (42, 512, 4),
         ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => (43, 784, 6),
+        ScalarDispatchPlan::TnD128InSm89DirectFoldQualified => (44, 16, 64),
+        ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified => (45, 16, 64),
         ScalarDispatchPlan::TnM16N16SplitM16Qualified => (35, 0, 0),
         ScalarDispatchPlan::TnFinal { slim } => (12, u64::from(slim), 0),
         ScalarDispatchPlan::NtNarrow => (13, 0, 0),
@@ -2218,6 +2220,8 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::TnD768InSm89DualChunkQualified, _)
         | (ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified, _)
         | (ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified, _)
+        | (ScalarDispatchPlan::TnD128InSm89DirectFoldQualified, _)
+        | (ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified, _)
         | (ScalarDispatchPlan::TnFinal { .. }, _)
         | (ScalarDispatchPlan::NtNarrow, _)
         | (ScalarDispatchPlan::NtSmallBatchWide, _)
@@ -2693,6 +2697,24 @@ fn scalar_physical_nodes(
                 ),
             );
         }
+        ScalarDispatchPlan::TnD128InSm89DirectFoldQualified
+        | ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified => {
+            let symbol = match plan {
+                ScalarDispatchPlan::TnD128InSm89DirectFoldQualified => super::D128_IN_SYMBOL,
+                ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified => super::D128_OUT_SYMBOL,
+                _ => unreachable!(),
+            };
+            let spec = super::sm89_exact_f32_d128_source::kernel_spec(symbol)
+                .ok_or_else(|| format!("missing exact-F32 d128 spec for {symbol}"))?;
+            push_scalar_node(
+                &mut nodes,
+                context,
+                symbol,
+                spec.tile,
+                (16, 2),
+                cfg(spec.grid, spec.block, spec.dynamic_shared_bytes),
+            );
+        }
         ScalarDispatchPlan::TnSplitM { chunks, .. } => {
             push_scalar_node(
                 &mut nodes,
@@ -3024,6 +3046,13 @@ fn scalar_route_contract(
     ResolvedNumericContract,
     ResolvedOutputOwnership,
 ) {
+    if symbol == super::D128_IN_SYMBOL || symbol == super::D128_OUT_SYMBOL {
+        return (
+            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        );
+    }
     if symbol == super::D768_IN_FUSED_SYMBOL {
         return (
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
@@ -3113,6 +3142,19 @@ fn scalar_resolved_routes(
                 context.artifacts.fixed,
                 ctx.kernels.compiler_identity(),
                 SM89_FIXED_COPYPLAN_ROUTE_REVISION,
+            )
+        } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 {
+            (
+                ModuleKind::TriadSm89ExactF32D128,
+                context.artifacts.sm89_exact_f32_d128.ok_or_else(|| {
+                    "SM89 exact-F32 d128 route lost its artifact identity".to_string()
+                })?,
+                ctx.kernels
+                    .triad_sm89_exact_f32_d128_compiler_identity()
+                    .ok_or_else(|| {
+                        "SM89 exact-F32 d128 route lost its compiler identity".to_string()
+                    })?,
+                SM89_EXACT_F32_D128_ROUTE_REVISION,
             )
         } else if matches!(
             backend,
@@ -3906,6 +3948,16 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
                 .is_some(),
             kernels
                 .triad_sm89_exact_f32_function(super::PRISM_RAW_SYMBOL)
+                .is_some(),
+        ],
+        sm89_exact_f32_d128_artifact: kernels.triad_sm89_exact_f32_d128_artifact_identity(),
+        sm89_exact_f32_d128_compiler: kernels.triad_sm89_exact_f32_d128_compiler_identity(),
+        sm89_exact_f32_d128_symbols_loaded: [
+            kernels
+                .triad_sm89_exact_f32_d128_function(super::D128_IN_SYMBOL)
+                .is_some(),
+            kernels
+                .triad_sm89_exact_f32_d128_function(super::D128_OUT_SYMBOL)
                 .is_some(),
         ],
         compute_capability: kernels.triad_scalar_compute_capability(),
@@ -6142,7 +6194,51 @@ pub(in crate::mamba_ssm::gpu) fn prepare_sm89_exact_f32_tn_forced(
     prepare_scalar_f32_with_plan(ctx, request, operands, output_resources, plan)
 }
 
+pub(in crate::mamba_ssm::gpu) fn prepare_sm89_exact_f32_d128_tn_forced(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: super::Sm89ExactF32D128Route,
+) -> Result<PreparedF32TriadLaunch, String> {
+    request.shape.validate(request.op)?;
+    validate_f32_triad_operands(request, operands)?;
+    require_f32_preparation_outside_capture(ctx)?;
+    let plan = forced_sm89_exact_f32_d128_plan(
+        scalar_launch_facts(&ctx.kernels),
+        request,
+        operands,
+        route,
+    )?;
+    let allocation_domain = validated_allocation_domain(&ctx.stream, &ctx.kernels, "f32 Triad")?;
+    let output_resources =
+        F32LaunchResourceSnapshot::query_output(request, operands, allocation_domain)?;
+    prepare_scalar_f32_with_plan(ctx, request, operands, output_resources, plan)
+}
+
 pub(in crate::mamba_ssm::gpu) unsafe fn launch_sm89_exact_f32_tn_forced(
+    ctx: &GpuCtx,
+    prepared: &PreparedF32TriadLaunch,
+    output: CUptr,
+    a: &GpuBuffer,
+    b: &GpuBuffer,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    unsafe {
+        launch_prepared_f32_triad(ctx, prepared, |control| {
+            gemm_bi_backward_dw_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                output,
+                b,
+                a,
+                dims,
+                Some(control),
+            )
+        })
+    }
+}
+
+pub(in crate::mamba_ssm::gpu) unsafe fn launch_sm89_exact_f32_d128_tn_forced(
     ctx: &GpuCtx,
     prepared: &PreparedF32TriadLaunch,
     output: CUptr,
@@ -9137,6 +9233,47 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
                 "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1 backward_dw"
             ))
         })?;
+        return Ok(());
+    }
+
+    if matches!(
+        scalar_plan,
+        ScalarDispatchPlan::TnD128InSm89DirectFoldQualified
+            | ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified
+    ) {
+        let symbol = match scalar_plan {
+            ScalarDispatchPlan::TnD128InSm89DirectFoldQualified => super::D128_IN_SYMBOL,
+            ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified => super::D128_OUT_SYMBOL,
+            _ => unreachable!(),
+        };
+        let spec = super::sm89_exact_f32_d128_source::kernel_spec(symbol)
+            .ok_or_else(|| format!("missing exact-F32 d128 spec for {symbol}"))?;
+        let function = kernels
+            .triad_sm89_exact_f32_d128_function(symbol)
+            .ok_or_else(|| {
+                format!("qualified SM89 exact-F32 d128 kernel {symbol} is unavailable")
+            })?;
+        let mut builder = scalar_launch_builder(stream, function, &control);
+        builder.arg(&dw_ptr);
+        builder.arg_buffer(x_saved);
+        builder.arg_buffer(dy);
+        builder.arg(&alpha);
+        builder.arg(&checked_dims.m_i32);
+        builder.arg(&checked_dims.k_i32);
+        builder.arg(&checked_dims.n_i32);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            symbol,
+            cudarc::driver::LaunchConfig {
+                grid_dim: spec.grid,
+                block_dim: spec.block,
+                shared_mem_bytes: spec.dynamic_shared_bytes,
+            },
+            &mut builder,
+        )
+        .map_err(|error| error.with_driver_context(format_args!("{symbol}")))?;
         return Ok(());
     }
 
@@ -15702,6 +15839,9 @@ mod prepared_f32_launch_tests {
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
+            sm89_exact_f32_d128_artifact: None,
+            sm89_exact_f32_d128_compiler: None,
+            sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
             multiprocessor_count: 170,
         }
@@ -16231,6 +16371,63 @@ mod sm89_exact_f32_tn_route_tests {
                     PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
                     ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
                     ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn d128_direct_folds_are_one_node_exact_routes_without_scratch() {
+        for (dims, plan, symbol, tile, shared) in [
+            (
+                (1_024, 128, 512),
+                ScalarDispatchPlan::TnD128InSm89DirectFoldQualified,
+                super::super::D128_IN_SYMBOL,
+                (16, 16),
+                4_096,
+            ),
+            (
+                (1_024, 256, 128),
+                ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified,
+                super::super::D128_OUT_SYMBOL,
+                (8, 16),
+                3_072,
+            ),
+        ] {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Tn,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+            };
+            let operands = F32TriadOperands {
+                output: 0x3000,
+                a: 0x1000,
+                b: 0x2000,
+                bias: None,
+                alpha: 1.0,
+                beta: 1.0,
+            };
+            let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
+            assert_eq!(scalar_node_count(plan), 1);
+            assert_eq!(nodes.len(), 1);
+            assert_eq!(nodes[0].symbol, symbol);
+            assert_eq!(nodes[0].tile, tile);
+            assert_eq!(nodes[0].bk, 16);
+            assert_eq!(nodes[0].stages, 2);
+            assert_eq!(nodes[0].launch.grid_dim, (256, 1, 1));
+            assert_eq!(nodes[0].launch.block_dim, (64, 1, 1));
+            assert_eq!(nodes[0].launch.shared_mem_bytes, shared);
+            assert!(!plan.needs_split_scratch());
+            assert!(!plan.needs_transpose_scratch());
+            assert_eq!(
+                scalar_plan_fields(plan).0,
+                if tile.0 == 16 { 44 } else { 45 }
+            );
+            assert_eq!(
+                scalar_route_contract(symbol),
+                (
+                    PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1,
+                    ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                    ResolvedOutputOwnership::OneCtaPerOutputTileV1,
                 )
             );
         }

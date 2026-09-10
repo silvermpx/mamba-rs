@@ -1082,6 +1082,9 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
         sm89_exact_f32_artifact: None,
         sm89_exact_f32_compiler: None,
         sm89_exact_f32_symbols_loaded: [false; 3],
+        sm89_exact_f32_d128_artifact: None,
+        sm89_exact_f32_d128_compiler: None,
+        sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (12, 0),
         multiprocessor_count: 170,
     }

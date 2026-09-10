@@ -2931,6 +2931,7 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::TriadSm89Finalist => "triad_sm89_finalist",
         ModuleKind::TriadSm89Half => "triad_sm89_half",
         ModuleKind::TriadSm89ExactF32 => "triad_sm89_exact_f32",
+        ModuleKind::TriadSm89ExactF32D128 => "triad_sm89_exact_f32_d128",
         ModuleKind::TriadSm89Tf32Joint => "triad_sm89_tf32_joint",
         ModuleKind::TriadSm90a => "triad_sm90a",
         ModuleKind::TriadSm100 => "triad_sm100",

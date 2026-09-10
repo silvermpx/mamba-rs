@@ -56,6 +56,7 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::TriadSm89Half as u8, 9);
     assert_eq!(ModuleKind::TriadSm89ExactF32 as u8, 10);
     assert_eq!(ModuleKind::TriadSm89Tf32Joint as u8, 11);
+    assert_eq!(ModuleKind::TriadSm89ExactF32D128 as u8, 12);
 }
 
 #[test]
@@ -376,7 +377,7 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
 }
 
 #[test]
-fn artifact_set_tracks_all_four_sm89_optional_modules_in_canonical_order() {
+fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     let fixed = artifact(ModuleKind::Fixed, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
     let sm80 = artifact(ModuleKind::TriadSm80, 5);
@@ -384,19 +385,33 @@ fn artifact_set_tracks_all_four_sm89_optional_modules_in_canonical_order() {
     let half = artifact(ModuleKind::TriadSm89Half, 9);
     let exact = artifact(ModuleKind::TriadSm89ExactF32, 11);
     let joint = artifact(ModuleKind::TriadSm89Tf32Joint, 13);
+    let d128 = artifact(ModuleKind::TriadSm89ExactF32D128, 15);
 
-    let all = build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, joint]).unwrap();
-    assert_eq!(all.module_count, 7);
+    let prior = build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, joint]).unwrap();
+    let all =
+        build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, d128, joint]).unwrap();
+    assert_eq!(all.module_count, 8);
     assert_eq!(all.specialized, Some(finalist));
     assert_eq!(all.sm89_half, Some(half));
     assert_eq!(all.sm89_exact_f32, Some(exact));
+    assert_eq!(all.sm89_exact_f32_d128, Some(d128));
     assert_eq!(all.sm89_tf32_joint, Some(joint));
+    assert_eq!(
+        prior.ordered_digest,
+        [
+            0x14, 0x43, 0x46, 0xde, 0xe3, 0xdf, 0x2c, 0xf5, 0x1c, 0x33, 0xd0, 0x40, 0xa4, 0x85,
+            0xf9, 0xf3, 0x22, 0x51, 0xe0, 0xa5, 0x84, 0x4c, 0xab, 0xbd, 0xe7, 0x57, 0x4b, 0x31,
+            0x40, 0x12, 0x98, 0x2a,
+        ],
+        "omitting d128 must preserve the pinned pre-d128 artifact-set digest"
+    );
 
     let half_only = build_artifact_set(&[fixed, scalar, sm80, half]).unwrap();
     assert_eq!(half_only.module_count, 4);
     assert_eq!(half_only.specialized, None);
     assert_eq!(half_only.sm89_half, Some(half));
     assert_eq!(half_only.sm89_exact_f32, None);
+    assert_eq!(half_only.sm89_exact_f32_d128, None);
     assert_eq!(half_only.sm89_tf32_joint, None);
 
     for artifacts in [
@@ -425,11 +440,32 @@ fn artifact_set_tracks_all_four_sm89_optional_modules_in_canonical_order() {
             .ordered_digest
     );
 
+    let changed_d128 = artifact(ModuleKind::TriadSm89ExactF32D128, 17);
+    assert_ne!(
+        all.ordered_digest,
+        build_artifact_set(&[
+            fixed,
+            scalar,
+            sm80,
+            finalist,
+            half,
+            exact,
+            changed_d128,
+            joint,
+        ])
+        .unwrap()
+        .ordered_digest
+    );
+
     assert!(build_artifact_set(&[fixed, scalar, sm80, half, finalist]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, half]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, finalist]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, exact]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, joint, exact]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, d128]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, d128, exact]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, exact, joint, d128]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar, sm80, d128, d128]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, joint, joint]).is_err());
     assert!(
         build_artifact_set(&[
@@ -967,6 +1003,10 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
     assert_eq!(
         PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
         25
+    );
+    assert_eq!(
+        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 as u8,
+        30
     );
     assert_eq!(
         ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1 as u8,

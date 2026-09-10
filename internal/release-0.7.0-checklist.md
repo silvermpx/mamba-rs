@@ -50,7 +50,12 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   reused for the completed supported-toolkit phase; no fresh Fast arm was run.
 - [x] Exact-F32 TN d128-in/out source-only promotion (`7d390fa7`), with
   normalized retained-body parity and exactly two exports; 13 native checks pass.
-- [ ] Exact-F32 TN d128-in/out module, routes and focused qualification.
+- [x] Exact-F32 TN d128-in/out module, routes and focused qualification.
+  Both routes are admitted on CUDA12.8/13.0/13.2; exact finite/exceptional
+  bits, guards, repeated eager/graph and one-node/no-scratch AUTO pass all3.
+  Paired pre-admission p50 is roughly0.364–0.401 of priorAUTO for in and
+  0.495–0.502 for out. Source review approved after fail-closed regressions.
+  Evidence: `internal/perf/ada-d128-assembly-20260910/report.md`.
 - [x] Four-cell TF32 joint source frozen (`560169d5`).
 - [x] TF32 joint standalone composer, two frozen primitives and four typed
   specs; 26 native source-contract checks pass at that historical checkpoint.

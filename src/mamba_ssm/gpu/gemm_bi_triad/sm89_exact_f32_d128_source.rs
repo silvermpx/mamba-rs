@@ -23,6 +23,21 @@ pub enum Sm89ExactF32D128KernelKind {
     DirectF64FoldFinal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sm89ExactF32D128Route {
+    D128InDirectFold,
+    D128OutDirectFold,
+}
+
+impl Sm89ExactF32D128Route {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::D128InDirectFold => D128_IN_SYMBOL,
+            Self::D128OutDirectFold => D128_OUT_SYMBOL,
+        }
+    }
+}
+
 /// Frozen launch and resource limits for the two retained SplitM64-equivalent
 /// direct folds. These bounds are qualification requirements, not live receipts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

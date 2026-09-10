@@ -41,6 +41,7 @@ mod dispatch;
 mod launch;
 pub(crate) mod modules;
 mod qualification;
+mod sm89_exact_f32_d128_source;
 mod sm89_exact_f32_source;
 mod sm89_finalist_source;
 mod sm89_half_source;
@@ -108,6 +109,12 @@ pub use qualification::{
     Tf32QualificationConfig, Tf32QualificationOutput, Tf32QualificationSuite,
     presize_physical_qualification_suite, qualify_physical_launch, run_tf32_qualification,
     tf32_qualification_route_specs,
+};
+#[doc(hidden)]
+pub use sm89_exact_f32_d128_source::{
+    D128_IN_SYMBOL, D128_OUT_SYMBOL, DIRECT_FOLD_DRIVER_ABI, DIRECT_FOLD_TERMINAL_ARGUMENT,
+    SM89_EXACT_F32_D128_KERNEL_SPECS, Sm89ExactF32D128KernelKind, Sm89ExactF32D128KernelSpec,
+    Sm89ExactF32D128Route,
 };
 #[doc(hidden)]
 pub use sm89_exact_f32_source::{

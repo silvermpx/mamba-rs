@@ -179,6 +179,9 @@ mod sm89_exact_f32_tn_admission_tests {
             }),
             sm89_exact_f32_compiler: Some(compiler),
             sm89_exact_f32_symbols_loaded: [true; 3],
+            sm89_exact_f32_d128_artifact: None,
+            sm89_exact_f32_d128_compiler: None,
+            sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
             multiprocessor_count: 142,
         }
@@ -440,6 +443,391 @@ mod sm89_exact_f32_tn_admission_tests {
             assert_eq!(
                 forced_sm89_exact_f32_plan(base, request, operands(), route).unwrap(),
                 expected
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sm89_exact_f32_d128_admission_tests {
+    use super::*;
+    use crate::mamba_ssm::gpu::gemm_bi_triad::Sm89ExactF32D128Route;
+    use crate::mamba_ssm::gpu::kernel_identity::CudaTarget;
+
+    const CASES: [(
+        Sm89ExactF32D128Route,
+        (usize, usize, usize),
+        ScalarDispatchPlan,
+    ); 2] = [
+        (
+            Sm89ExactF32D128Route::D128InDirectFold,
+            (1_024, 128, 512),
+            ScalarDispatchPlan::TnD128InSm89DirectFoldQualified,
+        ),
+        (
+            Sm89ExactF32D128Route::D128OutDirectFold,
+            (1_024, 256, 128),
+            ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified,
+        ),
+    ];
+
+    const FALLBACK: ScalarDispatchPlan = ScalarDispatchPlan::TnSplitM {
+        m_chunk: 16,
+        chunks: 64,
+    };
+
+    fn facts(identity: Sm89ExactF32D128QualificationIdentity) -> ScalarLaunchFacts {
+        let compiler = CompilerIdentity {
+            source_digest: identity.source_digest,
+            invocation_digest: identity.compile_key,
+            header_manifest_digest: identity.header_manifest_digest,
+            target: CudaTarget::new("sm_89").unwrap(),
+            nvrtc_version: identity.nvrtc_version,
+            nvrtc_library_domain: identity.nvrtc_library_domain,
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        ScalarLaunchFacts {
+            scalar_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::TriadScalar,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: [1; 32],
+                artifact_digest: [2; 32],
+            },
+            scalar_compiler: compiler,
+            fixed_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Fixed,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: [3; 32],
+                artifact_digest: [4; 32],
+            },
+            fixed_compiler: compiler,
+            fixed_copyplan_loaded: false,
+            sm89_exact_f32_artifact: None,
+            sm89_exact_f32_compiler: None,
+            sm89_exact_f32_symbols_loaded: [false; 3],
+            sm89_exact_f32_d128_artifact: Some(ArtifactIdentity {
+                module_kind: ModuleKind::TriadSm89ExactF32D128,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: identity.compile_key,
+                artifact_digest: identity.artifact_digest,
+            }),
+            sm89_exact_f32_d128_compiler: Some(compiler),
+            sm89_exact_f32_d128_symbols_loaded: [true; 2],
+            compute_capability: (8, 9),
+            multiprocessor_count: 142,
+        }
+    }
+
+    fn request(dims: (usize, usize, usize)) -> F32TriadRequest {
+        F32TriadRequest {
+            op: ResolvedGemmOp::Tn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+        }
+    }
+
+    fn operands() -> F32TriadOperands {
+        F32TriadOperands {
+            output: 0x3000,
+            a: 0x1000,
+            b: 0x2000,
+            bias: None,
+            alpha: 1.0,
+            beta: 1.0,
+        }
+    }
+
+    #[test]
+    fn all_three_candidates_bind_both_forced_symbols() {
+        assert_eq!(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES.len(), 3);
+        for identity in SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES {
+            let facts = facts(*identity);
+            assert!(identity.matches(facts));
+            for (route, dims, selected) in CASES {
+                assert_eq!(scalar_dispatch_plan(request(dims), 142).unwrap(), FALLBACK);
+                assert_eq!(
+                    forced_sm89_exact_f32_d128_plan(facts, request(dims), operands(), route)
+                        .unwrap(),
+                    selected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn actual_auto_admits_exactly_the_three_live_passed_d128_cohorts() {
+        assert_eq!(
+            SM89_EXACT_F32_D128_EVIDENCE_COHORTS,
+            SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES
+        );
+        for identity in SM89_EXACT_F32_D128_EVIDENCE_COHORTS {
+            let facts = facts(*identity);
+            for (route, dims, selected) in CASES {
+                assert_eq!(
+                    scalar_launch_plan(facts, request(dims), operands()).unwrap(),
+                    selected,
+                    "AUTO did not admit {route:?} on NVRTC {:?}",
+                    identity.nvrtc_version
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_route_accepts_nonunit_alpha_while_auto_epilogue_stays_exact() {
+        let facts = facts(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2]);
+        for (route, dims, selected) in CASES {
+            let nonunit = F32TriadOperands {
+                alpha: -0.75,
+                ..operands()
+            };
+            assert_eq!(
+                forced_sm89_exact_f32_d128_plan(facts, request(dims), nonunit, route).unwrap(),
+                selected,
+            );
+            assert_eq!(
+                scalar_launch_plan(facts, request(dims), nonunit).unwrap(),
+                FALLBACK
+            );
+        }
+    }
+
+    #[test]
+    fn d128_routes_fail_closed_on_every_shape_stride_and_operand_neighbor() {
+        let facts = facts(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2]);
+        for (route, dims, _) in CASES {
+            for (axis, delta) in [(0, -1_isize), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)] {
+                let mut neighbor = [dims.0, dims.1, dims.2];
+                neighbor[axis] = neighbor[axis].checked_add_signed(delta).unwrap();
+                assert!(
+                    forced_sm89_exact_f32_d128_plan(
+                        facts,
+                        request((neighbor[0], neighbor[1], neighbor[2])),
+                        operands(),
+                        route,
+                    )
+                    .is_err(),
+                    "shape axis {axis} delta {delta}"
+                );
+            }
+            for field in ["lda", "ldb", "ldc"] {
+                let mut neighbor = request(dims);
+                match field {
+                    "lda" => neighbor.shape.lda += 1,
+                    "ldb" => neighbor.shape.ldb += 1,
+                    "ldc" => neighbor.shape.ldc += 1,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    forced_sm89_exact_f32_d128_plan(facts, neighbor, operands(), route).is_err(),
+                    "stride {field}"
+                );
+            }
+            let wrong_op = F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+            };
+            assert!(forced_sm89_exact_f32_d128_plan(facts, wrong_op, operands(), route).is_err());
+            for rejected in [
+                F32TriadOperands {
+                    output: 0,
+                    ..operands()
+                },
+                F32TriadOperands { a: 0, ..operands() },
+                F32TriadOperands { b: 0, ..operands() },
+                F32TriadOperands {
+                    output: 0x3004,
+                    ..operands()
+                },
+                F32TriadOperands {
+                    a: 0x1004,
+                    ..operands()
+                },
+                F32TriadOperands {
+                    b: 0x2004,
+                    ..operands()
+                },
+                F32TriadOperands {
+                    bias: Some(0x4000),
+                    ..operands()
+                },
+                F32TriadOperands {
+                    beta: 0.0,
+                    ..operands()
+                },
+                F32TriadOperands {
+                    beta: -0.0,
+                    ..operands()
+                },
+            ] {
+                assert!(
+                    forced_sm89_exact_f32_d128_plan(facts, request(dims), rejected, route).is_err(),
+                    "operand mutation {rejected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_symbol_and_identity_field_fails_closed_independently() {
+        for (symbol_index, (route, dims, _)) in CASES.into_iter().enumerate() {
+            let base = facts(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2]);
+            let mut mutations = Vec::new();
+            let mut mutation = base;
+            mutation.sm89_exact_f32_d128_symbols_loaded[symbol_index] = false;
+            mutations.push(mutation);
+            mutation = base;
+            mutation.compute_capability = (9, 0);
+            mutations.push(mutation);
+            mutation = base;
+            mutation.multiprocessor_count = 141;
+            mutations.push(mutation);
+            mutation = base;
+            mutation.sm89_exact_f32_d128_artifact = None;
+            mutations.push(mutation);
+            mutation = base;
+            mutation.sm89_exact_f32_d128_compiler = None;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_artifact
+                .as_mut()
+                .unwrap()
+                .module_kind = ModuleKind::TriadScalar;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_artifact
+                .as_mut()
+                .unwrap()
+                .artifact_kind = ArtifactKind::Cubin;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_artifact
+                .as_mut()
+                .unwrap()
+                .compile_key[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_artifact
+                .as_mut()
+                .unwrap()
+                .artifact_digest[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .source_digest[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .invocation_digest[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .header_manifest_digest[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .target = CudaTarget::new("sm_90").unwrap();
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .nvrtc_version = (13, 1);
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .nvrtc_library_domain[0] ^= 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .nvrtc_library_known = false;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .output_kind = ArtifactKind::Cubin;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .composer_revision += 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .compiler_revision += 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .numeric_abi_revision += 1;
+            mutations.push(mutation);
+            mutation = base;
+            mutation
+                .sm89_exact_f32_d128_compiler
+                .as_mut()
+                .unwrap()
+                .schedule_revision += 1;
+            mutations.push(mutation);
+            for rejected in mutations {
+                assert!(
+                    forced_sm89_exact_f32_d128_plan(rejected, request(dims), operands(), route)
+                        .is_err(),
+                    "identity mutation admitted {route:?}: {rejected:?}"
+                );
+                assert_eq!(
+                    scalar_launch_plan(rejected, request(dims), operands()).unwrap(),
+                    FALLBACK,
+                    "AUTO admitted identity mutation for {route:?}: {rejected:?}"
+                );
+            }
+            let sibling = 1 - symbol_index;
+            let mut only_sibling = base;
+            only_sibling.sm89_exact_f32_d128_symbols_loaded[sibling] = false;
+            assert!(
+                forced_sm89_exact_f32_d128_plan(only_sibling, request(dims), operands(), route)
+                    .is_ok(),
+                "excluding sibling disabled {route:?}"
+            );
+            assert_eq!(
+                scalar_launch_plan(only_sibling, request(dims), operands()).unwrap(),
+                CASES[symbol_index].2,
+                "AUTO sibling exclusion disabled {route:?}"
             );
         }
     }
@@ -5619,8 +6007,149 @@ pub(super) struct ScalarLaunchFacts {
     pub sm89_exact_f32_artifact: Option<ArtifactIdentity>,
     pub sm89_exact_f32_compiler: Option<CompilerIdentity>,
     pub sm89_exact_f32_symbols_loaded: [bool; 3],
+    pub sm89_exact_f32_d128_artifact: Option<ArtifactIdentity>,
+    pub sm89_exact_f32_d128_compiler: Option<CompilerIdentity>,
+    pub sm89_exact_f32_d128_symbols_loaded: [bool; 2],
     pub compute_capability: (u32, u32),
     pub multiprocessor_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sm89ExactF32D128QualificationIdentity {
+    nvrtc_version: (i32, i32),
+    compile_key: [u8; 32],
+    artifact_digest: [u8; 32],
+    source_digest: [u8; 32],
+    header_manifest_digest: [u8; 32],
+    nvrtc_library_domain: [u8; 32],
+}
+
+impl Sm89ExactF32D128QualificationIdentity {
+    fn matches(self, facts: ScalarLaunchFacts) -> bool {
+        let Some(artifact) = facts.sm89_exact_f32_d128_artifact else {
+            return false;
+        };
+        let Some(compiler) = facts.sm89_exact_f32_d128_compiler else {
+            return false;
+        };
+        artifact.module_kind == ModuleKind::TriadSm89ExactF32D128
+            && artifact.artifact_kind == ArtifactKind::Ptx
+            && artifact.compile_key == self.compile_key
+            && artifact.artifact_digest == self.artifact_digest
+            && compiler.source_digest == self.source_digest
+            && compiler.invocation_digest == self.compile_key
+            && compiler.header_manifest_digest == self.header_manifest_digest
+            && compiler.target.as_str() == "sm_89"
+            && compiler.nvrtc_version == self.nvrtc_version
+            && compiler.nvrtc_library_domain == self.nvrtc_library_domain
+            && compiler.nvrtc_library_known
+            && compiler.output_kind == ArtifactKind::Ptx
+            && compiler.composer_revision == COMPOSER_REVISION
+            && compiler.compiler_revision == COMPILER_REVISION
+            && compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
+            && compiler.schedule_revision == SCHEDULE_REVISION
+    }
+}
+
+const SM89_EXACT_F32_D128_SOURCE_DIGEST: [u8; 32] = [
+    0x88, 0x35, 0xa9, 0x10, 0xa8, 0xe5, 0x80, 0x5f, 0xb6, 0x3c, 0x9b, 0x1d, 0x6e, 0xdf, 0x28, 0xf0,
+    0xc2, 0xc7, 0xd3, 0x3a, 0x2d, 0x08, 0x5c, 0x8f, 0x30, 0xd1, 0xb3, 0x3a, 0x93, 0xd8, 0x26, 0x52,
+];
+
+const SM89_EXACT_F32_D128_HEADER_MANIFEST_DIGEST: [u8; 32] = [
+    0x01, 0x89, 0x50, 0x95, 0x30, 0x55, 0x5f, 0x96, 0x15, 0x20, 0x71, 0x2f, 0x39, 0xe1, 0x02, 0x57,
+    0x76, 0xf4, 0x30, 0x19, 0x3b, 0x33, 0x53, 0x3d, 0x8b, 0xee, 0xbf, 0xcc, 0x38, 0xab, 0x8c, 0xfe,
+];
+
+// Exact live module/ABI/resource identities from CUDA 12.8/13.0/13.2.
+// AUTO evidence remains empty until exact-bit and performance qualification passes.
+const SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES: &[Sm89ExactF32D128QualificationIdentity] = &[
+    Sm89ExactF32D128QualificationIdentity {
+        nvrtc_version: (12, 8),
+        compile_key: [
+            0xf8, 0xa0, 0x2a, 0xa0, 0x4c, 0x33, 0xe5, 0x5d, 0x63, 0xea, 0x00, 0xa1, 0xad, 0xa3,
+            0xaa, 0xb6, 0x9a, 0x5c, 0xe0, 0x85, 0x07, 0x69, 0xa9, 0x64, 0x25, 0xd0, 0x67, 0x55,
+            0xa5, 0x30, 0x96, 0x1d,
+        ],
+        artifact_digest: [
+            0xf7, 0xcb, 0xa1, 0x05, 0x5e, 0xe7, 0xcc, 0x86, 0x75, 0x47, 0x57, 0xe0, 0xa8, 0xeb,
+            0x3d, 0xea, 0xfb, 0x52, 0xf1, 0x63, 0x42, 0x23, 0xc3, 0x50, 0x6e, 0xde, 0xac, 0x88,
+            0x97, 0x2e, 0xbe, 0xa6,
+        ],
+        source_digest: SM89_EXACT_F32_D128_SOURCE_DIGEST,
+        header_manifest_digest: SM89_EXACT_F32_D128_HEADER_MANIFEST_DIGEST,
+        nvrtc_library_domain: [
+            0x26, 0xb0, 0xa3, 0xa0, 0x20, 0x44, 0xff, 0xcb, 0xc1, 0x69, 0x3f, 0xd8, 0x3e, 0x92,
+            0x61, 0xbe, 0xff, 0xa6, 0x92, 0xa4, 0xfb, 0xcf, 0xe3, 0xac, 0x5e, 0x9d, 0x8c, 0x87,
+            0x98, 0x0b, 0xb1, 0x55,
+        ],
+    },
+    Sm89ExactF32D128QualificationIdentity {
+        nvrtc_version: (13, 0),
+        compile_key: [
+            0xca, 0x47, 0x73, 0xc6, 0x79, 0x7d, 0x1f, 0xa5, 0xb0, 0x3c, 0xb0, 0x20, 0xbc, 0x4a,
+            0x89, 0xb1, 0xe1, 0x93, 0x18, 0x8d, 0x0d, 0xce, 0x76, 0x93, 0x88, 0x2b, 0xae, 0xc1,
+            0x16, 0x14, 0x73, 0xfc,
+        ],
+        artifact_digest: [
+            0x2b, 0xac, 0x16, 0x24, 0x6e, 0x07, 0xbd, 0xbb, 0xed, 0xf2, 0xcc, 0xb8, 0x5b, 0x94,
+            0x15, 0x6c, 0x51, 0x60, 0x1e, 0x43, 0xc8, 0x2a, 0x61, 0x15, 0x91, 0x6a, 0x72, 0x26,
+            0x1a, 0x46, 0x99, 0xbb,
+        ],
+        source_digest: SM89_EXACT_F32_D128_SOURCE_DIGEST,
+        header_manifest_digest: SM89_EXACT_F32_D128_HEADER_MANIFEST_DIGEST,
+        nvrtc_library_domain: [
+            0x70, 0x9b, 0x91, 0xc3, 0x6b, 0xfb, 0x0e, 0xd9, 0x66, 0xee, 0x69, 0xad, 0xc8, 0xd6,
+            0xf8, 0x7f, 0xf1, 0x10, 0xee, 0xcf, 0x3d, 0xfb, 0x50, 0x60, 0x36, 0x7f, 0x18, 0x3c,
+            0xe6, 0x14, 0xeb, 0x0d,
+        ],
+    },
+    Sm89ExactF32D128QualificationIdentity {
+        nvrtc_version: (13, 2),
+        compile_key: [
+            0xe1, 0x80, 0xd1, 0x86, 0xc2, 0x35, 0xf3, 0x52, 0xdc, 0x7a, 0x3d, 0xe2, 0x76, 0xef,
+            0xa2, 0xf1, 0xf4, 0x42, 0x48, 0x51, 0xd9, 0x59, 0x10, 0x92, 0xfe, 0x5f, 0xeb, 0xd8,
+            0xbd, 0x24, 0x15, 0xbb,
+        ],
+        artifact_digest: [
+            0xf5, 0x19, 0xed, 0xae, 0x99, 0xea, 0x8a, 0xce, 0xe6, 0x32, 0x8b, 0x49, 0x87, 0x07,
+            0x5a, 0x3b, 0xa4, 0xb1, 0x03, 0xe6, 0xc2, 0xd1, 0x33, 0xf7, 0x92, 0x69, 0x7f, 0x3c,
+            0x54, 0x6d, 0xe4, 0x08,
+        ],
+        source_digest: SM89_EXACT_F32_D128_SOURCE_DIGEST,
+        header_manifest_digest: SM89_EXACT_F32_D128_HEADER_MANIFEST_DIGEST,
+        nvrtc_library_domain: [
+            0xd0, 0x31, 0xa5, 0x3e, 0xb9, 0x72, 0x35, 0xb7, 0x0f, 0x62, 0xf6, 0x52, 0x93, 0x2d,
+            0xb1, 0xbd, 0xf7, 0x28, 0xea, 0x22, 0x9c, 0x8c, 0xa8, 0x09, 0xd5, 0x3c, 0x5f, 0xfd,
+            0x91, 0x64, 0x26, 0x87,
+        ],
+    },
+];
+// Admission provenance: all three candidate identities passed the complete
+// module, exact-bit, guarded eager/graph, and once3/once7 actual-AUTO screen
+// recorded under `internal/perf/ada-d128-assembly-20260910/`.
+const SM89_EXACT_F32_D128_EVIDENCE_COHORTS: &[Sm89ExactF32D128QualificationIdentity] = &[
+    SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[0],
+    SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[1],
+    SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2],
+];
+
+fn qualified_sm89_exact_f32_d128_environment(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability == (8, 9)
+        && facts.multiprocessor_count == 142
+        && SM89_EXACT_F32_D128_EVIDENCE_COHORTS
+            .iter()
+            .copied()
+            .any(|identity| identity.matches(facts))
+}
+
+fn qualified_sm89_exact_f32_d128_candidate_environment(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability == (8, 9)
+        && facts.multiprocessor_count == 142
+        && SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES
+            .iter()
+            .copied()
+            .any(|identity| identity.matches(facts))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6317,6 +6846,15 @@ fn qualified_sm89_exact_f32_tn_operands(operands: F32TriadOperands) -> bool {
             .all(|pointer| pointer != 0 && pointer.is_multiple_of(ALIGNMENT))
 }
 
+fn qualified_sm89_exact_f32_d128_forced_operands(operands: F32TriadOperands) -> bool {
+    const ALIGNMENT: u64 = 16;
+    operands.bias.is_none()
+        && operands.beta.to_bits() == 1.0_f32.to_bits()
+        && [operands.output, operands.a, operands.b]
+            .into_iter()
+            .all(|pointer| pointer != 0 && pointer.is_multiple_of(ALIGNMENT))
+}
+
 const TN_D768_IN_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
     m: 2_048,
     k: 768,
@@ -6341,6 +6879,92 @@ const TN_PRISM_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
     ldb: 1_928,
     ldc: 1_928,
 };
+
+const TN_D128_IN_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
+    m: 1_024,
+    k: 128,
+    n: 512,
+    lda: 128,
+    ldb: 512,
+    ldc: 512,
+};
+
+const TN_D128_OUT_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
+    m: 1_024,
+    k: 256,
+    n: 128,
+    lda: 256,
+    ldb: 128,
+    ldc: 128,
+};
+
+fn sm89_exact_f32_d128_plan_for_route(
+    facts: ScalarLaunchFacts,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route,
+    admitted: bool,
+) -> Result<ScalarDispatchPlan, String> {
+    use super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route;
+    let (shape, plan, symbol_index) = match route {
+        Sm89ExactF32D128Route::D128InDirectFold => (
+            TN_D128_IN_SM89_EXACT_F32_CELL,
+            ScalarDispatchPlan::TnD128InSm89DirectFoldQualified,
+            0,
+        ),
+        Sm89ExactF32D128Route::D128OutDirectFold => (
+            TN_D128_OUT_SM89_EXACT_F32_CELL,
+            ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified,
+            1,
+        ),
+    };
+    let actual_fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
+    let required_fallback = ScalarDispatchPlan::TnSplitM {
+        m_chunk: 16,
+        chunks: 64,
+    };
+    let environment_ok = if admitted {
+        qualified_sm89_exact_f32_d128_environment(facts)
+    } else {
+        qualified_sm89_exact_f32_d128_candidate_environment(facts)
+    };
+    let operands_ok = if admitted {
+        qualified_sm89_exact_f32_tn_operands(operands)
+    } else {
+        qualified_sm89_exact_f32_d128_forced_operands(operands)
+    };
+    if actual_fallback != required_fallback
+        || request.op != crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn
+        || request.shape != shape
+        || !operands_ok
+        || !environment_ok
+        || !facts.sm89_exact_f32_d128_symbols_loaded[symbol_index]
+    {
+        return Ok(actual_fallback);
+    }
+    Ok(plan)
+}
+
+pub(super) fn forced_sm89_exact_f32_d128_plan(
+    facts: ScalarLaunchFacts,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route,
+) -> Result<ScalarDispatchPlan, String> {
+    let plan = sm89_exact_f32_d128_plan_for_route(facts, request, operands, route, false)?;
+    if matches!(
+        plan,
+        ScalarDispatchPlan::TnD128InSm89DirectFoldQualified
+            | ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified
+    ) {
+        Ok(plan)
+    } else {
+        Err(format!(
+            "SM89 exact-F32 d128 forced route {:?} failed shape, operand, symbol, or candidate-identity qualification",
+            route
+        ))
+    }
+}
 
 fn sm89_exact_f32_plan_for_route(
     facts: ScalarLaunchFacts,
@@ -6428,6 +7052,15 @@ pub(super) fn scalar_launch_plan(
     operands: F32TriadOperands,
 ) -> Result<ScalarDispatchPlan, String> {
     let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
+    for route in [
+        super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128InDirectFold,
+        super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128OutDirectFold,
+    ] {
+        let plan = sm89_exact_f32_d128_plan_for_route(facts, request, operands, route, true)?;
+        if plan != fallback {
+            return Ok(plan);
+        }
+    }
     for route in [
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D768InDualChunkFused,
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D768OutDirectBk16,
@@ -6613,6 +7246,8 @@ pub(super) enum ScalarDispatchPlan {
     TnD768InSm89DualChunkQualified,
     TnD768OutSm89DirectBk16Qualified,
     TnPrismSm89DirectBk16Qualified,
+    TnD128InSm89DirectFoldQualified,
+    TnD128OutSm89DirectFoldQualified,
     TnM16N16SplitM16Qualified,
     TnFinal { slim: bool },
     NtNarrow,
@@ -7067,6 +7702,9 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
+            sm89_exact_f32_d128_artifact: None,
+            sm89_exact_f32_d128_compiler: None,
+            sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
             multiprocessor_count: 170,
         }
@@ -7154,6 +7792,9 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
+            sm89_exact_f32_d128_artifact: None,
+            sm89_exact_f32_d128_compiler: None,
+            sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
             multiprocessor_count: RTX_6000_ADA_SMS,
         }

@@ -615,6 +615,9 @@ pub enum ModuleKind {
     /// owns its sealed artifact independently from every existing Ada
     /// finalist module.
     TriadSm89Tf32Joint = 11,
+    /// Exact-F32 SM89 TN d128 retained winners. Kept separate from the
+    /// large-TN exact-F32 owner so both artifact identities remain frozen.
+    TriadSm89ExactF32D128 = 12,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -635,12 +638,13 @@ pub struct ArtifactSetIdentity {
     pub specialized: Option<ArtifactIdentity>,
     pub sm89_half: Option<ArtifactIdentity>,
     pub sm89_exact_f32: Option<ArtifactIdentity>,
+    pub sm89_exact_f32_d128: Option<ArtifactIdentity>,
     pub sm89_tf32_joint: Option<ArtifactIdentity>,
 }
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
-    if !(3..=7).contains(&artifacts.len()) {
-        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, and one optional SM89 TF32 joint module".into());
+    if !(3..=8).contains(&artifacts.len()) {
+        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, and one optional SM89 TF32 joint module".into());
     }
     if artifacts[0].module_kind != ModuleKind::Fixed
         || artifacts[1].module_kind != ModuleKind::TriadScalar
@@ -653,6 +657,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     let mut specialized = None;
     let mut sm89_half = None;
     let mut sm89_exact_f32 = None;
+    let mut sm89_exact_f32_d128 = None;
     let mut sm89_tf32_joint = None;
     let mut cursor = 3;
     if let Some(artifact) = artifacts.get(cursor).copied()
@@ -680,19 +685,28 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         cursor += 1;
     }
     if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::TriadSm89ExactF32D128
+    {
+        sm89_exact_f32_d128 = Some(artifact);
+        cursor += 1;
+    }
+    if let Some(artifact) = artifacts.get(cursor).copied()
         && artifact.module_kind == ModuleKind::TriadSm89Tf32Joint
     {
         sm89_tf32_joint = Some(artifact);
         cursor += 1;
     }
     if cursor != artifacts.len() {
-        return Err("optional artifacts must be ordered as architecture-specialized, SM89 half, SM89 exact-F32, then SM89 TF32 joint".into());
+        return Err("optional artifacts must be ordered as architecture-specialized, SM89 half, SM89 exact-F32, SM89 exact-F32 d128, then SM89 TF32 joint".into());
     }
     if specialized.is_some_and(|artifact| artifact.module_kind != ModuleKind::TriadSm89Finalist)
-        && (sm89_half.is_some() || sm89_exact_f32.is_some() || sm89_tf32_joint.is_some())
+        && (sm89_half.is_some()
+            || sm89_exact_f32.is_some()
+            || sm89_exact_f32_d128.is_some()
+            || sm89_tf32_joint.is_some())
     {
         return Err(
-            "SM89 half, exact-F32, or TF32 joint artifacts cannot follow a non-SM89 specialized module".into(),
+            "SM89 half, exact-F32, exact-F32 d128, or TF32 joint artifacts cannot follow a non-SM89 specialized module".into(),
         );
     }
     let module_count = u8::try_from(artifacts.len())
@@ -722,6 +736,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         specialized,
         sm89_half,
         sm89_exact_f32,
+        sm89_exact_f32_d128,
         sm89_tf32_joint,
     })
 }
@@ -2944,6 +2959,7 @@ pub enum PhysicalGemmBackend {
     Sm89MmaTf32AddHalfV1 = 27,
     Sm89Mma16HalfS2V1 = 28,
     Sm89MmaTf32NtALdmatrixV1 = 29,
+    ScalarFmaTnDirectF64FoldSm89V1 = 30,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
@@ -2953,6 +2969,8 @@ pub(crate) const SM89_FIXED_COPYPLAN_ROUTE_REVISION: u16 = 1;
 pub(crate) const SM89_HALF_ROUTE_REVISION: u16 = 2;
 /// Scoped route epoch for the isolated Ada exact-F32 large-TN family.
 pub(crate) const SM89_EXACT_F32_TN_ROUTE_REVISION: u16 = 1;
+/// Scoped route epoch for the isolated Ada exact-F32 TN d128 direct folds.
+pub(crate) const SM89_EXACT_F32_D128_ROUTE_REVISION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -5382,6 +5400,10 @@ mod physical_launch_tests {
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 as u8, 27);
         assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8, 28);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 as u8, 29);
+        assert_eq!(
+            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 as u8,
+            30
+        );
         assert_eq!(
             ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
             21

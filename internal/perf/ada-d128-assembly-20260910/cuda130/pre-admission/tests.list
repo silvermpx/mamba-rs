@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_sm89_exact_f32_d128_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda130-20260910/release/deps/gemm_bi_sm89_exact_f32_d128_selector_qualification-1ea1c13c462b825b)
+full_mantissa::tests::corpus_is_repeatable_prefix_stable_and_seed_sensitive: test
+full_mantissa::tests::edge_prefix_preserves_signed_zero_subnormals_and_tf32_ties: test
+full_mantissa::tests::finite_random_tail_exercises_all_low_tf32_rounding_bits: test
+full_mantissa::tests::seeded_tail_retains_frozen_w4_generator_bits: test
+live::sm89_exact_f32_d128_post_admission_actual_auto_exactness: test
+live::sm89_exact_f32_d128_pre_admission_forced_vs_prior_actual_auto: test
+native_contract_tests::independent_oracle_retains_exceptional_and_repeated_add_semantics: test
+native_contract_tests::independent_oracle_uses_positive_zero_chunks_and_ascending_f64_fold: test
+native_contract_tests::receipt_requires_exactly_two_complete_cases_and_ordered_screen: test
+
+9 tests, 0 benchmarks

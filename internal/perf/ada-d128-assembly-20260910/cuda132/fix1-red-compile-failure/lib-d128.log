@@ -1,0 +1,83 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-d128-assembly.mD8m3k)
+error[E0308]: mismatched types
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11464:60
+      |
+11464 | ...     super::validate_sm89_exact_f32_d128_driver_abi(spec, &abi).un...
+      |         ---------------------------------------------- ^^^^ expected `&Sm89ExactF32D128KernelSpec`, found `Sm89ExactF32D128KernelSpec`
+      |         |
+      |         arguments to this function are incorrect
+      |
+note: function defined here
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:2875:4
+      |
+ 2875 | fn validate_sm89_exact_f32_d128_driver_abi(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 2876 |     spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+      |     --------------------------------------------------------------------
+help: consider borrowing here
+      |
+11464 |             super::validate_sm89_exact_f32_d128_driver_abi(&spec, &abi).unwrap();
+      |                                                            +
+
+error[E0308]: mismatched types
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11483:68
+      |
+11483 | ...     super::validate_sm89_exact_f32_d128_driver_abi(spec, &malform...
+      |         ---------------------------------------------- ^^^^ expected `&Sm89ExactF32D128KernelSpec`, found `Sm89ExactF32D128KernelSpec`
+      |         |
+      |         arguments to this function are incorrect
+      |
+note: function defined here
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:2875:4
+      |
+ 2875 | fn validate_sm89_exact_f32_d128_driver_abi(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 2876 |     spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+      |     --------------------------------------------------------------------
+help: consider borrowing here
+      |
+11483 |                     super::validate_sm89_exact_f32_d128_driver_abi(&spec, &malformed).is_err(),
+      |                                                                    +
+
+error[E0308]: mismatched types
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11495:59
+      |
+11495 | ...       super::validate_sm89_exact_f32_d128_resources(spec, valid)....
+      |           --------------------------------------------- ^^^^ expected `&Sm89ExactF32D128KernelSpec`, found `Sm89ExactF32D128KernelSpec`
+      |           |
+      |           arguments to this function are incorrect
+      |
+note: function defined here
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:8453:4
+      |
+ 8453 | fn validate_sm89_exact_f32_d128_resources(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 8454 |     spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+      |     --------------------------------------------------------------------
+help: consider borrowing here
+      |
+11495 |             super::validate_sm89_exact_f32_d128_resources(&spec, valid).unwrap();
+      |                                                           +
+
+error[E0308]: mismatched types
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11519:67
+      |
+11519 | ...       super::validate_sm89_exact_f32_d128_resources(spec, malform...
+      |           --------------------------------------------- ^^^^ expected `&Sm89ExactF32D128KernelSpec`, found `Sm89ExactF32D128KernelSpec`
+      |           |
+      |           arguments to this function are incorrect
+      |
+note: function defined here
+     --> src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:8453:4
+      |
+ 8453 | fn validate_sm89_exact_f32_d128_resources(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 8454 |     spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+      |     --------------------------------------------------------------------
+help: consider borrowing here
+      |
+11519 |                     super::validate_sm89_exact_f32_d128_resources(&spec, malformed).is_err(),
+      |                                                                   +
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `mamba-rs` (lib test) due to 4 previous errors

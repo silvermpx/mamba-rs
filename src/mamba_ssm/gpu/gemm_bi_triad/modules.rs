@@ -514,6 +514,8 @@ pub(crate) struct CompiledModule {
     sm89_half_driver_abi: Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     sm89_exact_f32_driver_abi:
         Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
+    sm89_exact_f32_d128_driver_abi:
+        Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     sm89_tf32_joint_driver_abi:
         Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
@@ -699,6 +701,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             census_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let sm89_exact_f32_abi =
             census_sm89_exact_f32_driver_abi(request.ctx, request.module_kind, request.arch, &src);
+        let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let sm89_tf32_joint_abi =
             census_sm89_tf32_joint_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let fixed_half_abi =
@@ -768,6 +776,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             tf32_driver_abi,
             sm89_half_abi,
             sm89_exact_f32_abi,
+            sm89_exact_f32_d128_abi,
             sm89_tf32_joint_abi,
             fixed_half_abi,
             fixed_half_swizzle_abi,
@@ -788,6 +797,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_driver_abi,
         sm89_half_driver_abi,
         sm89_exact_f32_driver_abi,
+        sm89_exact_f32_d128_driver_abi,
         sm89_tf32_joint_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
@@ -828,6 +838,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let sm89_exact_f32_abi = census_sm89_exact_f32_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -958,6 +974,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 tf32_driver_abi,
                 sm89_half_abi,
                 sm89_exact_f32_abi,
+                sm89_exact_f32_d128_abi,
                 sm89_tf32_joint_abi,
                 fixed_half_abi,
                 fixed_half_swizzle_abi,
@@ -1004,6 +1021,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_driver_abi,
         sm89_half_driver_abi,
         sm89_exact_f32_driver_abi,
+        sm89_exact_f32_d128_driver_abi,
         sm89_tf32_joint_driver_abi,
         fixed_sm89_half_driver_abi,
         fixed_sm89_half_swizzle_driver_abi,
@@ -1573,6 +1591,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm89ExactF32 requires exact target sm_89, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm89ExactF32D128 && arch != "sm_89" {
+        return Err(format!(
+            "TriadSm89ExactF32D128 requires exact target sm_89, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm89Tf32Joint && arch != "sm_89" {
         return Err(format!(
             "TriadSm89Tf32Joint requires exact target sm_89, got {arch}"
@@ -1867,6 +1890,87 @@ fn validate_sm89_exact_f32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
+        return Err("TriadSm89ExactF32D128 requires exact sm_89 source and PTX targets".into());
+    }
+    let expected = super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect::<BTreeSet<_>>();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(
+            "TriadSm89ExactF32D128 PTX inventory is incomplete, duplicated, or foreign".into(),
+        );
+    }
+
+    let parsed = parse_ptx(ptx)?;
+    for spec in super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{} has no PTX parameter list", spec.symbol))?;
+        let declarations = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect::<Vec<_>>();
+        let abi_valid = declarations.len() == 7
+            && declarations[..3]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+            && declarations[3].starts_with(".param .f32 ")
+            && declarations[4..]
+                .iter()
+                .all(|line| line.starts_with(".param .u32 "));
+        if !abi_valid {
+            return Err(format!(
+                "{} has the wrong static PTX parameter ABI",
+                spec.symbol
+            ));
+        }
+        require_ptx_entry_tokens(
+            "TriadSm89ExactF32D128 direct fold",
+            entry,
+            &[
+                "fma.rn.f32",
+                "add.rn.f64",
+                "mul.rn.f64",
+                "cvt.rn.f32.f64",
+                "cp.async.ca.shared.global",
+            ],
+        )?;
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token.starts_with("mma.")
+                || token.starts_with("wmma.")
+                || token.starts_with("wgmma.")
+                || token.starts_with("tcgen05.")
+                || token.starts_with("cp.async.bulk")
+                || token.starts_with("cp.reduce.async.bulk")
+                || token.contains("tensormap")
+        }) {
+            return Err(format!(
+                "TriadSm89ExactF32D128 {} contains a forbidden instruction family",
+                spec.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     use super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
 
@@ -2035,6 +2139,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         ModuleKind::TriadSm89Finalist => validate_sm89_finalist_ptx(arch, ptx),
         ModuleKind::TriadSm89Half => validate_sm89_half_ptx(arch, ptx),
         ModuleKind::TriadSm89ExactF32 => validate_sm89_exact_f32_ptx(arch, ptx),
+        ModuleKind::TriadSm89ExactF32D128 => validate_sm89_exact_f32_d128_ptx(arch, ptx),
         ModuleKind::TriadSm89Tf32Joint => validate_sm89_tf32_joint_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
@@ -2762,6 +2867,88 @@ fn census_sm89_exact_f32_driver_abi(
         if census.insert(spec.symbol, abi).is_some() {
             return Err(format!(
                 "duplicate TriadSm89ExactF32 ABI symbol {}",
+                spec.symbol
+            ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn validate_sm89_exact_f32_d128_driver_abi(
+    spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    let expected = super::sm89_exact_f32_d128_source::DIRECT_FOLD_DRIVER_ABI;
+    let extent = expected
+        .last()
+        .map(|(offset, size)| offset + size)
+        .unwrap_or_default();
+    if abi.parameter_count() != spec.abi_parameter_count as usize
+        || extent != spec.abi_parameter_bytes
+        || !abi
+            .parameters()
+            .iter()
+            .zip(expected)
+            .all(|(actual, (offset, size))| {
+                (actual.offset(), actual.size()) == (offset as usize, size as usize)
+            })
+    {
+        return Err(format!(
+            "{} has the wrong live Driver parameter ABI",
+            spec.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn census_sm89_exact_f32_d128_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String> {
+    if kind != ModuleKind::TriadSm89ExactF32D128 {
+        return Ok(BTreeMap::new());
+    }
+    if arch != "sm_89" {
+        return Err("TriadSm89ExactF32D128 Driver ABI census requires exact sm_89".into());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for spec in &super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
+        let abi = (|| {
+            let function = unsafe {
+                cudarc::driver::result::module::get_function(
+                    module.raw(),
+                    CString::new(spec.symbol).unwrap(),
+                )
+            }
+            .map_err(|error| {
+                format!(
+                    "load TriadSm89ExactF32D128/{} for Driver ABI: {error:?}",
+                    spec.symbol
+                )
+            })?;
+            let abi = query_driver_parameter_abi(
+                spec.symbol,
+                spec.abi_parameter_count as usize,
+                |index, offset, size| unsafe { get(function, index, offset, size) },
+            )?;
+            validate_sm89_exact_f32_d128_driver_abi(spec, &abi)?;
+            Ok(abi)
+        })();
+        if census.insert(spec.symbol, abi).is_some() {
+            return Err(format!(
+                "duplicate TriadSm89ExactF32D128 ABI symbol {}",
                 spec.symbol
             ));
         }
@@ -7574,6 +7761,20 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         super::sm89_exact_f32_source::validate_source()?;
         return super::sm89_exact_f32_source::compose_source();
     }
+    if kind == ModuleKind::TriadSm89ExactF32D128 {
+        if arch != "sm_89" {
+            return Err(format!(
+                "TriadSm89ExactF32D128 requires exact target sm_89, got {arch}"
+            ));
+        }
+        if FramedSha256::bytes(super::sm89_exact_f32_d128_source::OWNER_TEMPLATE.as_bytes())
+            != super::sm89_exact_f32_d128_source::OWNER_SHA256_BYTES
+        {
+            return Err("TriadSm89ExactF32D128 CUDA owner SHA-256 changed".into());
+        }
+        super::sm89_exact_f32_d128_source::validate_source()?;
+        return super::sm89_exact_f32_d128_source::compose_source();
+    }
     if kind == ModuleKind::TriadSm89Tf32Joint {
         validate_module_target(kind, arch)?;
         let owner_digest = FramedSha256::bytes(super::sm89_tf32_joint_source::SOURCE.as_bytes());
@@ -8213,6 +8414,156 @@ fn load_sm89_exact_f32_functions(
     Ok((functions, exclusions))
 }
 
+fn retain_sm89_exact_f32_d128_symbol<T>(
+    functions: &mut HashMap<&'static str, T>,
+    exclusions: &mut Vec<Tf32SymbolExclusion>,
+    symbol: &'static str,
+    loaded: Result<T, String>,
+) -> Result<(), String> {
+    match loaded {
+        Ok(function) => {
+            if functions.insert(symbol, function).is_some() {
+                return Err(format!("duplicate TriadSm89ExactF32D128 function {symbol}"));
+            }
+        }
+        Err(reason) => exclusions.push(Tf32SymbolExclusion { symbol, reason }),
+    }
+    Ok(())
+}
+
+fn sm89_exact_f32_d128_abi_for_symbol<'a>(
+    census: &'a BTreeMap<&'static str, Result<Tf32DriverAbi, String>>,
+    symbol: &str,
+) -> Result<&'a Tf32DriverAbi, String> {
+    census
+        .get(symbol)
+        .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sm89ExactF32D128ResourceFacts {
+    local_bytes: u32,
+    registers: u32,
+    static_shared_bytes: u32,
+    max_threads: i32,
+    occupancy: u32,
+}
+
+fn validate_sm89_exact_f32_d128_resources(
+    spec: &super::sm89_exact_f32_d128_source::Sm89ExactF32D128KernelSpec,
+    facts: Sm89ExactF32D128ResourceFacts,
+) -> Result<(), String> {
+    if facts.static_shared_bytes != spec.static_shared_bytes {
+        return Err(format!(
+            "{} uses {} static shared bytes, expected {}",
+            spec.symbol, facts.static_shared_bytes, spec.static_shared_bytes
+        ));
+    }
+    tf32_symbol_admission(
+        spec.symbol,
+        facts.local_bytes,
+        facts.registers,
+        spec.register_cap,
+        facts.max_threads,
+        i32::try_from(spec.block.0 * spec.block.1 * spec.block.2)
+            .map_err(|_| format!("{} thread count exceeds i32::MAX", spec.symbol))?,
+    )?;
+    if facts.occupancy < spec.occupancy_gate {
+        return Err(format!(
+            "{} occupancy {} misses its {}-CTA gate",
+            spec.symbol, facts.occupancy, spec.occupancy_gate
+        ));
+    }
+    Ok(())
+}
+
+fn load_sm89_exact_f32_d128_functions(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> Result<
+    (
+        HashMap<&'static str, CudaFunction>,
+        Vec<Tf32SymbolExclusion>,
+    ),
+    String,
+> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm89ExactF32D128
+        || module.compiler_identity.target.as_str() != "sm_89"
+        || ctx
+            .compute_capability()
+            .map_err(|error| format!("query TriadSm89ExactF32D128 CC: {error:?}"))?
+            != (8, 9)
+    {
+        return Err("TriadSm89ExactF32D128 requires an exact sm_89/CC8.9 binding".into());
+    }
+    let abi = module
+        .sm89_exact_f32_d128_driver_abi
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let mut functions = HashMap::new();
+    let mut exclusions = Vec::new();
+    for spec in &super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
+        let loaded = (|| {
+            validate_sm89_exact_f32_d128_driver_abi(
+                spec,
+                sm89_exact_f32_d128_abi_for_symbol(abi, spec.symbol)?,
+            )?;
+            let function = load_function(
+                &module.module,
+                ModuleKind::TriadSm89ExactF32D128,
+                spec.symbol,
+            )?;
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative local memory", spec.symbol))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|error| format!("query {} registers: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative register count", spec.symbol))?;
+            let static_shared_bytes =
+                u32::try_from(function.shared_size_bytes().map_err(|error| {
+                    format!("query {} static shared memory: {error:?}", spec.symbol)
+                })?)
+                .map_err(|_| format!("{} returned negative static shared memory", spec.symbol))?;
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    spec.block.0 * spec.block.1 * spec.block.2,
+                    spec.dynamic_shared_bytes as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+            validate_sm89_exact_f32_d128_resources(
+                spec,
+                Sm89ExactF32D128ResourceFacts {
+                    local_bytes,
+                    registers,
+                    static_shared_bytes,
+                    max_threads,
+                    occupancy,
+                },
+            )?;
+            Ok(function)
+        })();
+        retain_sm89_exact_f32_d128_symbol(&mut functions, &mut exclusions, spec.symbol, loaded)?;
+    }
+    if functions.len() + exclusions.len()
+        != super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS.len()
+    {
+        return Err("TriadSm89ExactF32D128 lost a symbol while applying resource gates".into());
+    }
+    Ok((functions, exclusions))
+}
+
 fn retain_sm89_tf32_joint_symbol<T>(
     functions: &mut HashMap<&'static str, T>,
     exclusions: &mut Vec<Tf32SymbolExclusion>,
@@ -8393,6 +8744,7 @@ pub struct GemmBiKernels {
     finalist_compiler_identity: Option<CompilerIdentity>,
     sm89_half_compiler_identity: Option<CompilerIdentity>,
     sm89_exact_f32_compiler_identity: Option<CompilerIdentity>,
+    sm89_exact_f32_d128_compiler_identity: Option<CompilerIdentity>,
     sm89_tf32_joint_compiler_identity: Option<CompilerIdentity>,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
@@ -8405,6 +8757,8 @@ pub struct GemmBiKernels {
     sm89_half_exclusions: Vec<Tf32SymbolExclusion>,
     sm89_exact_f32_functions: HashMap<&'static str, CudaFunction>,
     sm89_exact_f32_exclusions: Vec<Tf32SymbolExclusion>,
+    sm89_exact_f32_d128_functions: HashMap<&'static str, CudaFunction>,
+    sm89_exact_f32_d128_exclusions: Vec<Tf32SymbolExclusion>,
     sm89_tf32_joint_functions: HashMap<&'static str, CudaFunction>,
     sm89_tf32_joint_exclusions: Vec<Tf32SymbolExclusion>,
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
@@ -8412,6 +8766,7 @@ pub struct GemmBiKernels {
     finalist_tf32_rejection: Option<String>,
     sm89_half_rejection: Option<String>,
     sm89_exact_f32_rejection: Option<String>,
+    sm89_exact_f32_d128_rejection: Option<String>,
     sm89_tf32_joint_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
     tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
@@ -8499,6 +8854,8 @@ impl GemmBiKernels {
         sm89_half_compile_rejection: Option<String>,
         sm89_exact_f32: Option<CompiledModule>,
         sm89_exact_f32_compile_rejection: Option<String>,
+        sm89_exact_f32_d128: Option<CompiledModule>,
+        sm89_exact_f32_d128_compile_rejection: Option<String>,
         sm89_tf32_joint: Option<CompiledModule>,
         sm89_tf32_joint_compile_rejection: Option<String>,
         specialized: Option<QualifiedSpecializedModule>,
@@ -8553,6 +8910,15 @@ impl GemmBiKernels {
         }
         if let Some(sm89_exact_f32) = sm89_exact_f32.as_ref() {
             artifacts.push(sm89_exact_f32.artifact_identity);
+        }
+        if sm89_exact_f32_d128.is_some() && specialized.is_some() {
+            return Err(
+                "SM89 exact-F32 d128 and architecture-specialized triad modules are mutually exclusive"
+                    .into(),
+            );
+        }
+        if let Some(sm89_exact_f32_d128) = sm89_exact_f32_d128.as_ref() {
+            artifacts.push(sm89_exact_f32_d128.artifact_identity);
         }
         if sm89_tf32_joint.is_some() && specialized.is_some() {
             return Err(
@@ -8699,6 +9065,18 @@ impl GemmBiKernels {
             },
             None => (HashMap::new(), Vec::new()),
         };
+        let mut sm89_exact_f32_d128_rejection = sm89_exact_f32_d128_compile_rejection;
+        let (sm89_exact_f32_d128_functions, sm89_exact_f32_d128_exclusions) =
+            match sm89_exact_f32_d128.as_ref() {
+                Some(module) => match load_sm89_exact_f32_d128_functions(ctx, module) {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        sm89_exact_f32_d128_rejection = Some(error);
+                        (HashMap::new(), Vec::new())
+                    }
+                },
+                None => (HashMap::new(), Vec::new()),
+            };
         let mut sm89_tf32_joint_rejection = sm89_tf32_joint_compile_rejection;
         let (sm89_tf32_joint_functions, sm89_tf32_joint_exclusions) = match sm89_tf32_joint.as_ref()
         {
@@ -8814,6 +9192,9 @@ impl GemmBiKernels {
         if let Some(sm89_exact_f32) = sm89_exact_f32.as_ref() {
             anchors.push(sm89_exact_f32.module.clone());
         }
+        if let Some(sm89_exact_f32_d128) = sm89_exact_f32_d128.as_ref() {
+            anchors.push(sm89_exact_f32_d128.module.clone());
+        }
         if let Some(sm89_tf32_joint) = sm89_tf32_joint.as_ref() {
             anchors.push(sm89_tf32_joint.module.clone());
         }
@@ -8833,6 +9214,9 @@ impl GemmBiKernels {
             sm89_exact_f32_compiler_identity: sm89_exact_f32
                 .as_ref()
                 .map(|module| module.compiler_identity),
+            sm89_exact_f32_d128_compiler_identity: sm89_exact_f32_d128
+                .as_ref()
+                .map(|module| module.compiler_identity),
             sm89_tf32_joint_compiler_identity: sm89_tf32_joint
                 .as_ref()
                 .map(|module| module.compiler_identity),
@@ -8849,6 +9233,8 @@ impl GemmBiKernels {
             sm89_half_exclusions,
             sm89_exact_f32_functions,
             sm89_exact_f32_exclusions,
+            sm89_exact_f32_d128_functions,
+            sm89_exact_f32_d128_exclusions,
             sm89_tf32_joint_functions,
             sm89_tf32_joint_exclusions,
             tf32_excluded_symbols,
@@ -8857,6 +9243,7 @@ impl GemmBiKernels {
             finalist_tf32_rejection,
             sm89_half_rejection,
             sm89_exact_f32_rejection,
+            sm89_exact_f32_d128_rejection,
             sm89_tf32_joint_rejection,
             specialized_tf32_rejection,
             specialized_functions,
@@ -8986,6 +9373,14 @@ impl GemmBiKernels {
         &self.sm89_exact_f32_exclusions
     }
 
+    pub(crate) fn sm89_exact_f32_d128_rejection(&self) -> Option<&str> {
+        self.sm89_exact_f32_d128_rejection.as_deref()
+    }
+
+    pub(crate) fn sm89_exact_f32_d128_exclusions(&self) -> &[Tf32SymbolExclusion] {
+        &self.sm89_exact_f32_d128_exclusions
+    }
+
     pub(crate) fn sm89_tf32_joint_rejection(&self) -> Option<&str> {
         self.sm89_tf32_joint_rejection.as_deref()
     }
@@ -9086,6 +9481,18 @@ impl GemmBiKernels {
         super::sm89_exact_f32_source::kernel_spec(symbol)?;
         self.sm89_exact_f32_compiler_identity()?;
         self.sm89_exact_f32_functions.get(symbol)
+    }
+
+    pub fn sm89_exact_f32_d128_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .sm89_exact_f32_d128
+            .and(self.sm89_exact_f32_d128_compiler_identity)
+    }
+
+    pub fn sm89_exact_f32_d128_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        super::sm89_exact_f32_d128_source::kernel_spec(symbol)?;
+        self.sm89_exact_f32_d128_compiler_identity()?;
+        self.sm89_exact_f32_d128_functions.get(symbol)
     }
 
     pub fn sm89_tf32_joint_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -10894,6 +11301,280 @@ mod tests {
             exclusions[0].symbol,
             super::super::sm89_exact_f32_source::D768_OUT_RAW_SYMBOL
         );
+    }
+
+    fn sm89_exact_f32_d128_test_entry(symbol: &str) -> String {
+        format!(
+            ".visible .entry {symbol}(\n.param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .f32 p3,\n.param .u32 p4,\n.param .u32 p5,\n.param .u32 p6\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n.reg .f64 %fd<3>;\ncp.async.ca.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\nadd.rn.f64 %fd0, %fd1, %fd2;\nmul.rn.f64 %fd0, %fd0, %fd1;\ncvt.rn.f32.f64 %f0, %fd0;\nret;\n}}\n"
+        )
+    }
+
+    fn sm89_exact_f32_d128_test_ptx() -> String {
+        super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
+            .iter()
+            .fold(
+                String::from(".version 8.5\n.target sm_89\n.address_size 64\n"),
+                |mut ptx, spec| {
+                    ptx.push_str(&sm89_exact_f32_d128_test_entry(spec.symbol));
+                    ptx
+                },
+            )
+    }
+
+    #[test]
+    fn sm89_exact_f32_d128_composition_is_sealed_and_target_exact() {
+        let source = compose_module_source_for(ModuleKind::TriadSm89ExactF32D128, "sm_89")
+            .expect("compose sealed d128 module");
+        assert_eq!(
+            super::module_source_digest(ModuleKind::TriadSm89ExactF32D128, "sm_89").unwrap(),
+            crate::mamba_ssm::gpu::kernel_identity::FramedSha256::bytes(source.as_bytes())
+        );
+        super::super::sm89_exact_f32_d128_source::validate_source().unwrap();
+        assert!(
+            compose_module_source_for(ModuleKind::TriadSm89ExactF32D128, "compute_89").is_err()
+        );
+    }
+
+    #[test]
+    fn sm89_exact_f32_d128_validator_requires_exact_float_alpha_and_instruction_contract() {
+        let baseline = sm89_exact_f32_d128_test_ptx();
+        super::validate_sm89_exact_f32_d128_ptx("sm_89", &baseline).unwrap();
+        assert!(super::validate_sm89_exact_f32_d128_ptx("compute_89", &baseline).is_err());
+        assert!(
+            super::validate_sm89_exact_f32_d128_ptx(
+                "sm_89",
+                &baseline.replacen(".target sm_89", ".target sm_90", 1),
+            )
+            .is_err()
+        );
+        let first = super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS[0];
+        assert!(
+            super::validate_sm89_exact_f32_d128_ptx(
+                "sm_89",
+                &format!("{baseline}{}", sm89_exact_f32_d128_test_entry(first.symbol)),
+            )
+            .is_err(),
+            "accepted a duplicate d128 export"
+        );
+        assert!(
+            super::validate_sm89_exact_f32_d128_ptx(
+                "sm_89",
+                &format!(
+                    "{baseline}{}",
+                    sm89_exact_f32_d128_test_entry("gemm_bi_tn_sm89_f32_d128_foreign")
+                ),
+            )
+            .is_err(),
+            "accepted a foreign d128 export"
+        );
+        for spec in super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
+            let entry = sm89_exact_f32_d128_test_entry(spec.symbol);
+            assert!(
+                super::validate_sm89_exact_f32_d128_ptx("sm_89", &baseline.replacen(&entry, "", 1))
+                    .is_err()
+            );
+            let missing_parameter = entry.replacen(".param .u32 p6\n", "", 1);
+            assert!(
+                super::validate_sm89_exact_f32_d128_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &missing_parameter, 1),
+                )
+                .is_err(),
+                "accepted a six-parameter ABI for {}",
+                spec.symbol
+            );
+            for (declaration, wrong_type) in [
+                (".param .u64 p0", ".param .u32 p0"),
+                (".param .u64 p1", ".param .u32 p1"),
+                (".param .u64 p2", ".param .u32 p2"),
+                (".param .f32 p3", ".param .u32 p3"),
+                (".param .u32 p4", ".param .u64 p4"),
+                (".param .u32 p5", ".param .u64 p5"),
+                (".param .u32 p6", ".param .u64 p6"),
+            ] {
+                let wrong = entry.replacen(declaration, wrong_type, 1);
+                assert!(
+                    super::validate_sm89_exact_f32_d128_ptx(
+                        "sm_89",
+                        &baseline.replacen(&entry, &wrong, 1),
+                    )
+                    .is_err(),
+                    "accepted {wrong_type} for {}",
+                    spec.symbol
+                );
+            }
+            for required in [
+                "fma.rn.f32",
+                "add.rn.f64",
+                "mul.rn.f64",
+                "cvt.rn.f32.f64",
+                "cp.async.ca.shared.global",
+            ] {
+                let wrong = entry.replacen(required, "missing.instruction", 1);
+                assert!(
+                    super::validate_sm89_exact_f32_d128_ptx(
+                        "sm_89",
+                        &baseline.replacen(&entry, &wrong, 1)
+                    )
+                    .is_err(),
+                    "accepted missing {required} for {}",
+                    spec.symbol
+                );
+            }
+            for forbidden in [
+                "ld.local.u32",
+                "atom.global.add.f32",
+                "atom::sc.global.add.f32",
+                "red.global.add.f32",
+                "red::gpu.global.add.f32",
+                "redux.sync.add.u32",
+                "mma.sync.aligned",
+                "wgmma.mma_async",
+                "wmma.mma.sync",
+                "tcgen05.mma",
+                "cp.async.bulk.tensor",
+                "cp.reduce.async.bulk",
+                "tensormap.replace.tile.global_address.shared::cta.b1024.b64",
+            ] {
+                let wrong = entry.replacen("ret;", &format!("{forbidden} %r0;\nret;"), 1);
+                assert!(
+                    super::validate_sm89_exact_f32_d128_ptx(
+                        "sm_89",
+                        &baseline.replacen(&entry, &wrong, 1)
+                    )
+                    .is_err(),
+                    "accepted {forbidden} for {}",
+                    spec.symbol
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sm89_exact_f32_d128_abi_and_resource_failures_exclude_only_one_symbol() {
+        for spec in super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
+            let abi = Tf32DriverAbi::checked(
+                7,
+                vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)],
+            )
+            .unwrap();
+            super::validate_sm89_exact_f32_d128_driver_abi(&spec, &abi).unwrap();
+            for malformed in [
+                Tf32DriverAbi::checked(6, vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4)])
+                    .unwrap(),
+                Tf32DriverAbi::checked(
+                    7,
+                    vec![(0, 8), (8, 8), (16, 8), (24, 4), (32, 4), (36, 4), (40, 4)],
+                )
+                .unwrap(),
+                Tf32DriverAbi::checked(
+                    7,
+                    vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 4), (36, 4), (40, 4)],
+                )
+                .unwrap(),
+            ] {
+                assert!(
+                    super::validate_sm89_exact_f32_d128_driver_abi(&spec, &malformed).is_err(),
+                    "accepted malformed live ABI for {}: {malformed:?}",
+                    spec.symbol
+                );
+            }
+            let valid = super::Sm89ExactF32D128ResourceFacts {
+                local_bytes: 0,
+                registers: spec.register_cap,
+                static_shared_bytes: 0,
+                max_threads: 64,
+                occupancy: 8,
+            };
+            super::validate_sm89_exact_f32_d128_resources(&spec, valid).unwrap();
+            for malformed in [
+                super::Sm89ExactF32D128ResourceFacts {
+                    local_bytes: 4,
+                    ..valid
+                },
+                super::Sm89ExactF32D128ResourceFacts {
+                    registers: spec.register_cap + 1,
+                    ..valid
+                },
+                super::Sm89ExactF32D128ResourceFacts {
+                    static_shared_bytes: 4,
+                    ..valid
+                },
+                super::Sm89ExactF32D128ResourceFacts {
+                    max_threads: 63,
+                    ..valid
+                },
+                super::Sm89ExactF32D128ResourceFacts {
+                    occupancy: 7,
+                    ..valid
+                },
+            ] {
+                assert!(
+                    super::validate_sm89_exact_f32_d128_resources(&spec, malformed).is_err(),
+                    "accepted malformed resources for {}: {malformed:?}",
+                    spec.symbol
+                );
+            }
+        }
+
+        for (excluded_index, failure_kind) in [(0, "live ABI"), (1, "resource")] {
+            let mut functions = HashMap::new();
+            let mut exclusions = Vec::new();
+            for (index, spec) in
+                super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
+                    .iter()
+                    .enumerate()
+            {
+                let loaded = if index != excluded_index {
+                    Ok(index as u8)
+                } else if failure_kind == "live ABI" {
+                    let malformed = Tf32DriverAbi::checked(
+                        6,
+                        vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4)],
+                    )
+                    .unwrap();
+                    Err(
+                        super::validate_sm89_exact_f32_d128_driver_abi(spec, &malformed)
+                            .unwrap_err(),
+                    )
+                } else {
+                    Err(super::validate_sm89_exact_f32_d128_resources(
+                        spec,
+                        super::Sm89ExactF32D128ResourceFacts {
+                            local_bytes: 0,
+                            registers: spec.register_cap + 1,
+                            static_shared_bytes: 0,
+                            max_threads: 64,
+                            occupancy: 8,
+                        },
+                    )
+                    .unwrap_err())
+                };
+                super::retain_sm89_exact_f32_d128_symbol(
+                    &mut functions,
+                    &mut exclusions,
+                    spec.symbol,
+                    loaded,
+                )
+                .unwrap();
+            }
+            assert_eq!(functions.len(), 1);
+            assert_eq!(exclusions.len(), 1);
+            assert_eq!(
+                exclusions[0].symbol,
+                super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
+                    [excluded_index]
+                    .symbol
+            );
+            assert!(
+                functions.contains_key(
+                    super::super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
+                        [1 - excluded_index]
+                        .symbol
+                ),
+                "{failure_kind} exclusion removed the sibling"
+            );
+        }
     }
 
     fn sm89_tf32_joint_test_entry(
