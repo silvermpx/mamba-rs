@@ -153,8 +153,6 @@ pub struct MambaKernels {
     /// to the serial nosave walk at two orders more parallelism.
     pub conv1d_burnin_fwd_nosave_tiled: CudaFunction,
     pub conv1d_burnin_nosave_tiled_typed: TypedKernel,
-    /// Multi-step conv1d backward.
-    pub conv1d_burnin_bwd: CudaFunction,
 
     // -- Activations --
     /// Softplus forward: `ln(1 + exp(x))`.
@@ -195,8 +193,6 @@ pub struct MambaKernels {
     /// t-contiguous. Falls back to the untiled kernel when the tile exceeds
     /// the 48 KB static smem budget (f32 at d_state > 186).
     pub gather_bc_cols_tmajor_tiled: CudaFunction,
-    /// Scatter-add columns back into a wide matrix.
-    pub scatter_add_cols: CudaFunction,
     /// Split in_proj output into x_branch and gate with SiLU on gate.
     pub split_gate_silu: CudaFunction,
     /// Split in_proj output into x_branch and gate WITHOUT materializing
@@ -206,8 +202,6 @@ pub struct MambaKernels {
     pub gate_mul_silu: CudaFunction,
     /// Backward through gating: `y = ssm_out * gate_silu`.
     pub gating_backward: CudaFunction,
-    /// Concatenate two half-vectors into one (inverse of split).
-    pub concat_halves: CudaFunction,
     /// Residual add: `out[i] += residual[i]`.
     pub residual_add: CudaFunction,
     /// Copy with softplus: `out[i] = ln(1 + exp(in[i]))`.
@@ -228,16 +222,6 @@ pub struct MambaKernels {
     pub ssm_burnin_fwd_bf16: CudaFunction,
     /// f16 multi-step SSM forward with typed I/O + f32 saves.
     pub ssm_burnin_fwd_f16: CudaFunction,
-    /// bf16 multi-step conv1d forward with typed I/O + f32 saves.
-    pub conv1d_burnin_fwd_bf16: CudaFunction,
-    /// f16 multi-step conv1d forward with typed I/O + f32 saves.
-    pub conv1d_burnin_fwd_f16: CudaFunction,
-    /// f32 typed-signature conv1d burnin (matches the bf16/f16 argument
-    /// order `(u_out, state, conv_states_saved, post_conv, x_branch, ...)`
-    /// rather than the legacy f32 `(u_out, post_conv, conv_states, state,
-    /// x_branch, ...)`). Used by the mixed forward `WeightDtype::F32`
-    /// branch so all three dtypes share one calling convention.
-    pub conv1d_burnin_fwd_f32_typed: CudaFunction,
 
     // -- Typed training-backward kernels --
     /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
@@ -274,7 +258,6 @@ pub struct MambaKernels {
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub softplus_fwd_typed: TypedKernel,
-    pub rmsnorm_fwd_typed: TypedKernel,
     pub bias_broadcast_typed: TypedKernel,
     pub elementwise_mul_typed: TypedKernel,
     pub residual_add_typed: TypedKernel,
@@ -304,14 +287,8 @@ pub struct MambaKernels {
     /// only conv step kernel, one launch per layer.
     pub conv1d_step_fwd_silu_typed: TypedKernel,
     pub ssm_burnin_nosave_typed: TypedKernel,
-    pub conv1d_burnin_nosave_typed: TypedKernel,
-    pub silu_bwd_typed: TypedKernel,
     pub softplus_bwd_typed: TypedKernel,
     pub gather_last_timestep_typed: TypedKernel,
-    /// Typed vec_add_inplace — `a[i] += b[i]` where `a` is typed (activations
-    /// or typed grad accumulator) and `b` is f32 (master bias). Used in mixed
-    /// backward residual-add sequences where one operand is f32.
-    pub vec_add_inplace_typed: TypedKernel,
     pub vec_cast_zplus_typed: TypedKernel,
     /// Typed concat_halves — pure load/store with typed src/dst. Used by mixed
     /// backward to concat `d_x_branch` and `d_gate_pre` into `d_proj` before
@@ -1282,7 +1259,6 @@ impl MambaKernels {
             conv1d_burnin_fwd_nosave: get("conv1d_burnin_forward_nosave")?,
             conv1d_burnin_fwd_nosave_tiled: get("conv1d_burnin_forward_nosave_tiled_f32")?,
             conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
-            conv1d_burnin_bwd: get("conv1d_burnin_backward")?,
             // activations
             softplus_fwd: get("softplus_forward")?,
             softplus_bwd: get("softplus_backward")?,
@@ -1301,12 +1277,10 @@ impl MambaKernels {
             gather_bc_cols: get("gather_bc_cols")?,
             gather_bc_cols_tmajor: get("gather_bc_cols_tmajor")?,
             gather_bc_cols_tmajor_tiled: get("gather_bc_cols_tmajor_tiled")?,
-            scatter_add_cols: get("scatter_add_cols")?,
             split_gate_silu: get("split_gate_silu")?,
             split_gate: get("split_gate")?,
             gate_mul_silu: get("gate_mul_silu")?,
             gating_backward: get("gating_backward")?,
-            concat_halves: get("concat_halves")?,
             residual_add: get("residual_add")?,
             softplus_copy: get("softplus_copy")?,
             gather_last_timestep: get("gather_last_timestep")?,
@@ -1318,9 +1292,6 @@ impl MambaKernels {
             cast_f16_to_f32: get("cast_f16_to_f32")?,
             ssm_burnin_fwd_bf16: get("ssm_burnin_forward_bf16")?,
             ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
-            conv1d_burnin_fwd_bf16: get("conv1d_burnin_forward_bf16")?,
-            conv1d_burnin_fwd_f16: get("conv1d_burnin_forward_f16")?,
-            conv1d_burnin_fwd_f32_typed: get("conv1d_burnin_forward_f32")?,
 
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,
@@ -1497,7 +1468,6 @@ impl MambaKernels {
 
             // typed inference kernels
             softplus_fwd_typed: load_typed("softplus_forward")?,
-            rmsnorm_fwd_typed: load_typed("rmsnorm_forward")?,
             bias_broadcast_typed: load_typed("bias_broadcast")?,
             elementwise_mul_typed: load_typed("elementwise_mul")?,
             residual_add_typed: load_typed("residual_add")?,
@@ -1512,16 +1482,11 @@ impl MambaKernels {
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
             softplus_copy_v_typed: load_typed("softplus_copy_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
-            ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
-            ssm_step_fwd_gather_typed: load_typed("ssm_step_forward_gather")?,
             ssm_step_fwd_gather_gate_typed: load_typed("ssm_step_forward_gather_gate")?,
             conv1d_step_fwd_silu_typed: load_typed("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
-            conv1d_burnin_nosave_typed: load_typed("conv1d_burnin_forward_nosave")?,
-            silu_bwd_typed: load_typed("silu_backward")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
-            vec_add_inplace_typed: load_typed("vec_add_inplace")?,
             vec_cast_zplus_typed: load_typed("vec_cast_zplus")?,
             concat_halves_typed: load_typed("concat_halves")?,
             scatter_add_cols_typed: load_typed("scatter_add_cols")?,

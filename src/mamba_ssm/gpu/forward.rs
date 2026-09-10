@@ -474,15 +474,15 @@ pub fn gpu_forward_mamba_layer(
     // ===================================================================
     // F4a: Conv1d burnin + fused SiLU
     // ===================================================================
-    // conv1d_burnin_forward(u_out, post_conv_out, conv_states_out, state, x_branch, weight, bias,
-    //                       batch, T, d_inner, d_conv)
+    // Tiled kernel, typed f32 instantiation. Argument order:
+    // (u_out, state, conv_states_out, post_conv_out, x_branch, weight, bias,
+    //  batch, T, d_inner, d_conv). Grid (b*di, T tiles) instead of a
+    // serial walk over T.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let dc_i = d_conv as i32;
-        // Tiled twin (typed-f32 instantiation, note the typed arg order):
-        // grid (b*di, T tiles) instead of a 24-block serial walk.
         let mut builder = ctx.stream.launch_builder(
             ctx.kernels
                 .conv1d_burnin_fwd_tiled_typed
@@ -1114,6 +1114,8 @@ pub fn gpu_forward_mamba_target_burnin(
         }
 
         // === F4e: gating [B*T] — y * gate_silu ===
+        // The 16-byte vectorized twin does the same multiply per element;
+        // it runs when the count divides four and every operand is aligned.
         {
             let g = scratch.gated.cached_ptr();
             let y = scratch.y.cached_ptr();
@@ -1130,7 +1132,7 @@ pub fn gpu_forward_mamba_target_burnin(
             builder.arg(&y);
             builder.arg(&gs);
             builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * di)) }
+            unsafe { builder.launch(grid_1d(count)) }
                 .map_err(|e| format!("gating target L{layer_idx}: {:?}", e))?;
         }
 

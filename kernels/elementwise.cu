@@ -195,18 +195,6 @@ extern "C" __global__ void gather_cols(
     dst[b * dst_dim + d] = src[b * src_stride + offset + d];
 }
 
-extern "C" __global__ void scatter_add_cols(
-    float* dst, const float* src,
-    int batch, int dst_stride, int src_dim, int offset
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * src_dim;
-    if (idx >= total) return;
-    int b = idx / src_dim;
-    int d = idx % src_dim;
-    dst[b * dst_stride + offset + d] += src[b * src_dim + d];
-}
-
 extern "C" __global__ void split_gate_silu(
     float* x_branch,       // [batch * d_inner] first half
     float* gate_pre_silu,  // [batch * d_inner] second half (saved for backward)
@@ -321,22 +309,6 @@ extern "C" __global__ void gating_backward_##SUFFIX(                           \
 DEFINE_GATING_BWD(f32,  float,         from_f_f32)
 DEFINE_GATING_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_GATING_BWD(f16,  __half,        from_f_f16)
-
-extern "C" __global__ void concat_halves(
-    float* proj,              // [batch * 2*d_inner] output
-    const float* first_half,  // [batch * d_inner]
-    const float* second_half, // [batch * d_inner]
-    int batch, int d_inner
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
-    if (idx >= total) return;
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int proj_off = b * 2 * d_inner;
-    proj[proj_off + d] = first_half[idx];
-    proj[proj_off + d_inner + d] = second_half[idx];
-}
 
 extern "C" __global__ void gather_last_timestep(
     float* __restrict__ dst,      // [B * D]
@@ -776,21 +748,6 @@ extern "C" __global__ void softplus_copy_##SUFFIX(                            \
 DEFINE_SOFTPLUS_COPY(f32,  float,         from_f_f32)
 DEFINE_SOFTPLUS_COPY(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SOFTPLUS_COPY(f16,  __half,        from_f_f16)
-
-// Typed vec_add_inplace — for input_proj / out_proj bias add in M3 pipeline.
-// bias is always f32, activations in TY.
-#define DEFINE_VEC_ADD_INPLACE(SUFFIX, TY, FROM_F)                            \
-extern "C" __global__ void vec_add_inplace_##SUFFIX(                          \
-    TY* a, const float* b, int n                                              \
-) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n) return;                                                       \
-    a[i] = FROM_F(to_f(a[i]) + b[i]);                                         \
-}
-
-DEFINE_VEC_ADD_INPLACE(f32,  float,         from_f_f32)
-DEFINE_VEC_ADD_INPLACE(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_VEC_ADD_INPLACE(f16,  __half,        from_f_f16)
 
 // Typed cast-from-f32 replacing the zero() + vec_add_inplace staging
 // idiom (dst = FROM_F(0 + src)). The `0.0f +` is DELIBERATE and must

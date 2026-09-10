@@ -94,67 +94,6 @@ extern "C" __global__ void rmsnorm_forward(
     }
 }
 
-// Templated forward: input/output in T_IN, reduction in f32, scale in f32.
-#define DEFINE_RMSNORM_FWD(SUFFIX, T, FROM_F)                                \
-extern "C" __global__ void rmsnorm_forward_##SUFFIX(                         \
-    T* y, float* rms_out,                                                    \
-    const T* x, const float* scale,                                          \
-    int batch, int dim, float eps                                            \
-) {                                                                          \
-    int b = blockIdx.x;                                                      \
-    if (b >= batch) return;                                                  \
-    int d = threadIdx.x;                                                     \
-    extern __shared__ float sdata[];                                         \
-    int off = b * dim;                                                       \
-    float xh[RMSN_HOLD];                                                     \
-    float sum = 0.0f;                                                        \
-    _Pragma("unroll")                                                        \
-    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
-        int i = d + k * (int)blockDim.x;                                     \
-        xh[k] = (i < dim) ? to_f(x[off + i]) : 0.0f;                         \
-        sum += xh[k] * xh[k];                                                \
-    }                                                                        \
-    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
-        float v = to_f(x[off + i]);                                          \
-        sum += v * v;                                                        \
-    }                                                                        \
-    sdata[d] = sum;                                                          \
-    __syncthreads();                                                         \
-    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {                 \
-        if (d < s) sdata[d] += sdata[d + s];                                 \
-        __syncthreads();                                                     \
-    }                                                                        \
-    if (d < 32) {                                                            \
-        float v = sdata[d];                                                  \
-        if (d + 32 < blockDim.x) v += sdata[d + 32];                         \
-        v = warp_reduce_sum(v);                                              \
-        if (d == 0) sdata[0] = v;                                            \
-    }                                                                        \
-    __syncthreads();                                                         \
-    float rms = sqrtf(sdata[0] / (float)dim + eps);                          \
-    /* Finite-guard: if an upstream kernel produced NaN or +inf (bf16/f16    \
-     * overflow on very deep models, 48+ layers), rms becomes non-finite    \
-     * and inv_rms contaminates every subsequent layer. Fall back to 1.0    \
-     * so output = x*scale without normalization — still wrong, but avoids  \
-     * the silent NaN cascade that breaks the rest of the network. */       \
-    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                          \
-    if (d == 0) rms_out[b] = rms;                                            \
-    __syncthreads();                                                         \
-    float inv_rms = 1.0f / rms;                                              \
-    _Pragma("unroll")                                                        \
-    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
-        int i = d + k * (int)blockDim.x;                                     \
-        if (i < dim) y[off + i] = FROM_F(xh[k] * inv_rms * scale[i]);        \
-    }                                                                        \
-    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
-        y[off + i] = FROM_F(to_f(x[off + i]) * inv_rms * scale[i]);          \
-    }                                                                        \
-}
-
-DEFINE_RMSNORM_FWD(f32,  float,         from_f_f32)
-DEFINE_RMSNORM_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_RMSNORM_FWD(f16,  __half,        from_f_f16)
-
 // Dual-dtype variant: f32 input (residual-path), T_OUT output (bf16/f16).
 // Used in end-to-end bf16 inference where residual stays f32 across layers
 // but the branch fed into in_proj must be bf16 to match GEMM A dtype.

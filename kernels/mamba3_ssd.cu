@@ -221,7 +221,6 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     v_state[b * nh * hd + h * hd + p] = x_val;                               \
 }
 
-DEFINE_M3_STEP_FWD(f32,  float,         from_f_f32)
 DEFINE_M3_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_STEP_FWD(f16,  __half,        from_f_f16)
 
