@@ -1,0 +1,3 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-inference-rename-green-complete.eB6zX5)
+    Finished `release` profile [optimized] target(s) in 0.96s
+  Executable tests/gemm_bi_fixed_sm89_exact_n64.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_fixed_sm89_exact_n64-a63c8588a10ce5b4)

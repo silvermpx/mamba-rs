@@ -6,6 +6,11 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 
 ## Binding release decisions
 
+- `Deterministic` is the release default: custom Inference/Triad only, no
+  hidden cuBLAS fallback. `CublasFast` and `CublasPedantic` are explicit opt-in
+  vendor modes. F32/TF32/F16/BF16 are numerical policies/data types, not extra
+  backend modes. Owner explicitly reconfirmed this on2026-09-10; do not ask
+  again or preserve the old hybrid default.
 - Select the fastest qualified retained implementation for each covered cell.
   Beating cuBLAS Fast is not a prerequisite for replacing a slower AUTO route.
 - Preserve deterministic numerical contracts, eager/graph bits, shape/stride
@@ -158,13 +163,32 @@ Select their actual supported cases and prerequisites before executing them.
 
 ## API, cleanup and release preparation
 
-- [ ] Rename `gemm_bi_fixed` / Fixed to `gemm_bi_inference` / Inference in a
+- [x] Rename `gemm_bi_fixed` / Fixed to `gemm_bi_inference` / Inference in a
   separate mechanical phase after the kernels are assembled.
   Preserve frozen CUDA bytes, virtual compiler filenames and artifact/module
   identities. Changing them can invalidate measured cohorts; audit first and
   requalify affected artifacts if necessary, never clear admission as a workaround.
+  Source commit64d2888a; real composer identities,102 focused CUDA-host checks,
+  84 non-CUDA tests and five live Ada checks pass. All60 CUDA/header files are
+  unchanged;22 move into the Inference directory. Independent spec/quality
+  review approved. Evidence: `internal/perf/inference-rename-20260910/`.
 - [ ] Public modes: `Deterministic`, `CublasFast`, `CublasPedantic`; verify
   defaults, setters/builders, captured-policy invalidation and documentation.
+  API preflight found that current default policy is hybrid (F32 TF32 math,
+  half PEDANTIC), not a clean three-mode default. Several LM-head/M3 projection
+  helpers bypass context dispatch and call cuBLAS directly. Close these before
+  advertising a model-wide no-cuBLAS Deterministic mode; kernel assembly alone
+  does not prove model-wide dispatch. Preserve mixed half-input/F32-output
+  precision rather than adding a silent half-output round-trip.
+  Source map: `internal/release-mode-surface-audit-20260910.md`.
+- [ ] Document the public API in Rustdoc alongside implementation, not only
+  in README: IDE hover/completion must explain each mode, defaults, arguments,
+  return values, errors, numeric/determinism scope and graph restrictions.
+  Include practical linked examples and verify Rustdoc links and doctests
+  with the appropriate feature/toolkit lane. Owner explicitly requested this
+  as part of API work on 2026-09-10.
+  Use plain, concise technical language: what the API does and how to use it.
+  No marketing, filler, "magic" or AI-style boilerplate.
 - [ ] Review the two old Codex-owned Split8 WIP files; deliberately retain,
   redesign or retire them rather than staging them as performance evidence.
 - [ ] Keep useful regression and reproducible qualification tests. Archive
@@ -172,6 +196,11 @@ Select their actual supported cases and prerequisites before executing them.
   retaining their source and conclusions. Audit published crate contents.
   Repository-wide formatting still flags older discovery files; scoped
   formatting of this assembly block is green. Resolve the former in cleanup.
+  `cargo package --list --allow-dirty` preflight includes4438 internal files,
+  two tracked SDD reports, and local agent/fleet configuration. Add explicit
+  package exclusions for non-shipping evidence/tooling; preserve repository
+  evidence. The381 test/support files require a separate usefulness audit,
+  not indiscriminate deletion.
 - [ ] Benchmark unchanged monolithic `main` versus final new inference/Triad
   with one immutable harness and identical settings. Use reproducible measured
   deltas in the changelog; do not multiply unrelated discovery ratios.

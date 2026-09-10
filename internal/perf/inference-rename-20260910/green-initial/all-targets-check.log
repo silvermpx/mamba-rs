@@ -1,0 +1,553 @@
+    Checking mamba-rs v0.6.9 (/root/mamba-inference-rename-green-complete.eB6zX5)
+warning: variant `RawStore` is never constructed
+   --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:439:9
+    |
+437 |     enum CandidateFixed {
+    |          -------------- variant in this enum
+438 |         Production,
+439 |         RawStore,
+    |         ^^^^^^^^
+    |
+    = note: `CandidateFixed` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `RawPartialError` is never used
+   --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:443:10
+    |
+443 |     enum RawPartialError {
+    |          ^^^^^^^^^^^^^^^
+
+warning: fields `raw_fixed` and `raw_source_sha` are never read
+   --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:660:9
+    |
+654 |     struct Runtime {
+    |            ------- fields in this struct
+...
+660 |         raw_fixed: CudaFunction,
+    |         ^^^^^^^^^
+...
+663 |         raw_source_sha: String,
+    |         ^^^^^^^^^^^^^^
+
+warning: function `fixed_function` is never used
+   --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:958:8
+    |
+958 |     fn fixed_function(
+    |        ^^^^^^^^^^^^^^
+
+warning: function `launch_retained_partials` is never used
+   --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:996:8
+    |
+996 |     fn launch_retained_partials(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compare_raw_partials` is never used
+    --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:1241:8
+     |
+1241 |     fn compare_raw_partials(
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_candidate` is never used
+    --> tests/gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery.rs:1300:8
+     |
+1300 |     fn select_candidate(runtime: &Runtime) -> Result<CandidateFixed, S...
+     |        ^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_scalar_tn_transpose_32x8_d768_in_discovery") generated 7 warnings
+warning: associated function `new` is never used
+    --> tests/gemm_bi_typed_parity.rs:6370:8
+     |
+6369 | impl AdaHalfNtS3Fixture {
+     | ----------------------- associated function in this implementation
+6370 |     fn new(t: &Ctx, dtype: WeightDtype) -> Self {
+     |        ^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `SYMBOL_PREFIX` is never used
+ --> tests/support/triad_half_nt_fixed_s3_source.rs:1:11
+  |
+1 | pub const SYMBOL_PREFIX: &str = "gemm_bi_nt_test_fixed_s3_bxor_";
+  |           ^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_typed_parity") generated 2 warnings
+warning: enum `Sm89ExactF32TnRoute` is never used
+  --> tests/../src/mamba_ssm/gpu/gemm_bi_triad/sm89_exact_f32_source.rs:18:10
+   |
+18 | pub enum Sm89ExactF32TnRoute {
+   |          ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `symbol` is never used
+  --> tests/../src/mamba_ssm/gpu/gemm_bi_triad/sm89_exact_f32_source.rs:25:18
+   |
+24 | impl Sm89ExactF32TnRoute {
+   | ------------------------ method in this implementation
+25 |     pub const fn symbol(self) -> &'static str {
+   |                  ^^^^^^
+
+warning: function `kernel_spec` is never used
+   --> tests/../src/mamba_ssm/gpu/gemm_bi_triad/sm89_exact_f32_source.rs:130:8
+    |
+130 | pub fn kernel_spec(symbol: &str) -> Option<&'static Sm89ExactF32KernelS...
+    |        ^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_sm89_exact_f32_source_contract") generated 3 warnings
+warning: function `n96_grid` is never used
+ --> tests/support/triad_tf32_nn_n96_direct_epilogue_source.rs:5:14
+  |
+5 | pub const fn n96_grid(m: usize, n: usize) -> usize {
+  |              ^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `direct_pair_coordinates` is never used
+  --> tests/support/triad_tf32_nn_n96_direct_epilogue_source.rs:37:14
+   |
+37 | pub const fn direct_pair_coordinates(
+   |              ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `name` is never used
+  --> tests/support/triad_nn_n96_source.rs:99:18
+   |
+98 | impl BracketOrder {
+   | ----------------- method in this implementation
+99 |     pub const fn name(self) -> &'static str {
+   |                  ^^^^
+
+warning: constant `RETAINED_SYMBOL` is never used
+ --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:2:11
+  |
+2 | pub const RETAINED_SYMBOL: &str = "gemm_bi_nt_test_scalar_a_n96_s3_sm89_v1";
+  |           ^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_THREADS` is never used
+ --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:3:11
+  |
+3 | pub const BLOCK_THREADS: u32 = 256;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `DYNAMIC_SHARED_BYTES` is never used
+ --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:4:11
+  |
+4 | pub const DYNAMIC_SHARED_BYTES: u32 = 86_016;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TARGET_D768_IN` is never used
+ --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:5:11
+  |
+5 | pub const TARGET_D768_IN: (usize, usize, usize) = (2_048, 768, 3_072);
+  |           ^^^^^^^^^^^^^^
+
+warning: constant `TARGET_PRISM` is never used
+ --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:6:11
+  |
+6 | pub const TARGET_PRISM: (usize, usize, usize) = (4_621, 384, 1_928);
+  |           ^^^^^^^^^^^^
+
+warning: function `retained_source` is never used
+  --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:14:8
+   |
+14 | pub fn retained_source() -> String {
+   |        ^^^^^^^^^^^^^^^
+
+warning: constant `SCALAR_A_LOAD` is never used
+  --> tests/support/triad_tf32_nt_a_ldmatrix_n96_s3_source.rs:24:7
+   |
+24 | const SCALAR_A_LOAD: &str = r#"#pragma unroll
+   |       ^^^^^^^^^^^^^
+
+warning: constant `BLOCK_THREADS` is never used
+ --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:6:11
+  |
+6 | pub const BLOCK_THREADS: u32 = 256;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `DYNAMIC_SHARED_BYTES` is never used
+ --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:7:11
+  |
+7 | pub const DYNAMIC_SHARED_BYTES: usize = 49_152;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REGISTERS` is never used
+ --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:8:11
+  |
+8 | pub const MAX_REGISTERS: i32 = 128;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `REQUIRED_OCCUPANCY` is never used
+ --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:9:11
+  |
+9 | pub const REQUIRED_OCCUPANCY: u32 = 2;
+  |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `K8_ISSUE_OFFSETS` is never used
+  --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:10:11
+   |
+10 | pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
+   |           ^^^^^^^^^^^^^^^^
+
+warning: function `retained_parent_fnv64` is never used
+  --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:16:8
+   |
+16 | pub fn retained_parent_fnv64(raw_tn_n96: &str) -> Result<u64, String> {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fnv1a64` is never used
+   --> tests/support/triad_tf32_tn_transpose_rna_m64n64_source.rs:456:4
+    |
+456 | fn fnv1a64(bytes: &[u8]) -> u64 {
+    |    ^^^^^^^
+
+warning: function `tf32_rna_bits` is never used
+ --> tests/support/triad_tf32_tn_transpose_rna_n96_source.rs:7:14
+  |
+7 | pub const fn tf32_rna_bits(bits: u32) -> u32 {
+  |              ^^^^^^^^^^^^^
+
+warning: function `validate_rna_transposed_words` is never used
+  --> tests/support/triad_tf32_tn_transpose_rna_n96_source.rs:15:8
+   |
+15 | pub fn validate_rna_transposed_words(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `restore_retained_source` is never used
+  --> tests/support/triad_tf32_tn_transpose_rna_n96_source.rs:90:8
+   |
+90 | pub fn restore_retained_source(candidate_source: &str) -> Result<String,...
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TRANSPOSE_SYMBOL` is never used
+ --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:3:11
+  |
+3 | pub const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpos...
+  |           ^^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_THREADS` is never used
+ --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:4:11
+  |
+4 | pub const BLOCK_THREADS: u32 = 256;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `DYNAMIC_SHARED_BYTES` is never used
+ --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:5:11
+  |
+5 | pub const DYNAMIC_SHARED_BYTES: u32 = 40_960;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `REGISTER_CAP` is never used
+ --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:6:11
+  |
+6 | pub const REGISTER_CAP: i32 = 128;
+  |           ^^^^^^^^^^^^
+
+warning: constant `REQUIRED_ACTIVE_BLOCKS` is never used
+ --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:7:11
+  |
+7 | pub const REQUIRED_ACTIVE_BLOCKS: u32 = 2;
+  |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tf32_rna_bits` is never used
+  --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:15:14
+   |
+15 | pub const fn tf32_rna_bits(bits: u32) -> u32 {
+   |              ^^^^^^^^^^^^^
+
+warning: function `padded_stride` is never used
+  --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:23:8
+   |
+23 | pub fn padded_stride(rows: usize) -> Result<usize, String> {
+   |        ^^^^^^^^^^^^^
+
+warning: function `validate_rna_transposed_words` is never used
+  --> tests/support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs:29:8
+   |
+29 | pub fn validate_rna_transposed_words(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_tf32_joint_source_contract") generated 28 warnings
+warning: unused variable: `candidate`
+   --> tests/gemm_bi_scalar_tn_direct_prism_fused_n32_discovery.rs:986:9
+    |
+986 |         candidate: CandidateFixed,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `RawPartialError` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_fused_n32_discovery.rs:411:10
+    |
+411 |     enum RawPartialError {
+    |          ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixed_function` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_fused_n32_discovery.rs:799:8
+    |
+799 |     fn fixed_function(
+    |        ^^^^^^^^^^^^^^
+
+warning: function `launch_transpose` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_fused_n32_discovery.rs:817:8
+    |
+817 |     fn launch_transpose(runtime: &Runtime, fixture: &Fixture) -> Result...
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `launch_retained_partials` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_fused_n32_discovery.rs:835:8
+    |
+835 |     fn launch_retained_partials(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_scalar_tn_direct_prism_fused_n32_discovery") generated 5 warnings (run `cargo fix --test "gemm_bi_scalar_tn_direct_prism_fused_n32_discovery" -p mamba-rs` to apply 1 suggestion)
+warning: field `active` is never read
+   --> tests/gemm_bi_half_tn_regpipe_vec2_bx4_d768_in_discovery.rs:176:9
+    |
+173 |     struct GuardedHalf {
+    |            ----------- field in this struct
+...
+176 |         active: usize,
+    |         ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `reset` is never used
+   --> tests/gemm_bi_half_tn_regpipe_vec2_bx4_d768_in_discovery.rs:197:12
+    |
+179 |     impl GuardedHalf {
+    |     ---------------- method in this implementation
+...
+197 |         fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+    |            ^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_half_tn_regpipe_vec2_bx4_d768_in_discovery") generated 2 warnings
+warning: constant `SYMBOL_PREFIX` is never used
+ --> tests/support/triad_half_nt_fixed_s3_source.rs:1:11
+  |
+1 | pub const SYMBOL_PREFIX: &str = "gemm_bi_nt_test_fixed_s3_bxor_";
+  |           ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `BLOCK_THREADS` is never used
+ --> tests/support/triad_half_nt_m96n128_s3_source.rs:8:11
+  |
+8 | pub const BLOCK_THREADS: u32 = 384;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `DYNAMIC_SHARED_BYTES` is never used
+ --> tests/support/triad_half_nt_m96n128_s3_source.rs:9:11
+  |
+9 | pub const DYNAMIC_SHARED_BYTES: usize = 86_016;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REGISTERS` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:10:11
+   |
+10 | pub const MAX_REGISTERS: i32 = 168;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `REQUIRED_OCCUPANCY` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:11:11
+   |
+11 | pub const REQUIRED_OCCUPANCY: u32 = 1;
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `EXPECTED_HMMA` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:12:11
+   |
+12 | pub const EXPECTED_HMMA: usize = 64;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `EXPECTED_LDGSTS` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:13:11
+   |
+13 | pub const EXPECTED_LDGSTS: usize = 15;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_BLOCK_THREADS` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:14:11
+   |
+14 | pub const RETAINED_BLOCK_THREADS: u32 = parent::BLOCK_THREADS;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_DYNAMIC_SHARED_BYTES` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:15:11
+   |
+15 | pub const RETAINED_DYNAMIC_SHARED_BYTES: usize = parent::DYNAMIC_SHARED_...
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_MAX_REGISTERS` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:16:11
+   |
+16 | pub const RETAINED_MAX_REGISTERS: i32 = parent::MAX_REGISTERS;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_REQUIRED_OCCUPANCY` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:17:11
+   |
+17 | pub const RETAINED_REQUIRED_OCCUPANCY: u32 = parent::REQUIRED_OCCUPANCY;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_EXPECTED_HMMA` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:18:11
+   |
+18 | pub const RETAINED_EXPECTED_HMMA: usize = 64;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETAINED_EXPECTED_LDGSTS` is never used
+  --> tests/support/triad_half_nt_m96n128_s3_source.rs:19:11
+   |
+19 | pub const RETAINED_EXPECTED_LDGSTS: usize = 18;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `all_strata_pass` is never used
+   --> tests/support/triad_half_nt_m96n128_s3_source.rs:169:8
+    |
+169 | pub fn all_strata_pass(strata: &[[f64; 2]]) -> bool {
+    |        ^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_THREADS` is never used
+ --> tests/support/triad_half_nt_m64n192_s3_source.rs:5:11
+  |
+5 | pub const BLOCK_THREADS: u32 = 384;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `DYNAMIC_SHARED_BYTES` is never used
+ --> tests/support/triad_half_nt_m64n192_s3_source.rs:6:11
+  |
+6 | pub const DYNAMIC_SHARED_BYTES: usize = 98_304;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REGISTERS` is never used
+ --> tests/support/triad_half_nt_m64n192_s3_source.rs:7:11
+  |
+7 | pub const MAX_REGISTERS: i32 = 168;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `REQUIRED_OCCUPANCY` is never used
+ --> tests/support/triad_half_nt_m64n192_s3_source.rs:8:11
+  |
+8 | pub const REQUIRED_OCCUPANCY: u32 = 1;
+  |           ^^^^^^^^^^^^^^^^^^
+
+warning: function `measured_s3_source` is never used
+   --> tests/support/triad_half_nt_m64n192_s3_source.rs:125:8
+    |
+125 | pub fn measured_s3_source(swizzle: &str, s3: &str) -> Result<String, St...
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `all_strata_pass` is never used
+   --> tests/support/triad_half_nt_m64n192_s3_source.rs:129:8
+    |
+129 | pub fn all_strata_pass(strata: &[[f64; 2]]) -> bool {
+    |        ^^^^^^^^^^^^^^^
+
+warning: constant `SYMBOL_PREFIX` is never used
+ --> tests/support/triad_half_nt_m64n128_s3_source.rs:4:11
+  |
+4 | pub const SYMBOL_PREFIX: &str = "gemm_bi_nt_test_fixed_s3_m64n128_";
+  |           ^^^^^^^^^^^^^
+
+warning: unused variable: `candidate`
+    --> tests/gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery.rs:1045:9
+     |
+1045 |         candidate: CandidateFixed,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixed_function` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery.rs:849:8
+    |
+849 |     fn fixed_function(
+    |        ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `launch_transpose` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery.rs:867:8
+    |
+867 |     fn launch_transpose(runtime: &Runtime, fixture: &Fixture) -> Result...
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `launch_retained_partials` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery.rs:885:8
+    |
+885 |     fn launch_retained_partials(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery") generated 4 warnings (run `cargo fix --test "gemm_bi_scalar_tn_direct_prism_bk32_exact_tail_discovery" -p mamba-rs` to apply 1 suggestion)
+warning: `mamba-rs` (test "sm89_half_source_freeze") generated 21 warnings
+warning: `mamba-rs` (test "gemm_bi_half_nt_m64n128_s2_d768_out_discovery") generated 1 warning (1 duplicate)
+warning: unused variable: `candidate`
+    --> tests/gemm_bi_scalar_tn_prism_vec4_reducer_discovery.rs:1071:9
+     |
+1071 |         candidate: CandidateFixed,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixed_function` is never used
+   --> tests/gemm_bi_scalar_tn_prism_vec4_reducer_discovery.rs:861:8
+    |
+861 |     fn fixed_function(
+    |        ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `launch_transpose` is never used
+   --> tests/gemm_bi_scalar_tn_prism_vec4_reducer_discovery.rs:879:8
+    |
+879 |     fn launch_transpose(runtime: &Runtime, fixture: &Fixture) -> Result...
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `launch_retained_partials` is never used
+   --> tests/gemm_bi_scalar_tn_prism_vec4_reducer_discovery.rs:897:8
+    |
+897 |     fn launch_retained_partials(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_scalar_tn_prism_vec4_reducer_discovery") generated 4 warnings (run `cargo fix --test "gemm_bi_scalar_tn_prism_vec4_reducer_discovery" -p mamba-rs` to apply 1 suggestion)
+warning: `mamba-rs` (test "gemm_bi_half_nt_m64n128_s3_groupm8_d768_out_discovery") generated 1 warning (1 duplicate)
+warning: unused variable: `candidate`
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk16_discovery.rs:977:9
+    |
+977 |         candidate: CandidateFixed,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixed_function` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk16_discovery.rs:794:8
+    |
+794 |     fn fixed_function(
+    |        ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `launch_transpose` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk16_discovery.rs:812:8
+    |
+812 |     fn launch_transpose(runtime: &Runtime, fixture: &Fixture) -> Result...
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `launch_retained_partials` is never used
+   --> tests/gemm_bi_scalar_tn_direct_prism_bk16_discovery.rs:830:8
+    |
+830 |     fn launch_retained_partials(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_scalar_tn_direct_prism_bk16_discovery") generated 4 warnings (run `cargo fix --test "gemm_bi_scalar_tn_direct_prism_bk16_discovery" -p mamba-rs` to apply 1 suggestion)
+warning: function `fixture_with_values` is never used
+    --> tests/gemm_bi_fixed_tf32_n96_discovery.rs:1626:8
+     |
+1626 |     fn fixture_with_values(
+     |        ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mamba-rs` (test "gemm_bi_fixed_tf32_n96_discovery") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 1.74s

@@ -1,0 +1,6 @@
+live::sm89_tf32_joint_post_admission_auto_uses_the_toolkit_winner_map: test
+live::sm89_tf32_joint_six_cell_forced_wiring_matches_prior_auto: test
+six_cell_literal_map_is_complete_and_has_independent_launch_geometry: test
+toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2: test
+
+4 tests, 0 benchmarks

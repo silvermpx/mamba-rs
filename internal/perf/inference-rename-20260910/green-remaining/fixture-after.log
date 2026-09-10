@@ -1,0 +1,3 @@
+internal/perf/ada-f32-nt-copyplan-siblings-batch-a-20260909/evidence/exact-nt-prequal-f04584c8-cuda128.log: OK
+internal/perf/ada-f32-nt-copyplan-siblings-batch-a-20260909/evidence/exact-nt-prequal-f04584c8-cuda130.log: OK
+internal/perf/ada-f32-nt-copyplan-siblings-batch-a-20260909/evidence/exact-nt-prequal-f04584c8-cuda132.log: OK

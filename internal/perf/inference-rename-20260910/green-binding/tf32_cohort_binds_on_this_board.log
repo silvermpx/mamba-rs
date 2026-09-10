@@ -1,0 +1,11 @@
+
+running 1 test
+test tf32_cohort_binds_on_this_board ... cc=(8, 9) dims=(2048, 768, 3072) tf32=true served=TriadSm80:gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3
+cc=(8, 9) dims=(2048, 1536, 768) tf32=true served=TriadSm89Tf32Joint:gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1
+cc=(8, 9) dims=(4621, 384, 1928) tf32=true served=TriadSm89Tf32Joint:gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1
+cc=(8, 9) dims=(1024, 256, 128) tf32=true served=TriadSm80:gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4
+cc=(8, 9) dims=(1024, 128, 512) tf32=true served=TriadSm80:gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 5.07s
+

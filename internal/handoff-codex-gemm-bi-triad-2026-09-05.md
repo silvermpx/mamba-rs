@@ -2596,3 +2596,249 @@ eager/graph and ABBA/BAAB stratum; CUDA13.2 production once21 admits4/4 cells.
 cuBLAS Fast remains faster in these NT cells and is reported as a separate
 numerical contract. Evidence:
 `internal/perf/ada-triad-tf32-nt-stage-sliced-auto-20260909/report.md`.
+
+## Task 900: Artifact-preserving Inference rename (2026-09-10)
+
+The accepted kernel assembly is committed through `b47ff405`. This task is
+the already-requested release rename, not kernel discovery or a new GEMM mode.
+Work in the existing `codex/gemm-bi-triad-sm80` worktree. Root owns all GPU
+execution, remote snapshots, staging and commits. The implementer must not
+spawn children, start GPU/CUDA builds, alter the index, create branches,
+push, merge, publish or delete historical evidence.
+
+Requirements:
+
+1. Move `src/mamba_ssm/gpu/gemm_bi_fixed.rs` to `gemm_bi_inference.rs` and
+   `kernels/gemm_bi_fixed/` to `kernels/gemm_bi_inference/`. Every moved CUDA
+   source/header must remain byte-identical. Update real filesystem references
+   and Rust module imports/exports. Do not keep a duplicate implementation or
+   an old public module alias.
+2. Rename the public family variant `BiGemmFamily::Fixed` to `Inference`,
+   preserving its ordinal and all selection/numeric behavior. Accept the
+   public environment family token `inference` with the existing trim/case
+   rules; retain `fixed` solely as an input compatibility alias to the same
+   variant. Defaults remain unchanged in this task. Unknown/non-Unicode
+   inputs still fail closed and diagnostics advertise the canonical names.
+3. Rename the role-named public API inside the moved module consistently:
+   `FixedTile`, `FixedSm120HalfTile`, `FixedFwdOperands`, `FixedShape` become
+   their `Inference`-prefixed equivalents; `fixed_forward`,
+   `fixed_forward_with_tile`, `fixed_forward_f32_legacy_baseline` become the
+   corresponding `inference_forward*` entry points. Update all active Rust
+   callers/tests/examples and affected public documentation links/snippets.
+   This does not authorize renaming mathematical fixed-order/fixed-fold terms.
+4. Preserve every versioned physical/numeric/serialized identifier, CUDA
+   export, module-kind discriminant, compiler option, composer revision,
+   tuning revision, cache key and qualification constant. In particular the
+   persisted artifact kind `ModuleKind::Fixed` and contract/backend IDs may
+   keep their legacy names; they are not a duplicate backend. Preserve all
+   `SourceFragment.logical_name` strings and emitted `#line` boundaries even
+   though the physical directory moves. Explain that distinction next to the
+   production fragment inventory. Change `include_str!` filesystem paths,
+   never rewrite compiler logical names by global substitution.
+5. Do not change defaults, dispatch decisions, arithmetic, three-mode API,
+   GPU architecture gates or qualification admissions. Do not rewrite raw
+   receipts, old source snapshots or historical benchmark labels. Existing
+   qualification test target filenames can remain until the test-cleanup
+   phase; update their source imports and live filesystem accesses now.
+6. Tests first: extend the existing family-parser behavioral test with the
+   canonical `inference` spelling and a mixed-case/whitespace spelling while
+   it still expects the old variant. Freeze that tests-only context snapshot
+   and notify root; stop production edits until root observes the expected
+   parser RED on the CUDA host. Root then authorizes GREEN. Existing legacy
+   alias/default/unknown/non-Unicode behavior remains covered.
+7. Preserve compiler identity with real composer/identity tests, not a grep
+   asserting that a source string exists. Reuse the existing source-fragment,
+   compile-key, module discriminant and route-contract tests. If a compact
+   baseline source-digest fixture is needed, capture the actual pre-rename
+   composer outputs before editing production and freeze independent literals.
+   Root additionally compares all relocated CUDA bytes against `b47ff405`,
+   then runs focused CUDA-host source/identity/selector tests and actual Ada
+   binding/graph checks. No repeated full timing tournament is needed for a
+   source-identity-preserving rename.
+8. Use one coherent mechanical patch; avoid unrelated formatting or cleanup.
+   Report the exact rename mapping, remaining intentional legacy spellings,
+   RED/GREEN evidence, hashes, checks and concerns in the task report. Root
+   dispatches an independent spec/quality review and commits the verified phase.
+
+Preflight identity audit: `inference-rename-identity-audit.md` in this plan's
+SDD workspace. Before production edits, add a private real-composer unit test
+named `inference_composed_source_identity_is_frozen` for these independently
+computed baseline tuples (root must confirm them on the unchanged Rust composer):
+base composition615645 bytes / `fab86c118b49e88eaa566ef1c4322d039641fa11fbfa3c2dde402470b97b1d11`;
+Fixed `sm_89`723257 / `8ab4752c6f4b766486db09d22ddfc99df93dc1eb0507177f7edf92cc731233f4`;
+Fixed `compute_120`719063 / `8a9a5186c2a7763fab0027ab03417f6189730eac103e57d4863becd4a8a90a71`.
+Use literal length/hash expectations and the real composer/FramedSha256, not
+a second implementation of composition. Freeze both tests-only context.rs and
+modules.rs. Root first checks these baseline identities, then observes the
+parser RED. Any mismatch is investigated before the rename. All commands
+with the CUDA feature run on Ada, even for host-only tests; do not follow the
+audit's optional pinned-binding suggestion on the local Mac.
+
+Baseline correction: the preliminary audit's independently reconstructed
+composition did not match the real Rust composer. The tuples above are from
+the unchanged pre-rename composer on Ada; both architecture hashes independently
+match the already-committed full Inference performance packets at732c1146.
+All60 tracked CUDA/header files still equalb47ff405. Initial failing fixtures
+and the real-composer diagnostic are retained under
+`internal/perf/inference-rename-20260910/`; no production bytes or admission
+constants were changed to satisfy the test.
+
+## Task 901: Canonical GEMM modes and context policy (2026-09-10)
+
+This implements the approved release default and one context configuration
+authority. It is not the final model-wide no-cuBLAS proof: the separately
+listed direct-call seams must be closed before release. Read the bounded design
+`.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/gemm-mode-api-design.md`.
+Owner decisions override that document's provisional wording: Deterministic is
+the default; CublasFast and CublasPedantic are the only alternatives; Rustdoc
+must explain actual usage in plain technical language without marketing.
+
+Files: `src/mamba_ssm/gpu/context.rs`, `device.rs`, `blas.rs`,
+`kernel_identity.rs`, `mod.rs`; add `tests/gemm_mode_api.rs`. A private sibling
+`gemm_mode.rs` may hold pure configuration/transition logic if needed to keep
+context.rs readable, with one public type re-exported through context and gpu.
+Context-aware dispatch/capture/replay entry points may receive the central
+unusable-context guard described below. No CUDA bodies, selectors, cohort
+admissions, compiler identities or architecture gates change.
+
+Interfaces produced (existing String error convention):
+
+```rust
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GemmMode {
+    #[default]
+    Deterministic,
+    CublasFast,
+    CublasPedantic,
+}
+
+impl GemmMode {
+    pub fn parse_env_value(value: &str) -> Result<Self, String>;
+    pub const fn as_str(self) -> &'static str;
+}
+
+impl GpuCtx {
+    pub fn new_with_mode(device: &GpuDevice, mode: GemmMode) -> Result<Self, String>;
+    pub fn new_with_state_cap_and_mode(
+        device: &GpuDevice, state_cap: usize, mode: GemmMode,
+    ) -> Result<Self, String>;
+    pub fn set_gemm_mode(&self, mode: GemmMode) -> Result<(), String>;
+    pub fn gemm_mode(&self) -> GemmMode;
+}
+```
+
+- [ ] Tests first: add the new integration test with an actual public API
+  check below, plus live context mapping/transition checks. Freeze tests and
+  report to root before production edits. Root observes the missing-API RED
+  with CUDA compilation on Ada, then authorizes implementation.
+
+```rust
+#[test]
+fn gemm_mode_names_and_default() {
+    use mamba_rs::mamba_ssm::gpu::context::GemmMode;
+    assert_eq!(GemmMode::default(), GemmMode::Deterministic);
+    for (name, mode) in [
+        ("deterministic", GemmMode::Deterministic),
+        ("cublas-fast", GemmMode::CublasFast),
+        ("cublas-pedantic", GemmMode::CublasPedantic),
+    ] {
+        assert_eq!(GemmMode::parse_env_value(name).unwrap(), mode);
+        assert_eq!(mode.as_str(), name);
+    }
+    assert_eq!(GemmMode::parse_env_value(" \tdeterministic\n").unwrap(), GemmMode::Deterministic);
+    for bad in ["", "auto", "fast", "Deterministic", "cublas"] {
+        assert!(GemmMode::parse_env_value(bad).is_err(), "{bad:?}");
+    }
+}
+```
+
+- [ ] Replace independently writable mode booleans with one `Cell<GemmMode>`.
+  Derive batch_invariant/fast_gemm/tf32 and the existing GemmPolicy fields from
+  it. Keep family, tensor-core permission, F32 and half policy independent;
+  preserve them across all mode round trips. Fresh contexts use Triad family,
+  tensor-core permission true, ExactScalarFmaV1 and TiledParityV1. No implicit
+  stream-K opt-in from tensor-core permission. Explicit tensor-core false and
+  explicit stream-K remain available with their existing numeric contracts.
+  Ordinary constructors ignore ambient mode selectors; environment constructors
+  resolve/validate once before constructing the context.
+
+- [ ] Use exact mode mapping: Deterministic `(bi=true, fast=false, tf32=false)`;
+  Fast `(false,true,true)`; Pedantic `(false,false,false)`. Handle math is
+  PEDANTIC_MATH for Deterministic/Pedantic and TF32_TENSOR_OP_MATH for Fast.
+  Context-aware vendor GemmEx compute is COMPUTE_32F_PEDANTIC for Pedantic for
+  F32/F16/BF16, COMPUTE_32F for Fast. Preserve dtype-only standalone probe
+  helpers; do not globally redefine their existing numeric meaning. A custom
+  mode reaching a vendor dispatch boundary must return an error, never select
+  a vendor compute type. Direct no-context model bypasses are tracked separately.
+
+- [ ] Implement fallible reversible handle-math changes. Validate complete
+  policy and actual stream-capture/recorder state before mutation; reject a
+  different mode during capture or recording. Same-mode is a no-op on a usable
+  context. Query old handle math, set target, publish the mode cell only after
+  success. If the foreign update fails, verify/restore old math before returning
+  its error. If restoration cannot be verified, mark the context unusable and
+  reject subsequent supported context GEMM/capture/replay entry points through
+  one central guard. This error state is not a fourth selectable mode. Do not
+  replace handles/resources, clear caches or introduce permanent graph epochs.
+  Test the transaction with a minimal injected math backend: success, initial
+  query failure, update failure with unchanged math, restored update failure,
+  and unverified rollback. GPU checks query the real handle, not just flags.
+
+- [ ] Keep the old setters as migration adapters through the canonical setter,
+  with Rustdoc migration notes. Mark them deprecated and retain their signatures;
+  on foreign failure the old infallible adapter panics with the returned error.
+  `set_batch_invariant(true)` selects D; false selects Pedantic from D and
+  leaves a vendor mode unchanged. `set_fast_gemm(true)` selects Fast; false
+  leaves D unchanged and selects Pedantic from a vendor mode. `disable_tf32()`
+  leaves D/custom TF32 policy unchanged and selects Pedantic from vendor modes.
+  Thus `bi(true); fast(false)` and `fast(false); bi(true)` both select D;
+  `fast(true); bi(false)` and `bi(false); fast(true)` both select Fast.
+  Cover all nine canonical transitions, these adapter orders and policy/family
+  preservation. In this task migrate active production callers of deprecated
+  setters where intent is unambiguous; identify benchmark/test migrations with
+  their intended vendor baseline explicitly instead of blindly toggling flags.
+
+- [ ] Resolve `MAMBA_RS_GEMM_MODE` strictly as lowercase canonical names with
+  ASCII surrounding whitespace allowed; empty/unknown/non-Unicode errors.
+  Presence with either legacy BI or FAST variable is an error naming the
+  conflict, even if false. Without it preserve recognized legacy boolean
+  spellings but distinguish absence: neither -> D; BI=true with FAST absent/
+  false -> D; BI=true+FAST=true -> error; BI=false with FAST absent/false ->
+  Pedantic; FAST=false alone -> Pedantic; FAST=true with BI absent/false -> Fast.
+  Deterministic family/F32/half/tensor-core variables under vendor modes are
+  errors by presence, not silent no-ops. Validate the existing arch-rung flag.
+  Deterministic absent TC -> true; absent half -> tiled; explicit stream-K with
+  TC=false -> error. Retain `fixed` family input alias from Task900. Unit tests
+  inject environment values rather than mutate global process environment.
+
+- [ ] Version the changed vendor policy identity rather than reinterpret V1:
+  retain CUBLAS_POLICY_V1 and add CUBLAS_POLICY_V2 at the next unused bit; active
+  vendor routes use V2. Bump POLICY_REVISION from 5 to 6 and dispatch-policy
+  domain from v4 to v5 with an explicit vendor-policy revision field. Preserve
+  all custom numeric/artifact/compiler/tuning/schedule identities and previously
+  qualified selectors. Test the new mapping and identity drift; explain this
+  host-policy change without relabelling existing measured receipts.
+
+- [ ] Document the public enum, variants, constructors, setters/getters and
+  changed policy methods in Rustdoc as part of implementation. Give defaults,
+  arguments/output, errors, environment precedence, capture restrictions and
+  small usable examples with intra-doc links. Distinguish exact F32, custom
+  TF32 permission and vendor TF32. No all-shape/device bit-equality or speed
+  promise. Do not assert model-wide no-cuBLAS closure before routing tasks.
+  Use plain descriptions, no AI boilerplate, advertising or "magic". Remove
+  stale 18-cell/CC12.1 or scalar-versus-tensor claims from methods touched here.
+
+- [ ] Root runs focused host tests and real Ada mode/math/capture checks,
+  `cargo check --locked --release --features cuda --all-targets`, CUDA Rustdoc
+  with broken-intra-doc-links denied, scoped doctests and the non-CUDA lib
+  regression suite. Choose exact test names from binary listings; no full
+  performance tournament for this configuration task. Archive RED/GREEN,
+  source hashes and outstanding warnings. Root commits the verified slice and
+  dispatches independent spec/quality review before task completion.
+
+Root owns remote source snapshots, all CUDA/GPU execution, index and commits.
+The implementer is the sole source writer, must not spawn children, create
+branches, push, merge, publish or delete evidence. No allow(dead_code) or new
+blanket warning suppression. Subsequent phases cover high-level mode
+constructors, direct model GEMM bypasses (including true F32 mixed logits), M3
+physical graph manifests, benchmark migration, full documentation and packaging.

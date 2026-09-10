@@ -1,0 +1,20 @@
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::inference_composed_source_identity_is_frozen ... base: bytes=615645 chars=615059 sha256=fab86c118b49e88eaa566ef1c4322d039641fa11fbfa3c2dde402470b97b1d11
+sm_89: bytes=723257 chars=722671 sha256=8ab4752c6f4b766486db09d22ddfc99df93dc1eb0507177f7edf92cc731233f4
+compute_120: bytes=719063 chars=718477 sha256=8a9a5186c2a7763fab0027ab03417f6189730eac103e57d4863becd4a8a90a71
+
+thread 'mamba_ssm::gpu::gemm_bi_triad::modules::tests::inference_composed_source_identity_is_frozen' (2195422) panicked at src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:14387:13:
+assertion `left == right` failed: base composed source length
+  left: 615645
+ right: 615275
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    mamba_ssm::gpu::gemm_bi_triad::modules::tests::inference_composed_source_identity_is_frozen
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 778 filtered out; finished in 0.01s
+
