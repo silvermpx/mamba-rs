@@ -626,9 +626,7 @@ mod tied_head_capture_tests {
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::context::GemmMode;
 
-    #[test]
-    #[ignore = "needs a CUDA device and NVRTC"]
-    fn tied_f16_m3_capture_reserves_head_scratch_before_freeze() {
+    fn owned_lm(dtype: WeightDtype, tied: bool) -> GpuMamba3LM {
         const D_MODEL: usize = 16;
         const VOCAB_PADDED: usize = 512;
         let cfg = Mamba3Config {
@@ -648,17 +646,23 @@ mod tied_head_capture_tests {
         weights.input_proj_w.clear();
         weights.input_proj_b.clear();
         let embed = vec![0.125; VOCAB_PADDED * D_MODEL];
-        let mut lm = GpuMamba3LM::build(Mamba3LmBuild {
+        GpuMamba3LM::build(Mamba3LmBuild {
             cpu_weights: &weights,
             cfg,
             embed,
-            lm_head: None,
+            lm_head: (!tied).then(|| vec![0.125; VOCAB_PADDED * D_MODEL]),
             vocab_size: VOCAB_PADDED,
             gpu_ordinal: 0,
-            dtype: WeightDtype::F16,
+            dtype,
             batch: 1,
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device and NVRTC"]
+    fn tied_f16_m3_capture_reserves_head_scratch_before_freeze() {
+        let mut lm = owned_lm(WeightDtype::F16, true);
         lm.backbone
             .ctx()
             .set_gemm_mode(GemmMode::Deterministic)
@@ -666,12 +670,55 @@ mod tied_head_capture_tests {
 
         // Warm only the backbone. A prior head call would hide a missing
         // reservation in the LM capture wrapper.
-        lm.backbone.step_gpu_only(&vec![0.25; D_MODEL]).unwrap();
+        lm.backbone.step_gpu_only(&vec![0.25; lm.d_model]).unwrap();
         lm.capture_graph().unwrap();
         let reserved = lm.backbone.ctx().bi_upcast_scratch_ptrs();
         assert_ne!(reserved[0], 0);
         assert_ne!(reserved[1], 0);
         lm.compute_logits().unwrap();
         assert_eq!(lm.backbone.ctx().bi_upcast_scratch_ptrs(), reserved);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device and NVRTC"]
+    fn m3_tied_and_untied_heads_all_storage_without_vendor_gemm() {
+        use crate::mamba_ssm::gpu::blas::vendor_gemm_test::Guard;
+        use crate::mamba_ssm::gpu::context::BiGemmFamily;
+        let deny = Guard::new(true).unwrap();
+        for family in [BiGemmFamily::Inference, BiGemmFamily::Triad] {
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                for tied in [false, true] {
+                    eprintln!("M3 head {family:?} {dtype:?} tied={tied}");
+                    let mut lm = owned_lm(dtype, tied);
+                    lm.backbone
+                        .ctx()
+                        .set_gemm_mode(GemmMode::Deterministic)
+                        .unwrap();
+                    lm.backbone.ctx().set_bi_gemm_family(family);
+                    lm.backbone.ctx().set_bi_tensor_cores(true);
+                    let input = vec![0.25; lm.d_model];
+                    lm.backbone.step_gpu_only(&input).unwrap();
+                    lm.compute_logits().unwrap();
+                    let expected: Vec<_> = lm
+                        .gpu_logits
+                        .to_cpu(lm.backbone.stream())
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect();
+                    lm.capture_graph().unwrap();
+                    lm.backbone.reset().unwrap();
+                    lm.backbone.step_gpu_only(&input).unwrap();
+                    lm.compute_logits().unwrap();
+                    let output = lm.gpu_logits.to_cpu(lm.backbone.stream()).unwrap();
+                    assert!(output.iter().all(|x| x.is_finite()));
+                    assert_eq!(
+                        output.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            }
+        }
+        assert_eq!(deny.calls(), 0);
     }
 }

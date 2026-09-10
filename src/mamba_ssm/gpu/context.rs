@@ -1142,6 +1142,11 @@ impl GpuCtx {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn poison_gemm_for_test(&self) {
+        *self.gemm_unusable.borrow_mut() = Some("test: GPU GEMM context is unusable".into());
+    }
+
     pub(crate) fn ensure_vendor_gemm(&self, label: &str) -> Result<GemmMode, String> {
         self.ensure_gemm_usable()?;
         let mode = self.gemm_mode();

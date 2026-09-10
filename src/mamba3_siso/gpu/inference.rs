@@ -1,10 +1,10 @@
 //! Mamba-3 SISO GPU inference (T=1 step + CUDA Graph).
 //!
 //! 10-phase forward per layer:
-//!   F1: RMSNorm → F2: in_proj SGEMM → F3: m3_split (8-way + fused)
+//!   F1: RMSNorm → F2: in_proj GEMM → F3: m3_split (8-way + fused)
 //!   F4: BCNorm + bias + RoPE → F5: m3_compute_abg (alpha/beta/gamma)
 //!   F6: m3_step_fwd (trapezoidal SSM) → F7: output gating
-//!   F8: out_proj SGEMM → F9: residual add
+//!   F8: out_proj GEMM → F9: residual add
 //! Final: F10: norm_f RMSNorm
 //!
 //! Weight format: flat buffer + WeightSlice (CUDA Graph safe).
@@ -18,11 +18,393 @@ use crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
+use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
+};
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 type Stream = Arc<cudarc::driver::CudaStream>;
+
+#[cfg(test)]
+mod model_gemm_manifest_tests {
+    use super::*;
+    use crate::mamba_ssm::gpu::blas::vendor_gemm_test::Guard;
+    use crate::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode};
+    use crate::mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::{
+        assert_inventory, configure,
+    };
+
+    fn config(layers: usize) -> Mamba3Config {
+        Mamba3Config {
+            d_model: 32,
+            d_state: 8,
+            expand: 2,
+            headdim: 8,
+            ngroups: 1,
+            n_layers: layers,
+            rope_fraction: 0.5,
+            a_floor: 0.0625,
+            is_outproj_norm: true,
+            ..Mamba3Config::default()
+        }
+    }
+
+    fn weights(cfg: &Mamba3Config, input: usize, identity: bool) -> Mamba3Weights {
+        let mut weights = Mamba3Weights::init(cfg, input, 0x9053);
+        if identity {
+            weights.input_proj_w.clear();
+            weights.input_proj_b.clear();
+        }
+        weights
+    }
+
+    fn projections(
+        cfg: &Mamba3Config,
+        batch: usize,
+        input: Option<usize>,
+    ) -> Vec<(usize, usize, usize)> {
+        let mut expected = Vec::new();
+        if let Some(input) = input {
+            expected.push((batch, input, cfg.d_model));
+        }
+        let layer = [
+            (batch, cfg.d_model, cfg.in_proj_out_dim()),
+            (batch, cfg.d_inner(), cfg.d_model),
+        ];
+        for _ in 0..cfg.n_layers {
+            expected.extend(layer);
+        }
+        expected
+    }
+
+    fn bits(output: &[f32]) -> Vec<u32> {
+        assert!(output.iter().all(|x| x.is_finite()));
+        output.iter().map(|x| x.to_bits()).collect()
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m3_capture_requires_successful_public_eager_manifest() {
+        let device = GpuDevice::new(0).expect("CUDA device");
+        let cfg = config(1);
+        let mut weights = Mamba3Weights::init(&cfg, cfg.d_model, 0x9050_0003);
+        weights.input_proj_w.clear();
+        weights.input_proj_b.clear();
+        let mut engine = Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1)
+            .expect("M3 owned fixture");
+        engine.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        engine.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        let mut state = engine.alloc_state().unwrap();
+        let mut scratch = engine.alloc_scratch().unwrap();
+        scratch
+            .gpu_input
+            .upload(&engine.ctx.stream, &[0.01; 32])
+            .unwrap();
+        // Warm the actual production body and its caches, but never grant the
+        // public eager-step permit that capture is required to consume.
+        crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung(&engine.ctx).unwrap();
+        engine.step_kernels(&mut state, &mut scratch).unwrap();
+        engine.ctx.stream.synchronize().unwrap();
+        let result = unsafe { engine.capture_graph(&mut state, &mut scratch) };
+        // Destroy any incorrectly accepted graph while its buffers still live.
+        drop(engine);
+        let error = result.expect_err("capture must reject a missing successful eager manifest");
+        assert!(
+            error.contains("eager"),
+            "unexpected capture rejection: {error}"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m3_model_manifests_replay_all_paths_without_vendor_gemm() {
+        let device = GpuDevice::new(0).unwrap();
+        let cfg = config(2);
+        let deny = Guard::new(true).unwrap();
+        for (family, tc) in [
+            (BiGemmFamily::Inference, true),
+            (BiGemmFamily::Triad, false),
+            (BiGemmFamily::Triad, true),
+        ] {
+            for batch in [1, 3] {
+                eprintln!("M3 F32 {family:?} tc={tc} B{batch} nonidentity");
+                let input = vec![0.01; batch * 24];
+                let mut output = vec![0.0; batch * cfg.d_model];
+                let mut engine = Mamba3GpuInferenceEngine::new(
+                    &device,
+                    &weights(&cfg, 24, false),
+                    cfg,
+                    24,
+                    batch,
+                )
+                .unwrap();
+                configure(&engine.ctx, family, tc);
+                let mut state = engine.alloc_state().unwrap();
+                let mut scratch = engine.alloc_scratch().unwrap();
+                engine
+                    .step(&input, &mut output, &mut state, &mut scratch)
+                    .unwrap();
+                let trace = engine
+                    .ctx
+                    .record_eager_gemm_trace(|| engine.step_kernels(&mut state, &mut scratch))
+                    .unwrap();
+                state.reset(&engine.ctx.stream).unwrap();
+                engine
+                    .step_gpu_only(&input, &mut state, &mut scratch)
+                    .unwrap();
+                output = scratch.temporal.to_cpu(&engine.ctx.stream).unwrap();
+                let expected_bits = bits(&output);
+                let manifest = engine.eager_gemm_manifest.get().unwrap();
+                unsafe { engine.capture_graph(&mut state, &mut scratch) }.unwrap();
+                assert!(engine.eager_gemm_manifest.get().is_none());
+                assert_inventory(
+                    &engine.ctx,
+                    &trace,
+                    manifest,
+                    engine.captured_gemm_plan.as_ref().unwrap(),
+                    &projections(&cfg, batch, Some(24)),
+                );
+                for gpu_only in [false, true] {
+                    state.reset(&engine.ctx.stream).unwrap();
+                    if gpu_only {
+                        engine
+                            .step_gpu_only(&input, &mut state, &mut scratch)
+                            .unwrap();
+                        output = scratch.temporal.to_cpu(&engine.ctx.stream).unwrap();
+                    } else {
+                        engine
+                            .step(&input, &mut output, &mut state, &mut scratch)
+                            .unwrap();
+                    }
+                    assert_eq!(bits(&output), expected_bits);
+                }
+                drop(engine);
+                for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                    eprintln!("M3 {dtype:?} native {family:?} tc={tc} B{batch}");
+                    let input = vec![0.01; batch * cfg.d_model];
+                    let mut engine = Mamba3GpuInferenceMixed::new(
+                        &device,
+                        &weights(&cfg, cfg.d_model, true),
+                        cfg,
+                        cfg.d_model,
+                        batch,
+                        dtype,
+                    )
+                    .unwrap();
+                    configure(&engine.engine.ctx, family, tc);
+                    let mut state = engine.alloc_state().unwrap();
+                    let mut scratch = engine.alloc_mixed_scratch().unwrap();
+                    let ctx = &engine.engine.ctx;
+                    engine
+                        .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
+                        .unwrap();
+                    let trace = ctx
+                        .record_eager_gemm_trace(|| {
+                            engine.step_kernels_mixed_native(&mut state, &mut scratch)
+                        })
+                        .unwrap();
+                    state.reset(&ctx.stream).unwrap();
+                    engine
+                        .step_gpu_only_mixed_native(&input, &mut state, &mut scratch)
+                        .unwrap();
+                    scratch
+                        .temporal
+                        .download_f32(&ctx.stream, &mut output)
+                        .unwrap();
+                    let expected_bits = bits(&output);
+                    let manifest = engine.eager_gemm_manifest.get().unwrap();
+                    unsafe { engine.capture_graph_mixed_native(&mut state, &mut scratch) }.unwrap();
+                    let ctx = &engine.engine.ctx;
+                    assert!(engine.eager_gemm_manifest.get().is_none());
+                    assert_inventory(
+                        ctx,
+                        &trace,
+                        manifest,
+                        engine.captured_gemm_plan.as_ref().unwrap(),
+                        &projections(&cfg, batch, None),
+                    );
+                    if family == BiGemmFamily::Triad && !tc {
+                        assert!(trace.routes().iter().all(|r| r.symbol.contains("matvec")));
+                    }
+                    for gpu_only in [false, true] {
+                        state.reset(&ctx.stream).unwrap();
+                        if gpu_only {
+                            engine
+                                .step_gpu_only_mixed_native(&input, &mut state, &mut scratch)
+                                .unwrap();
+                            scratch
+                                .temporal
+                                .download_f32(&ctx.stream, &mut output)
+                                .unwrap();
+                        } else {
+                            engine
+                                .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
+                                .unwrap();
+                        }
+                        assert_eq!(bits(&output), expected_bits);
+                    }
+                    drop(engine);
+                }
+            }
+        }
+        assert_eq!(deny.calls(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan() {
+        let device = GpuDevice::new(0).unwrap();
+        let cfg = config(2);
+        let weights = weights(&cfg, cfg.d_model, true);
+        let input = vec![0.01; cfg.d_model];
+        let mut output = vec![0.0; cfg.d_model];
+        let mut engine =
+            Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+        configure(&engine.ctx, BiGemmFamily::Inference, true);
+        let mut state = engine.alloc_state().unwrap();
+        let mut scratch = engine.alloc_scratch().unwrap();
+        for gpu_only in [false, true] {
+            engine
+                .step(&input, &mut output, &mut state, &mut scratch)
+                .unwrap();
+            assert!(engine.eager_gemm_manifest.get().is_some());
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if gpu_only {
+                    engine.step_gpu_only(&[], &mut state, &mut scratch)
+                } else {
+                    engine.step(&[], &mut output, &mut state, &mut scratch)
+                }
+            }));
+            assert!(failed.is_err());
+            assert!(engine.eager_gemm_manifest.get().is_none());
+            assert!(
+                unsafe { engine.capture_graph(&mut state, &mut scratch) }
+                    .unwrap_err()
+                    .contains("eager")
+            );
+        }
+        engine
+            .step(&input, &mut output, &mut state, &mut scratch)
+            .unwrap();
+        let trace = engine
+            .ctx
+            .record_eager_gemm_trace(|| engine.step_kernels(&mut state, &mut scratch))
+            .unwrap();
+        unsafe { engine.capture_graph(&mut state, &mut scratch) }.unwrap();
+        let installed = engine.captured_gemm_plan.as_ref().unwrap().launches;
+        let mut missing = trace.routes().to_vec();
+        missing.remove(1);
+        let wrong = crate::mamba_ssm::gpu::kernel_identity::RecordedGemmTrace::from_routes(
+            engine.ctx.gemm_route(),
+            missing,
+        )
+        .unwrap()
+        .manifest();
+        engine.eager_gemm_manifest.set(Some(wrong));
+        assert!(unsafe { engine.capture_graph(&mut state, &mut scratch) }.is_err());
+        assert!(engine.eager_gemm_manifest.get().is_none());
+        assert_eq!(
+            engine.captured_gemm_plan.as_ref().unwrap().launches,
+            installed
+        );
+        assert!(engine.has_graph());
+        engine
+            .step(&input, &mut output, &mut state, &mut scratch)
+            .unwrap();
+        drop(engine);
+
+        let mut engine =
+            Mamba3GpuInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::F16)
+                .unwrap();
+        configure(&engine.engine.ctx, BiGemmFamily::Inference, true);
+        let mut state = engine.alloc_state().unwrap();
+        let mut scratch = engine.alloc_mixed_scratch().unwrap();
+        assert!(
+            unsafe { engine.capture_graph_mixed_native(&mut state, &mut scratch) }
+                .unwrap_err()
+                .contains("eager")
+        );
+        for gpu_only in [false, true] {
+            engine
+                .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
+                .unwrap();
+            assert!(engine.eager_gemm_manifest.get().is_some());
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if gpu_only {
+                    engine.step_gpu_only_mixed_native(&[], &mut state, &mut scratch)
+                } else {
+                    engine.step_mixed_native(&[], &mut output, &mut state, &mut scratch)
+                }
+            }));
+            assert!(failed.is_err());
+            assert!(engine.eager_gemm_manifest.get().is_none());
+            assert!(
+                unsafe { engine.capture_graph_mixed_native(&mut state, &mut scratch) }
+                    .unwrap_err()
+                    .contains("eager")
+            );
+        }
+        engine
+            .step_gpu_only_mixed_native(&input, &mut state, &mut scratch)
+            .unwrap();
+        unsafe { engine.capture_graph_mixed_native(&mut state, &mut scratch) }.unwrap();
+        assert!(
+            engine
+                .engine
+                .ctx
+                .ensure_half_staging(usize::MAX)
+                .unwrap_err()
+                .contains("cannot grow")
+        );
+        let original = engine.captured_bi_upcast_ptrs;
+        engine.captured_bi_upcast_ptrs[0] ^= 16;
+        assert!(
+            engine
+                .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
+                .unwrap_err()
+                .contains("staging scratch changed")
+        );
+        engine.captured_bi_upcast_ptrs = original;
+        engine
+            .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
+            .unwrap();
+        drop(engine);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m3_explicit_vendor_graph_without_custom_plan_replays() {
+        let device = GpuDevice::new(0).unwrap();
+        let cfg = config(1);
+        let weights = weights(&cfg, cfg.d_model, true);
+        for mode in [GemmMode::CublasFast, GemmMode::CublasPedantic] {
+            let mut engine =
+                Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+            engine.ctx.set_gemm_mode(mode).unwrap();
+            let mut state = engine.alloc_state().unwrap();
+            let mut scratch = engine.alloc_scratch().unwrap();
+            let input = vec![0.01; cfg.d_model];
+            let mut output = vec![0.0; cfg.d_model];
+            engine
+                .step(&input, &mut output, &mut state, &mut scratch)
+                .unwrap();
+            let expected = bits(&output);
+            unsafe { engine.capture_graph(&mut state, &mut scratch) }.unwrap();
+            assert!(engine.captured_gemm_plan.is_none());
+            state.reset(&engine.ctx.stream).unwrap();
+            engine
+                .step(&input, &mut output, &mut state, &mut scratch)
+                .unwrap();
+            assert_eq!(bits(&output), expected);
+            drop(engine);
+        }
+    }
+}
 
 /// Persistent recurrent state for GPU Mamba-3 inference (all layers).
 pub struct Mamba3GpuInferenceState {
@@ -287,7 +669,7 @@ impl Mamba3GpuInferenceMixedScratch {
 /// Mamba-3 SISO GPU inference engine.
 ///
 /// Holds compiled kernels, weights (flat buffer), cuBLAS handle.
-/// Supports CUDA Graph capture for ~2-5x launch speedup.
+/// Supports CUDA Graph capture with a validated GEMM-only inventory.
 ///
 /// Usage:
 /// 1. `Mamba3GpuInferenceEngine::new()` — compile kernels, upload weights
@@ -313,6 +695,8 @@ pub struct Mamba3GpuInferenceEngine {
     pub identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
+    eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
 }
@@ -357,6 +741,8 @@ impl Mamba3GpuInferenceEngine {
             identity_proj,
             graph: None,
             captured_gemm_route: None,
+            captured_gemm_plan: None,
+            eager_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
         })
@@ -364,11 +750,12 @@ impl Mamba3GpuInferenceEngine {
 
     /// Capture CUDA Graph for the inference step.
     ///
-    /// After capture, `step()` replays the graph instead of launching kernels
-    /// individually, reducing launch overhead from ~2ms to ~100us per step.
+    /// After capture, both step entries replay the fixed-buffer graph.
     ///
-    /// Call after at least one warmup `step()` to stabilize kernel launches.
-    /// H2D/D2H transfers remain outside the graph.
+    /// Requires and consumes a successful eager step on these buffers. GEMM
+    /// mode/family changes require new eager preparation and capture. Missing
+    /// or mismatching GEMM inventories are errors. H2D/D2H transfers remain
+    /// outside the body and graph; the manifest covers GEMMs only.
     ///
     /// # Safety
     ///
@@ -380,23 +767,53 @@ impl Mamba3GpuInferenceEngine {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
+        let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
+            "M3 f32 inference graph capture requires a successful eager step".to_string()
+        })?;
         self.ctx.presize_bi_scratch()?;
         let snap_state = state.ssm_state.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_gemm_route = self.ctx.gemm_route();
-        let stream = self.ctx.stream.clone();
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(&self.ctx, manifest.route_capacity, &manifest, || {
                 self.step_kernels(state, scratch)
             })
         }?;
-        // capture_into_graph pre-uploads the instantiated graph.
+        require_deterministic_gemm_graph_plan(
+            &self.ctx,
+            self.has_gemm_work(),
+            captured_gemm_plan.as_ref(),
+            "M3 f32 inference graph capture",
+        )?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
+        self.captured_gemm_plan = captured_gemm_plan;
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.ctx.note_graph_capture();
         Ok(())
+    }
+
+    fn has_gemm_work(&self) -> bool {
+        self.batch != 0 && (!self.identity_proj || self.cfg.n_layers != 0)
+    }
+
+    fn launch_captured_graph(&self) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "M3 graph is not captured".to_string())?;
+        with_validated_gemm_graph_launch(
+            &self.ctx,
+            self.has_gemm_work(),
+            self.captured_gemm_plan.as_ref(),
+            "M3 f32 inference graph replay",
+            || {
+                graph
+                    .launch()
+                    .map_err(|error| format!("M3 graph launch: {error:?}"))
+            },
+        )
     }
 
     /// Whether a CUDA Graph has been captured.
@@ -579,8 +996,8 @@ impl Mamba3GpuInferenceEngine {
 
     /// Launch the 10-phase T=1 forward for one layer.
     ///
-    /// Phases: F1(RMSNorm) → F2(in_proj SGEMM) → F3(m3_split) → F4(BCNorm+bias+RoPE)
-    ///       → F5(alpha/beta/gamma) → F6(m3_step_fwd) → F7(gating) → F8(out_proj SGEMM)
+    /// Phases: F1(RMSNorm) → F2(in_proj GEMM) → F3(m3_split) → F4(BCNorm+bias+RoPE)
+    ///       → F5(alpha/beta/gamma) → F6(m3_step_fwd) → F7(gating) → F8(out_proj GEMM)
     ///       → F9(residual add)
     ///
     /// Called inside CUDA Graph capture or directly.
@@ -884,10 +1301,13 @@ impl Mamba3GpuInferenceEngine {
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
         // H2D: upload input (outside graph)
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // GPU kernel pipeline (graph replay or individual launches)
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
                 return Err("M3 inference graph replay: GEMM route changed since capture".into());
             }
@@ -901,9 +1321,15 @@ impl Mamba3GpuInferenceEngine {
                 self.captured_scratch_ptr,
                 "CUDA Graph replay requires the same scratch buffers used during capture"
             );
-            g.launch().map_err(|e| format!("graph launch: {e:?}"))?;
+            self.launch_captured_graph()?;
         } else {
-            self.step_kernels(state, scratch)?;
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.ctx)?;
+            }
+            let manifest = self
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
         }
 
         // Sync + D2H download
@@ -927,17 +1353,25 @@ impl Mamba3GpuInferenceEngine {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
                 return Err("M3 inference graph replay: GEMM route changed since capture".into());
             }
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("graph launch (step_gpu_only): {e:?}"))?;
+            self.launch_captured_graph()?;
         } else {
-            self.step_kernels(state, scratch)?;
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.ctx)?;
+            }
+            let manifest = self
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
         }
         Ok(())
     }
@@ -960,6 +1394,8 @@ pub struct Mamba3GpuInferenceMixed {
     mixed_weights: GpuMamba3MixedWeights,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
+    eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
     captured_half_staging_ptr: u64,
@@ -974,6 +1410,28 @@ impl Drop for Mamba3GpuInferenceMixed {
 }
 
 impl Mamba3GpuInferenceMixed {
+    fn has_gemm_work(&self) -> bool {
+        self.engine.batch != 0 && self.engine.cfg.n_layers != 0
+    }
+
+    fn launch_captured_graph(&self) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "M3 mixed graph is not captured".to_string())?;
+        with_validated_gemm_graph_launch(
+            &self.engine.ctx,
+            self.has_gemm_work(),
+            self.captured_gemm_plan.as_ref(),
+            "M3 mixed inference graph replay",
+            || {
+                graph
+                    .launch()
+                    .map_err(|error| format!("M3 graph launch mixed: {error:?}"))
+            },
+        )
+    }
+
     fn ensure_graph_scratch(&self) -> Result<(), String> {
         self.engine.ctx.ensure_graph_scratch_ptrs(
             self.captured_half_staging_ptr,
@@ -1003,6 +1461,8 @@ impl Mamba3GpuInferenceMixed {
             mixed_weights,
             graph: None,
             captured_gemm_route: None,
+            captured_gemm_plan: None,
+            eager_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
             captured_half_staging_ptr: 0,
@@ -1504,8 +1964,11 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "M3 mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1514,10 +1977,16 @@ impl Mamba3GpuInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("M3 graph launch mixed: {e:?}"))?;
+            self.launch_captured_graph()?;
         } else {
-            self.step_kernels_mixed_native(state, scratch)?;
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed_native(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
         }
         self.engine
             .ctx
@@ -1536,8 +2005,11 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "M3 mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1546,14 +2018,25 @@ impl Mamba3GpuInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("M3 graph launch mixed: {e:?}"))?;
+            self.launch_captured_graph()?;
             Ok(())
         } else {
-            self.step_kernels_mixed_native(state, scratch)
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed_native(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
+            Ok(())
         }
     }
 
+    /// Capture the native half pipeline after a successful eager step on these
+    /// fixed buffers. Consumes its GEMM-only manifest and rejects missing work,
+    /// changed mode/family, or changed bindings. H2D/D2H stay outside the graph.
+    ///
     /// # Safety
     ///
     /// `state`, `scratch`, and their views must remain unchanged until the
@@ -1564,6 +2047,9 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
+            "M3 mixed inference graph capture requires a successful eager step".to_string()
+        })?;
         self.engine.ctx.presize_bi_scratch()?;
         self.engine.ctx.presize_mixed_graph_scratch_m3(
             &self.engine.prefill_dims(1),
@@ -1574,15 +2060,24 @@ impl Mamba3GpuInferenceMixed {
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
         let snap_bi_upcast = self.engine.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.engine.ctx.gemm_route();
-        let stream = self.engine.ctx.stream.clone();
         self.engine.ctx.freeze_graph_scratch();
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
-                self.step_kernels_mixed_native(state, scratch)
-            })
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(
+                &self.engine.ctx,
+                manifest.route_capacity,
+                &manifest,
+                || self.step_kernels_mixed_native(state, scratch),
+            )
         }?;
+        require_deterministic_gemm_graph_plan(
+            &self.engine.ctx,
+            self.has_gemm_work(),
+            captured_gemm_plan.as_ref(),
+            "M3 mixed inference graph capture",
+        )?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
+        self.captured_gemm_plan = captured_gemm_plan;
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.captured_half_staging_ptr = snap_half_staging;

@@ -1,7 +1,9 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::{MambaConfig, ScanMode};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy};
+use mamba_rs::mamba_ssm::gpu::context::{
+    BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy,
+};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::{GpuMambaInference, GpuMambaInferenceMixed};
@@ -12,25 +14,23 @@ use mamba_rs::weights::MambaWeights;
 
 const OUTPUT_POISON_BITS: u32 = 0x7fc0_d00d;
 
-fn configure_decode_route(ctx: &GpuCtx, tensor_cores: bool) {
-    ctx.set_fast_gemm(false);
-    ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+fn configure_decode_route(ctx: &GpuCtx, tensor_cores: bool, family: BiGemmFamily) {
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+    ctx.set_bi_gemm_family(family);
     ctx.set_bi_tensor_cores(tensor_cores);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
 }
 
-fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool) {
+fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool, family: BiGemmFamily) {
     let route = ctx.gemm_route();
     assert!(
         route.policy.batch_invariant,
         "{label} batch-invariant route"
     );
     assert_eq!(
-        route.policy.bi_gemm_family,
-        BiGemmFamily::Triad,
-        "{label} Triad family"
+        route.policy.bi_gemm_family, family,
+        "{label} selected family"
     );
     assert_eq!(
         route.policy.f32_triad_policy,
@@ -95,6 +95,15 @@ fn m3_config() -> Mamba3Config {
 
 #[test]
 fn decode_graphs_reject_complete_route_drift() {
+    decode_graphs_reject_route_drift(BiGemmFamily::Triad);
+}
+
+#[test]
+fn inference_decode_graphs_reject_complete_route_drift() {
+    decode_graphs_reject_route_drift(BiGemmFamily::Inference);
+}
+
+fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
     let device = GpuDevice::new(0).expect("CUDA device");
     let input = vec![0.01; 32];
     let mut output = vec![0.0; 32];
@@ -105,8 +114,8 @@ fn decode_graphs_reject_complete_route_drift() {
     weights.input_proj_b.clear();
 
     let mut f32 = GpuMambaInference::new(&device, &weights, cfg, cfg.d_model, 1).expect("M1 f32");
-    configure_decode_route(f32.ctx(), false);
-    assert_decode_route(f32.ctx(), "M1 f32", false);
+    configure_decode_route(f32.ctx(), false, family);
+    assert_decode_route(f32.ctx(), "M1 f32", false, family);
     let captured_route = f32.ctx().gemm_route();
     let mut state = f32.alloc_state().expect("M1 f32 state");
     let mut scratch = f32.alloc_scratch().expect("M1 f32 scratch");
@@ -131,8 +140,8 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut mixed =
         GpuMambaInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
             .expect("M1 mixed");
-    configure_decode_route(mixed.ctx(), true);
-    assert_decode_route(mixed.ctx(), "M1 BF16", true);
+    configure_decode_route(mixed.ctx(), true, family);
+    assert_decode_route(mixed.ctx(), "M1 BF16", true, family);
     let captured_route = mixed.ctx().gemm_route();
     let mut state = mixed.alloc_state().expect("M1 mixed state");
     let mut scratch = mixed.alloc_mixed_scratch().expect("M1 mixed scratch");
@@ -169,8 +178,8 @@ fn decode_graphs_reject_complete_route_drift() {
 
     let mut f32 =
         Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).expect("M3 f32");
-    configure_decode_route(f32.ctx(), false);
-    assert_decode_route(f32.ctx(), "M3 f32", false);
+    configure_decode_route(f32.ctx(), false, family);
+    assert_decode_route(f32.ctx(), "M3 f32", false, family);
     let captured_route = f32.ctx().gemm_route();
     let mut state = f32.alloc_state().expect("M3 f32 state");
     let mut scratch = f32.alloc_scratch().expect("M3 f32 scratch");
@@ -195,8 +204,8 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut mixed =
         Mamba3GpuInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
             .expect("M3 mixed");
-    configure_decode_route(mixed.engine_ref().ctx(), true);
-    assert_decode_route(mixed.engine_ref().ctx(), "M3 BF16", true);
+    configure_decode_route(mixed.engine_ref().ctx(), true, family);
+    assert_decode_route(mixed.engine_ref().ctx(), "M3 BF16", true, family);
     let captured_route = mixed.engine_ref().ctx().gemm_route();
     let mut state = mixed.alloc_state().expect("M3 mixed state");
     let mut scratch = mixed.alloc_mixed_scratch().expect("M3 mixed scratch");

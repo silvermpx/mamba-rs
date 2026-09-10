@@ -11,7 +11,11 @@ use super::context::GpuCtx;
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
 use super::forward::GpuMambaDims;
-use super::graph_capture::{capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan};
+use super::gemm_bi_inference::prepare_inference_arch_rung;
+use super::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
+};
 use super::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use super::launch::{grid_1d, grid_norm};
 use super::weights::{
@@ -23,15 +27,435 @@ use cudarc::driver::PushKernelArg;
 use std::cell::Cell;
 use std::sync::Arc;
 
-fn with_validated_launch(
-    ctx: &GpuCtx,
-    plan: Option<&CapturedGemmGraphPlan>,
-    label: &str,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    match plan {
-        Some(plan) => plan.with_validated_launch(ctx, label, launch),
-        None => launch(),
+#[cfg(test)]
+mod model_gemm_manifest_tests {
+    use super::super::blas::vendor_gemm_test::Guard;
+    use super::super::context::BiGemmFamily;
+    use super::super::graph_capture::model_gemm_guard_tests::{
+        assert_inventory, assert_plan_mutations, configure,
+    };
+    use super::*;
+    use crate::config::ScanMode;
+
+    fn config() -> MambaConfig {
+        MambaConfig {
+            d_model: 32,
+            n_layers: 2,
+            d_state: 8,
+            d_conv: 4,
+            expand: 2,
+            scan_mode: ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
+        }
+    }
+
+    fn weights(cfg: &MambaConfig, input_dim: usize, identity: bool) -> MambaWeights {
+        let mut weights = MambaWeights::init(cfg, input_dim, 0x9051);
+        if identity {
+            weights.input_proj_w.clear();
+            weights.input_proj_b.clear();
+        }
+        weights
+    }
+
+    fn projections(
+        cfg: &MambaConfig,
+        batch: usize,
+        input: Option<usize>,
+    ) -> Vec<(usize, usize, usize)> {
+        let mut expected = Vec::new();
+        if let Some(input) = input {
+            expected.push((batch, input, cfg.d_model));
+        }
+        let layer = [
+            (batch, cfg.d_model, 2 * cfg.d_inner()),
+            (batch, cfg.d_inner(), cfg.xdbl_dim()),
+            (batch, cfg.dt_rank(), cfg.d_inner()),
+            (batch, cfg.d_inner(), cfg.d_model),
+        ];
+        for _ in 0..cfg.n_layers {
+            expected.extend(layer);
+        }
+        expected
+    }
+
+    fn bits(output: &[f32]) -> Vec<u32> {
+        assert!(output.iter().all(|x| x.is_finite()));
+        output.iter().map(|x| x.to_bits()).collect()
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m1_failed_steps_clear_permits_and_mixed_graphs_reject_wrong_path() {
+        let device = GpuDevice::new(0).unwrap();
+        let cfg = config();
+        let weights = weights(&cfg, cfg.d_model, true);
+        let input = vec![0.01; cfg.d_model];
+        let mut output = vec![0.0; cfg.d_model];
+        let mut f32 = GpuMambaInference::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+        configure(&f32.ctx, BiGemmFamily::Inference, true);
+        let mut state = f32.alloc_state().unwrap();
+        let mut scratch = f32.alloc_scratch().unwrap();
+        assert!(
+            unsafe { f32.capture_graph(&mut state, &mut scratch) }
+                .unwrap_err()
+                .contains("eager")
+        );
+        for gpu_only in [false, true] {
+            f32.step(&input, &mut output, &mut state, &mut scratch)
+                .unwrap();
+            assert!(f32.eager_gemm_manifest.get().is_some());
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if gpu_only {
+                    f32.step_gpu_only(&[], &mut state, &mut scratch)
+                } else {
+                    f32.step(&[], &mut output, &mut state, &mut scratch)
+                }
+            }));
+            assert!(failed.is_err());
+            assert!(f32.eager_gemm_manifest.get().is_none());
+            assert!(
+                unsafe { f32.capture_graph(&mut state, &mut scratch) }
+                    .unwrap_err()
+                    .contains("eager")
+            );
+        }
+        // A manifest prepared against different live buffers cannot install a
+        // graph. The capture error must also consume that old permit.
+        f32.step(&input, &mut output, &mut state, &mut scratch)
+            .unwrap();
+        let mut cold_scratch = f32.alloc_scratch().unwrap();
+        assert!(unsafe { f32.capture_graph(&mut state, &mut cold_scratch) }.is_err());
+        assert!(!f32.has_graph());
+        assert!(f32.eager_gemm_manifest.get().is_none());
+        drop(f32);
+
+        let mut engine =
+            GpuMambaInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
+                .unwrap();
+        configure(&engine.engine.ctx, BiGemmFamily::Inference, true);
+        let mut state = engine.alloc_state().unwrap();
+        let mut legacy = engine.alloc_scratch().unwrap();
+        let mut native = engine.alloc_mixed_scratch().unwrap();
+        for path in [MixedGraphPath::Legacy, MixedGraphPath::Native] {
+            for gpu_only in [false, true] {
+                engine
+                    .step(&input, &mut output, &mut state, &mut legacy)
+                    .unwrap();
+                engine
+                    .step_mixed_native(&input, &mut output, &mut state, &mut native)
+                    .unwrap();
+                let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match (path, gpu_only) {
+                        (MixedGraphPath::Legacy, false) => {
+                            engine.step(&[], &mut output, &mut state, &mut legacy)
+                        }
+                        (MixedGraphPath::Legacy, true) => {
+                            engine.step_gpu_only(&[], &mut state, &mut legacy)
+                        }
+                        (MixedGraphPath::Native, false) => {
+                            engine.step_mixed_native(&[], &mut output, &mut state, &mut native)
+                        }
+                        (MixedGraphPath::Native, true) => {
+                            engine.step_gpu_only_mixed_native(&[], &mut state, &mut native)
+                        }
+                    }
+                }));
+                assert!(failed.is_err());
+                if path == MixedGraphPath::Legacy {
+                    assert!(engine.eager_legacy_gemm_manifest.get().is_none());
+                    assert!(engine.eager_mixed_native_gemm_manifest.get().is_some());
+                    assert!(
+                        unsafe { engine.capture_graph(&mut state, &mut legacy) }
+                            .unwrap_err()
+                            .contains("eager")
+                    );
+                } else {
+                    assert!(engine.eager_mixed_native_gemm_manifest.get().is_none());
+                    assert!(engine.eager_legacy_gemm_manifest.get().is_some());
+                    assert!(
+                        unsafe { engine.capture_graph_mixed_native(&mut state, &mut native) }
+                            .unwrap_err()
+                            .contains("eager")
+                    );
+                }
+            }
+        }
+        engine
+            .step(&input, &mut output, &mut state, &mut legacy)
+            .unwrap();
+        engine
+            .step_mixed_native(&input, &mut output, &mut state, &mut native)
+            .unwrap();
+        unsafe { engine.capture_graph_mixed_native(&mut state, &mut native) }.unwrap();
+        assert!(
+            engine
+                .step(&input, &mut output, &mut state, &mut legacy)
+                .unwrap_err()
+                .contains("captured path")
+        );
+        assert!(
+            engine
+                .step_gpu_only(&input, &mut state, &mut legacy)
+                .unwrap_err()
+                .contains("captured path")
+        );
+        // Recapture the other prepared path into the same slot; the association
+        // and plan must change together, not retain the native plan.
+        unsafe { engine.capture_graph(&mut state, &mut legacy) }.unwrap();
+        assert_eq!(engine.captured_path, Some(MixedGraphPath::Legacy));
+        assert!(
+            engine
+                .step_mixed_native(&input, &mut output, &mut state, &mut native)
+                .unwrap_err()
+                .contains("captured path")
+        );
+        assert!(
+            engine
+                .step_gpu_only_mixed_native(&input, &mut state, &mut native)
+                .unwrap_err()
+                .contains("captured path")
+        );
+        let ctx = &engine.engine.ctx;
+        assert!(
+            ctx.ensure_half_staging(usize::MAX)
+                .unwrap_err()
+                .contains("cannot grow")
+        );
+        let original = engine.captured_half_staging_ptr;
+        engine.captured_half_staging_ptr ^= 16;
+        assert!(
+            engine
+                .step_gpu_only(&input, &mut state, &mut legacy)
+                .unwrap_err()
+                .contains("staging scratch changed")
+        );
+        engine.captured_half_staging_ptr = original;
+        engine
+            .step_gpu_only(&input, &mut state, &mut legacy)
+            .unwrap();
+        let calls = Cell::new(0);
+        engine.engine.ctx.poison_gemm_for_test();
+        assert!(
+            with_validated_gemm_graph_launch(
+                &engine.engine.ctx,
+                true,
+                engine.captured_gemm_plan.as_ref(),
+                "poison",
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                }
+            )
+            .unwrap_err()
+            .contains("unusable")
+        );
+        assert_eq!(calls.get(), 0);
+        drop(engine);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn m1_model_manifests_replay_all_paths_without_vendor_gemm() {
+        let device = GpuDevice::new(0).unwrap();
+        let cfg = config();
+        let deny = Guard::new(true).unwrap();
+        for (family, tc) in [
+            (BiGemmFamily::Inference, true),
+            (BiGemmFamily::Triad, false),
+            (BiGemmFamily::Triad, true),
+        ] {
+            for batch in [1, 3] {
+                eprintln!("M1 F32 {family:?} tc={tc} B{batch} nonidentity");
+                let input = vec![0.01; batch * 24];
+                let mut output = vec![0.0; batch * cfg.d_model];
+                let mut engine =
+                    GpuMambaInference::new(&device, &weights(&cfg, 24, false), cfg, 24, batch)
+                        .unwrap();
+                configure(&engine.ctx, family, tc);
+                let mut state = engine.alloc_state().unwrap();
+                let mut scratch = engine.alloc_scratch().unwrap();
+                // First public step also exercises cold architecture preparation.
+                engine
+                    .step(&input, &mut output, &mut state, &mut scratch)
+                    .unwrap();
+                let trace = engine
+                    .ctx
+                    .record_eager_gemm_trace(|| engine.step_kernels(&mut state, &mut scratch))
+                    .unwrap();
+                state.reset(&engine.ctx.stream).unwrap();
+                engine
+                    .step_gpu_only(&input, &mut state, &mut scratch)
+                    .unwrap();
+                scratch
+                    .temporal
+                    .download(&engine.ctx.stream, &mut output)
+                    .unwrap();
+                let expected_bits = bits(&output);
+                let manifest = engine.eager_gemm_manifest.get().unwrap();
+                unsafe { engine.capture_graph(&mut state, &mut scratch) }.unwrap();
+                assert!(engine.eager_gemm_manifest.get().is_none());
+                assert_inventory(
+                    &engine.ctx,
+                    &trace,
+                    manifest,
+                    engine.captured_gemm_plan.as_ref().unwrap(),
+                    &projections(&cfg, batch, Some(24)),
+                );
+                if family == BiGemmFamily::Inference && batch == 1 {
+                    assert_plan_mutations(&engine.ctx, engine.captured_gemm_plan.as_ref().unwrap());
+                }
+                for gpu_only in [false, true] {
+                    state.reset(&engine.ctx.stream).unwrap();
+                    if gpu_only {
+                        engine
+                            .step_gpu_only(&input, &mut state, &mut scratch)
+                            .unwrap();
+                        scratch
+                            .temporal
+                            .download(&engine.ctx.stream, &mut output)
+                            .unwrap();
+                    } else {
+                        engine
+                            .step(&input, &mut output, &mut state, &mut scratch)
+                            .unwrap();
+                    }
+                    assert_eq!(bits(&output), expected_bits);
+                }
+                drop(engine);
+
+                for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                    for path in [MixedGraphPath::Legacy, MixedGraphPath::Native] {
+                        eprintln!("M1 {dtype:?} {path:?} {family:?} tc={tc} B{batch}");
+                        let native = path == MixedGraphPath::Native;
+                        let input_dim = if native { cfg.d_model } else { 24 };
+                        let input = vec![0.01; batch * input_dim];
+                        let mut engine = GpuMambaInferenceMixed::new(
+                            &device,
+                            &weights(&cfg, input_dim, native),
+                            cfg,
+                            input_dim,
+                            batch,
+                            dtype,
+                        )
+                        .unwrap();
+                        configure(&engine.engine.ctx, family, tc);
+                        let mut state = engine.alloc_state().unwrap();
+                        let mut legacy_scratch = engine.alloc_scratch().unwrap();
+                        let mut native_scratch = engine.alloc_mixed_scratch().unwrap();
+                        let ctx = &engine.engine.ctx;
+                        let trace;
+                        let manifest;
+                        if native {
+                            engine
+                                .step_mixed_native(
+                                    &input,
+                                    &mut output,
+                                    &mut state,
+                                    &mut native_scratch,
+                                )
+                                .unwrap();
+                            trace = ctx
+                                .record_eager_gemm_trace(|| {
+                                    engine
+                                        .step_kernels_mixed_native(&mut state, &mut native_scratch)
+                                })
+                                .unwrap();
+                            state.reset(&ctx.stream).unwrap();
+                            engine
+                                .step_gpu_only_mixed_native(&input, &mut state, &mut native_scratch)
+                                .unwrap();
+                            native_scratch
+                                .temporal
+                                .download_f32(&ctx.stream, &mut output)
+                                .unwrap();
+                            manifest = engine.eager_mixed_native_gemm_manifest.get().unwrap();
+                        } else {
+                            engine
+                                .step(&input, &mut output, &mut state, &mut legacy_scratch)
+                                .unwrap();
+                            trace = ctx
+                                .record_eager_gemm_trace(|| {
+                                    engine.step_kernels_mixed(&mut state, &mut legacy_scratch)
+                                })
+                                .unwrap();
+                            state.reset(&ctx.stream).unwrap();
+                            engine
+                                .step_gpu_only(&input, &mut state, &mut legacy_scratch)
+                                .unwrap();
+                            legacy_scratch
+                                .temporal
+                                .download(&ctx.stream, &mut output)
+                                .unwrap();
+                            manifest = engine.eager_legacy_gemm_manifest.get().unwrap();
+                        }
+                        let expected_bits = bits(&output);
+                        if native {
+                            unsafe {
+                                engine.capture_graph_mixed_native(&mut state, &mut native_scratch)
+                            }
+                            .unwrap();
+                        } else {
+                            unsafe { engine.capture_graph(&mut state, &mut legacy_scratch) }
+                                .unwrap();
+                        }
+                        let ctx = &engine.engine.ctx;
+                        assert_eq!(engine.captured_path, Some(path));
+                        assert_inventory(
+                            ctx,
+                            &trace,
+                            manifest,
+                            engine.captured_gemm_plan.as_ref().unwrap(),
+                            &projections(&cfg, batch, if native { None } else { Some(input_dim) }),
+                        );
+                        if family == BiGemmFamily::Triad && !tc {
+                            assert!(trace.routes().iter().all(|r| r.symbol.contains("matvec")));
+                        }
+                        for gpu_only in [false, true] {
+                            state.reset(&ctx.stream).unwrap();
+                            match (native, gpu_only) {
+                                (true, true) => {
+                                    engine
+                                        .step_gpu_only_mixed_native(
+                                            &input,
+                                            &mut state,
+                                            &mut native_scratch,
+                                        )
+                                        .unwrap();
+                                    native_scratch
+                                        .temporal
+                                        .download_f32(&ctx.stream, &mut output)
+                                        .unwrap();
+                                }
+                                (true, false) => engine
+                                    .step_mixed_native(
+                                        &input,
+                                        &mut output,
+                                        &mut state,
+                                        &mut native_scratch,
+                                    )
+                                    .unwrap(),
+                                (false, true) => {
+                                    engine
+                                        .step_gpu_only(&input, &mut state, &mut legacy_scratch)
+                                        .unwrap();
+                                    legacy_scratch
+                                        .temporal
+                                        .download(&ctx.stream, &mut output)
+                                        .unwrap();
+                                }
+                                (false, false) => engine
+                                    .step(&input, &mut output, &mut state, &mut legacy_scratch)
+                                    .unwrap(),
+                            }
+                            assert_eq!(bits(&output), expected_bits);
+                        }
+                        drop(engine);
+                    }
+                }
+            }
+        }
+        assert_eq!(deny.calls(), 0);
     }
 }
 
@@ -349,11 +773,12 @@ impl GpuMambaInference {
 
     /// Capture CUDA Graph for the inference step.
     ///
-    /// After capture, `step()` replays the graph instead of launching kernels
-    /// individually, reducing launch overhead from ~50us to ~5us per step.
+    /// After capture, both step entries replay the fixed-buffer graph.
     ///
-    /// Call after at least one warmup `step()` to stabilize kernel launches.
-    /// H2D/D2H transfers remain outside the graph.
+    /// Requires and consumes a successful eager step on these buffers. GEMM
+    /// mode/family changes require new eager preparation and capture. A missing
+    /// or mismatching GEMM manifest is an error. The inventory covers GEMMs;
+    /// H2D/D2H transfers remain outside the recorded body and graph.
     ///
     /// # Safety
     ///
@@ -365,21 +790,21 @@ impl GpuMambaInference {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
+            "M1 f32 inference graph capture requires a successful eager step".to_string()
+        })?;
         self.ctx.presize_bi_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_gemm_route = self.ctx.gemm_route();
-        let manifest = self.eager_gemm_manifest.get().ok_or_else(|| {
-            "M1 f32 inference graph capture requires a successful eager step".to_string()
-        })?;
         let (graph, captured_gemm_plan) = unsafe {
             capture_into_graph_with_gemm_plan(&self.ctx, manifest.route_capacity, &manifest, || {
                 self.step_kernels(state, scratch)
             })
         }?;
-        require_f32_triad_graph_plan(
+        require_deterministic_gemm_graph_plan(
             &self.ctx,
-            true,
+            self.has_gemm_work(),
             captured_gemm_plan.as_ref(),
             "M1 f32 inference graph capture",
         )?;
@@ -397,8 +822,9 @@ impl GpuMambaInference {
             .graph
             .as_ref()
             .ok_or_else(|| "M1 f32 inference graph is not captured".to_string())?;
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             &self.ctx,
+            self.has_gemm_work(),
             self.captured_gemm_plan.as_ref(),
             "M1 f32 inference graph replay",
             || {
@@ -407,6 +833,10 @@ impl GpuMambaInference {
                     .map_err(|error| format!("graph launch: {error:?}"))
             },
         )
+    }
+
+    fn has_gemm_work(&self) -> bool {
+        self.batch != 0 && (!self.identity_proj || self.cfg.n_layers != 0)
     }
 
     /// Whether a CUDA Graph has been captured.
@@ -443,6 +873,9 @@ impl GpuMambaInference {
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
         // H2D: upload raw input (outside graph)
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // Run GPU kernel pipeline (graph replay or individual launches)
@@ -462,6 +895,9 @@ impl GpuMambaInference {
             );
             self.launch_captured_graph()?;
         } else {
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.ctx)?;
+            }
             let manifest = self
                 .ctx
                 .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
@@ -478,13 +914,16 @@ impl GpuMambaInference {
     }
 
     /// Run backbone step without D2H download. Returns GPU temporal pointer.
-    /// Use for chaining with lm_head SGEMM on GPU without round-trip.
+    /// Use for chaining with lm_head GEMM on GPU without round-trip.
     pub fn step_gpu_only(
         &self,
         input: &[f32],
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
@@ -494,6 +933,9 @@ impl GpuMambaInference {
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             self.launch_captured_graph()?;
         } else {
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.ctx)?;
+            }
             let manifest = self
                 .ctx
                 .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
@@ -885,19 +1327,27 @@ impl GpuMambaInference {
 // Mixed-precision inference engine (bf16/f16 weight storage, f32 compute).
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixedGraphPath {
+    Legacy,
+    Native,
+}
+
 /// GPU Mamba inference with mixed-precision weights (bf16 or f16).
 ///
-/// Bulk linear weights (in_proj, x_proj, dt_proj, out_proj, input_proj) are
-/// stored in bf16/f16 to halve VRAM and memory bandwidth. All other tensors
-/// (norms, biases, a_log, D, conv1d_weight) stay f32 for numerical stability.
-/// Compute is f32 (CUBLAS_COMPUTE_32F) regardless of weight dtype.
+/// Bulk linear weights use half storage; norms, biases and recurrence
+/// parameters stay F32. The context selects deterministic or vendor GEMMs.
+/// Legacy F32-activation and native half-activation paths have separate eager
+/// permits; their shared graph slot is bound to exactly one captured path.
 pub struct GpuMambaInferenceMixed {
     engine: GpuMambaInference, // owns ctx + (possibly unused) f32 weights
     mixed_weights: GpuMambaMixedWeights,
     a_neg_all: GpuBuffer,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
-    captured_mixed_native_gemm_plan: Option<CapturedGemmGraphPlan>,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
+    captured_path: Option<MixedGraphPath>,
+    eager_legacy_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     eager_mixed_native_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
@@ -921,15 +1371,32 @@ impl GpuMambaInferenceMixed {
         )
     }
 
-    fn launch_mixed_native_graph(&self) -> Result<(), String> {
+    fn has_gemm_work(&self, path: MixedGraphPath) -> bool {
+        self.engine.batch != 0
+            && (self.engine.cfg.n_layers != 0
+                || (path == MixedGraphPath::Legacy && !self.engine.identity_proj))
+    }
+
+    fn ensure_graph_path(&self, path: MixedGraphPath) -> Result<(), String> {
+        if self.captured_path != Some(path) {
+            return Err(
+                "M1 mixed inference graph replay: captured path does not match entry".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn launch_captured_graph(&self, path: MixedGraphPath) -> Result<(), String> {
+        self.ensure_graph_path(path)?;
         let graph = self
             .graph
             .as_ref()
             .ok_or_else(|| "M1 mixed-native inference graph is not captured".to_string())?;
-        with_validated_launch(
+        with_validated_gemm_graph_launch(
             &self.engine.ctx,
-            self.captured_mixed_native_gemm_plan.as_ref(),
-            "M1 mixed-native inference graph replay",
+            self.has_gemm_work(path),
+            self.captured_gemm_plan.as_ref(),
+            "M1 mixed inference graph replay",
             || {
                 graph
                     .launch()
@@ -991,7 +1458,9 @@ impl GpuMambaInferenceMixed {
             a_neg_all,
             graph: None,
             captured_gemm_route: None,
-            captured_mixed_native_gemm_plan: None,
+            captured_gemm_plan: None,
+            captured_path: None,
+            eager_legacy_gemm_manifest: Cell::new(None),
             eager_mixed_native_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
@@ -1007,8 +1476,12 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_legacy_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
+            self.ensure_graph_path(MixedGraphPath::Legacy)?;
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1017,10 +1490,16 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("graph launch mixed: {e:?}"))?;
+            self.launch_captured_graph(MixedGraphPath::Legacy)?;
         } else {
-            self.step_kernels_mixed(state, scratch)?;
+            if self.has_gemm_work(MixedGraphPath::Legacy) {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed(state, scratch))?;
+            self.eager_legacy_gemm_manifest.set(Some(manifest));
         }
         self.engine
             .ctx
@@ -1037,8 +1516,12 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_legacy_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
+            self.ensure_graph_path(MixedGraphPath::Legacy)?;
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1047,10 +1530,16 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("graph launch mixed: {e:?}"))?;
+            self.launch_captured_graph(MixedGraphPath::Legacy)?;
         } else {
-            self.step_kernels_mixed(state, scratch)?;
+            if self.has_gemm_work(MixedGraphPath::Legacy) {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed(state, scratch))?;
+            self.eager_legacy_gemm_manifest.set(Some(manifest));
         }
         Ok(())
     }
@@ -1447,8 +1936,12 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_mixed_native_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
+            self.ensure_graph_path(MixedGraphPath::Native)?;
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1457,8 +1950,11 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            self.launch_mixed_native_graph()?;
+            self.launch_captured_graph(MixedGraphPath::Native)?;
         } else {
+            if self.has_gemm_work(MixedGraphPath::Native) {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
             let manifest = self
                 .engine
                 .ctx
@@ -1483,8 +1979,12 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        if self.graph.is_none() {
+            self.eager_mixed_native_gemm_manifest.set(None);
+        }
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
+            self.ensure_graph_path(MixedGraphPath::Native)?;
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1493,9 +1993,12 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            self.launch_mixed_native_graph()?;
+            self.launch_captured_graph(MixedGraphPath::Native)?;
             Ok(())
         } else {
+            if self.has_gemm_work(MixedGraphPath::Native) {
+                prepare_inference_arch_rung(&self.engine.ctx)?;
+            }
             let manifest = self
                 .engine
                 .ctx
@@ -1517,6 +2020,9 @@ impl GpuMambaInferenceMixed {
     }
 
     /// Capture a CUDA Graph for the mixed-native pipeline.
+    /// Requires and consumes this path's successful eager manifest. Mode or
+    /// family drift and mismatching GEMM inventories are rejected. Transfers
+    /// remain outside the body; the manifest inventories GEMMs only.
     ///
     /// # Safety
     ///
@@ -1528,6 +2034,13 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        let manifest = self
+            .eager_mixed_native_gemm_manifest
+            .take()
+            .ok_or_else(|| {
+                "M1 mixed-native inference graph capture requires a successful eager step"
+                    .to_string()
+            })?;
         self.engine.ctx.presize_bi_scratch()?;
         self.engine
             .ctx
@@ -1537,9 +2050,6 @@ impl GpuMambaInferenceMixed {
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
         let snap_bi_upcast = self.engine.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.engine.ctx.gemm_route();
-        let manifest = self.eager_mixed_native_gemm_manifest.get().ok_or_else(|| {
-            "M1 mixed-native inference graph capture requires a successful eager step".to_string()
-        })?;
         self.engine.ctx.freeze_graph_scratch();
         let (graph, captured_gemm_plan) = unsafe {
             capture_into_graph_with_gemm_plan(
@@ -1549,9 +2059,16 @@ impl GpuMambaInferenceMixed {
                 || self.step_kernels_mixed_native(state, scratch),
             )
         }?;
+        require_deterministic_gemm_graph_plan(
+            &self.engine.ctx,
+            self.has_gemm_work(MixedGraphPath::Native),
+            captured_gemm_plan.as_ref(),
+            "M1 mixed-native inference graph capture",
+        )?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
-        self.captured_mixed_native_gemm_plan = captured_gemm_plan;
+        self.captured_gemm_plan = captured_gemm_plan;
+        self.captured_path = Some(MixedGraphPath::Native);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.captured_half_staging_ptr = snap_half_staging;
@@ -1560,6 +2077,11 @@ impl GpuMambaInferenceMixed {
         Ok(())
     }
 
+    /// Capture the legacy F32-activation mixed pipeline after a successful
+    /// eager legacy step on these fixed buffers. Consumes that path's GEMM-only
+    /// manifest and rejects missing or changed work or GEMM policy. Native
+    /// entries cannot replay this graph. H2D/D2H remain outside the graph.
+    ///
     /// # Safety
     ///
     /// `state`, `scratch`, and their views must remain unchanged until the
@@ -1570,6 +2092,9 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        let manifest = self.eager_legacy_gemm_manifest.take().ok_or_else(|| {
+            "M1 legacy mixed inference graph capture requires a successful eager step".to_string()
+        })?;
         self.engine.ctx.presize_bi_scratch()?;
         self.engine
             .ctx
@@ -1579,15 +2104,25 @@ impl GpuMambaInferenceMixed {
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
         let snap_bi_upcast = self.engine.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.engine.ctx.gemm_route();
-        let stream = self.engine.ctx.stream.clone();
         self.engine.ctx.freeze_graph_scratch();
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
-                self.step_kernels_mixed(state, scratch)
-            })
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(
+                &self.engine.ctx,
+                manifest.route_capacity,
+                &manifest,
+                || self.step_kernels_mixed(state, scratch),
+            )
         }?;
+        require_deterministic_gemm_graph_plan(
+            &self.engine.ctx,
+            self.has_gemm_work(MixedGraphPath::Legacy),
+            captured_gemm_plan.as_ref(),
+            "M1 legacy mixed inference graph capture",
+        )?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
+        self.captured_gemm_plan = captured_gemm_plan;
+        self.captured_path = Some(MixedGraphPath::Legacy);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.captured_half_staging_ptr = snap_half_staging;

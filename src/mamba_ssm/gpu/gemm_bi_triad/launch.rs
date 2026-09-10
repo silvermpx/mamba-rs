@@ -10863,6 +10863,7 @@ impl HalfKernelIdentity {
 struct HalfLaunchEnvironment<'a, O> {
     stream: &'a Arc<CudaStream>,
     kernels: &'a GpuKernels,
+    context: Option<&'a GpuCtx>,
     observer: O,
 }
 
@@ -10871,6 +10872,7 @@ impl<'a> HalfLaunchEnvironment<'a, NoPhysicalObserver> {
         Self {
             stream,
             kernels,
+            context: None,
             observer: NoPhysicalObserver,
         }
     }
@@ -10881,12 +10883,13 @@ impl<'a, O: PhysicalLaunchObserver> HalfLaunchEnvironment<'a, O> {
         Self {
             stream: &ctx.stream,
             kernels: &ctx.kernels,
+            context: Some(ctx),
             observer,
         }
     }
 }
 
-const _: [(); 2 * std::mem::size_of::<usize>()] =
+const _: [(); 3 * std::mem::size_of::<usize>()] =
     [(); std::mem::size_of::<HalfLaunchEnvironment<'static, NoPhysicalObserver>>()];
 
 #[derive(Clone, Copy)]
@@ -10956,8 +10959,8 @@ fn half_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     }
 }
 
-fn half_gemm_arguments_digest<O: PhysicalLaunchObserver>(
-    observer: &O,
+fn half_gemm_arguments_digest(
+    argument_identity: impl Fn(CUptr, u64) -> Result<Sha256Digest, String>,
     observation: HalfGemmObservation,
     identity: HalfKernelIdentity,
     dtype: PolicyDtype,
@@ -11002,12 +11005,9 @@ fn half_gemm_arguments_digest<O: PhysicalLaunchObserver>(
             elements(shape.k, shape.n, "B")?,
         ),
     };
-    let output_identity =
-        observer.argument_identity_digest(observation.arguments.output, output_bytes)?;
-    let a_identity = observer
-        .argument_identity_digest(observation.arguments.a, matrix_bytes(a_elements, "A")?)?;
-    let b_identity = observer
-        .argument_identity_digest(observation.arguments.b, matrix_bytes(b_elements, "B")?)?;
+    let output_identity = argument_identity(observation.arguments.output, output_bytes)?;
+    let a_identity = argument_identity(observation.arguments.a, matrix_bytes(a_elements, "A")?)?;
+    let b_identity = argument_identity(observation.arguments.b, matrix_bytes(b_elements, "B")?)?;
     let bias_identity = if observation.arguments.bias == 0 {
         None
     } else {
@@ -11015,7 +11015,7 @@ fn half_gemm_arguments_digest<O: PhysicalLaunchObserver>(
             .ok()
             .and_then(|columns| columns.checked_mul(4))
             .ok_or_else(|| "physical half bias span overflows u64".to_string())?;
-        Some(observer.argument_identity_digest(observation.arguments.bias, bytes)?)
+        Some(argument_identity(observation.arguments.bias, bytes)?)
     };
     let alpha = 1.0_f32;
     let beta = if observation.op == ResolvedGemmOp::Tn {
@@ -11081,10 +11081,10 @@ fn half_gemm_resources_digest(identity: HalfKernelIdentity, config: LaunchConfig
         .finish()
 }
 
-fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
+fn resolved_half_gemm_route(
     context: GemmRouteIdentity,
     kernels: &GpuKernels,
-    observer: &O,
+    argument_identity: impl Fn(CUptr, u64) -> Result<Sha256Digest, String>,
     observation: HalfGemmObservation,
     identity: HalfKernelIdentity,
     config: LaunchConfig,
@@ -11144,7 +11144,12 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
         grid_dim: config.grid_dim,
         block_dim: config.block_dim,
         shared_mem_bytes: config.shared_mem_bytes,
-        arguments_digest: half_gemm_arguments_digest(observer, observation, identity, dtype)?,
+        arguments_digest: half_gemm_arguments_digest(
+            argument_identity,
+            observation,
+            identity,
+            dtype,
+        )?,
     };
     Ok(ResolvedGemmRoute {
         op: observation.op,
@@ -11209,8 +11214,14 @@ fn resolve_half_gemm_observation<O: PhysicalLaunchObserver>(
                 .into(),
         );
     }
-    let route =
-        resolved_half_gemm_route(context, kernels, observer, observation, identity, config)?;
+    let route = resolved_half_gemm_route(
+        context,
+        kernels,
+        |pointer, bytes| observer.argument_identity_digest(pointer, bytes),
+        observation,
+        identity,
+        config,
+    )?;
     Ok(PhysicalLaunchObservation::gemm(
         half_policy_dtype(observation.dtype)?,
         None,
@@ -11419,12 +11430,42 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
 #[inline(always)]
 unsafe fn enqueue_half_gemm<O: PhysicalLaunchObserver>(
     observer: &mut O,
-    kernels: &GpuKernels,
+    bindings: (&GpuKernels, Option<&GpuCtx>),
     builder: &mut LaunchArgs<'_>,
     config: LaunchConfig,
     observation: HalfGemmObservation,
     driver_context: std::fmt::Arguments<'_>,
 ) -> Result<HalfNativeBranchSeal, String> {
+    let (kernels, context) = bindings;
+    if let Some(ctx) = context {
+        ctx.ensure_gemm_usable()?;
+        if ctx.gemm_route_recording_active()? {
+            let identity = HalfKernelIdentity::resolve(observation.base, observation.dtype)?;
+            // GEMM-only context inventory binds actual pointer values/spans.
+            // Physical observations below retain their allocation identities.
+            let route = resolved_half_gemm_route(
+                ctx.gemm_route(),
+                kernels,
+                |pointer, bytes| {
+                    if pointer == 0 && bytes != 0 {
+                        return Err("half GEMM context route has a null nonempty span".into());
+                    }
+                    pointer
+                        .checked_add(bytes)
+                        .ok_or("half GEMM context span overflows u64")?;
+                    Ok(FramedSha256::new(b"triad-half-context-pointer-span.v1")
+                        .required(b"pointer", &pointer.to_le_bytes())
+                        .required(b"bytes", &bytes.to_le_bytes())
+                        .finish())
+                },
+                observation,
+                identity,
+                config,
+            )?;
+            ctx.validate_resolved_gemm_route(&route, "native half terminal")?;
+            ctx.record_resolved_gemm_route(route)?;
+        }
+    }
     let physical_observation = if O::ENABLED {
         Some(resolve_half_gemm_observation(
             observer,
@@ -11565,7 +11606,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLa
     let seal = unsafe {
         enqueue_half_gemm(
             observer,
-            &ctx.kernels,
+            (&ctx.kernels, Some(ctx)),
             &mut builder,
             cfg,
             HalfGemmObservation {
@@ -11641,7 +11682,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLa
     let seal = unsafe {
         enqueue_half_gemm(
             observer,
-            &ctx.kernels,
+            (&ctx.kernels, Some(ctx)),
             &mut builder,
             cfg,
             HalfGemmObservation {
@@ -11717,7 +11758,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLa
     let seal = unsafe {
         enqueue_half_gemm(
             observer,
-            &ctx.kernels,
+            (&ctx.kernels, Some(ctx)),
             &mut builder,
             cfg,
             HalfGemmObservation {
@@ -11934,7 +11975,7 @@ pub(in crate::mamba_ssm::gpu) fn gemm_bi_forward_tc_with_tile_shape(
     shape: F32TriadShape,
     tile: TcTile,
 ) -> Result<(), String> {
-    let mut environment = HalfLaunchEnvironment::production(&ctx.stream, &ctx.kernels);
+    let mut environment = HalfLaunchEnvironment::observed(ctx, NoPhysicalObserver);
     gemm_bi_forward_tc_with_tile_in(&mut environment, ops, shape, tile).map(drop)
 }
 
@@ -11999,7 +12040,7 @@ fn gemm_bi_forward_tc_with_tile_in<O: PhysicalLaunchObserver>(
     unsafe {
         enqueue_half_gemm(
             &mut environment.observer,
-            environment.kernels,
+            (environment.kernels, environment.context),
             &mut b,
             cfg,
             HalfGemmObservation {
@@ -12179,7 +12220,7 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
     unsafe {
         enqueue_half_gemm(
             &mut environment.observer,
-            environment.kernels,
+            (environment.kernels, environment.context),
             &mut b,
             cfg,
             HalfGemmObservation {
@@ -12310,7 +12351,7 @@ fn gemm_bi_backward_dx_tc_with_tile_in<O: PhysicalLaunchObserver>(
     unsafe {
         enqueue_half_gemm(
             &mut environment.observer,
-            environment.kernels,
+            (environment.kernels, environment.context),
             &mut b,
             cfg,
             HalfGemmObservation {
@@ -12400,7 +12441,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12455,7 +12496,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12524,7 +12565,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12582,7 +12623,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12673,7 +12714,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12726,7 +12767,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12782,7 +12823,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12873,7 +12914,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12926,7 +12967,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -12982,7 +13023,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
         let seal = unsafe {
             enqueue_half_gemm(
                 &mut environment.observer,
-                environment.kernels,
+                (environment.kernels, environment.context),
                 &mut b,
                 cfg,
                 HalfGemmObservation {
@@ -16324,7 +16365,7 @@ mod half_physical_trace_tests {
         assert_eq!(std::mem::size_of::<NoPhysicalObserver>(), 0);
         assert_eq!(
             std::mem::size_of::<HalfLaunchEnvironment<'static, NoPhysicalObserver>>(),
-            2 * std::mem::size_of::<usize>()
+            3 * std::mem::size_of::<usize>()
         );
     }
 

@@ -99,6 +99,54 @@ fn braced_scope_at<'a>(source: &'a str, start: usize, label: &str) -> &'a str {
     panic!("unterminated scope after {label}")
 }
 
+fn struct_scope_for_type<'a>(source: &'a str, type_name: &str) -> &'a str {
+    let mask = source_mask(source);
+    let mut matches = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = mask[cursor..].find("struct") {
+        let start = cursor + relative;
+        cursor = start + "struct".len();
+        if !token_at(&mask, start, "struct") {
+            continue;
+        }
+        let name = skip_ascii_whitespace(&mask, cursor);
+        if token_at(&mask, name, type_name) {
+            matches.push(start);
+        }
+    }
+    assert_eq!(matches.len(), 1, "expected exactly one struct {type_name}");
+    braced_scope_at(source, matches[0], type_name)
+}
+
+#[test]
+fn struct_scope_parser_distinguishes_exact_type_from_prefix_collision() {
+    let source = r#"
+        struct Mamba3GpuInferenceMixedScratch { scratch_only: usize }
+        struct Mamba3GpuInferenceMixed_extra { suffix_only: usize }
+        // struct Mamba3GpuInferenceMixed { comment_only: usize }
+        pub struct Mamba3GpuInferenceMixed { captured_plan: Option<Plan> }
+        struct Mamba3GpuInferenceMixedOther { other_only: usize }
+    "#;
+    assert_eq!(
+        struct_scope_for_type(source, "Mamba3GpuInferenceMixed"),
+        "struct Mamba3GpuInferenceMixed { captured_plan: Option<Plan> }"
+    );
+    assert_eq!(
+        struct_scope_for_type(source, "Mamba3GpuInferenceMixedScratch"),
+        "struct Mamba3GpuInferenceMixedScratch { scratch_only: usize }"
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            struct_scope_for_type(
+                "struct Mamba3GpuInferenceMixedScratch { scratch: usize }",
+                "Mamba3GpuInferenceMixed",
+            )
+        })
+        .is_err(),
+        "a prefix collision cannot substitute for an absent exact type"
+    );
+}
+
 fn token_present(source: &str, token: &str) -> bool {
     let bytes = source.as_bytes();
     let token_bytes = token.as_bytes();
@@ -193,50 +241,63 @@ fn method_scope_for_type<'a>(source: &'a str, type_name: &str, method: &str) -> 
 fn graph_launches_are_guarded(source: &str) -> bool {
     let mask = source_mask(source);
     let mut closures = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative) = mask[cursor..].find("with_validated_launch") {
-        let call = cursor + relative;
-        cursor = call + "with_validated_launch".len();
-        if !token_at(&mask, call, "with_validated_launch") {
-            continue;
-        }
-        let open = skip_ascii_whitespace(&mask, cursor);
-        if mask.as_bytes().get(open) != Some(&b'(') {
-            continue;
-        }
-        let Some(close) = matching_delimiter(&mask, open, b'(', b')') else {
-            return false;
-        };
-        let mut closure_cursor = open + 1;
-        while let Some(relative) = mask[closure_cursor..close].find("||") {
-            let bars = closure_cursor + relative;
-            let body = skip_ascii_whitespace(&mask, bars + 2);
-            if mask.as_bytes().get(body) == Some(&b'{') {
-                let Some(end) = matching_delimiter(&mask, body, b'{', b'}') else {
-                    return false;
-                };
-                if end > close {
-                    return false;
-                }
-                closures.push((body, end + 1));
-            } else {
-                closures.push((body, closure_expression_end(&mask, body, close)));
+    for guard in ["with_validated_launch", "with_validated_gemm_graph_launch"] {
+        let mut cursor = 0;
+        while let Some(relative) = mask[cursor..].find(guard) {
+            let call = cursor + relative;
+            cursor = call + guard.len();
+            if !token_at(&mask, call, guard) {
+                continue;
             }
-            closure_cursor = bars + 2;
+            let open = skip_ascii_whitespace(&mask, cursor);
+            if mask.as_bytes().get(open) != Some(&b'(') {
+                continue;
+            }
+            let Some(close) = matching_delimiter(&mask, open, b'(', b')') else {
+                return false;
+            };
+            let mut closure_cursor = open + 1;
+            while let Some(relative) = mask[closure_cursor..close].find("||") {
+                let bars = closure_cursor + relative;
+                let body = skip_ascii_whitespace(&mask, bars + 2);
+                if mask.as_bytes().get(body) == Some(&b'{') {
+                    let Some(end) = matching_delimiter(&mask, body, b'{', b'}') else {
+                        return false;
+                    };
+                    if end > close {
+                        return false;
+                    }
+                    closures.push((body, end + 1));
+                } else {
+                    closures.push((body, closure_expression_end(&mask, body, close)));
+                }
+                closure_cursor = bars + 2;
+            }
+            cursor = close + 1;
         }
-        cursor = close + 1;
     }
 
     let mut launch_cursor = 0;
-    while let Some(relative) = mask[launch_cursor..].find("self.graph.launch()") {
+    while let Some(relative) = mask[launch_cursor..].find(".launch") {
         let launch = launch_cursor + relative;
+        launch_cursor = launch + ".launch".len();
+        if !token_at(&mask, launch + 1, "launch") {
+            continue;
+        }
+        let open = skip_ascii_whitespace(&mask, launch_cursor);
+        if mask.as_bytes().get(open) != Some(&b'(') {
+            continue;
+        }
+        let close = skip_ascii_whitespace(&mask, open + 1);
+        if mask.as_bytes().get(close) != Some(&b')') {
+            continue;
+        }
         if !closures
             .iter()
             .any(|(start, end)| *start <= launch && launch < *end)
         {
             return false;
         }
-        launch_cursor = launch + "self.graph.launch()".len();
     }
     true
 }
@@ -4719,7 +4780,7 @@ fn physical_graph_package_covers_all_prepared_triad_route_shapes() {
 }
 
 #[test]
-fn exact_graph_inventory_wires_only_direct_and_conditional_triad_holders() {
+fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
     let direct_holders = [
         (
             "M1 f32 training",
@@ -4727,13 +4788,6 @@ fn exact_graph_inventory_wires_only_direct_and_conditional_triad_holders() {
             "GpuMambaF32TrainingStepGraph",
             "capture",
             &["replay"][..],
-        ),
-        (
-            "M1 f32 inference",
-            INFERENCE_SOURCE,
-            "GpuMambaInference",
-            "capture_graph",
-            &["step", "step_gpu_only"][..],
         ),
         (
             "M1 pooled prefill",
@@ -4765,7 +4819,7 @@ fn exact_graph_inventory_wires_only_direct_and_conditional_triad_holders() {
         ),
     ];
     for (label, source, holder, capture, replays) in direct_holders {
-        let structure = source_mask(braced_scope_after(source, &format!("struct {holder}")));
+        let structure = source_mask(struct_scope_for_type(source, holder));
         assert!(
             structure.contains("Option<CapturedGemmGraphPlan>") && structure.contains("GemmRoute"),
             "{label} must store a physical plan beside its existing route snapshot"
@@ -4823,16 +4877,9 @@ fn exact_graph_inventory_wires_only_direct_and_conditional_triad_holders() {
             "capture_graph_f16",
             &["step_f16"][..],
         ),
-        (
-            "M1 mixed-native inference",
-            INFERENCE_SOURCE,
-            "GpuMambaInferenceMixed",
-            "capture_graph_mixed_native",
-            &["step_mixed_native", "step_gpu_only_mixed_native"][..],
-        ),
     ];
     for (label, source, holder, capture, replays) in conditional_holders {
-        let structure = source_mask(braced_scope_after(source, &format!("struct {holder}")));
+        let structure = source_mask(struct_scope_for_type(source, holder));
         assert!(
             structure.contains("Option<CapturedGemmGraphPlan>") && structure.contains("GemmRoute"),
             "{label} must retain route and optional physical plan storage"
@@ -4858,42 +4905,137 @@ fn exact_graph_inventory_wires_only_direct_and_conditional_triad_holders() {
         }
     }
 
-    let legacy_capture = source_mask(method_scope_for_type(
-        INFERENCE_SOURCE,
-        "GpuMambaInferenceMixed",
-        "capture_graph",
-    ));
-    assert!(
-        legacy_capture.contains("capture_into_graph")
-            && !legacy_capture.contains("capture_into_graph_with_gemm_plan"),
-        "M1 legacy mixed inference is not a Triad graph-plan capture"
-    );
-
-    assert!(
-        !source_mask(MAMBA3_INFERENCE_SOURCE).contains("CapturedGemmGraphPlan"),
-        "M3 inference uses context-free cuBLAS and must not receive a fake Triad plan"
-    );
-    assert_code_contains_all(
-        MAMBA3_INFERENCE_SOURCE,
-        &["sgemm_no_bias", "gpu_gemm_typed_raw_no_bias"],
-        "M3 inference exclusion",
-    );
-
-    for (holder, helper) in [
-        ("GpuMambaInference", "launch_captured_graph"),
-        ("GpuMambaInferenceMixed", "launch_mixed_native_graph"),
-    ] {
-        let scope = method_scope_for_type(INFERENCE_SOURCE, holder, helper);
+    let decode_holders = [
+        (
+            INFERENCE_SOURCE,
+            "GpuMambaInference",
+            "capture_graph",
+            &["step", "step_gpu_only"][..],
+        ),
+        (
+            INFERENCE_SOURCE,
+            "GpuMambaInferenceMixed",
+            "capture_graph",
+            &["step", "step_gpu_only"][..],
+        ),
+        (
+            INFERENCE_SOURCE,
+            "GpuMambaInferenceMixed",
+            "capture_graph_mixed_native",
+            &["step_mixed_native", "step_gpu_only_mixed_native"][..],
+        ),
+        (
+            MAMBA3_INFERENCE_SOURCE,
+            "Mamba3GpuInferenceEngine",
+            "capture_graph",
+            &["step", "step_gpu_only"][..],
+        ),
+        (
+            MAMBA3_INFERENCE_SOURCE,
+            "Mamba3GpuInferenceMixed",
+            "capture_graph_mixed_native",
+            &["step_mixed_native", "step_gpu_only_mixed_native"][..],
+        ),
+    ];
+    for (source, holder, capture, replays) in decode_holders {
+        let structure = source_mask(struct_scope_for_type(source, holder));
+        assert_code_contains_all(
+            &structure,
+            &[
+                "Option<CapturedGemmGraphPlan>",
+                "Cell<Option<PreparedGemmCaptureManifest>>",
+                "GemmRoute",
+            ],
+            holder,
+        );
+        let capture = source_mask(method_scope_for_type(source, holder, capture));
+        assert_code_contains_all(
+            &capture,
+            &[
+                ".take()",
+                "capture_into_graph_with_gemm_plan",
+                "require_deterministic_gemm_graph_plan",
+                "has_gemm_work",
+            ],
+            holder,
+        );
+        assert!(!capture.contains("require_f32_triad_graph_plan"));
+        assert!(
+            capture
+                .find("require_deterministic_gemm_graph_plan")
+                .unwrap()
+                < capture.find("self.graph = Some(graph)").unwrap(),
+            "{holder} validates before installation"
+        );
+        for replay in replays {
+            let replay = source_mask(method_scope_for_type(source, holder, replay));
+            assert_code_contains_all(
+                &replay,
+                &[
+                    ".set(None)",
+                    "prepare_inference_arch_rung",
+                    "record_eager_gemm_manifest",
+                    "launch_captured_graph",
+                ],
+                holder,
+            );
+            assert!(
+                replay.find(".set(None)").unwrap() < replay.find(".upload(").unwrap(),
+                "{holder} clears permit before upload"
+            );
+            assert!(graph_launches_are_guarded(&replay));
+        }
+        let scope = method_scope_for_type(source, holder, "launch_captured_graph");
         assert_code_contains_all(
             scope,
-            &["with_validated_launch"],
+            &[
+                "with_validated_gemm_graph_launch",
+                "has_gemm_work",
+                "captured_gemm_plan",
+            ],
             &format!("{holder} shared replay helper"),
         );
         assert!(
             graph_launches_are_guarded(scope),
-            "{holder}::{helper} may not launch outside the validated closure"
+            "{holder} replay helper may not launch outside the validated closure"
         );
     }
+    for (capture, path) in [
+        ("capture_graph", "Legacy"),
+        ("capture_graph_mixed_native", "Native"),
+    ] {
+        let capture = method_scope_for_type(INFERENCE_SOURCE, "GpuMambaInferenceMixed", capture);
+        assert_code_contains_all(
+            capture,
+            &[&format!(
+                "self.captured_path = Some(MixedGraphPath::{path})"
+            )],
+            "M1 mixed graph association",
+        );
+    }
+    let launch = method_scope_for_type(
+        INFERENCE_SOURCE,
+        "GpuMambaInferenceMixed",
+        "launch_captured_graph",
+    );
+    assert_code_contains_all(
+        launch,
+        &["ensure_graph_path(path)"],
+        "M1 mixed replay association",
+    );
+    let seam =
+        active_production_function_scope(GRAPH_CAPTURE_SOURCE, "with_validated_gemm_graph_launch")
+            .unwrap();
+    assert_code_contains_all(
+        &seam,
+        &[
+            "ensure_gemm_usable",
+            "require_deterministic_gemm_graph_plan",
+            "plan.with_validated_launch",
+            "None => launch()",
+        ],
+        "shared decode guard",
+    );
 }
 
 #[test]
@@ -5284,6 +5426,8 @@ fn direct_function_names_at_depth(source: &str, expected_depth: u32) -> Vec<Stri
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum PhysicalSensitiveCall {
     GemmObservation,
+    InferenceObservation,
+    InputTransformObservation,
     ConversionObservation,
     ConversionArguments,
     ObserverConstructor,
@@ -5655,6 +5799,22 @@ fn physical_sensitive_calls(
             "PhysicalLaunchObservation::conversion" => {
                 Some(PhysicalSensitiveCall::ConversionObservation)
             }
+            "PhysicalLaunchObservation::inference" => {
+                Some(PhysicalSensitiveCall::InferenceObservation)
+            }
+            "inference"
+                if token_is_path_member(&tokens, index, &aliases, "PhysicalLaunchObservation") =>
+            {
+                Some(PhysicalSensitiveCall::InferenceObservation)
+            }
+            "PhysicalLaunchObservation::input_transform" => {
+                Some(PhysicalSensitiveCall::InputTransformObservation)
+            }
+            "input_transform"
+                if token_is_path_member(&tokens, index, &aliases, "PhysicalLaunchObservation") =>
+            {
+                Some(PhysicalSensitiveCall::InputTransformObservation)
+            }
             "conversion"
                 if token_is_path_member(&tokens, index, &aliases, "PhysicalLaunchObservation") =>
             {
@@ -5967,7 +6127,31 @@ fn validate_physical_sensitive_call_site_ownership(
         let mut covered = Vec::new();
         if path.ends_with("mamba_ssm/gpu/kernel_identity.rs") {
             let identity_tests = active_test_module_scope(source, "physical_launch_tests")?;
+            let inference_support = active_test_module_scope(source, "inference_test_support")?;
+            let observer = direct_test_function_scope(inference_support, "observer", "")?;
+            for (scope, visibility) in [
+                (inference_support, "pub(incrate::mamba_ssm::gpu)"),
+                (observer, "pub(incrate::mamba_ssm::gpu)"),
+                (
+                    active_production_method_scope(source, "PhysicalLaunchObservation", "resolve")?,
+                    "",
+                ),
+            ] {
+                let start = scope.as_ptr() as usize - source.as_ptr() as usize;
+                let mask = source_mask(source);
+                if compact_code(&mask[item_prefix_start(&mask, start)..start]) != visibility {
+                    return Err("Inference test observer authority visibility changed".into());
+                }
+            }
             for (scope, expected) in [
+                (
+                    observer,
+                    &[(PhysicalSensitiveCall::ObserverConstructor, 1)][..],
+                ),
+                (
+                    active_production_method_scope(source, "PhysicalLaunchObservation", "resolve")?,
+                    &[(PhysicalSensitiveCall::ObservationResolver, 1)][..],
+                ),
                 (
                     audited_function_scope(source, "prepare_recording_physical_observer", "")?,
                     &[(PhysicalSensitiveCall::ObserverConstructor, 1)][..],
@@ -6072,7 +6256,46 @@ fn validate_physical_sensitive_call_site_ownership(
                 validate_sensitive_scope(source, scope, expected, &calls, &mut covered)?;
             }
         } else if path.ends_with("mamba_ssm/gpu/blas.rs") {
+            let graph_tests = active_test_module_scope(source, "physical_graph_tests")?;
+            let inventory_tests = active_test_module_scope(source, "matvec_inventory_cuda_tests")?;
             for (scope, expected) in [
+                (
+                    audited_function_scope(source, "launch_bi_gemm", "")?,
+                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                ),
+                (
+                    audited_function_scope(source, "launch_bi_matvec", "")?,
+                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                ),
+                (
+                    direct_test_function_scope(graph_tests, "record_tied_half_f32_trace", "")?,
+                    &[
+                        (PhysicalSensitiveCall::PreparedObserverFactory, 1),
+                        (PhysicalSensitiveCall::ObserverFinalizationAuthority, 1),
+                    ][..],
+                ),
+                (
+                    direct_test_function_scope(
+                        inventory_tests,
+                        "typed_matvec_physical_observation_preserves_public_output_and_storage",
+                        "#[test]#[ignore=]",
+                    )?,
+                    &[
+                        (PhysicalSensitiveCall::PreparedObserverFactory, 1),
+                        (PhysicalSensitiveCall::ObserverFinalizationAuthority, 1),
+                    ][..],
+                ),
+                (
+                    direct_test_function_scope(
+                        inventory_tests,
+                        "triad_native_half_context_inventory_records_all_projection_terminals",
+                        "#[test]#[ignore=]",
+                    )?,
+                    &[
+                        (PhysicalSensitiveCall::PreparedObserverFactory, 2),
+                        (PhysicalSensitiveCall::ObserverFinalizationAuthority, 2),
+                    ][..],
+                ),
                 (
                     audited_function_scope(source, "conversion_observation", "")?,
                     &[
@@ -6121,6 +6344,28 @@ fn validate_physical_sensitive_call_site_ownership(
             }
         } else if path.ends_with("mamba_ssm/gpu/gemm_bi_triad/launch.rs") {
             for (scope, expected) in [
+                (
+                    audited_function_scope(
+                        source,
+                        "prepare_sm89_tf32_tn_pre_rna_graph_sequence",
+                        "",
+                    )?,
+                    &[
+                        (PhysicalSensitiveCall::ConversionArguments, 1),
+                        (PhysicalSensitiveCall::GemmObservation, 1),
+                        (PhysicalSensitiveCall::InputTransformObservation, 1),
+                        (PhysicalSensitiveCall::ObservationResolution, 2),
+                    ][..],
+                ),
+                (
+                    audited_function_scope(source, "enqueue_sm89_tf32_tn_pre_rna", "")?,
+                    &[
+                        (PhysicalSensitiveCall::ConversionArguments, 1),
+                        (PhysicalSensitiveCall::GemmObservation, 1),
+                        (PhysicalSensitiveCall::InputTransformObservation, 1),
+                        (PhysicalSensitiveCall::Submission, 2),
+                    ][..],
+                ),
                 (
                     audited_function_scope(source, "prepare_physical_observer", "")?,
                     &[(PhysicalSensitiveCall::ObserverConstructionAuthority, 1)][..],
@@ -6276,6 +6521,88 @@ fn validate_physical_sensitive_call_site_ownership(
             ] {
                 validate_sensitive_scope(source, scope, expected, &calls, &mut covered)?;
             }
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/identity.rs") {
+            validate_sensitive_scope(
+                source,
+                audited_function_scope(source, "observation", "")?,
+                &[(PhysicalSensitiveCall::InferenceObservation, 1)],
+                &calls,
+                &mut covered,
+            )?;
+            let tests = active_test_module_scope(source, "tests")?;
+            for (name, count) in [
+                (
+                    "every_terminal_has_its_exact_storage_geometry_and_arithmetic_tuple",
+                    1,
+                ),
+                (
+                    "every_terminal_rejects_individually_changed_route_and_abi_before_enqueue",
+                    2,
+                ),
+                (
+                    "pair_store_symbol_is_bound_even_when_geometry_is_identical",
+                    1,
+                ),
+                (
+                    "allocation_spans_and_zero_reduction_use_actual_required_operands",
+                    3,
+                ),
+                (
+                    "allocation_bound_digest_updates_the_contained_route_and_rejects_stale_copy",
+                    1,
+                ),
+            ] {
+                validate_sensitive_scope(
+                    source,
+                    direct_test_function_scope(tests, name, "#[test]")?,
+                    &[
+                        (PhysicalSensitiveCall::InferenceObservation, count),
+                        (PhysicalSensitiveCall::ObservationResolution, count),
+                    ],
+                    &calls,
+                    &mut covered,
+                )?;
+            }
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
+            for name in [
+                "launch_sm89_exact_n64",
+                "launch_sm120_exact_n64",
+                "launch_sm120_copyplan_t256",
+                "launch_sm120_sliced",
+                "launch_sm120_tma_postbias",
+                "launch_f32_n128_s2",
+                "launch_tf32",
+                "launch_tf32_rna_n96",
+                "launch_tf32_wide",
+                "launch_sm120_tf32",
+                "launch_sm120_half",
+                "launch_sm89_half_pipeline",
+                "launch_sm89_half_swizzle",
+                "launch_sm89_half_s3",
+                "launch_sm89_half_n64",
+                "launch_ladder",
+                "launch_f32out_ladder",
+            ] {
+                validate_sensitive_scope(
+                    source,
+                    audited_function_scope(source, name, "")?,
+                    &[(PhysicalSensitiveCall::Submission, 1)],
+                    &calls,
+                    &mut covered,
+                )?;
+            }
+            let inventory_tests =
+                active_test_module_scope(source, "observed_inventory_cuda_tests")?;
+            validate_sensitive_scope(
+                source,
+                direct_test_function_scope(inventory_tests, "run_case", "")?,
+                &[
+                    (PhysicalSensitiveCall::PreparedObserverFactory, 1),
+                    (PhysicalSensitiveCall::ObserverFinalizationAuthority, 1),
+                ],
+                &calls,
+                &mut covered,
+            )?;
         } else if path.ends_with("mamba_ssm/gpu/graph_capture.rs") {
             validate_sensitive_scope(
                 source,
@@ -6316,6 +6643,18 @@ fn validate_physical_sensitive_call_site_ownership(
                 (PhysicalSensitiveCall::Submission, 1),
                 (PhysicalSensitiveCall::PreparedSubmission, 1),
                 (PhysicalSensitiveCall::ObservationResolution, 1),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/identity.rs") {
+            [(PhysicalSensitiveCall::ObservationResolution, 1)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
+            [
+                (PhysicalSensitiveCall::Submission, 1),
+                (PhysicalSensitiveCall::PreparedObserverFactory, 1),
+                (PhysicalSensitiveCall::ObserverFinalizationAuthority, 1),
             ]
             .into_iter()
             .collect::<BTreeMap<_, _>>()
@@ -6462,6 +6801,31 @@ fn validate_physical_owner_exports(identity_source: &str) -> Result<(), String> 
     Ok(())
 }
 
+fn has_recorded_physical_trace_literal(source: &str) -> bool {
+    let mask = source_mask(source);
+    let tokens = rust_code_tokens(source);
+    let function_bodies = tokens
+        .windows(2)
+        .filter_map(|pair| {
+            (pair[0].text == "fn"
+                && pair[1]
+                    .text
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphabetic))
+            .then(|| function_body_open(&mask, pair[0].start, &pair[1].text).ok())
+            .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+    tokens.windows(2).any(|pair| {
+        pair[0].text == "RecordedPhysicalTrace"
+            && pair[1].text == "{"
+            // `fn helper() -> RecordedPhysicalTrace {` opens the function body,
+            // whereas a literal inside that body has a distinct opening token.
+            && !function_bodies.contains(&pair[1].start)
+    })
+}
+
 fn validate_physical_trace_ownership_boundary(
     identity_source: &str,
     sources: &[(PathBuf, String)],
@@ -6564,7 +6928,7 @@ fn validate_physical_trace_ownership_boundary(
         0,
     )?);
     if observation_struct
-        != "structPhysicalLaunchObservation{gemm:Option<PhysicalGemmObservation>,conversion:Option<PhysicalConversionObservation>,}"
+        != "structPhysicalLaunchObservation{gemm:Option<PhysicalGemmObservation>,conversion:Option<PhysicalConversionObservation>,input_transform:Option<PhysicalInputTransformObservation>,}"
         || identity
             .matches("pub(super)structPhysicalLaunchObservation{")
             .count()
@@ -6586,7 +6950,7 @@ fn validate_physical_trace_ownership_boundary(
         0,
     )?);
     if gemm_observation
-        != "structPhysicalGemmObservation{logical_dtype:PolicyDtype,resources_digest:Option<Sha256Digest>,route:ResolvedGemmRoute,}"
+        != "structPhysicalGemmObservation{logical_dtype:PolicyDtype,resources_digest:Option<Sha256Digest>,route:ResolvedGemmRoute,inference:Option<super::gemm_bi_inference::identity::Arguments>,}"
         || conversion_observation
             != "structPhysicalConversionObservation{kind:PhysicalLaunchKind,logical_op:ResolvedGemmOp,logical_dtype:PolicyDtype,shape:(usize,usize,usize),strides:(usize,usize,usize),element_count:u64,arguments:PhysicalConversionArguments,}"
         || identity.contains("pubstructPhysicalGemmObservation")
@@ -6598,6 +6962,27 @@ fn validate_physical_trace_ownership_boundary(
     {
         return Err("physical observation payloads must remain private and exact".into());
     }
+    let transform_observation = compact_code(unique_named_item_scope_at_depth(
+        identity_source,
+        "struct",
+        "PhysicalInputTransformObservation",
+        0,
+    )?);
+    if transform_observation
+        != "structPhysicalInputTransformObservation{identity:ResolvedInputTransform,logical_op:ResolvedGemmOp,logical_dtype:PolicyDtype,shape:(usize,usize,usize),strides:(usize,usize,usize),arguments:PhysicalConversionArguments,symbol:&'staticstr,}"
+        || [
+            "pubstruct",
+            "pub(crate)struct",
+            "pub(super)struct",
+            "pub(incrate::mamba_ssm::gpu)struct",
+        ]
+        .iter()
+        .any(|visibility| {
+            identity.contains(&format!("{visibility}PhysicalInputTransformObservation"))
+        })
+    {
+        return Err("physical input-transform payload must remain private and exact".into());
+    }
     let observation_implementations =
         impl_scopes_for_type(identity_source, "PhysicalLaunchObservation");
     if observation_implementations.len() != 1 {
@@ -6605,7 +6990,13 @@ fn validate_physical_trace_ownership_boundary(
     }
     let observation_implementation = observation_implementations[0];
     if direct_function_names_at_depth(observation_implementation, 1)
-        != ["gemm", "conversion", "resolve"]
+        != [
+            "gemm",
+            "inference",
+            "conversion",
+            "input_transform",
+            "resolve",
+        ]
     {
         return Err("PhysicalLaunchObservation gained a constructor or resolution wrapper".into());
     }
@@ -6624,13 +7015,29 @@ fn validate_physical_trace_ownership_boundary(
         "PhysicalLaunchObservation",
         "resolve",
     )?);
+    let inference_constructor = compact_code(active_production_method_scope(
+        observation_implementation,
+        "PhysicalLaunchObservation",
+        "inference",
+    )?);
+    let transform_constructor = compact_code(active_production_method_scope(
+        observation_implementation,
+        "PhysicalLaunchObservation",
+        "input_transform",
+    )?);
     if !gemm_constructor.contains(
-        "Self{gemm:Some(PhysicalGemmObservation{logical_dtype,resources_digest,route,}),conversion:None,}",
+        "Self{gemm:Some(PhysicalGemmObservation{logical_dtype,resources_digest,route,inference:None,}),conversion:None,input_transform:None,}",
     ) || !conversion_constructor.contains(
-        "Self{gemm:None,conversion:Some(PhysicalConversionObservation{kind,logical_op,logical_dtype,shape,strides,element_count,arguments,}),}",
-    ) || !observation_resolver.contains("match(self.gemm,self.conversion){")
+        "Self{gemm:None,conversion:Some(PhysicalConversionObservation{kind,logical_op,logical_dtype,shape,strides,element_count,arguments,}),input_transform:None,}",
+    ) || !inference_constructor.contains(
+        "Self{gemm:Some(PhysicalGemmObservation{logical_dtype:arguments.storage[0],resources_digest:None,route,inference:Some(arguments),}),conversion:None,input_transform:None,}",
+    ) || !transform_constructor.contains(
+        "Self{gemm:None,conversion:None,input_transform:Some(PhysicalInputTransformObservation{identity,logical_op,logical_dtype,shape,strides,arguments,symbol,}),}",
+    ) || !observation_resolver.starts_with("fnresolve<")
+        || !observation_resolver.contains("match(self.gemm,self.conversion,self.input_transform){")
         || !observation_resolver.contains("Some(PhysicalGemmObservation{")
         || !observation_resolver.contains("Some(PhysicalConversionObservation{")
+        || !observation_resolver.contains("Some(PhysicalInputTransformObservation{")
         || !observation_resolver.contains("_=>Err(")
     {
         return Err(
@@ -6754,7 +7161,7 @@ fn validate_physical_trace_ownership_boundary(
         if path.ends_with("kernel_identity.rs") {
             continue;
         }
-        if mask.contains("RecordedPhysicalTrace {")
+        if has_recorded_physical_trace_literal(source)
             || mask.contains("RecordedPhysicalTrace::from_")
             || mask.contains("physical_enqueue_event_digest(")
             || mask.contains("physical_enqueue_provenance_digest(")
@@ -7520,6 +7927,22 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
             "fn forged(arguments: PhysicalConversionArguments) { let _ = PhysicalLaunchObservation :: conversion(kind, op, dtype, shape, strides, count, arguments); }",
         ),
         (
+            "sibling Inference semantic constructor",
+            "fn forged() { let _ = PhysicalLaunchObservation::inference(arguments, route); }",
+        ),
+        (
+            "aliased sibling Inference semantic constructor",
+            "use PhysicalLaunchObservation::inference as mint; fn forged() { let _ = mint(arguments, route); }",
+        ),
+        (
+            "sibling input-transform semantic constructor",
+            "fn forged() { let _ = PhysicalLaunchObservation::input_transform(symbol, op, dtype, shape, strides, identity, arguments); }",
+        ),
+        (
+            "aliased sibling input-transform semantic constructor",
+            "type Alias = PhysicalLaunchObservation; fn forged() { let mint = Alias::input_transform; let _ = mint(symbol, op, dtype, shape, strides, identity, arguments); }",
+        ),
+        (
             "sibling conversion argument constructor",
             "fn forged() { let _ = PhysicalConversionArguments :: new(source, source_bytes, destination, destination_bytes); }",
         ),
@@ -7760,6 +8183,113 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
         validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &conditional_sources).is_err(),
         "a cfg-hidden approved observer constructor was accepted"
     );
+}
+
+#[test]
+fn physical_904_census_keeps_test_authorities_gated_private_and_exact() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    collect_rust_sources(&root, &mut sources);
+    validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &sources).unwrap();
+    for signature in [
+        "fn helper() -> RecordedPhysicalTrace { unreachable!() }",
+        "fn helper() -> crate::mamba_ssm::gpu::kernel_identity::RecordedPhysicalTrace { unreachable!() }",
+    ] {
+        assert!(!has_recorded_physical_trace_literal(signature));
+        let mut with_return_type = sources.clone();
+        with_return_type.push((
+            PathBuf::from("src/return_type_fixture.rs"),
+            signature.into(),
+        ));
+        validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &with_return_type).unwrap();
+    }
+    for literal in [
+        "fn forged() -> RecordedPhysicalTrace { RecordedPhysicalTrace { context, binding, launches, enqueue_provenance, nodes } }",
+        "fn forged() { let _ = RecordedPhysicalTrace\n{ context, binding, launches, enqueue_provenance, nodes }; }",
+        "fn forged() { let _ = crate::kernel_identity::RecordedPhysicalTrace/* gap */{ context, binding, launches, enqueue_provenance, nodes }; }",
+    ] {
+        assert!(has_recorded_physical_trace_literal(literal));
+        let mut with_literal = sources.clone();
+        with_literal.push((
+            PathBuf::from("src/forged_literal_fixture.rs"),
+            literal.into(),
+        ));
+        assert!(
+            validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &with_literal).is_err()
+        );
+    }
+    for (label, from, to) in [
+        (
+            "missing test gate",
+            "#[cfg(test)]\npub(in crate::mamba_ssm::gpu) mod inference_test_support",
+            "pub(in crate::mamba_ssm::gpu) mod inference_test_support",
+        ),
+        (
+            "public test module",
+            "pub(in crate::mamba_ssm::gpu) mod inference_test_support",
+            "pub mod inference_test_support",
+        ),
+        (
+            "public observer factory",
+            "pub(in crate::mamba_ssm::gpu) fn observer(",
+            "pub fn observer(",
+        ),
+        (
+            "extra observer factory",
+            "RecordingPhysicalObserver::with_argument_identity(128, None, resolve).unwrap()",
+            "let _extra = RecordingPhysicalObserver::with_argument_identity(128, None, resolve); RecordingPhysicalObserver::with_argument_identity(128, None, resolve).unwrap()",
+        ),
+        (
+            "public resolver",
+            "    fn resolve<O: PhysicalLaunchObserver>(",
+            "    pub(super) fn resolve<O: PhysicalLaunchObserver>(",
+        ),
+        (
+            "extra nested resolver",
+            "launch.arguments_digest = arguments.resolve(observer, &route, config)?;",
+            "let _extra = arguments.resolve(observer, &route, config)?; launch.arguments_digest = arguments.resolve(observer, &route, config)?;",
+        ),
+        (
+            "public transform payload",
+            "struct PhysicalInputTransformObservation {",
+            "pub(super) struct PhysicalInputTransformObservation {",
+        ),
+        (
+            "wrong Inference payload",
+            "inference: Some(arguments),",
+            "inference: None,",
+        ),
+    ] {
+        assert!(
+            IDENTITY_SOURCE.contains(from),
+            "missing mutation target: {label}"
+        );
+        let identity = IDENTITY_SOURCE.replacen(from, to, 1);
+        assert!(
+            validate_physical_trace_ownership_boundary(&identity, &sources).is_err(),
+            "accepted {label}"
+        );
+    }
+    for (path_suffix, module) in [
+        ("mamba_ssm/gpu/blas.rs", "matvec_inventory_cuda_tests"),
+        (
+            "mamba_ssm/gpu/gemm_bi_inference.rs",
+            "observed_inventory_cuda_tests",
+        ),
+    ] {
+        let mut changed = sources.clone();
+        let (_, source) = changed
+            .iter_mut()
+            .find(|(path, _)| path.ends_with(path_suffix))
+            .unwrap();
+        let from = format!("#[cfg(test)]\nmod {module}");
+        assert!(source.contains(&from));
+        *source = source.replacen(&from, &format!("mod {module}"), 1);
+        assert!(
+            validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &changed).is_err(),
+            "ungated {module} accepted"
+        );
+    }
 }
 
 #[test]
@@ -11123,6 +11653,29 @@ fn graph_launch_scanner_rejects_a_bypass_beside_a_guarded_call() {
     "#;
     assert!(graph_launches_are_guarded(guarded));
     assert!(!graph_launches_are_guarded(bypass));
+    let model_guarded = guarded.replace(
+        "self.plan.with_validated_launch",
+        "with_validated_gemm_graph_launch",
+    );
+    let model_bypass = bypass.replace(
+        "self.plan.with_validated_launch",
+        "with_validated_gemm_graph_launch",
+    );
+    assert!(graph_launches_are_guarded(&model_guarded));
+    assert!(!graph_launches_are_guarded(&model_bypass));
+    let impostor = model_guarded.replace(
+        "with_validated_gemm_graph_launch",
+        "unchecked_with_validated_gemm_graph_launch",
+    );
+    assert!(!graph_launches_are_guarded(&impostor));
+    for receiver in ["graph", "g"] {
+        let guarded_local =
+            model_guarded.replace("self.graph.launch()", &format!("{receiver}\n .launch()"));
+        let bypass_local =
+            model_bypass.replace("self.graph.launch()", &format!("{receiver}\n .launch()"));
+        assert!(graph_launches_are_guarded(&guarded_local));
+        assert!(!graph_launches_are_guarded(&bypass_local));
+    }
 }
 
 #[test]

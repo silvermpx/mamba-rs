@@ -24,6 +24,140 @@ use super::launch::grid_1d;
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
+/// Test-only observation at the actual vendor GEMM FFI boundaries. A scoped
+/// guard owns thread-local state; nested guards are rejected without changing
+/// the enclosing guard, and Drop restores it on errors and unwinding.
+#[cfg(test)]
+pub(crate) mod vendor_gemm_test {
+    use std::{cell::Cell, marker::PhantomData, rc::Rc};
+
+    #[derive(Clone, Copy)]
+    struct State {
+        deny: bool,
+        calls: usize,
+    }
+
+    thread_local! {
+        static STATE: Cell<Option<State>> = const { Cell::new(None) };
+    }
+
+    pub(crate) struct Guard {
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    impl Guard {
+        pub(crate) fn new(deny: bool) -> Result<Self, String> {
+            STATE.with(|state| {
+                if state.get().is_some() {
+                    return Err("nested vendor GEMM test guard".into());
+                }
+                state.set(Some(State { deny, calls: 0 }));
+                Ok(Self {
+                    _thread: PhantomData,
+                })
+            })
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            STATE.with(|state| state.get().expect("active vendor guard").calls)
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            STATE.with(|state| state.set(None));
+        }
+    }
+
+    pub(super) fn boundary() -> Result<(), String> {
+        STATE.with(|state| {
+            if let Some(mut current) = state.get() {
+                current.calls += 1;
+                state.set(Some(current));
+                if current.deny {
+                    return Err("vendor GEMM denied before FFI".into());
+                }
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn vendor_gemm_guard_restores_on_error_unwind_and_rejects_nesting() {
+        let guard = Guard::new(false).unwrap();
+        boundary().unwrap();
+        assert!(Guard::new(true).is_err());
+        assert_eq!(guard.calls(), 1);
+        boundary().unwrap();
+        assert_eq!(guard.calls(), 2);
+        drop(guard);
+        let error = (|| -> Result<(), String> {
+            let _guard = Guard::new(true)?;
+            boundary()
+        })();
+        assert!(error.unwrap_err().contains("before FFI"));
+        let unwind = std::panic::catch_unwind(|| {
+            let _guard = Guard::new(false).unwrap();
+            panic!("exercise vendor guard unwind");
+        });
+        assert!(unwind.is_err());
+        let guard = Guard::new(false).unwrap();
+        assert_eq!(guard.calls(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn vendor_gemm_counter_observes_both_modes_and_denies_before_ffi() {
+        use super::*;
+        use crate::mamba_ssm::gpu::{buffers::DtypedBuf, device::GpuDevice};
+        let device = GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new(&device).unwrap();
+        for mode in [GemmMode::CublasFast, GemmMode::CublasPedantic] {
+            ctx.set_gemm_mode(mode).unwrap();
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                eprintln!("vendor control {mode:?} {dtype:?}");
+                let x = DtypedBuf::zeros(&ctx.stream, 32, dtype).unwrap();
+                let w = DtypedBuf::zeros(&ctx.stream, 32 * 16, dtype).unwrap();
+                let y = DtypedBuf::zeros(&ctx.stream, 16, dtype).unwrap();
+                x.upload_f32(&ctx.stream, &[1.0; 32]).unwrap();
+                w.upload_f32(&ctx.stream, &[1.0; 32 * 16]).unwrap();
+                let run = || {
+                    gpu_gemm_typed_forward_raw(
+                        &ctx,
+                        TypedPtr {
+                            ptr: y.cached_ptr(),
+                            dtype,
+                        },
+                        TypedPtr {
+                            ptr: x.cached_ptr(),
+                            dtype,
+                        },
+                        TypedPtr {
+                            ptr: w.cached_ptr(),
+                            dtype,
+                        },
+                        None,
+                        (1, 32, 16),
+                    )
+                };
+                let counter = Guard::new(false).unwrap();
+                run().unwrap();
+                let mut output = [0.0; 16];
+                y.download_f32(&ctx.stream, &mut output).unwrap();
+                assert_eq!(output, [32.0; 16]);
+                assert_eq!(counter.calls(), 1);
+                drop(counter);
+                y.upload_f32(&ctx.stream, &[7.0; 16]).unwrap();
+                let deny = Guard::new(true).unwrap();
+                assert!(run().unwrap_err().contains("before FFI"));
+                assert_eq!(deny.calls(), 1);
+                y.download_f32(&ctx.stream, &mut output).unwrap();
+                assert_eq!(output, [7.0; 16], "denied FFI must not write output");
+            }
+        }
+    }
+}
+
 /// Effective cuBLAS compute type for a context-aware typed GEMM.
 ///
 /// Fast uses ordinary f32 compute and Pedantic uses pedantic f32 compute for
@@ -133,6 +267,8 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     let y_raw = y as *mut f32;
 
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
@@ -222,6 +358,8 @@ pub fn gpu_gemm_bi_backward_dx_raw(
     let dx_raw = dx.raw_ptr(&ctx.stream) as *mut f32;
 
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
@@ -285,6 +423,8 @@ pub fn gpu_gemm_bi_backward_dw_grad(
     let dw_ptr = dw.ptr() as *mut f32;
 
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
@@ -350,6 +490,8 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
@@ -419,6 +561,8 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
@@ -2357,6 +2501,8 @@ pub fn gpu_gemm_bi_tied_lm_head_blas(
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
@@ -3670,6 +3816,8 @@ fn gpu_gemm_ex_tied_lm_head_with_compute(
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
@@ -3756,6 +3904,8 @@ pub fn gpu_gemm_typed_raw_no_bias(
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
@@ -4134,6 +4284,8 @@ pub fn gpu_gemm_typed_forward_raw(
     let alpha: f32 = 1.0;
 
     unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
@@ -4169,6 +4321,148 @@ mod matvec_inventory_cuda_tests {
     use crate::mamba_ssm::gpu::context::BiGemmFamily;
     use crate::mamba_ssm::gpu::device::GpuDevice;
     use crate::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, ResolvedNumericContract};
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn triad_native_half_context_inventory_records_all_projection_terminals() {
+        let device = GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new_with_mode(&device, GemmMode::Deterministic).unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_bi_tensor_cores(true);
+        let deny = vendor_gemm_test::Guard::new(true).unwrap();
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for batch in [1, 3] {
+                eprintln!("native half context terminals {dtype:?} B{batch}");
+                let shapes = [
+                    (batch, 32, 128),
+                    (batch, 64, 18),
+                    (batch, 2, 64),
+                    (batch, 64, 32),
+                ];
+                let buffers: Vec<_> = shapes
+                    .iter()
+                    .map(|&(m, k, n)| {
+                        let x = DtypedBuf::zeros(&ctx.stream, m * k, dtype).unwrap();
+                        let w = DtypedBuf::zeros(&ctx.stream, k * n, dtype).unwrap();
+                        let y = DtypedBuf::zeros(&ctx.stream, m * n, dtype).unwrap();
+                        x.upload_f32(&ctx.stream, &vec![1.0; m * k]).unwrap();
+                        w.upload_f32(&ctx.stream, &vec![1.0; k * n]).unwrap();
+                        (x, w, y)
+                    })
+                    .collect();
+                let pointers = |i: usize| {
+                    let (x, w, y) = &buffers[i];
+                    (
+                        TypedPtr {
+                            ptr: y.cached_ptr(),
+                            dtype,
+                        },
+                        TypedPtr {
+                            ptr: x.cached_ptr(),
+                            dtype,
+                        },
+                        TypedPtr {
+                            ptr: w.cached_ptr(),
+                            dtype,
+                        },
+                    )
+                };
+                let run = || -> Result<(), String> {
+                    for (i, &shape) in shapes.iter().enumerate() {
+                        let (y, x, w) = pointers(i);
+                        gpu_gemm_typed_forward_raw(&ctx, y, x, w, None, shape)?;
+                    }
+                    Ok(())
+                };
+                run().unwrap();
+                let trace = ctx.record_eager_gemm_trace(run).unwrap();
+                assert_eq!(
+                    trace
+                        .routes()
+                        .iter()
+                        .map(|route| route.shape)
+                        .collect::<Vec<_>>(),
+                    shapes
+                );
+                for (i, &(m, k, n)) in shapes.iter().enumerate() {
+                    let mut output = vec![0.0; m * n];
+                    buffers[i].2.download_f32(&ctx.stream, &mut output).unwrap();
+                    assert_eq!(output, vec![k as f32; m * n]);
+                    ctx.validate_resolved_gemm_route(
+                        &trace.routes()[i],
+                        "native half direct projection",
+                    )
+                    .unwrap();
+                }
+
+                let (y, x, w) = pointers(0);
+                let (m, k, n) = shapes[0];
+                let ranges = [
+                    PhysicalArgumentRange {
+                        pointer: y.ptr,
+                        required_bytes: (m * n * dtype.size_bytes()) as u64,
+                    },
+                    PhysicalArgumentRange {
+                        pointer: x.ptr,
+                        required_bytes: (m * k * dtype.size_bytes()) as u64,
+                    },
+                    PhysicalArgumentRange {
+                        pointer: w.ptr,
+                        required_bytes: (k * n * dtype.size_bytes()) as u64,
+                    },
+                ];
+                let mut observer = prepare_physical_observer(&ctx, 1, &ranges).unwrap();
+                gemm_bi_forward_typed_in(&ctx, y, x, w, 0, shapes[0], &mut observer).unwrap();
+                let physical_only =
+                    finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
+                let mut observer = prepare_physical_observer(&ctx, 1, &ranges).unwrap();
+                let context_trace = ctx
+                    .record_eager_gemm_trace(|| {
+                        gemm_bi_forward_typed_in(&ctx, y, x, w, 0, shapes[0], &mut observer)
+                            .map(drop)
+                    })
+                    .unwrap();
+                let physical_with_context =
+                    finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
+                assert_eq!(
+                    physical_with_context.nodes(),
+                    physical_only.nodes(),
+                    "context recording must preserve physical allocation digests"
+                );
+                assert_eq!(physical_with_context.nodes().len(), 1);
+                assert_eq!(
+                    context_trace.routes(),
+                    &trace.routes()[..1],
+                    "one context record, no duplication"
+                );
+                assert_ne!(
+                    physical_only.nodes()[0]
+                        .gemm_route()
+                        .unwrap()
+                        .launch
+                        .arguments_digest,
+                    context_trace.routes()[0].launch.arguments_digest
+                );
+
+                // A full recorder must reject the real terminal before enqueue.
+                buffers[0]
+                    .2
+                    .upload_f32(&ctx.stream, &vec![7.0; m * n])
+                    .unwrap();
+                let recording = ctx.begin_gemm_route_recording(0).unwrap();
+                assert!(gpu_gemm_typed_forward_raw(&ctx, y, x, w, None, shapes[0]).is_err());
+                drop(recording);
+                let mut output = vec![0.0; m * n];
+                buffers[0].2.download_f32(&ctx.stream, &mut output).unwrap();
+                assert_eq!(
+                    output,
+                    vec![7.0; m * n],
+                    "invalid context recording must not enqueue"
+                );
+            }
+        }
+        assert_eq!(deny.calls(), 0);
+    }
 
     #[test]
     #[ignore = "needs a CUDA device"]
