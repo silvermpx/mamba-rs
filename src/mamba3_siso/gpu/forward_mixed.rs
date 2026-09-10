@@ -8,7 +8,7 @@
 //!   k_prev_saved, v_prev_saved, chunk_states_saved), reduction saves
 //!   (rms_vals, b_rms, c_rms, gated_rms_vals, angle_cumsum,
 //!   da_cumsum_saved, scale_saved, gamma_saved, qk_dot_saved), small
-//!   T-length coefficients (dt, a_val, trap, alpha, beta, gamma), plus
+//!   T-length coefficients (dt, a_val, trap), plus
 //!   `norm_f_input` + `norm_f_rms`.
 //! - **typed**: activation I/O at kernel boundaries — post_norm, z, x,
 //!   b_raw, c_raw, b_normed, c_normed, b_biased, c_biased, k, q, y,
@@ -86,10 +86,6 @@ pub struct GpuMamba3LayerMixedActs {
     // F5: Angle accumulation
     /// f32 — cumulative sum of angles (precision-sensitive).
     pub angle_cumsum: GpuBuffer,
-    /// f32 — per-timestep coefficients (precision-sensitive, small).
-    pub alpha: GpuBuffer,
-    pub beta: GpuBuffer,
-    pub gamma: GpuBuffer,
 
     // F6: SSM
     /// f32 — hidden state BPTT save [B*(T+1)*d_inner*ds].
@@ -196,9 +192,6 @@ impl GpuMamba3BackboneMixedActs {
                     // `.max(1)` — defense in depth, same rationale as
                     // `angles_raw` above and the f32 `angle_cumsum` path.
                     angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na.max(1))?,
-                    alpha: GpuBuffer::zeros(stream, bt * nh)?,
-                    beta: GpuBuffer::zeros(stream, bt * nh)?,
-                    gamma: GpuBuffer::zeros(stream, bt * nh)?,
                     // Sequential-scan tapes, consumed only by the
                     // sequential forward branch (the mixed backward
                     // supports the chunked path only). On the chunked
@@ -295,7 +288,6 @@ pub fn gpu_forward_mamba3_layer_mixed(
         beta: beta_scratch,
         gamma: gamma_scratch,
         adt_temp: adt_temp_scratch,
-        chunk_states: chunk_states_scratch,
         final_states: final_states_scratch,
         ..
     } = scratch;
@@ -511,8 +503,11 @@ pub fn gpu_forward_mamba3_layer_mixed(
             .map_err(|e| format!("m3_mixed F4 bias_rope: {e:?}"))?;
     }
 
-    // F5b: m3_compute_abg — all f32.
-    {
+    // F5b: m3_compute_abg, all f32. Only the sequential burn-in forward
+    // below reads alpha/beta/gamma; the chunked pipeline derives its own
+    // coefficients and the mixed backward never runs the sequential
+    // branch, so nothing is saved for it.
+    if !dims.use_parallel_scan {
         let n_total = (bt * nh) as i32;
         let mut bld = ctx.stream.launch_builder(&m3k.m3_compute_abg);
         bld.arg(alpha_scratch.inner_mut());
@@ -524,11 +519,6 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&n_total);
         unsafe { bld.launch(grid_1d(bt * nh)) }.map_err(|e| format!("m3_mixed F5b abg: {e:?}"))?;
     }
-
-    // Save alpha/beta/gamma into typed acts (f32 copy for backward).
-    acts.alpha.copy_from_raw(alpha_scratch, &ctx.stream)?;
-    acts.beta.copy_from_raw(beta_scratch, &ctx.stream)?;
-    acts.gamma.copy_from_raw(gamma_scratch, &ctx.stream)?;
 
     // F6: SSM forward — sequential burnin OR chunked parallel scan.
     if dims.use_parallel_scan {
@@ -563,8 +553,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(acts.a_val.inner());
             bld.arg(acts.dt.inner());
             bld.arg(&n_total);
-            unsafe { bld.launch(grid_1d(bt * nh)) }
-                .map_err(|e| format!("m3_mixed F6 adt: {e:?}"))?;
+            unsafe { bld.launch(grid_1d(count)) }.map_err(|e| format!("m3_mixed F6 adt: {e:?}"))?;
         }
 
         // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved.
@@ -603,7 +592,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(acts.qk_dot_saved.inner_mut());
             bld.arg(acts.scale_saved.inner_mut());
             bld.arg(acts.gamma_saved.inner_mut());
-            bld.arg(chunk_states_scratch.inner_mut());
+            bld.arg(acts.chunk_states_saved.inner_mut());
             bld.arg(&kp);
             bld.arg(&qp);
             bld.arg(acts.dt.inner());
@@ -652,8 +641,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
             }
 
             // K3: m3_chunk_state_fwd_typed — typed x + typed K_scaled →
-            // f32 chunk_states (chunk_states_scratch, will be in-place
-            // mutated by K4).
+            // f32 chunk_states (acts.chunk_states_saved, mutated in place
+            // by K4 into the entering states).
             {
                 let cfg =
                     super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
@@ -662,7 +651,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
                 let xp = acts.x.cached_ptr();
                 let ks = acts.k_scaled_saved.cached_ptr();
-                bld.arg(chunk_states_scratch.inner_mut());
+                bld.arg(acts.chunk_states_saved.inner_mut());
                 bld.arg(&xp);
                 bld.arg(&ks);
                 bld.arg(acts.da_cumsum_saved.inner());
@@ -689,7 +678,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 shared_mem_bytes: 0,
             };
             let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
-            bld.arg(chunk_states_scratch.inner_mut());
+            bld.arg(acts.chunk_states_saved.inner_mut());
             bld.arg(final_states_scratch.inner_mut());
             bld.arg(acts.da_cumsum_saved.inner());
             // Training forward: stateless window — chunk 0 enters at zero.
@@ -706,10 +695,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 .map_err(|e| format!("m3_mixed F6 K4 state_passing: {e:?}"))?;
         }
 
-        // Save chunk_states → acts.chunk_states_saved BEFORE K5 reads them
-        // (K5 reads as prev_states; saved version is what bwd needs).
-        acts.chunk_states_saved
-            .copy_from_raw(chunk_states_scratch, &ctx.stream)?;
+        // K5 reads the entering states K4 left in acts.chunk_states_saved,
+        // which is also what the backward needs.
 
         // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
         // f32 qk_dot/da_cumsum/prev_states/D.
@@ -732,7 +719,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(&ks);
             bld.arg(acts.qk_dot_saved.inner());
             bld.arg(acts.da_cumsum_saved.inner());
-            bld.arg(chunk_states_scratch.inner());
+            bld.arg(acts.chunk_states_saved.inner());
             bld.arg(&dp_ptr);
             bld.arg(&b_i);
             bld.arg(&t_i);
@@ -946,11 +933,6 @@ pub struct GpuMamba3MixedScratch {
     // in the mixed forward; backward path uses the saved versions in acts).
     /// f32 `[B*nh]` — adt = a_val · dt, fed into m3_dA_cumsum.
     pub adt_temp: GpuBuffer,
-    /// f32 [B * n_chunks * nh * chunk_size] — chunked dA cumulative sums.
-    pub da_cumsum: GpuBuffer,
-    /// f32 [B * n_chunks * nh * hd * ds] — per-chunk SSM state (in-place
-    /// mutated by m3_state_passing_fwd from contributions to entering states).
-    pub chunk_states: GpuBuffer,
     /// f32 [B * nh * hd * ds] — output of m3_state_passing_fwd, fed to
     /// m3_writeback_parallel_states for persistent SSM state writeback.
     pub final_states: GpuBuffer,
@@ -992,8 +974,6 @@ impl GpuMamba3MixedScratch {
             d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             adt_temp: GpuBuffer::zeros(stream, bt * nh)?,
-            da_cumsum: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * CHUNK_SIZE)?,
-            chunk_states: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * hd * ds)?,
             final_states: GpuBuffer::zeros(stream, batch * nh * hd * ds)?,
             angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
                 stream,

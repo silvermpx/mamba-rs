@@ -503,8 +503,10 @@ pub fn gpu_forward_mamba3_layer(
             .map_err(|e| format!("m3_bias_rope_fwd F4: {:?}", e))?;
     }
 
-    // F5b: alpha/beta/gamma
-    {
+    // F5b: alpha/beta/gamma. Only the sequential kernels (the burn-in
+    // forward, its backward and the abg backward) read them; the chunked
+    // pipeline derives its own coefficients, so the launch is skipped there.
+    if !dims.use_parallel_scan {
         let n_total = (bt * nh) as i32;
         let mut builder = ctx.stream.launch_builder(&m3k.m3_compute_abg);
         builder.arg(acts.alpha.inner_mut());
@@ -545,7 +547,7 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(acts.a_val.inner());
             builder.arg(acts.dt.inner());
             builder.arg(&n_total);
-            unsafe { builder.launch(grid_1d(bt * nh)) }
+            unsafe { builder.launch(grid_1d(count)) }
                 .map_err(|e| format!("adt compute F6: {:?}", e))?;
         }
         {
@@ -557,7 +559,7 @@ pub fn gpu_forward_mamba3_layer(
                 shared_mem_bytes: 0,
             };
             let mut builder = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
-            builder.arg(scratch.da_cumsum.inner_mut());
+            builder.arg(acts.da_cumsum_saved.inner_mut());
             builder.arg(scratch.d_alpha.inner());
             builder.arg(&b_i);
             builder.arg(&t_i);
@@ -573,17 +575,17 @@ pub fn gpu_forward_mamba3_layer(
             let mut builder = ctx
                 .stream
                 .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
-            builder.arg(scratch.d_q.inner_mut());
-            builder.arg(scratch.d_beta.inner_mut());
-            builder.arg(scratch.d_gamma.inner_mut());
-            builder.arg(scratch.d_dd_dt.inner_mut());
-            builder.arg(scratch.chunk_states.inner_mut());
+            builder.arg(acts.k_scaled_saved.inner_mut());
+            builder.arg(acts.qk_dot_saved.inner_mut());
+            builder.arg(acts.scale_saved.inner_mut());
+            builder.arg(acts.gamma_saved.inner_mut());
+            builder.arg(acts.chunk_states_saved.inner_mut());
             builder.arg(acts.k.inner());
             builder.arg(acts.q.inner());
             builder.arg(acts.dt.inner());
             builder.arg(acts.trap.inner());
             builder.arg(acts.x.inner());
-            builder.arg(scratch.da_cumsum.inner());
+            builder.arg(acts.da_cumsum_saved.inner());
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);
@@ -600,10 +602,10 @@ pub fn gpu_forward_mamba3_layer(
                     shared_mem_bytes: 0,
                 };
                 let mut builder = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
-                builder.arg(scratch.d_q.inner_mut());
-                builder.arg(scratch.d_beta.inner_mut());
-                builder.arg(scratch.d_gamma.inner_mut());
-                builder.arg(scratch.d_dd_dt.inner_mut());
+                builder.arg(acts.k_scaled_saved.inner_mut());
+                builder.arg(acts.qk_dot_saved.inner_mut());
+                builder.arg(acts.scale_saved.inner_mut());
+                builder.arg(acts.gamma_saved.inner_mut());
                 builder.arg(acts.k.inner());
                 builder.arg(acts.q.inner());
                 builder.arg(acts.dt.inner());
@@ -620,10 +622,10 @@ pub fn gpu_forward_mamba3_layer(
                 let cfg =
                     super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
                 let mut builder = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
-                builder.arg(scratch.chunk_states.inner_mut());
+                builder.arg(acts.chunk_states_saved.inner_mut());
                 builder.arg(acts.x.inner());
-                builder.arg(scratch.d_q.inner());
-                builder.arg(scratch.da_cumsum.inner());
+                builder.arg(acts.k_scaled_saved.inner());
+                builder.arg(acts.da_cumsum_saved.inner());
                 builder.arg(&b_i);
                 builder.arg(&t_i);
                 builder.arg(&nh_i);
@@ -645,9 +647,9 @@ pub fn gpu_forward_mamba3_layer(
             };
             let nc_i = nc as i32;
             let mut builder = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
-            builder.arg(scratch.chunk_states.inner_mut());
+            builder.arg(acts.chunk_states_saved.inner_mut());
             builder.arg(scratch.final_states.inner_mut());
-            builder.arg(scratch.da_cumsum.inner());
+            builder.arg(acts.da_cumsum_saved.inner());
             // Training forward: stateless window — chunk 0 enters at zero.
             // A state-carrying prefill passes the folded entering state.
             let init_states_null: crate::mamba3_siso::gpu::state::CUptr = 0;
@@ -674,10 +676,10 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.x.inner());
             builder.arg(acts.q.inner());
-            builder.arg(scratch.d_q.inner());
-            builder.arg(scratch.d_beta.inner());
-            builder.arg(scratch.da_cumsum.inner());
-            builder.arg(scratch.chunk_states.inner());
+            builder.arg(acts.k_scaled_saved.inner());
+            builder.arg(acts.qk_dot_saved.inner());
+            builder.arg(acts.da_cumsum_saved.inner());
+            builder.arg(acts.chunk_states_saved.inner());
             builder.arg(&dp_ptr);
             builder.arg(&b_i);
             builder.arg(&t_i);
@@ -689,18 +691,8 @@ pub fn gpu_forward_mamba3_layer(
                 .map_err(|e| format!("m3_chunk_scan_fwd F6 K5: {:?}", e))?;
         }
 
-        acts.da_cumsum_saved
-            .copy_from_raw(&scratch.da_cumsum, &ctx.stream)?;
-        acts.k_scaled_saved
-            .copy_from_raw(&scratch.d_q, &ctx.stream)?;
-        acts.scale_saved
-            .copy_from_raw(&scratch.d_gamma, &ctx.stream)?;
-        acts.gamma_saved
-            .copy_from_raw(&scratch.d_dd_dt, &ctx.stream)?;
-        acts.qk_dot_saved
-            .copy_from_raw(&scratch.d_beta, &ctx.stream)?;
-        acts.chunk_states_saved
-            .copy_from_raw(&scratch.chunk_states, &ctx.stream)?;
+        // The chunked kernels above wrote their saves straight into the
+        // layer acts; the backward reads them from there.
 
         {
             let block_x = hd.max(ds) as u32;

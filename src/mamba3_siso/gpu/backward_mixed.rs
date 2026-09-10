@@ -376,16 +376,9 @@ fn gpu_backward_mamba3_layer_mixed(
     let nc = dims.n_chunks();
     let cs_u = dims.chunk_size();
 
-    // Load saved intermediates from typed/f32 fwd save into f32 scratch
-    // (the parallel bwd kernels read these from f32 buffers).
-    sc.da_cumsum
-        .copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
-    sc.d_scale.copy_from_raw(&acts.scale_saved, &ctx.stream)?;
-    sc.d_gamma_par
-        .copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
-    sc.d_qk_dot.copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
-    sc.chunk_states
-        .copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
+    // The forward saved da_cumsum, scale, gamma, qk_dot and the chunk
+    // states in f32 in the layer acts; the kernels read them from there,
+    // and the scale and gamma gradients get their own scratch.
 
     // Extract per-chunk dA cumsum end values.
     {
@@ -398,7 +391,7 @@ fn gpu_backward_mamba3_layer_mixed(
         };
         let mut builder = ctx.stream.launch_builder(&m3k.m3_extract_da_cs_sum);
         builder.arg(sc.da_cs_sum.inner_mut());
-        builder.arg(sc.da_cumsum.inner());
+        builder.arg(acts.da_cumsum_saved.inner());
         builder.arg(&b);
         builder.arg(&t);
         builder.arg(&nh_i);
@@ -407,25 +400,9 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("m3_extract_da_cs_sum mixed: {:?}", e))?;
     }
 
-    // Zero output buffers for m3_dqkv_typed.
-    {
-        let zero: f32 = 0.0;
-        for (buf, sz, label) in [
-            (&mut sc.d_x, bt * di, "d_x"),
-            (&mut sc.d_k, bt * nh * ds, "d_k"),
-            (&mut sc.d_q, bt * nh * ds, "d_q"),
-        ] {
-            let ne = sz as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-            builder.arg(buf.inner_mut());
-            builder.arg(&zero);
-            builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(sz)) }
-                .map_err(|e| format!("zero {label} mixed: {:?}", e))?;
-        }
-    }
-
-    // m3_dqkv typed — no-atomics partials rule: dD_partials[B*nh] via axis0_partials,
+    // m3_dqkv typed assigns every element of d_q, d_k and d_x it owns, so
+    // the three buffers need no zeroing first.
+    // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
     // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
     {
         // Two chunk-by-state operand tiles, V/dO tiles, two per-step
@@ -470,7 +447,7 @@ fn gpu_backward_mamba3_layer_mixed(
             let dy_p = msc.d_y_typed.cached_ptr();
             sb.arg(sc.dstate_terms.inner_mut());
             sb.arg(&q_p);
-            sb.arg(sc.da_cumsum.inner());
+            sb.arg(acts.da_cumsum_saved.inner());
             sb.arg(&dy_p);
             sb.arg(&b);
             sb.arg(&t);
@@ -514,10 +491,10 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&q_p);
         builder.arg(&ks_p);
         builder.arg(&v_p);
-        builder.arg(sc.da_cumsum.inner());
+        builder.arg(acts.da_cumsum_saved.inner());
         builder.arg(sc.da_cs_sum.inner());
-        builder.arg(sc.d_qk_dot.inner());
-        builder.arg(sc.chunk_states.inner());
+        builder.arg(acts.qk_dot_saved.inner());
+        builder.arg(acts.chunk_states_saved.inner());
         builder.arg(&dy_p);
         builder.arg(&dp_ptr);
         builder.arg(sc.dstate_enter.inner());
@@ -586,8 +563,8 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_c_pre_rope.inner_mut());
         builder.arg(sc.d_b_pre_rope.inner_mut());
         builder.arg(sc.d_angle_cumsum.inner_mut());
-        let scale_in_ptr = sc.d_scale.raw_ptr(&ctx.stream);
-        let gamma_in_ptr = sc.d_gamma_par.raw_ptr(&ctx.stream);
+        let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+        let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
         builder.arg(sc.d_scale.inner_mut());
         builder.arg(sc.d_gamma_par.inner_mut());
         let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw

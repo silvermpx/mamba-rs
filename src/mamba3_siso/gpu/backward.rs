@@ -248,24 +248,9 @@ pub fn gpu_backward_mamba3_layer(
         let b_i = dims.batch as i32;
         let na = dims.n_angles;
 
-        scratch
-            .da_cumsum
-            .copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
-        scratch
-            .d_b_pre_rope
-            .copy_from_raw(&acts.k_scaled_saved, &ctx.stream)?;
-        scratch
-            .d_scale
-            .copy_from_raw(&acts.scale_saved, &ctx.stream)?;
-        scratch
-            .d_gamma_par
-            .copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
-        scratch
-            .d_qk_dot
-            .copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
-        scratch
-            .chunk_states
-            .copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
+        // The forward saved da_cumsum, k_scaled, scale, gamma, qk_dot and
+        // the chunk states in the layer acts; the kernels read them from
+        // there, and the scale and gamma gradients get their own scratch.
 
         {
             let block_x = nh.min(256) as u32;
@@ -277,7 +262,7 @@ pub fn gpu_backward_mamba3_layer(
             };
             let mut builder = ctx.stream.launch_builder(&m3k.m3_extract_da_cs_sum);
             builder.arg(scratch.da_cs_sum.inner_mut());
-            builder.arg(scratch.da_cumsum.inner());
+            builder.arg(acts.da_cumsum_saved.inner());
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);
@@ -286,24 +271,9 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("m3_extract_da_cs_sum B6: {:?}", e))?;
         }
 
-        {
-            let zero: f32 = 0.0;
-            for (buf, sz, label) in [
-                (&mut scratch.d_x, bt * di, "d_x"),
-                (&mut scratch.d_k, bt * nh * ds, "d_k"),
-                (&mut scratch.d_q, bt * nh * ds, "d_q"),
-            ] {
-                let ne = sz as i32;
-                let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-                builder.arg(buf.inner_mut());
-                builder.arg(&zero);
-                builder.arg(&ne);
-                unsafe { builder.launch(grid_1d(sz)) }
-                    .map_err(|e| format!("zero {label} B6 par: {:?}", e))?;
-            }
-        }
-
-        // m3_dqkv — no-atomics partials rule: dD_partials[B*nh] via axis0_partials,
+        // m3_dqkv assigns every element of d_q, d_k and d_x it owns, so the
+        // three buffers need no zeroing first.
+        // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
         // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1 across
         // layers since GpuMamba3Grads::zero runs once per step).
         {
@@ -346,7 +316,7 @@ pub fn gpu_backward_mamba3_layer(
                 );
                 sb.arg(scratch.dstate_terms.inner_mut());
                 sb.arg(acts.q.inner());
-                sb.arg(scratch.da_cumsum.inner());
+                sb.arg(acts.da_cumsum_saved.inner());
                 sb.arg(scratch.d_y.inner());
                 sb.arg(&b_i);
                 sb.arg(&t_i);
@@ -389,12 +359,12 @@ pub fn gpu_backward_mamba3_layer(
             // dD_partials [B*nh] — reduced after kernel.
             builder.arg(scratch.axis0_partials.inner_mut());
             builder.arg(acts.q.inner());
-            builder.arg(scratch.d_b_pre_rope.inner());
+            builder.arg(acts.k_scaled_saved.inner());
             builder.arg(acts.x.inner());
-            builder.arg(scratch.da_cumsum.inner());
+            builder.arg(acts.da_cumsum_saved.inner());
             builder.arg(scratch.da_cs_sum.inner());
-            builder.arg(scratch.d_qk_dot.inner());
-            builder.arg(scratch.chunk_states.inner());
+            builder.arg(acts.qk_dot_saved.inner());
+            builder.arg(acts.chunk_states_saved.inner());
             builder.arg(scratch.d_y.inner());
             builder.arg(&dp_ptr);
             builder.arg(scratch.dstate_enter.inner());
@@ -465,8 +435,8 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(scratch.d_c_pre_rope.inner_mut());
             builder.arg(scratch.d_b_pre_rope.inner_mut());
             builder.arg(scratch.d_angle_cumsum.inner_mut());
-            let scale_in_ptr = scratch.d_scale.raw_ptr(&ctx.stream);
-            let gamma_in_ptr = scratch.d_gamma_par.raw_ptr(&ctx.stream);
+            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
             builder.arg(scratch.d_scale.inner_mut());
             builder.arg(scratch.d_gamma_par.inner_mut());
             builder.arg(acts.c_biased.inner());

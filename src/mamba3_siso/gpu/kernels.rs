@@ -39,7 +39,6 @@ pub struct Mamba3Kernels {
     pub bcnorm_bwd: CudaFunction,
     pub bc_bias_add: CudaFunction,
     pub bc_bias_add_bwd: CudaFunction,
-    pub angle_dt_fwd: CudaFunction,
     pub m3_angle_dt_fwd_batch: CudaFunction,
     pub m3_angle_dt_fwd_seq: CudaFunction,
     /// Chunk-parallel angle accumulation pair — replaces the sequential
@@ -47,7 +46,6 @@ pub struct Mamba3Kernels {
     /// the prefill profile at production shapes).
     pub m3_angle_chunk_sums: CudaFunction,
     pub m3_angle_chunk_apply: CudaFunction,
-    pub angle_dt_bwd: CudaFunction,
     pub m3_angle_dt_bwd_seq: CudaFunction,
     pub rope_fwd: CudaFunction,
     /// Fused bc_bias_add (B + C) + rope_fwd - one launch replaces the
@@ -72,12 +70,12 @@ pub struct Mamba3Kernels {
     /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
     /// m3_angle_dt_bwd_seq, and d_scale from rmsnorm_bwd).
     pub reduce_sum_axis0: CudaFunction,
+    pub vec_add_inplace: CudaFunction,
+    pub elementwise_mul: CudaFunction,
     /// 16-byte vectorized twin of `elementwise_mul` for f32 operands: the
     /// same multiply per element, four elements per thread. Launched when
     /// `vec8_ok` holds for the count and every operand pointer.
     pub elementwise_mul_v: CudaFunction,
-    pub vec_add_inplace: CudaFunction,
-    pub elementwise_mul: CudaFunction,
     pub fill_scalar: CudaFunction,
     pub cast_f32_to_bf16: CudaFunction,
     pub cast_f32_to_f16: CudaFunction,
@@ -128,19 +126,11 @@ pub struct Mamba3Kernels {
     /// 8-way split + fused softplus/sigmoid, bf16/f16 proj and activation outputs.
     /// Coefficient outputs (dt, a_val, trap, angles, raw saves) stay f32.
     pub m3_split_typed: TypedKernel,
-    /// RMSNorm on B/C per group, half I/O, f32 rms_val and weight.
-    pub bcnorm_fwd_typed: TypedKernel,
     /// Fused B+C variant of bcnorm_fwd_typed (2× grid via blockIdx.y).
     pub bcnorm_fwd_bc_typed: TypedKernel,
     /// Fused B+C norm, f32 lane (the decode step merges its two bcnorm
     /// launches through it).
     pub bcnorm_fwd_bc_f32: CudaFunction,
-    /// Per-head bias add, half I/O, f32 bias.
-    pub bc_bias_add_typed: TypedKernel,
-    /// Fused B+C variant of bc_bias_add_typed (2× grid via blockIdx.y).
-    pub bc_bias_add_bc_typed: TypedKernel,
-    /// RoPE rotation, half B/C, f32 angle_cumsum.
-    pub rope_fwd_typed: TypedKernel,
     /// Fused typed twin of bias + rope (round-trip contract preserved).
     pub m3_bias_rope_fwd_typed: TypedKernel,
     /// Plain SiLU gate (no norm), half I/O.
@@ -453,12 +443,10 @@ impl Mamba3Kernels {
             bcnorm_bwd: get("bcnorm_bwd")?,
             bc_bias_add: get("bc_bias_add")?,
             bc_bias_add_bwd: get("bc_bias_add_bwd")?,
-            angle_dt_fwd: get("angle_dt_fwd")?,
             m3_angle_dt_fwd_batch: get("m3_angle_dt_fwd_batch")?,
             m3_angle_dt_fwd_seq: get("m3_angle_dt_fwd_seq")?,
             m3_angle_chunk_sums: get("m3_angle_chunk_sums")?,
             m3_angle_chunk_apply: get("m3_angle_chunk_apply")?,
-            angle_dt_bwd: get("angle_dt_bwd")?,
             m3_angle_dt_bwd_seq: get("m3_angle_dt_bwd_seq")?,
             rope_fwd: get("rope_fwd")?,
             m3_bias_rope_fwd: get("m3_bias_rope_fwd")?,
@@ -466,7 +454,6 @@ impl Mamba3Kernels {
             m3_compute_abg: get("m3_compute_abg")?,
             m3_abg_bwd: get("m3_abg_bwd")?,
             silu_gate_fwd: get("silu_gate_fwd")?,
-            elementwise_mul_v: get("elementwise_mul_v_f32")?,
             silu_gate_bwd: get("silu_gate_bwd")?,
             rmsnorm_gated_fwd: get("rmsnorm_gated_forward")?,
             rmsnorm_gated_bwd: get("rmsnorm_gated_backward")?,
@@ -479,6 +466,7 @@ impl Mamba3Kernels {
             reduce_sum_axis0: get("reduce_sum_axis0")?,
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
+            elementwise_mul_v: get("elementwise_mul_v_f32")?,
             fill_scalar: get("fill_scalar")?,
             cast_f32_to_bf16: get("cast_f32_to_bf16")?,
             cast_f32_to_f16: get("cast_f32_to_f16")?,
@@ -523,32 +511,12 @@ impl Mamba3Kernels {
                 bf16: get("m3_split_bf16")?,
                 f16: get("m3_split_f16")?,
             },
-            bcnorm_fwd_typed: TypedKernel {
-                f32: get("bcnorm_fwd")?,
-                bf16: get("bcnorm_fwd_bf16")?,
-                f16: get("bcnorm_fwd_f16")?,
-            },
             bcnorm_fwd_bc_typed: TypedKernel {
                 f32: get("bcnorm_fwd_bc_f32")?,
                 bf16: get("bcnorm_fwd_bc_bf16")?,
                 f16: get("bcnorm_fwd_bc_f16")?,
             },
             bcnorm_fwd_bc_f32: get("bcnorm_fwd_bc_f32")?,
-            bc_bias_add_typed: TypedKernel {
-                f32: get("bc_bias_add")?,
-                bf16: get("bc_bias_add_bf16")?,
-                f16: get("bc_bias_add_f16")?,
-            },
-            bc_bias_add_bc_typed: TypedKernel {
-                f32: get("bc_bias_add")?,
-                bf16: get("bc_bias_add_bc_bf16")?,
-                f16: get("bc_bias_add_bc_f16")?,
-            },
-            rope_fwd_typed: TypedKernel {
-                f32: get("rope_fwd")?,
-                bf16: get("rope_fwd_bf16")?,
-                f16: get("rope_fwd_f16")?,
-            },
             m3_bias_rope_fwd_typed: TypedKernel {
                 f32: get("m3_bias_rope_fwd")?,
                 bf16: get("m3_bias_rope_fwd_bf16")?,

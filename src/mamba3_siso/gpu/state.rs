@@ -296,11 +296,8 @@ pub struct GpuMamba3Scratch {
     pub d_input_proj_dx: GpuBuffer, // [B*T*mamba_input_dim]
 
     // Chunked parallel scan buffers
-    pub da_cumsum: GpuBuffer,    // [B * n_chunks * nheads * chunk_size]
-    pub da_cs_sum: GpuBuffer,    // [B * nheads * n_chunks] -- per-chunk decay sum
-    pub chunk_states: GpuBuffer, // [B * n_chunks * nheads * headdim * d_state]
+    pub da_cs_sum: GpuBuffer, // [B * nheads * n_chunks] -- per-chunk decay sum
     pub final_states: GpuBuffer, // [B * nheads * headdim * d_state]
-    pub d_da_cumsum: GpuBuffer,  // backward
     /// Per-chunk B terms of the reverse d_state recurrence
     /// (m3_dqkv_state_terms output). [B * n_chunks * nh * hd * ds]
     pub dstate_terms: GpuBuffer,
@@ -310,7 +307,6 @@ pub struct GpuMamba3Scratch {
     // Parallel backward intermediate buffers (Steps 2-6)
     pub d_scale: GpuBuffer,     // [B * T * nh] -- dScale from dqktheta
     pub d_gamma_par: GpuBuffer, // [B * T * nh] -- dGamma from dqktheta
-    pub d_qk_dot: GpuBuffer,    // [B * T * nh] -- dQK_dot from dqkv
 
     // -- Rule-B axis-0 reduction partials (determinism fix) --
     /// Scratch for per-sample partials produced by Rule-B backward kernels.
@@ -531,25 +527,11 @@ impl GpuMamba3Scratch {
             d_b_norm_w: GpuBuffer::zeros(stream, bt * dims.ngroups * ds)?,
             d_c_norm_w: GpuBuffer::zeros(stream, bt * dims.ngroups * ds)?,
             d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
-            da_cumsum: {
-                let cs = dims.chunk_size();
-                let nc = dims.n_chunks();
-                GpuBuffer::zeros(stream, b * nc * nh * cs)?
-            },
             da_cs_sum: {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nh * nc)?
             },
-            chunk_states: {
-                let nc = dims.n_chunks();
-                GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
-            },
             final_states: GpuBuffer::zeros(stream, b * nh * hd * ds)?,
-            d_da_cumsum: {
-                let cs = dims.chunk_size();
-                let nc = dims.n_chunks();
-                GpuBuffer::zeros(stream, b * nc * nh * cs)?
-            },
             dstate_terms: {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
@@ -560,7 +542,6 @@ impl GpuMamba3Scratch {
             },
             d_scale: GpuBuffer::zeros(stream, bt * nh)?,
             d_gamma_par: GpuBuffer::zeros(stream, bt * nh)?,
-            d_qk_dot: GpuBuffer::zeros(stream, bt * nh)?,
             // Rule-B axis-0 partials — sized to fit largest M3 consumer.
             axis0_partials: {
                 let na = dims.n_angles.max(1);
