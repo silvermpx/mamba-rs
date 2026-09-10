@@ -1,0 +1,74 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  cuda-crt-12-8 cuda-crt-13-0 cuda-cudart-12-8 cuda-cudart-13-0
+  cuda-culibos-dev-13-0 cuda-driver-dev-12-8 cuda-driver-dev-13-0
+  cuda-nvrtc-12-8 cuda-nvrtc-13-0 cuda-nvvm-12-8
+  cuda-toolkit-12-8-config-common cuda-toolkit-12-config-common
+  cuda-toolkit-13-0-config-common libcublas-12-8 libcublas-13-0
+  libnvptxcompiler-13-0 libnvvm-13-0
+The following NEW packages will be installed:
+  cuda-cccl-12-8 cuda-cccl-13-0 cuda-crt-12-8 cuda-crt-13-0 cuda-cudart-12-8
+  cuda-cudart-13-0 cuda-cudart-dev-12-8 cuda-cudart-dev-13-0
+  cuda-culibos-dev-13-0 cuda-driver-dev-12-8 cuda-driver-dev-13-0
+  cuda-nvcc-12-8 cuda-nvcc-13-0 cuda-nvrtc-12-8 cuda-nvrtc-13-0
+  cuda-nvrtc-dev-12-8 cuda-nvrtc-dev-13-0 cuda-nvvm-12-8
+  cuda-toolkit-12-8-config-common cuda-toolkit-12-config-common
+  cuda-toolkit-13-0-config-common libcublas-12-8 libcublas-13-0
+  libcublas-dev-12-8 libcublas-dev-13-0 libnvptxcompiler-13-0 libnvvm-13-0
+0 upgraded, 27 newly installed, 0 to remove and 100 not upgraded.
+Inst cuda-cccl-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-cccl-13-0 (13.0.85-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-toolkit-12-config-common (12.9.79-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Inst cuda-toolkit-12-8-config-common (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Inst cuda-cudart-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-driver-dev-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-cudart-dev-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-crt-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-toolkit-13-0-config-common (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Inst cuda-cudart-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-culibos-dev-13-0 (13.0.85-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-driver-dev-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-cudart-dev-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-crt-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvvm-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvcc-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libnvvm-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libnvptxcompiler-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvcc-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvrtc-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvrtc-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvrtc-dev-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst cuda-nvrtc-dev-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libcublas-12-8 (12.8.5.5-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libcublas-13-0 (13.1.1.3-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libcublas-dev-12-8 (12.8.5.5-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Inst libcublas-dev-13-0 (13.1.1.3-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-cccl-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-cccl-13-0 (13.0.85-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-toolkit-12-config-common (12.9.79-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Conf cuda-toolkit-12-8-config-common (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Conf cuda-cudart-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-driver-dev-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-cudart-dev-12-8 (12.8.90-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-crt-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-toolkit-13-0-config-common (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [all])
+Conf cuda-cudart-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-culibos-dev-13-0 (13.0.85-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-driver-dev-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-cudart-dev-13-0 (13.0.96-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-crt-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvvm-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvcc-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libnvvm-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libnvptxcompiler-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvcc-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvrtc-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvrtc-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvrtc-dev-12-8 (12.8.93-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf cuda-nvrtc-dev-13-0 (13.0.88-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libcublas-12-8 (12.8.5.5-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libcublas-13-0 (13.1.1.3-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libcublas-dev-12-8 (12.8.5.5-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
+Conf libcublas-dev-13-0 (13.1.1.3-1 NVIDIA CUDA:developer.download.nvidia.com [amd64])
