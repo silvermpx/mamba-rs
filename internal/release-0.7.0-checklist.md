@@ -304,16 +304,17 @@ Select their actual supported cases and prerequisites before executing them.
   elementwise multiply and softplus copy twins, which are now wired at their
   f32 sites. The four `sm120_scalar_nt_*` library tests are RTX 5090 only and
   fail on Ada by design.
-- [ ] `cargo clippy --features cuda,hf,qualification -- -D warnings` had nine
-  pre-existing lints in the GEMM tree; the release gate never ran clippy
-  with the CUDA feature. Five are fixed (collapsible `if`, derivable
-  `Default`, transmute annotations, a type alias, a boxed enum variant).
-  Four remain, all argument counts above seven in functions the
-  seven-argument contract test does not cover but forbids `allow` for:
-  `fixed_select_sm89_half_auto_tile` (8) and `fixed_pick_tf32` (10) in
-  `gemm_bi_inference.rs`, `QualifiedTriadModules::load` (15) in
-  `modules.rs`, the `spec` const fn (12) in `sm89_half_source.rs`. Fix by
-  grouping arguments into structs, or accept the gap for 0.7.0.
+- [x] The seven-argument contract test (`gemm_bi_tf32_contract`, gate lane)
+  was red before the kernel pass: `GemmBiKernels::load` took fifteen
+  arguments. They travel as `GemmBiModuleSet` now.
+- [ ] `cargo clippy --all-targets --features cuda,hf,qualification -- -D warnings`
+  still reports 16 findings the release gate never ran: three argument
+  counts outside the contract's sources (`fixed_pick_tf32` 10,
+  `fixed_select_sm89_half_auto_tile` 8, the `spec` const fn 12) and
+  thirteen in the library's own test modules (complex tuple types, an
+  8-argument test helper, index loops, an OR pattern, a late init, a
+  `vec!`, items after a test module). Not release-blocking; decide whether
+  to clear them or add clippy with the CUDA feature to the gate first.
 - [ ] `gpu_forward_mamba_target_burnin` and `gpu_forward_mamba3_target_burnin`
   (the target-network forwards RL consumers call) have no test in the tree.
 - [ ] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms,

@@ -996,20 +996,22 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm120_fma_postbias(ctx, &fixed);
         let triad = GemmBiKernels::load(
             ctx,
-            fixed.artifact_identity,
-            scalar,
-            sm80,
-            finalist,
-            finalist_rejection,
-            sm89_half,
-            sm89_half_rejection,
-            sm89_exact_f32,
-            sm89_exact_f32_rejection,
-            sm89_exact_f32_d128,
-            sm89_exact_f32_d128_rejection,
-            sm89_tf32_joint,
-            sm89_tf32_joint_rejection,
-            specialized,
+            super::gemm_bi_triad::modules::GemmBiModuleSet {
+                fixed_artifact: fixed.artifact_identity,
+                scalar,
+                sm80,
+                finalist,
+                finalist_compile_rejection: finalist_rejection,
+                sm89_half,
+                sm89_half_compile_rejection: sm89_half_rejection,
+                sm89_exact_f32,
+                sm89_exact_f32_compile_rejection: sm89_exact_f32_rejection,
+                sm89_exact_f32_d128,
+                sm89_exact_f32_d128_compile_rejection: sm89_exact_f32_d128_rejection,
+                sm89_tf32_joint,
+                sm89_tf32_joint_compile_rejection: sm89_tf32_joint_rejection,
+                specialized,
+            },
         )?;
         // A rejected TF32 module used to be recorded and never shown: the
         // process booted green and every TF32 request quietly ran scalar.

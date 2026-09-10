@@ -8861,24 +8861,44 @@ pub struct GemmBiKernels {
     transpose_scratch: std::sync::OnceLock<GpuBuffer>,
 }
 
+/// The compiled modules a Triad kernel set is assembled from. Every optional
+/// module travels with the text of its compile rejection, so a set can say
+/// why a route is missing instead of silently lacking it.
+pub(crate) struct GemmBiModuleSet {
+    pub fixed_artifact: ArtifactIdentity,
+    pub scalar: CompiledModule,
+    pub sm80: CompiledModule,
+    pub finalist: Option<CompiledModule>,
+    pub finalist_compile_rejection: Option<String>,
+    pub sm89_half: Option<CompiledModule>,
+    pub sm89_half_compile_rejection: Option<String>,
+    pub sm89_exact_f32: Option<CompiledModule>,
+    pub sm89_exact_f32_compile_rejection: Option<String>,
+    pub sm89_exact_f32_d128: Option<CompiledModule>,
+    pub sm89_exact_f32_d128_compile_rejection: Option<String>,
+    pub sm89_tf32_joint: Option<CompiledModule>,
+    pub sm89_tf32_joint_compile_rejection: Option<String>,
+    pub specialized: Option<QualifiedSpecializedModule>,
+}
+
 impl GemmBiKernels {
-    pub(crate) fn load(
-        ctx: &Arc<CudaContext>,
-        fixed_artifact: ArtifactIdentity,
-        scalar: CompiledModule,
-        sm80: CompiledModule,
-        finalist: Option<CompiledModule>,
-        finalist_compile_rejection: Option<String>,
-        sm89_half: Option<CompiledModule>,
-        sm89_half_compile_rejection: Option<String>,
-        sm89_exact_f32: Option<CompiledModule>,
-        sm89_exact_f32_compile_rejection: Option<String>,
-        sm89_exact_f32_d128: Option<CompiledModule>,
-        sm89_exact_f32_d128_compile_rejection: Option<String>,
-        sm89_tf32_joint: Option<CompiledModule>,
-        sm89_tf32_joint_compile_rejection: Option<String>,
-        specialized: Option<QualifiedSpecializedModule>,
-    ) -> Result<Self, String> {
+    pub(crate) fn load(ctx: &Arc<CudaContext>, modules: GemmBiModuleSet) -> Result<Self, String> {
+        let GemmBiModuleSet {
+            fixed_artifact,
+            scalar,
+            sm80,
+            finalist,
+            finalist_compile_rejection,
+            sm89_half,
+            sm89_half_compile_rejection,
+            sm89_exact_f32,
+            sm89_exact_f32_compile_rejection,
+            sm89_exact_f32_d128,
+            sm89_exact_f32_d128_compile_rejection,
+            sm89_tf32_joint,
+            sm89_tf32_joint_compile_rejection,
+            specialized,
+        } = modules;
         let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
         let (major, minor) = ctx
             .compute_capability()
