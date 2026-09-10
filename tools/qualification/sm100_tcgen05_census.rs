@@ -1,4 +1,4 @@
-//! Datacenter-Blackwell qualification census (needs a CC 10.x device -
+//! Datacenter-Blackwell qualification check (needs a CC 10.x device -
 //! B200/B300).
 //!
 //! Decides the tcgen05 rung's contract class: launch the forced tcgen05
@@ -48,7 +48,7 @@ fn tcgen05_vs_mma_sync_family_verdict() {
     let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
     assert!(
         arch == "sm_100a" || arch == "sm_103a",
-        "this census runs on datacenter Blackwell only (got {arch})"
+        "this check runs on datacenter Blackwell only (got {arch})"
     );
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let tcgen = ctx

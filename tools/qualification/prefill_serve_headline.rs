@@ -134,7 +134,7 @@ fn set_tier(ctx: &GpuCtx, tier: &str) {
 }
 
 /// I-5b: the headline serve numbers on the pinned serve tier —
-/// full-temporal eager (the eval/calibrate lane), pooled eager, and the
+/// full-temporal eager (the evaluation and calibration path), pooled eager, and the
 /// production pooled graph. ms/page and pages/s.
 #[test]
 #[ignore = "serve headline bench"]

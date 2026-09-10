@@ -1,8 +1,8 @@
-//! Does the frozen TF32 cohort of this board bind on this stack? The host
-//! tests prove the cohorts describe the tree; only a live context proves the
+//! Does the frozen TF32 route set of this board bind on this stack? The host
+//! tests prove the frozen sets describe the tree; only a live context proves the
 //! board's compiled module matches a frozen identity. This smoke qualifies
 //! the automatic TF32 policy on the projection shapes and reports which
-//! module served each one; a stack the cohorts do not describe serves them
+//! module served each one; a stack the frozen sets do not describe serves them
 //! all from the exact families and fails here.
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -514,7 +514,7 @@ fn sm89_finalist_admitted_cells() -> Vec<(&'static str, (usize, usize, usize))> 
 }
 
 #[test]
-#[ignore = "prints the live Ada SM89 finalist module identity for cohort freezing"]
+#[ignore = "prints the live Ada SM89 finalist module identity so the route set can be frozen"]
 fn sm89_finalist_live_binding_identity() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
@@ -580,7 +580,8 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
             ),
         )
     });
-    presize_physical_qualification_suite(ctx, &requests).expect("presize current SM120 cohort");
+    presize_physical_qualification_suite(ctx, &requests)
+        .expect("presize the current SM120 route set");
     let mut tf32_served = 0;
     for (index, (case, request)) in SM120_CURRENT_COHORT_CASES
         .into_iter()
@@ -663,7 +664,7 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
         assert_eq!(eager_repeat, eager, "{} eager repeat bits", case.id);
         assert_eq!(graph, eager, "{} eager/graph output bits", case.id);
         println!(
-            "SM120 current cohort {} {:?} {:?} bits={}",
+            "SM120 current route set {} {:?} {:?} bits={}",
             case.id,
             case.op,
             case.dims,
@@ -674,7 +675,7 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
 }
 
 #[test]
-#[ignore = "requires a CUDA device whose TF32 cohort is frozen in the tree; SM120 expects a current driver-595.84 toolkit cohort"]
+#[ignore = "requires a CUDA device whose TF32 route set is frozen in the tree; SM120 expects the current driver-595.84 toolkit"]
 fn tf32_cohort_binds_on_this_board() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
@@ -750,12 +751,12 @@ fn tf32_cohort_binds_on_this_board() {
     }
     assert!(
         tf32_served > 0,
-        "no projection shape reached a TF32 route: the board's cohort does not bind on this stack"
+        "no projection shape reached a TF32 route: the board's frozen route set does not bind on this stack"
     );
 }
 
 #[test]
-#[ignore = "requires the frozen RTX 6000 Ada TF32 bias cohort"]
+#[ignore = "requires the frozen RTX 6000 Ada TF32 bias route set"]
 fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
@@ -790,12 +791,12 @@ fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
 }
 
 #[test]
-#[ignore = "requires the fresh CC12.0/170SM CUDA13.2 driver595.58.03 cohort; run after frozen comparator queue"]
+#[ignore = "requires a CC12.0/170SM board on CUDA 13.2 with driver 595.58.03; run after the frozen comparator queue"]
 fn sm120_tf32_fresh_595_58_03_auto_symbols_graphs_and_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
     assert_eq!(device.multiprocessor_count(), 170);
-    let ctx = GpuCtx::new(&device).expect("fresh cohort context");
+    let ctx = GpuCtx::new(&device).expect("context");
     let binding = ctx
         .kernels
         .f32_triad_availability()
@@ -1052,7 +1053,7 @@ fn sm89_finalist_admitted_cell_filter_is_strict() {
 }
 
 #[test]
-#[ignore = "requires an admitted Ada SM89 finalist cohort on the active toolkit"]
+#[ignore = "requires the admitted Ada SM89 finalist routes on the active toolkit"]
 fn sm89_nt_compact_finalist_actual_auto_symbols_graphs_and_bits() {
     let auto_device = GpuDevice::new(0).expect("AUTO CUDA device");
     let forced_device = GpuDevice::new(0).expect("forced CUDA device");

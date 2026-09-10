@@ -1,7 +1,7 @@
 //! Real-device qualification for the deterministic generic SM120 triad.
 //!
-//! CC12.0 automatic cells remain independent from this forced-route census.
-//! The census checks every physical route against the ordinary MMA16 baseline
+//! CC12.0 automatic cells remain independent from this forced-route check,
+//! which holds every physical route to the ordinary MMA16 baseline
 //! bit-for-bit and is the focused memcheck, initcheck, racecheck, and synccheck target.
 #![cfg(feature = "cuda")]
 
@@ -685,7 +685,7 @@ fn assert_identity_and_resources(prepared: &Sm120PreparedLaunch, route: Sm120For
     );
     assert!(
         resources.registers_per_thread > 0,
-        "{} register census",
+        "{} register check",
         spec.symbol
     );
     assert!(
@@ -883,7 +883,7 @@ fn run_graph_route(ctx: &GpuCtx, case: &CensusCase, physical: Sm120PhysicalRoute
     .expect("capture prepared SM120 route");
     let captured_identity = captured_identity.expect("captured route identity");
     eager_identity
-        .ensure_current(captured_identity, "SM120 graph census")
+        .ensure_current(captured_identity, "SM120 graph check")
         .expect("eager and captured identity agree");
 
     let changed = prepare_sm120_tma_forced(
@@ -929,7 +929,7 @@ fn assert_multi_stream_concurrency(ctx: &GpuCtx) {
     let route = forced_route(ctx, &case, physical);
     let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
         .expect("prepare multi-stream maps");
-    let alternate = ctx.stream.fork().expect("fork census stream");
+    let alternate = ctx.stream.fork().expect("fork second stream");
     let mut main_output = GuardedOutput::new(ctx, case.op, case.dtype, case.initial.len(), 0);
     let mut other_output = GuardedOutput::new(ctx, case.op, case.dtype, case.initial.len(), 0);
     let main = prepare_sm120_tma_forced(
@@ -1082,13 +1082,13 @@ fn sm120_context() -> Option<(GpuDevice, GpuCtx)> {
     let device = match GpuDevice::new(0) {
         Ok(device) => device,
         Err(error) => {
-            eprintln!("skipping SM120 triad census without a CUDA device: {error}");
+            eprintln!("skipping the SM120 triad check without a CUDA device: {error}");
             return None;
         }
     };
     if !matches!(device.compute_capability, (12, 0) | (12, 1)) {
         eprintln!(
-            "skipping SM120 triad census on compute capability {}.{}",
+            "skipping the SM120 triad check on compute capability {}.{}",
             device.compute_capability.0, device.compute_capability.1
         );
         return None;
@@ -1210,7 +1210,7 @@ fn assert_auto_matches_mma16_baseline(
         }
         // A stream-K cell folds its slabs in its own fixed order: the bits
         // it must reproduce are the forced stream-K route's, whose own
-        // census holds them to the CPU reference.
+        // check holds them to the CPU reference.
         Sm120Schedule::StreamK => {
             let maps =
                 prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(route.physical))
@@ -1795,7 +1795,7 @@ const SM120_HOT_SHAPES: [Sm120HotShape; 15] = [
         dims: (10400, 768, 384),
     },
     // Held-out shapes of the performance matrix: the nearest-cell rule is
-    // judged on them against the forced census.
+    // judged on them against the forced-route check.
     Sm120HotShape {
         name: "rect_wide",
         dims: (512, 3072, 768),
@@ -1856,7 +1856,7 @@ fn sm120_schedule_name(schedule: Sm120Schedule) -> &'static str {
     }
 }
 
-/// The cell-id segment of a schedule: the tiled census ids stay as they
+/// The cell-id segment of a schedule: the tiled check ids stay as they
 /// were, the stream-K cells carry their own segment.
 fn sm120_schedule_segment(schedule: Sm120Schedule) -> &'static str {
     match schedule {

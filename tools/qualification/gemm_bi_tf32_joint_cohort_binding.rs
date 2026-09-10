@@ -1,4 +1,4 @@
-//! Pre-admission performance qualification for retained Ada TF32 joint cells.
+//! Performance qualification, before admission, for the retained Ada TF32 joint cells.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PairOrder {

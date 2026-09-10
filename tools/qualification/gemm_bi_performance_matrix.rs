@@ -8032,7 +8032,7 @@ fn summarize_tf32_tournament_samples(
         || samples.ratios.len() != DEFAULT_WINDOWS
     {
         return Err(format!(
-            "TF32 tournament cohort requires {DEFAULT_WINDOWS} paired samples"
+            "the TF32 tournament set requires {DEFAULT_WINDOWS} paired samples"
         ));
     }
     let percentiles = |values: &[f64]| {

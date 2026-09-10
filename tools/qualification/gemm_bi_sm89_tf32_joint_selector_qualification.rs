@@ -1,10 +1,10 @@
 //! First live wiring smoke for the six retained Ada TF32 joint cells.
 //!
-//! This test intentionally stops before timing and cohort admission. It proves
+//! This test intentionally stops before timing and admission. It proves
 //! the forced production launch manifest and compares its exact bits with the
 //! portable route that served the cell before the joint module. The prior
 //! route is forced so the comparator is identical across toolkit-specific
-//! AUTO cohort identities.
+//! AUTO route-set identities.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiteralOp {

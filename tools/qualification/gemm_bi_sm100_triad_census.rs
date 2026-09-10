@@ -1,6 +1,6 @@
 //! Real-Blackwell qualification for the deterministic SM100 triad.
 //!
-//! The census keeps automatic routing disabled. It exercises every forced
+//! The check keeps automatic routing disabled. It exercises every forced
 //! physical route, descriptor cache reuse, prepared graph capture, replay
 //! identity, output padding, and bitwise repeatability on CC 10.0 or 10.3.
 #![cfg(feature = "cuda")]
@@ -588,7 +588,7 @@ fn run_graph_route(
     .expect("capture prepared SM100 route");
     let captured_identity = captured_identity.expect("captured route identity");
     eager_identity
-        .ensure_current(captured_identity, "SM100 graph census")
+        .ensure_current(captured_identity, "SM100 graph check")
         .expect("eager and captured identity agree");
 
     let changed = prepare_sm100_tcgen_forced(
@@ -684,7 +684,7 @@ fn assert_multi_stream_replay(ctx: &GpuCtx) {
     let route = forced_route(ctx, &case, physical);
     let maps = prepare_sm100_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical.tile))
         .expect("prepare multi-stream maps");
-    let alternate = ctx.stream.fork().expect("fork census stream");
+    let alternate = ctx.stream.fork().expect("fork second stream");
     let mut main_output = CensusOutput::new(ctx, case.op, case.dtype, case.initial.len());
     let mut alternate_output = CensusOutput::new(ctx, case.op, case.dtype, case.initial.len());
     let main = prepare_sm100_tcgen_forced(
@@ -855,13 +855,13 @@ fn qualifies_all_forced_sm100_triad_routes() {
     let first_device = match GpuDevice::new(0) {
         Ok(device) => device,
         Err(error) => {
-            eprintln!("skipping SM100 triad census without a CUDA device: {error}");
+            eprintln!("skipping the SM100 triad check without a CUDA device: {error}");
             return;
         }
     };
     if !matches!(first_device.compute_capability, (10, 0) | (10, 3)) {
         eprintln!(
-            "skipping SM100 triad census on compute capability {}.{}",
+            "skipping the SM100 triad check on compute capability {}.{}",
             first_device.compute_capability.0, first_device.compute_capability.1
         );
         return;

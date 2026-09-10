@@ -1,4 +1,4 @@
-//! The WMMA / mma.sync arithmetic-contract census.
+//! The WMMA / mma.sync arithmetic-contract check.
 //!
 //! Question 1: is the WMMA m16n16k16 tile (the Fixed family's bf16/f16
 //! path, `kernels/gemm_bi_inference/`) bit-identical to the inline
@@ -145,7 +145,7 @@ fn census_wmma_vs_mma_sync() {
             m * n
         );
     }
-    println!("CENSUS VERDICT: WMMA bit-identical to mma.sync on all shapes: {all_equal}");
+    println!("VERDICT: WMMA bit-identical to mma.sync on all shapes: {all_equal}");
     // PINNED (measured on sm_89): the two paths are ONE
     // arithmetic contract - wmma::mma_sync on m16n16k16 lowers to the
     // same ascending m16n8k16 pair the TC tier issues explicitly, so per
@@ -358,7 +358,7 @@ fn census_backward_tile64_tail_contract() {
     }
 }
 
-/// The decisive census for the decode ladder: is matvec_bi bit-identical
+/// The decisive check for the decode ladder: is matvec_bi bit-identical
 /// to the TC chain? If yes, matvec and the TC rungs are ONE arithmetic
 /// contract and an M-keyed pick between them is legal scheduling; if no,
 /// matvec at small M is a documented bucketed exception.
@@ -458,5 +458,5 @@ fn census_matvec_vs_thin16() {
             m * n
         );
     }
-    println!("CENSUS VERDICT: matvec bit-identical to the TC chain: {all_equal}");
+    println!("VERDICT: matvec bit-identical to the TC chain: {all_equal}");
 }

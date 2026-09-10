@@ -1,7 +1,7 @@
 //! The TF32 hardware gate: build the qualification binary, run the full
 //! runtime and performance corpus on a board of the exact compute
 //! capability, verify the report's digests, driver ABI proof and symbol
-//! census, then rerun it under every compute-sanitizer tool. One arm per
+//! inventory, then rerun it under every compute-sanitizer tool. One arm per
 //! architecture; each requires its own board, so every arm is ignored and
 //! run by name with `--features cuda,qualification`.
 

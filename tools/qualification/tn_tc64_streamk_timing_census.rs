@@ -1,4 +1,4 @@
-//! Timing census of the tc64 TN dW body over its two schedules (the tiled
+//! Timing survey of the tc64 TN dW body over its two schedules (the tiled
 //! kernel and the stream-K twin) as graph replays, one JSON line per cell.
 //! The automatic SM89 rule was set from these numbers. Manual instrument:
 //! build with `--features cuda,qualification` and run the ignored test on
@@ -35,12 +35,12 @@ fn portable_module_composes_streamk() -> bool {
     }
     true
 }
-/// Timing census of the tc64 TN dW body over its two schedules on this
+/// Timing survey of the tc64 TN dW body over its two schedules on this
 /// device: the tiled kernel and the stream-K twin, forced through the
 /// physical qualification facade and timed as graph replays. Prints one
 /// JSON line per cell; the automatic SM89 rule is set from these numbers.
 #[test]
-#[ignore = "timing census; run by hand on the measured board"]
+#[ignore = "timing survey; run by hand on the measured board"]
 fn tn_tc64_streamk_versus_tiled_timing_census() {
     use gemm_bi_triad::{
         PhysicalQualificationRequest, PhysicalQualificationRoute, TcTile, qualify_physical_launch,
@@ -103,7 +103,7 @@ fn tn_tc64_streamk_versus_tiled_timing_census() {
         })
         .collect::<Vec<_>>();
     gemm_bi_triad::presize_physical_qualification_suite(&t.ctx, &suite)
-        .expect("pre-size the stream-K census suite");
+        .expect("pre-size the stream-K timing suite");
     for (name, dims) in SHAPES {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             let mut row = format!(

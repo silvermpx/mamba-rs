@@ -1421,7 +1421,7 @@ fn require_quiet_gpu(label: &str) -> Result<String, String> {
             && last_competing_pids.is_empty()
             && telemetry_is_quiet(gpu_util, memory_util)
         {
-            eprintln!("HALF M64N128 cohort preflight {label}: {last_snapshot}");
+            eprintln!("HALF M64N128 route-set preflight {label}: {last_snapshot}");
             return Ok(last_snapshot);
         }
         thread::sleep(Duration::from_millis(100));

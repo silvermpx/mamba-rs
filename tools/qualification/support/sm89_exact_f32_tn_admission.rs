@@ -458,7 +458,7 @@ pub fn run_raw_probe_repeated(
     dy.unchanged(ctx)?;
 
     // active_bits validates every trailing guard.  Count every allocation so
-    // the caller can require the same two-sided census for every corpus.
+    // the caller can require the same two-sided inventory for every corpus.
     for buffer in [
         &candidate_output,
         &reference_output,

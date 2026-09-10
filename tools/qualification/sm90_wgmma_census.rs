@@ -1,4 +1,4 @@
-//! Hopper qualification census (needs an sm_90a device - H100/H200).
+//! Hopper qualification check (needs an sm_90a device - H100/H200).
 //!
 //! Decides the wgmma rung's contract class: launch the forced wgmma
 //! kernel and the mma.sync Tile128 twin on identical inputs and compare
@@ -44,7 +44,7 @@ fn wgmma_vs_mma_sync_family_verdict() {
     assert_eq!(
         GpuDevice::nvrtc_arch(dev.compute_capability),
         "sm_90a",
-        "this census runs on Hopper only"
+        "this check runs on Hopper only"
     );
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let wgmma = ctx

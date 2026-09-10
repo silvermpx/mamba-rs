@@ -1,6 +1,6 @@
 //! Real-Hopper qualification for the deterministic SM90a triad.
 //!
-//! This is deliberately separate from the fixed-family Hopper census. It
+//! This is deliberately separate from the Inference family's Hopper check. It
 //! exercises only the triad's exact-sm_90a module through its public tensor-map
 //! preparation and forced-launch APIs. Automatic routing remains disabled until
 //! this test has passed on the target Hopper/toolchain pair.
@@ -396,7 +396,7 @@ fn run_route(
             );
             baseline_identity
                 .expect("baseline identity")
-                .ensure_current(identity, "SM90a census")
+                .ensure_current(identity, "SM90a check")
                 .expect("route identity remains current");
         }
     }
@@ -474,7 +474,7 @@ fn run_graph_route(
     .expect("capture forced SM90a route");
     let captured_identity = captured_identity.expect("captured route identity");
     eager_identity
-        .ensure_current(captured_identity, "SM90a graph census")
+        .ensure_current(captured_identity, "SM90a graph check")
         .expect("eager and captured route identity agree");
 
     let mut changed_scalars = operands;
@@ -578,13 +578,13 @@ fn qualifies_all_forced_sm90a_triad_routes() {
     let device = match GpuDevice::new(0) {
         Ok(device) => device,
         Err(error) => {
-            eprintln!("skipping SM90a triad census without a CUDA device: {error}");
+            eprintln!("skipping the SM90a triad check without a CUDA device: {error}");
             return;
         }
     };
     if device.compute_capability != (9, 0) {
         eprintln!(
-            "skipping SM90a triad census on compute capability {}.{}",
+            "skipping the SM90a triad check on compute capability {}.{}",
             device.compute_capability.0, device.compute_capability.1
         );
         return;

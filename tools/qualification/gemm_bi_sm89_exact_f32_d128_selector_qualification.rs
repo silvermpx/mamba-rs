@@ -390,7 +390,7 @@ mod live {
         let exclusions = ctx.kernels.triad_sm89_exact_f32_d128_exclusions();
         if !exclusions.is_empty() {
             return Err(format!(
-                "exact-F32 d128 ABI/resource census excluded symbols: {exclusions:?}"
+                "exact-F32 d128 ABI/resource inventory excluded symbols: {exclusions:?}"
             ));
         }
         for spec in SM89_EXACT_F32_D128_KERNEL_SPECS {
@@ -747,7 +747,7 @@ mod live {
             }
             let guards = launch.validate_red_zones(ctx)?;
             if guards.allocation_count() != 3 || guards.element_count() < 96 {
-                return Err("qualified d128 output/A/B guard census changed".into());
+                return Err("qualified d128 output/A/B guard inventory changed".into());
             }
         }
         Ok(())

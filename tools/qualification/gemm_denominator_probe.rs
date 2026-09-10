@@ -131,7 +131,7 @@ fn det(n: usize, seed: u64) -> Vec<f32> {
 }
 
 #[test]
-#[ignore = "record-lane instrument (GPU, quiet card)"]
+#[ignore = "measurement tool: needs an otherwise idle GPU"]
 fn denominator_probe() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");

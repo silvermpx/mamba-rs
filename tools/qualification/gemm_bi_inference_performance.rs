@@ -2547,13 +2547,13 @@ fn triad_sm120_tf32_nn_reference_smoke() {
 }
 
 /// One body, two families: the Fixed inference family and the Triad
-/// family carry kernels of the same tile geometry. This census times each
+/// family carry kernels of the same tile geometry. This survey times each
 /// pair on the same NN shapes so the slower body can be retired on evidence.
 #[test]
-#[ignore = "requires a quiet SM120 CUDA device and emits the Fixed/Triad pairwise census"]
+#[ignore = "requires an otherwise idle SM120 CUDA device and emits the Inference/Triad pairwise survey"]
 fn fixed_vs_triad_pairwise_census() {
-    fixed_sm120_tf32_bd_environment_preflight("pairwise census")
-        .expect("pairwise census preflight");
+    fixed_sm120_tf32_bd_environment_preflight("pairwise survey")
+        .expect("pairwise survey preflight");
     let shapes = [
         InferenceShape {
             m: 4621,
@@ -6146,7 +6146,7 @@ fn fixed_sm120_half_emit_requalification_cohort(
         cell.shape.k,
         cell.shape.n,
     ))
-    .unwrap_or_else(|error| panic!("HALF exact timed-cohort preflight failed: {error}"));
+    .unwrap_or_else(|error| panic!("HALF exact timed-set preflight failed: {error}"));
     let mut ratios = Vec::with_capacity(101);
     for pair_index in 0..101 {
         let (candidate_us, incumbent_us) = if candidate_first {
@@ -7526,7 +7526,7 @@ fn fixed_tc16_occupancy_cliff_paired_census() {
             .compute_capability()
             .expect("CUDA compute capability"),
         (8, 9),
-        "Tc16 occupancy census is qualified on SM89",
+        "Tc16 occupancy inventory is qualified on SM89",
     );
     assert_eq!(device.multiprocessor_count(), 142);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -8245,7 +8245,7 @@ fn fixed_sm120_tf32_bd_environment_preflight(label: &str) -> Result<(), String> 
         ));
         if gpu_util <= 1 && memory_util <= 1 && sm_clock_mhz > 0 && temperature_c > 0 {
             eprintln!(
-                "TF32 B/D cohort preflight {label}: {} (the process's own allocations are excluded from the launch-time <=128 MiB gate)",
+                "TF32 B/D route-set preflight {label}: {} (the process's own allocations are excluded from the launch-time <=128 MiB gate)",
                 last_snapshot.as_deref().unwrap_or("telemetry unavailable")
             );
             return Ok(());
@@ -10006,7 +10006,7 @@ fn fixed_auto_vendor_expected_exact_tile(
         (12, 0) => cell.expected,
         (12, 1) => InferenceTile::Legacy,
         _ => panic!(
-            "AUTO/vendor census does not admit CC{}.{}",
+            "the AUTO/vendor survey does not admit CC{}.{}",
             device_cc.0, device_cc.1
         ),
     }
@@ -10630,7 +10630,7 @@ fn fixed_production_auto_vs_fast_cublas_hot_and_selector_census() {
     let sm_count = device.multiprocessor_count();
     if !matches!(device_cc, (12, 0) | (12, 1)) || sm_count != 170 {
         eprintln!(
-            "skipping production Fixed AUTO/vendor census on CC{}.{} with {} SMs; CC12.0/12.1 with exactly 170 SMs required",
+            "skipping the production Inference AUTO/vendor survey on CC{}.{} with {} SMs; CC12.0/12.1 with exactly 170 SMs required",
             device_cc.0, device_cc.1, sm_count
         );
         return;
@@ -12021,7 +12021,7 @@ fn fixed_explicit_vendor_tolerance_metadata(row: &FixedExplicitVendorRowSpec) ->
     )
 }
 
-// Each registry macro drives both the iterable census universe and an
+// Each registry macro drives both the iterable inventory universe and an
 // exhaustive match. Adding an enum variant therefore cannot compile until it
 // is classified here, and classification automatically adds it to the reverse
 // inventory check.
@@ -12250,7 +12250,7 @@ fn fixed_force_row_dtypes(row: &str) -> Result<(WeightDtype, WeightDtype), Strin
 }
 
 // Keep this match exhaustive: adding a InferenceTile without deciding its physical
-// force identity must fail compilation instead of silently shrinking the census.
+// force identity must fail compilation instead of silently shrinking the inventory.
 fn fixed_force_spec(
     row: &'static str,
     cc: (u32, u32),
@@ -12610,7 +12610,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<InferenceTile> 
             _ => {}
         }
     } else if row == "tf32" {
-        // The wide symbol is not bound in the committed CC12 module cohort.
+        // The wide symbol is not bound in the committed CC12 module set.
         tiles.insert(2, InferenceTile::Tf32M128N128S3);
         tiles.insert(3, InferenceTile::Tf32RnaM128N128S3);
         tiles.insert(4, InferenceTile::Tf32RnaM128N96S3);
@@ -13544,7 +13544,7 @@ fn fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only() {
         &fixed_explicit_vendor_tiles("tf32", (8, 9)),
         Some(name),
     )
-    .expect("RNA-compatible wide must be reachable through the Ada TF32 census");
+    .expect("RNA-compatible wide must be reachable through the Ada TF32 inventory");
     assert_eq!(selected.len(), 1);
     assert_eq!(format!("{:?}", selected[0]), name);
     assert_eq!(
@@ -13862,7 +13862,7 @@ fn fixed_force_bias_contract_requires_disallowed_launch_to_fail() {
         }
     );
     let accepted_wrong_bias = fixed_force_classify_first_launch(&spec, true, Ok(()))
-        .expect_err("a successful wrong-bias launch must fail the census");
+        .expect_err("a successful wrong-bias launch must fail the inventory");
     assert!(accepted_wrong_bias.contains("accepted disallowed bias=true"));
     assert!(accepted_wrong_bias.contains("no_bias"));
 
@@ -14797,7 +14797,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     assert_eq!(
         std::env::var("MAMBA_FIXED_ADA_VENDOR").as_deref(),
         Ok("1"),
-        "set MAMBA_FIXED_ADA_VENDOR=1 to run the explicit vendor rung census"
+        "set MAMBA_FIXED_ADA_VENDOR=1 to run the explicit vendor rung survey"
     );
     assert_ne!(
         std::env::var("NVIDIA_TF32_OVERRIDE").as_deref(),
@@ -14805,7 +14805,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
         "NVIDIA_TF32_OVERRIDE=0 disables the explicit FAST_TF32 denominator"
     );
     if cfg!(debug_assertions) {
-        panic!("explicit vendor rung census requires --release");
+        panic!("the explicit vendor rung survey requires --release");
     }
     let rows = fixed_explicit_vendor_row_specs();
     let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &rows.map(|row| row.name));
@@ -14990,7 +14990,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     assert_eq!(
                         launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
                         selected,
-                        "explicit vendor AUTO tile changed during rung census"
+                        "explicit vendor AUTO tile changed during the rung survey"
                     );
                 };
                 let vendor_launch = || fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
@@ -15443,7 +15443,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     }
     assert!(
         records > 0,
-        "explicit vendor rung census measured no eligible candidates"
+        "the explicit vendor rung survey measured no eligible candidates"
     );
     println!(
         "{{\"schema\":\"MambaBiFixedExplicitForcedRungCompleteV2\",{},{},\"records\":{records},\"rejected\":{rejected},\"passed\":true}}",
@@ -15944,7 +15944,10 @@ fn fixed_ada_half_forced_direct_pair() {
             }
         }
     }
-    assert!(records > 0, "direct pairing measured no selected cohorts");
+    assert!(
+        records > 0,
+        "direct pairing measured no selected route sets"
+    );
     println!(
         "{{\"schema\":\"MambaBiFixedHalfDirectPairCompleteV1\",{},\"tuning_table_revision\":{},\"records\":{records},\"rejected\":0,\"passed\":true}}",
         device_metadata, TUNING_TABLE_REVISION,

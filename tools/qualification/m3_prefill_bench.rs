@@ -149,7 +149,7 @@ fn m3_train_step_at_multichunk_shape() {
             cfg.n_layers,
             1e3 * dt / iters as f64
         );
-        // Graph lane too — the M1 table is graph-mode; an eager-only M3
+        // Graph arm too: the M1 table is graph-mode; an eager-only M3
         // number was never comparable with it.
         tr.capture_graph().unwrap();
         for _ in 0..5 {
@@ -173,7 +173,7 @@ fn m3_train_step_at_multichunk_shape() {
 /// Page measurement: pooled-graph replay latency per page at the
 /// classifier serve shape (non-identity 1024->384 input projection, T=4621),
 /// across the three numeric routes that matter: today's deterministic
-/// f32 serve (Fixed family), the typed bf16 lane on the batch-invariant
+/// f32 serve (Inference family), the typed bf16 path on the batch-invariant
 /// tensor-core ladder, and non-deterministic cuBLAS f32 as the speed
 /// reference.
 #[test]

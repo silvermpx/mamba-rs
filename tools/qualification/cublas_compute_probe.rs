@@ -19,7 +19,7 @@
 //!   V3 = COMPUTE_32F          + DEFAULT
 //!   V4 = COMPUTE_32F          + (TF32 | DISALLOW_REDUCED_PRECISION_REDUCTION)
 //!   V5 = COMPUTE_32F          + DISALLOW_REDUCED_PRECISION_REDUCTION
-//! f32 lane (f32 A/B/C):
+//! f32 arm (f32 A/B/C):
 //!   V6d = COMPUTE_32F + DEFAULT, V6t = COMPUTE_32F + TF32,
 //!   V6e = COMPUTE_32F_EMULATED_16BFX9 + DEFAULT (skipped as UNSUPPORTED
 //!         where the toolkit refuses it).
@@ -28,7 +28,7 @@
 //! realism — uniform inputs hide it); `silu` = the same normals passed
 //! through x*sigmoid(x) on the activation side (post-SiLU skew, the shape
 //! mamba out_proj actually consumes). Real-checkpoint weights are a
-//! follow-up lane (needs the HF pull wired into this harness); the
+//! follow-up arm (needs the HF pull wired into this harness); the
 //! decision gate for ANY default flip additionally requires the
 //! end-to-end mamba-1.4b greedy-decode check via the compute-type
 //! plumb, per the plan — this TSV alone never flips a default.
@@ -435,8 +435,8 @@ fn cublas_compute_probe() {
         for &(m, k, n, tag) in &shapes {
             // Deterministic per-(family, shape) inputs. The PROBE VALUES
             // ARE bf16 (generated, rounded to bf16, widened back) so the
-            // f64 reference sees the SAME bits every lane consumes and
-            // the f32 lane measures compute error only, never input
+            // f64 reference sees the SAME bits every arm consumes and
+            // the f32 arm measures compute error only, never input
             // quantization.
             let sigma = 1.0 / (k as f32).sqrt();
             let mut rng = Rng(0x9E37_79B9

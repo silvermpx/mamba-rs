@@ -537,7 +537,7 @@ mod gpu {
         require_bits("own B public-seed readback", &b, &as_bits(&corpus.b))?;
         let guards = launch.validate_red_zones(ctx)?;
         if guards.allocation_count() != 3 || guards.element_count() != 96 {
-            return Err(format!("own trailing guard census changed: {guards:?}"));
+            return Err(format!("own trailing guard inventory changed: {guards:?}"));
         }
         Ok(())
     }

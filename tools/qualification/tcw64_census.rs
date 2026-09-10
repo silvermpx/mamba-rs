@@ -1,7 +1,7 @@
-//! On-box census for the fragment-reuse rung: per-element byte identity
+//! On-device check of the fragment-reuse tile: per-element byte identity
 //! with the 128-tile, resource sanity, and the event-timed comparison
 //! at the fat training shapes. The rung enters the dispatch ladder only
-//! on a green identity census plus a measured win.
+//! on a green identity check plus a measured win.
 #![cfg(feature = "cuda")]
 
 #[path = "../../tests/common/evidence.rs"]
@@ -195,7 +195,7 @@ fn tcw64_resources() {
 /// symmetrically, and everything else a TIE - the promotion rule's
 /// band is drawn from this table, never the other way round.
 #[test]
-#[ignore = "record-lane instrument (GPU, quiet card)"]
+#[ignore = "measurement tool: needs an otherwise idle GPU"]
 fn tcwn64_promotion_grid() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
@@ -301,7 +301,7 @@ fn tcwn64_promotion_grid() {
 
 /// Event-timed comparison at the fat shapes, alternating groups.
 #[test]
-#[ignore = "record-lane instrument (GPU, quiet card)"]
+#[ignore = "measurement tool: needs an otherwise idle GPU"]
 fn tcw64_vs_tc128_fat_shapes() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");

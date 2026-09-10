@@ -433,7 +433,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         beta: 0.0,
         bias: false,
     },
-    // The hot training shapes the SM89 census still ran scalar under the
+    // The hot training shapes the SM89 inventory still ran scalar under the
     // TF32 policy (sm89-hotall-20260904): the projections of the prism and
     // batch cells, the tall rectangle and the underfilled grid.
     Cell {
@@ -1311,7 +1311,7 @@ struct CellResult {
     cell: Cell,
     specialized_identity_json: String,
     /// The portable SM80 module the board also binds, `null` when it has
-    /// none; a cohort couples its portable routes to this identity.
+    /// none; a frozen route set couples its portable routes to this identity.
     portable_identity_json: String,
     candidates: Vec<CandidateResult>,
     excluded_candidates: Vec<CandidateExclusion>,
@@ -1797,7 +1797,7 @@ fn run_cell(
 ) -> Result<CellResult, String> {
     let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32V1)?;
     let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFmaV1)?;
-    // The identity the cohort is frozen against: the SM120 module where the
+    // The identity the route set is frozen against: the SM120 module where the
     // board has one, otherwise the portable SM80 module the board runs.
     let availability = candidate_ctx.kernels.f32_triad_availability();
     let specialized_bound = availability.specialized.is_some();
@@ -2053,8 +2053,8 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    // Any board with a bound TF32 module qualifies its own cohort; the JSONL
-    // records the board, and the cohort it freezes is scoped to it.
+    // Any board with a bound TF32 module qualifies its own route set; the JSONL
+    // records the board, and the route set it freezes is scoped to it.
     if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
         .kernels
         .f32_triad_availability()
@@ -2135,8 +2135,8 @@ fn run_projection_selector_qualification(cells: &[Cell]) -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-projection-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    // Any board with a bound TF32 module qualifies its own cohort; the JSONL
-    // records the board, and the cohort it freezes is scoped to it.
+    // Any board with a bound TF32 module qualifies its own route set; the JSONL
+    // records the board, and the route set it freezes is scoped to it.
     if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
         .kernels
         .f32_triad_availability()

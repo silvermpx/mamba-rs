@@ -295,7 +295,7 @@ mod live {
         let exclusions = ctx.kernels.triad_sm89_exact_f32_exclusions();
         if !exclusions.is_empty() {
             return Err(format!(
-                "exact-F32 ABI/SASS/resource census excluded symbols: {exclusions:?}"
+                "exact-F32 ABI/SASS/resource inventory excluded symbols: {exclusions:?}"
             ));
         }
         for spec in SM89_EXACT_F32_KERNEL_SPECS {
@@ -478,7 +478,7 @@ mod live {
             }
             let guards = launch.validate_red_zones(ctx)?;
             if guards.allocation_count() != 3 || guards.element_count() == 0 {
-                return Err("qualified output/A/B guard census changed".into());
+                return Err("qualified output/A/B guard inventory changed".into());
             }
         }
         Ok(())
@@ -522,7 +522,7 @@ mod live {
             || (case.route != Sm89ExactF32TnRoute::D768InDualChunkFused
                 && raw.compared_partial_words != cell.chunks * cell.dims.1 * cell.dims.2)
         {
-            return Err(format!("{:?} raw/scratch census changed", case.route));
+            return Err(format!("{:?} raw/scratch inventory changed", case.route));
         }
         println!(
             "{}",
@@ -566,7 +566,9 @@ mod live {
         if node_symbols(&auto).iter().any(|symbol| {
             [D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL].contains(symbol)
         }) {
-            return Err("public AUTO admitted an exact-F32 B2 route before cohort evidence".into());
+            return Err(
+                "public AUTO admitted an exact-F32 B2 route before the route-set evidence".into(),
+            );
         }
         auto.upload_exact_unbiased_f32_words(ctx, &words.0, &words.1, &words.2)?;
         let original_inputs = auto.f32_operand_bits(ctx)?;
@@ -711,7 +713,7 @@ mod live {
         }
         let guards = launch.validate_red_zones(ctx)?;
         if guards.allocation_count() != 3 || guards.element_count() == 0 {
-            return Err("timed exact-F32 guard census changed".into());
+            return Err("timed exact-F32 guard inventory changed".into());
         }
         Ok(total / OPS_PER_WINDOW as f64)
     }
@@ -937,7 +939,7 @@ mod live {
                 || oracle.guarded_elements == 0
             {
                 return Err(format!(
-                    "{:?} post-admission raw oracle census changed",
+                    "{:?} post-admission raw oracle inventory changed",
                     case.route
                 ));
             }

@@ -1,7 +1,7 @@
 //! Offline GEMM rung sweep: event-timed, alternating-group measurements
 //! of the forced tensor-core rungs, emitting a TSV artifact.
 //!
-//! This is the record-lane instrument behind every tile-table decision:
+//! This is the measurement tool behind every tile-table decision:
 //! it drives the forced `_with_tile` entry points - never the selector -
 //! so it measures rungs, while the bitwise suites measure the selector.
 //! Methodology, each part paid for by a prior mis-reading:
@@ -464,7 +464,7 @@ fn assert_wins(label: &str, win: &RungStats, lose: &RungStats, min_margin: f64) 
 }
 
 #[test]
-#[ignore = "record-lane instrument (GPU, quiet card)"]
+#[ignore = "measurement tool: needs an otherwise idle GPU"]
 fn gemm_ladder_sweep() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
@@ -472,7 +472,7 @@ fn gemm_ladder_sweep() {
     let scope = std::env::var("MAMBA_RS_SWEEP").unwrap_or_default();
 
     // Targeted cells: MAMBA_RS_SWEEP=cell:[op,]K,N,M[;...] measures and
-    // records exactly those cells, no assertions - the record lane's
+    // records exactly those cells, no assertions - a measurement run's
     // probe mode. op is nn (default), dw or dx.
     if let Some(list) = scope.strip_prefix("cell:") {
         for spec in list.split(';') {

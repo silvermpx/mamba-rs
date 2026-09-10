@@ -347,7 +347,7 @@ fn percentile(values: &[f64], index: usize) -> f64 {
 fn summarize(samples: &PairSamples) -> Result<RatioSummary, String> {
     if samples.left_first.ratios.len() != WINDOWS || samples.right_first.ratios.len() != WINDOWS {
         return Err(format!(
-            "performance cohort requires exactly {WINDOWS} paired windows"
+            "the performance set requires exactly {WINDOWS} paired windows"
         ));
     }
     let summarize_order = |values: &[f64]| {
@@ -874,7 +874,7 @@ fn validate_context_balance(
 ) -> Result<(), String> {
     if decisions.len() != CELLS.len() * 4 {
         return Err(format!(
-            "{label} requires {} context-balanced cohorts, received {}",
+            "{label} requires {} context-balanced sets, received {}",
             CELLS.len() * 4,
             decisions.len()
         ));
@@ -892,7 +892,7 @@ fn validate_context_balance(
                     .count();
                 if count != 1 {
                     return Err(format!(
-                        "{label} {} {} requires one {comparison} cohort, received {count}",
+                        "{label} {} {} requires one {comparison} set, received {count}",
                         cell.name,
                         path.name()
                     ));
