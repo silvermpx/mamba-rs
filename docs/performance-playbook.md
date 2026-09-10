@@ -162,7 +162,7 @@ this codebase; apply them in order.
 
 ## 9. Kernel optimization protocol: diagnose before designing
 
-Use this protocol for Fixed inference and Triad NN/TN/NT work. Its purpose is
+Use this protocol for Inference-family and Triad NN/TN/NT work. Its purpose is
 to prevent long sequences of plausible but causally unsupported tile changes.
 
 **User-approved fast discovery cycle (2026-09-07).** Separate candidate search
@@ -186,7 +186,7 @@ that require the entire qualification matrix before every candidate timing:
 - After a fix, rerun affected checks and reuse evidence whose source, binary
   and contract dependencies are unchanged. Do not automatically restart all
   toolkits, all precisions or all 101-window runs.
-- Latest user priority (2026-09-07): finish and assemble Fixed inference
+- Latest user priority (2026-09-07): finish and assemble Inference-family
   first, then resume Triad. This supersedes the earlier interleaved-discovery
   ordering. Preserve the prepared Triad probe, but do not spend the Ada lane
   on it while the inference candidate batch is being completed.
@@ -277,6 +277,6 @@ cross-toolkit admission, or a cuBLAS Fast victory.
 For Triad, begin with a complete matrix of NN/TN/NT × dtype × shape × bias ×
 toolkit × architecture and profile the worst release-weighted cells first.
 Reuse the deterministic arithmetic contract and this gate order, but do not
-assume a Fixed NN schedule transfers to transposed operand layouts: copy
+assume an Inference NN schedule transfers to transposed operand layouts: copy
 coalescing, shared layout, raster order and cuBLAS's selected kernel must be
 measured separately for each operation.

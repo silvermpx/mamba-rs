@@ -13300,7 +13300,7 @@ mod prepared_f32_launch_tests {
                 ..policy
             },
             GemmPolicy {
-                bi_gemm_family: BiGemmFamily::Fixed,
+                bi_gemm_family: BiGemmFamily::Inference,
                 ..policy
             },
         ] {

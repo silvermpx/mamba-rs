@@ -4,10 +4,10 @@ mod bxor;
 mod m96;
 
 const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89_half.cu");
-const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_fixed/common.cuh");
-const LAYOUT: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh");
-const SWIZZLE: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-const S3: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
+const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
+const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+const S3: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
 #[test]
 fn standalone_source_defines_each_fixed_common_half_helper_once() {

@@ -108,8 +108,8 @@ fn replace_exact(source: &mut String, before: &str, after: &str) -> Result<(), S
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
     #[test]
     fn transform_changes_only_the_export_and_physical_copy_issue_schedule() {

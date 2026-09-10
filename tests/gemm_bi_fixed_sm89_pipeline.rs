@@ -7,32 +7,32 @@ use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
 
-const CANDIDATE: FixedTile = FixedTile::Tc128Sm89Pipeline;
-const SWIZZLE_CANDIDATE: FixedTile = FixedTile::Tc128Sm89Swizzle;
-const S3_CANDIDATE: FixedTile = FixedTile::Tc128Sm89S3;
-const D_FINALIST: FixedTile = FixedTile::TcM64N64Sm89S3;
-const E_FINALIST: FixedTile = FixedTile::TcM128N64Sm89S2;
-const RUNGS: [FixedTile; 5] = [
-    FixedTile::Tc16,
-    FixedTile::Tc64,
-    FixedTile::Tc128,
-    FixedTile::TcW64,
-    FixedTile::TcWn64,
+const CANDIDATE: InferenceTile = InferenceTile::Tc128Sm89Pipeline;
+const SWIZZLE_CANDIDATE: InferenceTile = InferenceTile::Tc128Sm89Swizzle;
+const S3_CANDIDATE: InferenceTile = InferenceTile::Tc128Sm89S3;
+const D_FINALIST: InferenceTile = InferenceTile::TcM64N64Sm89S3;
+const E_FINALIST: InferenceTile = InferenceTile::TcM128N64Sm89S2;
+const RUNGS: [InferenceTile; 5] = [
+    InferenceTile::Tc16,
+    InferenceTile::Tc64,
+    InferenceTile::Tc128,
+    InferenceTile::TcW64,
+    InferenceTile::TcWn64,
 ];
 
 fn expected_ada_half_auto_v45(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-) -> Option<FixedTile> {
-    use FixedTile::{
+) -> Option<InferenceTile> {
+    use InferenceTile::{
         Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
     };
 
@@ -247,7 +247,7 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
     let a = upload_half(&ctx, &[0; 8]);
     let b = upload_half(&ctx, &[0; 8]);
     let c = upload_half(&ctx, &[0x7fff; 8]);
-    let good = FixedFwdOperands {
+    let good = InferenceFwdOperands {
         c: typed(c.cached_ptr(), WeightDtype::F16),
         x: typed(a.cached_ptr(), WeightDtype::F16),
         w: typed(b.cached_ptr(), WeightDtype::F16),
@@ -256,7 +256,7 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
     for (tile, shape) in [
         (
             D_FINALIST,
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -264,7 +264,7 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
         ),
         (
             E_FINALIST,
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -272,23 +272,23 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
         ),
     ] {
         for bad in [
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 c: typed(c.cached_ptr() + 2, WeightDtype::F16),
                 ..good
             },
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 x: typed(a.cached_ptr() + 2, WeightDtype::F16),
                 ..good
             },
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 w: typed(b.cached_ptr() + 2, WeightDtype::F16),
                 ..good
             },
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 bias_ptr: Some(4),
                 ..good
             },
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 c: typed(c.cached_ptr(), WeightDtype::Bf16),
                 x: typed(a.cached_ptr(), WeightDtype::Bf16),
                 w: typed(b.cached_ptr(), WeightDtype::Bf16),
@@ -296,24 +296,24 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
             },
         ] {
             assert!(
-                fixed_forward_with_tile(&ctx, bad, shape, tile).is_err(),
+                inference_forward_with_tile(&ctx, bad, shape, tile).is_err(),
                 "{tile:?} admitted an unsafe dtype/pointer/bias contract"
             );
         }
         for bad_shape in [
-            FixedShape { m: 0, ..shape },
-            FixedShape { m: 2049, ..shape },
-            FixedShape {
+            InferenceShape { m: 0, ..shape },
+            InferenceShape { m: 2049, ..shape },
+            InferenceShape {
                 k: shape.k - 64,
                 ..shape
             },
-            FixedShape {
+            InferenceShape {
                 n: shape.n - 64,
                 ..shape
             },
         ] {
             assert!(
-                fixed_forward_with_tile(&ctx, good, bad_shape, tile).is_err(),
+                inference_forward_with_tile(&ctx, good, bad_shape, tile).is_err(),
                 "{tile:?} admitted out-of-contract shape {bad_shape:?}"
             );
         }
@@ -321,7 +321,7 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
 }
 
 fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
-    forced: Option<FixedTile>,
+    forced: Option<InferenceTile>,
     finalist: Option<(usize, usize)>,
 ) {
     let device = GpuDevice::new(0).expect("CUDA device");
@@ -395,17 +395,17 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                 };
                 for &has_bias in bias_states {
                     let full = upload_half(&ctx, &vec![0x7fff; rows * n]);
-                    let operands = FixedFwdOperands {
+                    let operands = InferenceFwdOperands {
                         c: typed(full.cached_ptr(), dtype),
                         x: typed(a.cached_ptr(), dtype),
                         w: typed(b.cached_ptr(), dtype),
                         bias_ptr: has_bias.then_some(bias.cached_ptr()),
                     };
-                    fixed_forward_with_tile(
+                    inference_forward_with_tile(
                         &ctx,
                         operands,
-                        FixedShape { m: rows, k, n },
-                        FixedTile::Tc128,
+                        InferenceShape { m: rows, k, n },
+                        InferenceTile::Tc128,
                     )
                     .expect("full incumbent reference outside AUTO cells");
                     let reference = raw_half(&ctx, &full);
@@ -435,22 +435,22 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                             }
                             let mut output = upload_half(&ctx, &initial);
                             assert_eq!(raw_half(&ctx, &output), initial, "initial poison readback");
-                            let view = FixedFwdOperands {
+                            let view = InferenceFwdOperands {
                                 c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                                 x: typed(a.cached_ptr() + (row_offset * k * 2) as u64, dtype),
                                 ..operands
                             };
-                            let run = || -> Result<FixedTile, String> {
+                            let run = || -> Result<InferenceTile, String> {
                                 if let Some(tile) = forced {
-                                    fixed_forward_with_tile(
+                                    inference_forward_with_tile(
                                         &ctx,
                                         view,
-                                        FixedShape { m, k, n },
+                                        InferenceShape { m, k, n },
                                         tile,
                                     )?;
                                     Ok(tile)
                                 } else {
-                                    fixed_forward(
+                                    inference_forward(
                                         &ctx,
                                         view.c,
                                         view.x,
@@ -466,7 +466,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                                     let expected = expected_ada_half_auto_v45(
                                         ctx.kernels.compiler_identity().nvrtc_version,
                                         dtype,
-                                        FixedShape { m, k, n },
+                                        InferenceShape { m, k, n },
                                         has_bias,
                                     )
                                     .expect("literal revision-45 hot-cell expectation");
@@ -510,7 +510,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                                     picked,
                                     dtype,
                                     view,
-                                    FixedShape { m, k, n },
+                                    InferenceShape { m, k, n },
                                 );
                             }
                             for _ in 0..2 {
@@ -548,112 +548,112 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
     let a = upload_half(&ctx, &vec![0; 17 * 65]);
     let b = upload_half(&ctx, &vec![0; 65 * 131]);
     let c = upload_half(&ctx, &vec![0x7fff; 17 * 131]);
-    let good = FixedFwdOperands {
+    let good = InferenceFwdOperands {
         c: typed(c.cached_ptr(), dt),
         x: typed(a.cached_ptr(), dt),
         w: typed(b.cached_ptr(), dt),
         bias_ptr: None,
     };
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 17,
         k: 65,
         n: 131,
     };
     for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-        fixed_forward_with_tile(&ctx, good, shape, candidate).expect("odd-stride positive control");
+        inference_forward_with_tile(&ctx, good, shape, candidate).expect("odd-stride positive control");
     }
     for bad in [
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: typed(0, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: typed(0, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(0, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: typed(a.cached_ptr() + 1, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: typed(b.cached_ptr() + 1, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(c.cached_ptr() + 1, dt),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             bias_ptr: Some(1),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(c.cached_ptr(), WeightDtype::F32),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: typed(b.cached_ptr(), WeightDtype::F16),
             ..good
         },
     ] {
         for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             assert!(
-                fixed_forward_with_tile(&ctx, bad, shape, candidate).is_err(),
+                inference_forward_with_tile(&ctx, bad, shape, candidate).is_err(),
                 "unsafe operands admitted by {candidate:?}"
             );
         }
     }
     for bad in [
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             n: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             k: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: 1 << 20,
             n: 1 << 29,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize + 1,
             ..shape
         },
     ] {
         for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             assert!(
-                fixed_forward_with_tile(&ctx, good, bad, candidate).is_err(),
+                inference_forward_with_tile(&ctx, good, bad, candidate).is_err(),
                 "unsafe shape admitted by {candidate:?}: {bad:?}"
             );
         }
     }
-    let empty = FixedFwdOperands {
+    let empty = InferenceFwdOperands {
         c: typed(0, dt),
         x: typed(0, dt),
         w: typed(0, dt),
         bias_ptr: None,
     };
     for k in [2_147_483_521, 2_147_483_584] {
-        let error = fixed_forward_with_tile(&ctx, good, FixedShape { m: 1, k, n: 1 }, S3_CANDIDATE)
+        let error = inference_forward_with_tile(&ctx, good, InferenceShape { m: 1, k, n: 1 }, S3_CANDIDATE)
             .expect_err("S3 lookahead overflow must reject before issuing any GPU work");
         assert!(
             error.contains("S3 padded K"),
             "unexpected boundary rejection: {error}"
         );
     }
-    for no_output in [FixedShape { m: 0, ..shape }, FixedShape { n: 0, ..shape }] {
+    for no_output in [InferenceShape { m: 0, ..shape }, InferenceShape { n: 0, ..shape }] {
         for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-            fixed_forward_with_tile(&ctx, empty, no_output, candidate)
+            inference_forward_with_tile(&ctx, empty, no_output, candidate)
                 .expect("empty output is a no-op");
         }
     }
@@ -702,10 +702,10 @@ fn typed(ptr: u64, dtype: WeightDtype) -> TypedPtr {
 
 fn assert_half_graph(
     graph: &CudaGraph,
-    tile: FixedTile,
+    tile: InferenceTile,
     dtype: WeightDtype,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
 ) {
     assert_half_graph_params(
         graph,
@@ -728,10 +728,10 @@ fn assert_half_graph(
 
 fn assert_half_graph_params(
     graph: &CudaGraph,
-    tile: FixedTile,
+    tile: InferenceTile,
     dtype: WeightDtype,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     bundle: [u32; 8],
 ) {
     let mut count = 0;
@@ -759,28 +759,28 @@ fn assert_half_graph_params(
         sys::CUresult::CUDA_SUCCESS
     );
     let (expected, threads, bm, bn, shared) = match tile {
-        FixedTile::Tc128Sm89Pipeline => (
+        InferenceTile::Tc128Sm89Pipeline => (
             format!("gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_{}", dtype.as_str()),
             256,
             128,
             128,
             71_680,
         ),
-        FixedTile::Tc128Sm89Swizzle => (
+        InferenceTile::Tc128Sm89Swizzle => (
             format!("gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_{}", dtype.as_str()),
             256,
             128,
             128,
             69_632,
         ),
-        FixedTile::Tc128Sm89S3 => (
+        InferenceTile::Tc128Sm89S3 => (
             format!("gemm_bi_nn_fixed_sm89_tc128_s3_v1_{}", dtype.as_str()),
             256,
             128,
             128,
             98_304,
         ),
-        FixedTile::TcM64N64Sm89S3 => {
+        InferenceTile::TcM64N64Sm89S3 => {
             assert_eq!(dtype, WeightDtype::F16);
             (
                 "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16".into(),
@@ -790,7 +790,7 @@ fn assert_half_graph_params(
                 49_152,
             )
         }
-        FixedTile::TcM128N64Sm89S2 => {
+        InferenceTile::TcM128N64Sm89S2 => {
             assert_eq!(dtype, WeightDtype::F16);
             (
                 "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16".into(),
@@ -866,9 +866,9 @@ unsafe impl cudarc::driver::DeviceRepr for RawHalfParams {}
 
 fn launch_raw_half(
     ctx: &GpuCtx,
-    tile: FixedTile,
+    tile: InferenceTile,
     dtype: WeightDtype,
-    ops: FixedFwdOperands,
+    ops: InferenceFwdOperands,
     params: RawHalfParams,
 ) {
     use cudarc::driver::PushKernelArg;
@@ -930,7 +930,7 @@ fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
                 let initial = vec![half_bits(3.0, dtype); offset + m * ldc + 9];
                 let oracle = upload_half(&ctx, &initial);
                 let mut output = upload_half(&ctx, &initial);
-                let ops = FixedFwdOperands {
+                let ops = InferenceFwdOperands {
                     c: typed(output.cached_ptr() + 2 * offset as u64, dtype),
                     x: typed(
                         if k == 0 {
@@ -964,7 +964,7 @@ fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
                     &ctx,
                     SWIZZLE_CANDIDATE,
                     dtype,
-                    FixedFwdOperands {
+                    InferenceFwdOperands {
                         c: typed(oracle.cached_ptr() + 2 * offset as u64, dtype),
                         ..ops
                     },
@@ -1008,7 +1008,7 @@ fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
                     S3_CANDIDATE,
                     dtype,
                     ops,
-                    FixedShape { m, k, n },
+                    InferenceShape { m, k, n },
                     params.0,
                 );
                 for _ in 0..2 {
@@ -1112,17 +1112,17 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                 let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("bias upload");
                 for has_bias in [false, true] {
                     let full = upload_half(&ctx, &vec![0x7fff; rows * n]);
-                    let operands = FixedFwdOperands {
+                    let operands = InferenceFwdOperands {
                         c: typed(full.cached_ptr(), dtype),
                         x: typed(if k == 0 { 0 } else { a.cached_ptr() }, dtype),
                         w: typed(if k == 0 { 0 } else { b.cached_ptr() }, dtype),
                         bias_ptr: has_bias.then_some(bias.cached_ptr()),
                     };
-                    fixed_forward_with_tile(
+                    inference_forward_with_tile(
                         &ctx,
                         operands,
-                        FixedShape { m: rows, k, n },
-                        FixedTile::Tc128,
+                        InferenceShape { m: rows, k, n },
+                        InferenceTile::Tc128,
                     )
                     .expect("incumbent full reference");
                     let reference = raw_half(&ctx, &full);
@@ -1150,7 +1150,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                             }
                             let mut output = upload_half(&ctx, &initial);
                             assert_eq!(raw_half(&ctx, &output), initial, "initial poison readback");
-                            let view = FixedFwdOperands {
+                            let view = InferenceFwdOperands {
                                 c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                                 x: typed(
                                     if k == 0 {
@@ -1176,7 +1176,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                 ),
                                 ..operands
                             };
-                            let shape = FixedShape { m, k, n };
+                            let shape = InferenceShape { m, k, n };
                             for tile in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE]
                                 .into_iter()
                                 .chain(RUNGS)
@@ -1189,7 +1189,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                     initial,
                                     "poison upload readback"
                                 );
-                                fixed_forward_with_tile(&ctx, view, shape, tile).unwrap_or_else(
+                                inference_forward_with_tile(&ctx, view, shape, tile).unwrap_or_else(
                                     |e| panic!("{tile:?} {dtype:?} M={m} K={k} N={n}: {e}"),
                                 );
                                 assert_eq!(
@@ -1199,7 +1199,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                 );
                             }
                             for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-                                let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
+                                let run = || inference_forward_with_tile(&ctx, view, shape, candidate);
                                 for _ in 0..2 {
                                     output
                                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
@@ -1301,15 +1301,15 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
             let a = upload_half(&ctx, &a_host);
             let b = upload_half(&ctx, &b_host);
             let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("bias upload");
-            let shape = FixedShape { m, k, n };
+            let shape = InferenceShape { m, k, n };
             let reference = upload_half(&ctx, &vec![0x7fff; m * n]);
-            let reference_ops = FixedFwdOperands {
+            let reference_ops = InferenceFwdOperands {
                 c: typed(reference.cached_ptr(), dtype),
                 x: typed(a.cached_ptr(), dtype),
                 w: typed(b.cached_ptr(), dtype),
                 bias_ptr: Some(bias.cached_ptr()),
             };
-            fixed_forward_with_tile(&ctx, reference_ops, shape, FixedTile::Tc128)
+            inference_forward_with_tile(&ctx, reference_ops, shape, InferenceTile::Tc128)
                 .expect("portable incumbent rounding oracle");
             let expected = raw_half(&ctx, &reference);
             let exponent_mask = if dtype == WeightDtype::Bf16 {
@@ -1333,7 +1333,7 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
                     *actual = !*expected;
                 }
                 let mut output = upload_half(&ctx, &initial);
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                     ..reference_ops
                 };
@@ -1342,7 +1342,7 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&poison))
                         .expect("poison rounding-edge output");
                     assert_eq!(raw_half(&ctx, &output), poison, "poison upload readback");
-                    fixed_forward_with_tile(&ctx, operands, shape, candidate)
+                    inference_forward_with_tile(&ctx, operands, shape, candidate)
                         .unwrap_or_else(|error| panic!("{candidate:?}: {error}"));
                     let actual = raw_half(&ctx, &output);
                     assert_eq!(&actual[..output_offset], &initial[..output_offset]);
@@ -1416,7 +1416,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
             for has_bias in [false, true] {
                 let full_initial = vec![0x7fff; HALF_GUARD + rows * n + HALF_GUARD];
                 let full = upload_half(&ctx, &full_initial);
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(full.cached_ptr() + (HALF_GUARD * 2) as u64, dtype),
                     x: typed(
                         if k == 0 {
@@ -1436,11 +1436,11 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                     ),
                     bias_ptr: has_bias.then_some(bias.cached_ptr() + (BIAS_GUARD * 4) as u64),
                 };
-                fixed_forward_with_tile(
+                inference_forward_with_tile(
                     &ctx,
                     operands,
-                    FixedShape { m: rows, k, n },
-                    FixedTile::Tc128,
+                    InferenceShape { m: rows, k, n },
+                    InferenceTile::Tc128,
                 )
                 .expect("bounded incumbent full reference");
                 let reference = raw_half(&ctx, &full);
@@ -1453,7 +1453,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                 for (row_offset, output_offset) in [(0, HALF_GUARD), (1, 1)] {
                     let mut initial = vec![0x7fff; output_offset + m * n + HALF_GUARD];
                     let mut output = upload_half(&ctx, &initial);
-                    let view = FixedFwdOperands {
+                    let view = InferenceFwdOperands {
                         c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
                         x: typed(
                             if k == 0 {
@@ -1465,7 +1465,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                         ),
                         ..operands
                     };
-                    let shape = FixedShape { m, k, n };
+                    let shape = InferenceShape { m, k, n };
                     let mut expected = initial.clone();
                     let reference_start = HALF_GUARD + row_offset * n;
                     expected[output_offset..output_offset + m * n]
@@ -1478,7 +1478,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                         assert_ne!(*poison, *gold);
                     }
                     for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-                        let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
+                        let run = || inference_forward_with_tile(&ctx, view, shape, candidate);
                         for _ in 0..2 {
                             output
                                 .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))

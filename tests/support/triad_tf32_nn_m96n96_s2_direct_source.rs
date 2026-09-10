@@ -14,7 +14,7 @@ pub const REQUIRED_OCCUPANCY: u32 = 2;
 pub const ACCUMULATORS_PER_THREAD: u32 = 48;
 pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub const fn grid(m: usize, n: usize) -> usize {
     m.div_ceil(96) * n.div_ceil(96)

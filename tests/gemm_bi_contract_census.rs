@@ -1,7 +1,7 @@
 //! The WMMA / mma.sync arithmetic-contract census.
 //!
 //! Question 1: is the WMMA m16n16k16 tile (the Fixed family's bf16/f16
-//! path, `kernels/gemm_bi_fixed/`) bit-identical to the inline
+//! path, `kernels/gemm_bi_inference/`) bit-identical to the inline
 //! `mma.sync.m16n8k16` K-slab (the triad's TC tier)? `wmma::mma_sync` on
 //! an m16n16k16 fragment lowers to a pair of m16n8k16 covering the full
 //! k=16, so per element the chain MAY already be the same ascending
@@ -75,7 +75,7 @@ fn census_wmma_vs_mma_sync() {
         let c_tc = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Ct");
 
         // Route 1: the Fixed family's WMMA tile.
-        ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         let run_wmma = |c: &DtypedBuf| {
             gemm_bi_forward_raw(
                 &ctx,
@@ -372,7 +372,7 @@ fn census_matvec_vs_thin16() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     // Force matvec through the typed route: the Fixed check is first, so
     // flip family to Triad only for the matvec launch below.
 

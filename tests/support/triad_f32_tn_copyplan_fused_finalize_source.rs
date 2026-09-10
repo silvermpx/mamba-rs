@@ -2,7 +2,7 @@ pub const PRODUCTION_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
 pub const FUSED_SYMBOL: &str = "gemm_bi_tn_test_fixed_sm89_f32_n64_copyplan_fused_finalize_v1";
 
 const PRELUDE: &str = include_str!("../../kernels/_typed_prelude.cuh");
-const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu");
+const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu");
 
 fn replace_once(source: &mut String, before: &str, after: &str) -> Result<(), String> {
     let count = source.matches(before).count();

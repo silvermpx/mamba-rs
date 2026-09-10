@@ -110,7 +110,7 @@ GEMM tiers, per `GpuCtx` flags:
   custom fixed-order kernels (deterministic, batch-invariant);
 - `set_bi_gemm_family(..)`: which family serves the forward under that flag
   — `Triad` (`gemm_bi_triad/`, default; all three layouts, per-bucket
-  invariance) or `Fixed` (`gemm_bi_fixed/`; forward-only, a bit-identical
+  invariance) or `Inference` (`gemm_bi_inference/`; forward-only, a bit-identical
   tile ladder with `SPLIT_K=1`, invariant by construction);
 - + `set_bi_tensor_cores(true)`: permission to use the separately identified
   deterministic `mma.sync` contract. CC12.0 automatic dispatch is sealed to

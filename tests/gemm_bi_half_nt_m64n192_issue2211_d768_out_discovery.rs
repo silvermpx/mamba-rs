@@ -2,8 +2,8 @@
 #[allow(dead_code)]
 mod candidate_source;
 
-const SWIZZLE: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-const S3: &str = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+const S3: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
 fn sass_issue_signature(sass: &str) -> String {
     sass.lines()
@@ -347,7 +347,7 @@ mod cuda_suite {
     }
 
     fn composed_source(transformed: &str) -> String {
-        let fixed_common = strip_typed_include(include_str!("../kernels/gemm_bi_fixed/common.cuh"));
+        let fixed_common = strip_typed_include(include_str!("../kernels/gemm_bi_inference/common.cuh"));
         [
             include_str!("../kernels/_typed_prelude.cuh").to_owned(),
             fixed_common,
@@ -566,8 +566,8 @@ mod cuda_suite {
     #[test]
     #[ignore = "CUDA13.2 NVRTC compile-only; creates no device or CUDA context"]
     fn cuda132_nvrtc_source_compile_only() -> Result<(), String> {
-        let swizzle = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-        let s3 = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+        let swizzle = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+        let s3 = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
         let candidate = candidate_source::candidate_source(swizzle, s3)?;
         let retained = candidate_source::retained_source(swizzle, s3)?;
         let (candidate_ptx, candidate_source_sha) =
@@ -667,8 +667,8 @@ mod cuda_suite {
                 "M64N192/S3 discovery requires CUDA13.2/sm_89, got {compiler:?}"
             ));
         }
-        let swizzle = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-        let s3 = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+        let swizzle = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+        let s3 = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
         let candidate_source = candidate_source::candidate_source(swizzle, s3)?;
         let retained_source = candidate_source::retained_source(swizzle, s3)?;
         let (candidate_module, candidate, candidate_source_sha) = compile_source(

@@ -1,6 +1,6 @@
 //! Host-side pin scan for the inference kernel family's epilogues.
 //!
-//! Every epilogue in kernels/gemm_bi_fixed computes alpha and beta
+//! Every epilogue in kernels/gemm_bi_inference computes alpha and beta
 //! through explicit rounding intrinsics (__fmul_rn / __fadd_rn /
 //! __fmaf_rn). A bare `alpha * acc` or `val += beta * c` leaves ptxas
 //! free to contract multiplies and adds per target under --fmad=true,
@@ -16,7 +16,7 @@ use std::path::Path;
 
 #[test]
 fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_fixed");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_inference");
     let mut offenders = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("kernel dir") {
         let path = entry.expect("dir entry").path();

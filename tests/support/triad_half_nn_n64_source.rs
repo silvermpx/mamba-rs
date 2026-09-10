@@ -75,8 +75,8 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> Result<&'a str, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    const N64: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_n64.cu");
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
+    const N64: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_n64.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
 
     #[test]
     fn emits_four_exact_projection_exports_without_changing_the_compute_body() {

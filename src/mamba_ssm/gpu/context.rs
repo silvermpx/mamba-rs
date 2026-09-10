@@ -56,12 +56,12 @@ pub enum BiGemmFamily {
     /// reduction association deterministically.
     #[default]
     Triad,
-    /// The standalone inference ladder (`kernels/gemm_bi_fixed/`):
+    /// The standalone inference ladder (`kernels/gemm_bi_inference/`):
     /// forward-only NN, batch-invariant BY CONSTRUCTION. Its portable
     /// thin/64/128/wide rungs are bit-identical per output element and
     /// `SPLIT_K=1`; Hopper and datacenter Blackwell use separately
     /// qualified architecture rungs. Training still belongs to Triad.
-    Fixed,
+    Inference,
 }
 
 /// `MAMBA_RS_ARCH_RUNG` knows one value, `off`; any other spelling would
@@ -108,9 +108,9 @@ fn validate_env_route_combination(
                 .to_string(),
         );
     }
-    if bi_gemm_family == BiGemmFamily::Fixed && !batch_invariant {
+    if bi_gemm_family == BiGemmFamily::Inference && !batch_invariant {
         return Err(
-            "MAMBA_RS_BI_GEMM_FAMILY=fixed without MAMBA_RS_BATCH_INVARIANT=1 is a \
+            "MAMBA_RS_BI_GEMM_FAMILY=inference without MAMBA_RS_BATCH_INVARIANT=1 is a \
              silent no-op: the family is read only under the batch-invariant \
              dispatch. Set both or neither."
                 .to_string(),
@@ -134,16 +134,21 @@ fn bi_gemm_family_from_result(
         Ok(value) => match value.trim() {
             "" => Ok(BiGemmFamily::Triad),
             value if value.eq_ignore_ascii_case("triad") => Ok(BiGemmFamily::Triad),
-            value if value.eq_ignore_ascii_case("fixed") => Ok(BiGemmFamily::Fixed),
+            value
+                if value.eq_ignore_ascii_case("inference")
+                    || value.eq_ignore_ascii_case("fixed") =>
+            {
+                Ok(BiGemmFamily::Inference)
+            }
             value => Err(format!(
                 "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not a recognized family; \
-                 only fixed or triad are accepted"
+                 only inference or triad are accepted"
             )),
         },
         Err(std::env::VarError::NotPresent) => Ok(BiGemmFamily::Triad),
         Err(std::env::VarError::NotUnicode(value)) => Err(format!(
             "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not valid Unicode; \
-             only fixed or triad are accepted"
+             only inference or triad are accepted"
         )),
     }
 }
@@ -416,9 +421,9 @@ pub struct GpuCtx {
     sm120_prepared_launches: RefCell<Sm120PreparedLaunchCache>,
     sm100_prepared_launches: RefCell<Sm100PreparedLaunchCache>,
     sm90a_prepared_launches: RefCell<Sm90aPreparedLaunchCache>,
-    pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_fixed::FixedTf32MapCache>,
-    pub(crate) fixed_postbias_maps: RefCell<super::gemm_bi_fixed::FixedPostBiasMapCache>,
-    pub(crate) fixed_half_maps: RefCell<super::gemm_bi_fixed::FixedHalfMapCache>,
+    pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_inference::FixedTf32MapCache>,
+    pub(crate) fixed_postbias_maps: RefCell<super::gemm_bi_inference::FixedPostBiasMapCache>,
+    pub(crate) fixed_half_maps: RefCell<super::gemm_bi_inference::FixedHalfMapCache>,
     /// Opt-in flag for deterministic batch-invariant GEMM dispatch.
     /// Default: `false` uses cuBLAS. Set via `set_batch_invariant(true)` or
     /// `MAMBA_RS_BATCH_INVARIANT=1`; each selected family documents the
@@ -644,11 +649,11 @@ impl GpuCtx {
             sm120_prepared_launches: RefCell::new(Sm120PreparedLaunchCache::default()),
             sm100_prepared_launches: RefCell::new(Sm100PreparedLaunchCache::default()),
             sm90a_prepared_launches: RefCell::new(Sm90aPreparedLaunchCache::default()),
-            fixed_tf32_maps: RefCell::new(super::gemm_bi_fixed::FixedTf32MapCache::default()),
+            fixed_tf32_maps: RefCell::new(super::gemm_bi_inference::FixedTf32MapCache::default()),
             fixed_postbias_maps: RefCell::new(
-                super::gemm_bi_fixed::FixedPostBiasMapCache::default(),
+                super::gemm_bi_inference::FixedPostBiasMapCache::default(),
             ),
-            fixed_half_maps: RefCell::new(super::gemm_bi_fixed::FixedHalfMapCache::default()),
+            fixed_half_maps: RefCell::new(super::gemm_bi_inference::FixedHalfMapCache::default()),
             batch_invariant: std::cell::Cell::new(false),
             bi_tensor_cores: std::cell::Cell::new(false),
             bi_gemm_family: std::cell::Cell::new(BiGemmFamily::Triad),
@@ -2007,18 +2012,18 @@ mod tests {
                 "{value:?}"
             );
         }
-        for value in ["fixed", "\nFiXeD "] {
+        for value in ["fixed", "\nFiXeD ", "inference", " \nInFeReNcE\t"] {
             assert_eq!(
                 bi_gemm_family_from_result(Ok(value.into())).unwrap(),
-                BiGemmFamily::Fixed,
+                BiGemmFamily::Inference,
                 "{value:?}"
             );
         }
         for value in ["gemm_bi", "batch_invariant", "warptile", "wmma", "other"] {
             let error = bi_gemm_family_from_result(Ok(value.into()))
-                .expect_err("legacy and unknown family names must fail");
+                .expect_err("unknown family names must fail");
             assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
-            assert!(error.contains("only fixed or triad"), "{error}");
+            assert!(error.contains("only inference or triad"), "{error}");
         }
 
         #[cfg(unix)]
@@ -2030,28 +2035,31 @@ mod tests {
             )))
             .expect_err("non-Unicode family names must fail");
             assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
-            assert!(error.contains("only fixed or triad"), "{error}");
+            assert!(error.contains("only inference or triad"), "{error}");
         }
     }
 
     #[test]
     fn env_route_refuses_the_flag_combinations_that_change_nothing() {
         use super::HalfTriadPolicy::{AllowStreamKFixedOrderV1 as StreamK, TiledParityV1 as Tiled};
-        use BiGemmFamily::{Fixed, Triad};
+        use BiGemmFamily::{Inference, Triad};
         let validate = super::validate_env_route_combination;
         assert!(validate(false, false, false, Triad, None).is_ok());
-        assert!(validate(true, true, false, Fixed, Some(Tiled)).is_ok());
+        assert!(validate(true, true, false, Inference, Some(Tiled)).is_ok());
         assert!(validate(false, false, true, Triad, None).is_ok());
         assert!(validate(true, true, false, Triad, Some(StreamK)).is_ok());
-        assert!(validate(true, true, false, Fixed, Some(StreamK)).is_ok());
+        assert!(validate(true, true, false, Inference, Some(StreamK)).is_ok());
         // No explicit policy never conflicts: the tier resolves it.
         assert!(validate(true, false, false, Triad, None).is_ok());
         let error = validate(false, true, false, Triad, None).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES"), "{error}");
         let error = validate(true, false, true, Triad, None).unwrap_err();
         assert!(error.contains("MAMBA_RS_FAST_GEMM"), "{error}");
-        let error = validate(false, false, false, Fixed, None).unwrap_err();
-        assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY=fixed"), "{error}");
+        let error = validate(false, false, false, Inference, None).unwrap_err();
+        assert!(
+            error.contains("MAMBA_RS_BI_GEMM_FAMILY=inference"),
+            "{error}"
+        );
         // The explicit stream-K permission without the tensor-core tier
         // reaches no kernel: refused, not ignored.
         let error = validate(true, false, false, Triad, Some(StreamK)).unwrap_err();

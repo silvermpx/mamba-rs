@@ -1,9 +1,9 @@
 //! Independent exact-N64 protocol; no historical comparator semantics are changed.
 
 use super::{
-    CStr, CudaGraph, DtypedBuf, F32TriadPolicy, FixedFwdOperands, FixedShape, FixedTile, GpuCtx,
+    CStr, CudaGraph, DtypedBuf, F32TriadPolicy, InferenceFwdOperands, InferenceShape, InferenceTile, GpuCtx,
     GpuDevice, TypedPtr, WeightDtype, capture_into_graph, digest_hex, fixed_ada_event_window_us,
-    fixed_ada_vendor_launch, fixed_forward_f32_legacy_baseline, fixed_forward_with_tile,
+    fixed_ada_vendor_launch, inference_forward_f32_legacy_baseline, inference_forward_with_tile,
     launch_fixed_auto_vendor_custom, percentile,
 };
 use cudarc::driver::{CudaFunction, sys};
@@ -735,10 +735,10 @@ const ARMS: [&str; 6] = [
 ];
 const PATHS: [&str; 2] = ["eager", "graph"];
 const ORDERS: [&str; 2] = ["ABBA", "BAAB"];
-const CELLS: [(&str, FixedShape); 5] = [
+const CELLS: [(&str, InferenceShape); 5] = [
     (
         "hot_a",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
@@ -746,7 +746,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_b",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -754,7 +754,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_c",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
@@ -762,7 +762,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_d",
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
@@ -770,7 +770,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_e",
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -907,19 +907,19 @@ impl Guarded {
 }
 
 struct Case {
-    shape: FixedShape,
+    shape: InferenceShape,
     corpus: Corpus,
     has_bias: bool,
     a: Guarded,
     b: Guarded,
     bias: Guarded,
     outputs: Vec<Guarded>,
-    auto: Cell<Option<FixedTile>>,
+    auto: Cell<Option<InferenceTile>>,
 }
 impl Case {
     fn new(
         ctx: &GpuCtx,
-        shape: FixedShape,
+        shape: InferenceShape,
         corpus: Corpus,
         has_bias: bool,
     ) -> Result<Self, String> {
@@ -953,8 +953,8 @@ impl Case {
             auto: Cell::new(None),
         })
     }
-    fn operands(&self, arm: usize) -> FixedFwdOperands {
-        FixedFwdOperands {
+    fn operands(&self, arm: usize) -> InferenceFwdOperands {
+        InferenceFwdOperands {
             c: TypedPtr {
                 ptr: self.outputs[arm].ptr(),
                 dtype: WeightDtype::F32,
@@ -973,10 +973,10 @@ impl Case {
     fn launch(&self, ctx: &GpuCtx, arm: usize) -> Result<(), String> {
         let operands = self.operands(arm);
         match arm {
-            0 => fixed_forward_with_tile(ctx, operands, self.shape, FixedTile::F32Sm89N64CopyPlan),
+            0 => inference_forward_with_tile(ctx, operands, self.shape, InferenceTile::F32Sm89N64CopyPlan),
             1 => {
                 let selected = launch_fixed_auto_vendor_custom(ctx, operands, self.shape);
-                if !matches!(selected, FixedTile::Legacy | FixedTile::F32Sm89N64CopyPlan) {
+                if !matches!(selected, InferenceTile::Legacy | InferenceTile::F32Sm89N64CopyPlan) {
                     return Err(format!("unapproved Ada AUTO physical route {selected:?}"));
                 }
                 if self.auto.get().is_some_and(|previous| previous != selected) {
@@ -985,8 +985,8 @@ impl Case {
                 self.auto.set(Some(selected));
                 Ok(())
             }
-            2 => fixed_forward_with_tile(ctx, operands, self.shape, FixedTile::Legacy),
-            4 => fixed_forward_f32_legacy_baseline(ctx, operands, self.shape),
+            2 => inference_forward_with_tile(ctx, operands, self.shape, InferenceTile::Legacy),
+            4 => inference_forward_f32_legacy_baseline(ctx, operands, self.shape),
             3 | 5 => {
                 // Every invocation includes bias broadcast + beta1, or beta0
                 // without bias. Reference has its own separately reset output.
@@ -1165,7 +1165,7 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let (symbol, params) = kernel_params(nodes[0])?;
     let expected_symbol = match arm {
         0 => CANDIDATE,
-        1 if case.auto.get() == Some(FixedTile::F32Sm89N64CopyPlan) => CANDIDATE,
+        1 if case.auto.get() == Some(InferenceTile::F32Sm89N64CopyPlan) => CANDIDATE,
         1 | 2 => LEGACY,
         4 => ORACLE,
         _ => return Err("not an own arm".into()),
@@ -1698,7 +1698,7 @@ fn single_term_preflight(
     for has_bias in [false, true] {
         let mut case = Case::new(
             ctx,
-            FixedShape { m: 65, k: 1, n: 65 },
+            InferenceShape { m: 65, k: 1, n: 65 },
             Corpus::Representable,
             has_bias,
         )?;
@@ -1716,7 +1716,7 @@ fn single_term_preflight(
                 case.launch(ctx, arm)?;
             }
         }
-        if case.auto.get() != Some(FixedTile::Legacy) {
+        if case.auto.get() != Some(InferenceTile::Legacy) {
             return Err("small single-term AUTO must remain Legacy".into());
         }
         let expected = vec![
@@ -1774,7 +1774,7 @@ fn run_case(
         protocol.auto_phase.as_deref(),
         label,
         cell_selected,
-        case.auto.get() == Some(FixedTile::F32Sm89N64CopyPlan),
+        case.auto.get() == Some(InferenceTile::F32Sm89N64CopyPlan),
     )?;
     let (expected, pre_numeric) = verify(case, ctx, None, evidence, "eager_first")?;
     for arm in 0..6 {
@@ -1889,13 +1889,13 @@ fn run_case(
             }
         }
     }
-    let auto_admitted = selected == FixedTile::F32Sm89N64CopyPlan
+    let auto_admitted = selected == InferenceTile::F32Sm89N64CopyPlan
         || admission(label, protocol.windows, &protocol.paths, &auto_p95);
     let own_win = admission(label, protocol.windows, &protocol.paths, &legacy_p95) && auto_admitted;
     let vendor_win =
         own_win && vendor_p95.len() == 4 && vendor_p95.iter().all(|r| r.is_finite() && *r <= 1.0);
     evidence.emit(format!("\"record\":\"cell_summary\",\"cell\":{},\"bias\":{},\"windows\":{},\"legacy_paired_p95\":{:?},\"auto_paired_p95\":{:?},\"pedantic_paired_p95\":{:?},\"auto_is_candidate_self_comparison\":{},\"eligible_own_win\":{own_win},\"vendor_win\":{vendor_win},\"host_auto_not_changed\":true",
-        quoted(label),case.has_bias,protocol.windows,legacy_p95,auto_p95,vendor_p95,selected==FixedTile::F32Sm89N64CopyPlan))?;
+        quoted(label),case.has_bias,protocol.windows,legacy_p95,auto_p95,vendor_p95,selected==InferenceTile::F32Sm89N64CopyPlan))?;
     Ok(records)
 }
 

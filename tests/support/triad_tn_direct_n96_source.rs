@@ -340,7 +340,7 @@ mod transpose_n96_source_for_tests;
 mod tests {
     use super::*;
 
-    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
     #[test]
     fn direct_a_copy_plan_covers_each_stage_word_once_in_aligned_chunks() {

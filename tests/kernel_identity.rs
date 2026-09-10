@@ -220,7 +220,7 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
 
     for tc in [false, true] {
         let (backends, contracts) =
-            route_backend_contract_sets(policy(true, tc, BiGemmFamily::Fixed));
+            route_backend_contract_sets(policy(true, tc, BiGemmFamily::Inference));
         assert!(backends.contains(BackendSet::TRIAD));
         assert!(backends.contains(BackendSet::FIXED));
         assert!(!contracts.contains(NumericContractSet::FIXED_MATVEC_TREE_V1));
@@ -262,7 +262,7 @@ fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
     assert!(allow_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
 
     let mut fixed_allow = allow;
-    fixed_allow.bi_gemm_family = BiGemmFamily::Fixed;
+    fixed_allow.bi_gemm_family = BiGemmFamily::Inference;
     let (_, fixed_contracts) = route_backend_contract_sets(fixed_allow);
     assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
 }
@@ -282,7 +282,7 @@ fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
 
     // The default policy never carries the fixed-order fold, tensor cores or not.
     for tc in [false, true] {
-        for family in [BiGemmFamily::Triad, BiGemmFamily::Fixed] {
+        for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
             let (_, contracts) =
                 route_backend_contract_sets(policy(tc, HalfTriadPolicy::TiledParityV1, family));
             assert!(!contracts.contains(stream_k), "{tc} {family:?}");
@@ -290,7 +290,7 @@ fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
     }
     // The permission reaches a kernel only through the tensor-core tier,
     // under either family.
-    for family in [BiGemmFamily::Triad, BiGemmFamily::Fixed] {
+    for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
         let (_, without_tc) = route_backend_contract_sets(policy(
             false,
             HalfTriadPolicy::AllowStreamKFixedOrderV1,
@@ -694,7 +694,7 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.policy.f32_triad_policy = F32TriadPolicy::AllowDeterministicTf32V1;
     changed.push(value);
     let mut value = captured;
-    value.policy.bi_gemm_family = BiGemmFamily::Fixed;
+    value.policy.bi_gemm_family = BiGemmFamily::Inference;
     changed.push(value);
     let mut value = captured;
     value.backend_set = BackendSet::CUBLAS;

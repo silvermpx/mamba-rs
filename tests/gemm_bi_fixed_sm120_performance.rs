@@ -13,9 +13,9 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_f32_legacy_baseline,
-    fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_f32_legacy_baseline,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{TUNING_TABLE_REVISION, digest_hex};
@@ -137,7 +137,7 @@ fn sm120_exact_environment_preflight(label: &str) -> Result<(), String> {
 
 fn configure_sm120_exact_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(policy);
@@ -145,10 +145,10 @@ fn configure_sm120_exact_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
 
 fn launch_sm120_exact_auto(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-) -> FixedTile {
-    fixed_forward(
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+) -> InferenceTile {
+    inference_forward(
         ctx,
         operands.c,
         operands.x,
@@ -161,8 +161,8 @@ fn launch_sm120_exact_auto(
 
 fn sm120_exact_vendor_launch(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     compute: cudarc::cublas::sys::cublasComputeType_t,
 ) {
     use std::ffi::{c_int, c_void};

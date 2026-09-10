@@ -2940,14 +2940,14 @@ mod cuda_suite {
     fn compose_source(variant: CandidateVariant) -> Result<String, String> {
         if variant.uses_fixed_n96_source() {
             let prelude = include_str!("../kernels/_typed_prelude.cuh");
-            let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+            let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
                 .lines()
                 .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
+            let tf32 = include_str!("../kernels/gemm_bi_inference/tf32.cu");
             let transpose_n96 = triad_tn_transpose_n96_source::candidate_source(include_str!(
-                "../kernels/gemm_bi_fixed/tf32_rna_n96.cu"
+                "../kernels/gemm_bi_inference/tf32_rna_n96.cu"
             ))?;
             let n96 = if variant.is_direct_n96() {
                 triad_tn_direct_n96_source::candidate_source(&transpose_n96)?

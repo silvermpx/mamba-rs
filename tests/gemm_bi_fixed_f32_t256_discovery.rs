@@ -11,15 +11,15 @@ use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     NUMERIC_ABI_REVISION, SCHEDULE_REVISION, TUNING_TABLE_REVISION, digest_hex,
 };
 use sha2::{Digest as _, Sha256};
 
-const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
+const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_inference/sm120_f32_n64_copyplan.cu");
 const T256_START: &str =
     "// Force-only T256 CopyPlan twin: four async vectors and a 4x4 microtile per thread.";
 const T256_END: &str =
@@ -66,7 +66,7 @@ fn outputs(thread: usize) -> Vec<(usize, usize)> {
 
 fn compose_source() -> String {
     let prelude = include_str!("../kernels/_typed_prelude.cuh");
-    let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()
@@ -169,13 +169,13 @@ const _: () = {
 #[derive(Clone, Copy)]
 struct Case {
     label: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     bias: bool,
 }
 
 const B0: Case = Case {
     label: "b0",
-    shape: FixedShape {
+    shape: InferenceShape {
         m: 4621,
         k: 768,
         n: 2304,
@@ -185,7 +185,7 @@ const B0: Case = Case {
 
 const TAIL0: Case = Case {
     label: "tail0",
-    shape: FixedShape {
+    shape: InferenceShape {
         m: 65,
         k: 36,
         n: 68,
@@ -312,7 +312,7 @@ fn finite_values(len: usize, mut state: u64) -> Vec<f32> {
 }
 
 impl Fixture {
-    fn new(runtime: &Runtime, shape: FixedShape) -> Result<Self, String> {
+    fn new(runtime: &Runtime, shape: InferenceShape) -> Result<Self, String> {
         let output = vec![f32::from_bits(POISON_BITS); shape.m * shape.n];
         Ok(Self {
             a: Guarded::new(
@@ -347,12 +347,12 @@ impl Fixture {
     fn reset(&mut self, runtime: &Runtime, arm: Arm) -> Result<(), String> {
         self.output_mut(arm).reset(&runtime.ctx.stream)
     }
-    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> InferenceFwdOperands {
         let typed = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(self.output(arm).ptr(&runtime.ctx.stream)),
             x: typed(self.a.ptr(&runtime.ctx.stream)),
             w: typed(self.b.ptr(&runtime.ctx.stream)),
@@ -465,7 +465,7 @@ fn validate_resources(runtime: &Runtime) -> Result<(), String> {
 }
 
 fn configure(runtime: &Runtime, arm: Arm) -> Result<(), String> {
-    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     runtime.ctx.set_bi_tensor_cores(false);
     runtime
         .ctx
@@ -513,11 +513,11 @@ fn launch(runtime: &Runtime, fixture: &Fixture, case: Case, arm: Arm) -> Result<
                 .map(|_| ())
                 .map_err(|e| format!("candidate launch: {e:?}"))
         }
-        Arm::Current => fixed_forward_with_tile(
+        Arm::Current => inference_forward_with_tile(
             &runtime.ctx,
             operands,
             case.shape,
-            FixedTile::F32Sm89N64CopyPlan,
+            InferenceTile::F32Sm89N64CopyPlan,
         ),
         Arm::Fast => gpu_gemm_typed_forward_raw(
             &runtime.ctx,
@@ -576,7 +576,7 @@ fn run_correctness() -> Result<(), String> {
     auto_fixture.reset(&runtime, Arm::Current)?;
     configure(&runtime, Arm::Current)?;
     let o = auto_fixture.operands(&runtime, B0, Arm::Current);
-    let selected = fixed_forward(
+    let selected = inference_forward(
         &runtime.ctx,
         o.c,
         o.x,
@@ -584,14 +584,14 @@ fn run_correctness() -> Result<(), String> {
         o.bias_ptr,
         (B0.shape.m, B0.shape.k, B0.shape.n),
     )?;
-    if selected != FixedTile::F32Sm89N64CopyPlan {
+    if selected != InferenceTile::F32Sm89N64CopyPlan {
         return Err(format!("AUTO selected {selected:?}"));
     }
     let full = check_case(&runtime, B0)?;
     let mut prefix = Fixture::new(&runtime, B0.shape)?;
     let one = Case {
         label: "prefix_m1",
-        shape: FixedShape { m: 1, ..B0.shape },
+        shape: InferenceShape { m: 1, ..B0.shape },
         bias: false,
     };
     for arm in [Arm::Current, Arm::Candidate] {

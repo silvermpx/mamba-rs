@@ -11,7 +11,7 @@ mod direct_source;
 #[allow(dead_code)]
 mod retained_source;
 
-const FIXED_N96_SOURCE: &str = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 fn strict_once7_win(strata: &[[f64; 2]]) -> bool {
     strata.len() == 4
@@ -464,12 +464,12 @@ mod cuda_suite {
 
     fn module_source(body: &str) -> String {
         let prelude = include_str!("../kernels/_typed_prelude.cuh");
-        let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+        let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
             .lines()
             .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
             .collect::<Vec<_>>()
             .join("\n");
-        let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
+        let tf32 = include_str!("../kernels/gemm_bi_inference/tf32.cu");
         [prelude, &common, tf32, body].join("\n")
     }
 

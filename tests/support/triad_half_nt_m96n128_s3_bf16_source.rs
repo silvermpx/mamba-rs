@@ -114,8 +114,8 @@ void gemm_bi_nt_test_fixed_s3_m96n128_bf16(
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
     #[test]
     fn adapter_changes_only_the_exported_scalar_type() {

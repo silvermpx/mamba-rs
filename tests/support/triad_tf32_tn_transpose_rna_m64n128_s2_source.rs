@@ -15,7 +15,7 @@ pub const TILE: (u32, u32, u32) = (64, 128, 32);
 pub const STAGES: u32 = 2;
 pub const ACCUMULATORS_PER_THREAD: u32 = 32;
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub fn retained_source(fixed_n96: &str) -> Result<String, String> {
     let raw = raw_parent::candidate_source(fixed_n96)?;

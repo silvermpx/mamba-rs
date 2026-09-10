@@ -16,7 +16,7 @@ pub const PARAM_BYTES: usize = 32;
 pub const PARAM_ALIGNMENT: usize = 4;
 pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub const fn grid(m: usize, n: usize) -> usize {
     direct_parent::n96_grid(m, n)

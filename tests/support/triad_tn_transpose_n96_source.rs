@@ -222,7 +222,7 @@ void gemm_bi_tn_test_transpose_raw_u32_32x32_v1(
 mod tests {
     use super::*;
 
-    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
     #[test]
     fn transpose_stride_and_indices_cover_raw_words_and_padding() {

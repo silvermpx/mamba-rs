@@ -20,7 +20,7 @@ const SCALAR_NN_M32N64_SPLITK32_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_n
 fn fixed_sm89_half_s3_production_source_contract() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/kernels/gemm_bi_fixed/sm89_half_s3.cu"
+        "/kernels/gemm_bi_inference/sm89_half_s3.cu"
     ))
     .expect("production S3 source must be available to the Fixed composer");
     for token in [
@@ -55,7 +55,7 @@ fn fixed_sm89_half_s3_production_source_contract() {
 
 #[test]
 fn fixed_sm89_finalist_production_source_contract() {
-    let n96 = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+    let n96 = include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu");
     for required in [
         "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
         "__launch_bounds__(256, 1)",
@@ -65,7 +65,7 @@ fn fixed_sm89_finalist_production_source_contract() {
     ] {
         assert!(n96.contains(required), "N96 source omitted {required}");
     }
-    let half = include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu");
+    let half = include_str!("../kernels/gemm_bi_inference/sm89_half_n64.cu");
     for required in [
         "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
         "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
@@ -104,13 +104,13 @@ fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
         std::fs::read_to_string(root.join("tests/cuda/gemm_bi_fixed_sm89_swizzle_layout.cpp"))
             .expect("production-bound Fixed SM89 half-swizzle host layout proof");
     assert!(
-        host_proof.contains("../../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"),
+        host_proof.contains("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"),
         "host layout proof must include the production header directly"
     );
     let layout =
-        std::fs::read_to_string(root.join("kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"))
+        std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"))
             .expect("production Fixed SM89 half-swizzle layout header");
-    let source = std::fs::read_to_string(root.join("kernels/gemm_bi_fixed/sm89_half_swizzle.cu"))
+    let source = std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89_half_swizzle.cu"))
         .expect("production Fixed SM89 half-swizzle source");
 
     for required in [
@@ -176,7 +176,7 @@ fn compose(fragments: &[&str]) -> String {
 
 #[test]
 fn fixed_tf32_source_is_forward_only_and_self_contained() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/kernels/gemm_bi_fixed/tf32.cu");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/kernels/gemm_bi_inference/tf32.cu");
     let source = std::fs::read_to_string(path).expect("standalone Fixed TF32 source");
     assert!(source.contains("gemm_bi_nn_tf32_v1_m128n64_bk32_s2"));
     assert!(source.contains("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"));
@@ -194,7 +194,7 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
     }
     let sm120_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/kernels/gemm_bi_fixed/tf32_sm120.cu"
+        "/kernels/gemm_bi_inference/tf32_sm120.cu"
     );
     let sm120 = std::fs::read_to_string(sm120_path).expect("standalone Fixed SM120 TF32 source");
     assert!(sm120.contains("gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2"));
@@ -212,7 +212,7 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
     }
     let half_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/kernels/gemm_bi_fixed/sm120_tma.cu"
+        "/kernels/gemm_bi_inference/sm120_tma.cu"
     );
     let half = std::fs::read_to_string(half_path).expect("standalone Fixed SM120 half source");
     assert!(half.contains("GBF_SM120_HALF_DEFINE_PAIR(64, 64, 64, 2)"));
@@ -230,7 +230,7 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
     }
     let postbias_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/kernels/gemm_bi_fixed/sm120_f32_postbias.cu"
+        "/kernels/gemm_bi_inference/sm120_f32_postbias.cu"
     );
     let postbias =
         std::fs::read_to_string(postbias_path).expect("standalone Fixed SM120 post-bias source");
@@ -277,17 +277,17 @@ fn fixed_blob() -> String {
         include_str!("../kernels/loss_scaler.cu"),
         include_str!("../kernels/grad_clip.cu"),
         include_str!("../kernels/adamw.cu"),
-        include_str!("../kernels/gemm_bi_fixed/common.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/ffma.cu"),
-        include_str!("../kernels/gemm_bi_fixed/tf32.cu"),
-        include_str!("../kernels/gemm_bi_fixed/tf32_sm120.cu"),
-        include_str!("../kernels/gemm_bi_fixed/sm120_tma.cu"),
-        include_str!("../kernels/gemm_bi_fixed/wmma_legacy.cu"),
-        include_str!("../kernels/gemm_bi_fixed/matvec.cu"),
-        include_str!("../kernels/gemm_bi_fixed/mma16.cu"),
-        include_str!("../kernels/gemm_bi_fixed/tcw64.cu"),
-        include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
-        include_str!("../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
+        include_str!("../kernels/gemm_bi_inference/common.cuh"),
+        include_str!("../kernels/gemm_bi_inference/ffma.cu"),
+        include_str!("../kernels/gemm_bi_inference/tf32.cu"),
+        include_str!("../kernels/gemm_bi_inference/tf32_sm120.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm120_tma.cu"),
+        include_str!("../kernels/gemm_bi_inference/wmma_legacy.cu"),
+        include_str!("../kernels/gemm_bi_inference/matvec.cu"),
+        include_str!("../kernels/gemm_bi_inference/mma16.cu"),
+        include_str!("../kernels/gemm_bi_inference/tcw64.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm90_wgmma.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm100_tcgen05.cu"),
     ])
 }
 
@@ -296,41 +296,41 @@ fn fixed_blob_for(arch: &str) -> String {
     if arch == "sm_89" {
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+            "../kernels/gemm_bi_inference/sm89_half_pipeline.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+            "../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu"
         ));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu"));
+        source.push_str(include_str!("../kernels/gemm_bi_inference/tf32_rna_wide.cu"));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
+            "../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"
         ));
         source.push('\n');
         source.push_str(&compose(&[include_str!(
-            "../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
+            "../kernels/gemm_bi_inference/sm89_half_swizzle.cu"
         )]));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"));
+        source.push_str(include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu"));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu"));
+        source.push_str(include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu"));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu"));
+        source.push_str(include_str!("../kernels/gemm_bi_inference/sm89_half_n64.cu"));
     }
     if arch == "compute_120" {
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"
+            "../kernels/gemm_bi_inference/sm120_f32_n64_copyplan.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu"
+            "../kernels/gemm_bi_inference/sm120_f32_n64_sliced.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_fixed/sm120_f32_postbias.cu"
+            "../kernels/gemm_bi_inference/sm120_f32_postbias.cu"
         ));
     }
     source
@@ -2481,7 +2481,7 @@ fn normalized_whitespace(source: &str) -> String {
 #[test]
 fn fixed_sm120_tf32_pair_store_production_source_contract() {
     const CANDIDATE: &str = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store";
-    let source = include_str!("../kernels/gemm_bi_fixed/tf32_sm120.cu");
+    let source = include_str!("../kernels/gemm_bi_inference/tf32_sm120.cu");
     assert_eq!(source.matches(CANDIDATE).count(), 1, "pair-store export");
     assert!(normalized_whitespace(source).contains(
         "template <int M, int N, int Stages, int WarpN, bool PairStore, bool ProducerWarp>"
@@ -2542,7 +2542,7 @@ fn fixed_sm120_tf32_pair_store_production_source_contract() {
 #[test]
 fn fixed_sm120_tf32_producer_warp_candidate_source_contract() {
     const M64_CANDIDATE: &str = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp";
-    let source = include_str!("../kernels/gemm_bi_fixed/tf32_sm120.cu");
+    let source = include_str!("../kernels/gemm_bi_inference/tf32_sm120.cu");
     assert_eq!(
         source.matches(M64_CANDIDATE).count(),
         1,
@@ -2564,7 +2564,7 @@ fn fixed_sm120_tf32_producer_warp_candidate_source_contract() {
         );
     }
 
-    let fixed = include_str!("../src/mamba_ssm/gpu/gemm_bi_fixed.rs");
+    let fixed = include_str!("../src/mamba_ssm/gpu/gemm_bi_inference.rs");
     assert!(
         fixed.contains("Tf32Sm120M64S2ProducerWarp"),
         "forced M64 candidate tile"
@@ -2766,7 +2766,7 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     const SYMBOL: &str = "gemm_bi_f32_f32_n128_s2";
     const BEGIN: &str = "// BEGIN exact-f32 N128 S2 candidate";
     const END: &str = "// END exact-f32 N128 S2 candidate";
-    let source = include_str!("../kernels/gemm_bi_fixed/ffma.cu");
+    let source = include_str!("../kernels/gemm_bi_inference/ffma.cu");
     assert_eq!(source.matches(BEGIN).count(), 1, "candidate BEGIN marker");
     assert_eq!(source.matches(END).count(), 1, "candidate END marker");
     assert_eq!(source.matches(SYMBOL).count(), 1, "candidate source export");
@@ -2983,7 +2983,7 @@ fn assert_fixed_exact_n64_copyplan_ptx(
 
 #[test]
 fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
-    let candidate = include_str!("../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu");
+    let candidate = include_str!("../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu");
     assert_eq!(candidate.matches(FIXED_SM89_EXACT_N64_COPYPLAN).count(), 1);
     let parameters = candidate
         .split_once(&format!("{FIXED_SM89_EXACT_N64_COPYPLAN}("))
@@ -3031,10 +3031,10 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
     let mut retained = base;
     retained.push('\n');
     retained.push_str(include_str!(
-        "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+        "../kernels/gemm_bi_inference/sm89_half_pipeline.cu"
     ));
     let ada = fixed_blob_for("sm_89");
-    let rna_wide = include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu");
+    let rna_wide = include_str!("../kernels/gemm_bi_inference/tf32_rna_wide.cu");
     assert!(
         ada.strip_prefix(&retained)
             .unwrap()
@@ -3045,7 +3045,7 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
 
 #[test]
 fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
-    let candidate = include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu");
+    let candidate = include_str!("../kernels/gemm_bi_inference/tf32_rna_wide.cu");
     assert_eq!(
         candidate
             .matches(&format!("void {FIXED_SM89_RNA_WIDE}("))
@@ -3096,7 +3096,7 @@ fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
 
 #[test]
 fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
-    let candidate = include_str!("../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
+    let candidate = include_str!("../kernels/gemm_bi_inference/sm120_f32_n64_copyplan.cu");
     assert_eq!(candidate.matches(FIXED_SM120_EXACT_N64_COPYPLAN).count(), 1);
     let parameters = candidate
         .split_once(&format!("{FIXED_SM120_EXACT_N64_COPYPLAN}("))
@@ -3127,8 +3127,8 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
     }
     let base = fixed_blob();
     let production = fixed_blob_for("compute_120");
-    let postbias = include_str!("../kernels/gemm_bi_fixed/sm120_f32_postbias.cu");
-    let sliced = include_str!("../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
+    let postbias = include_str!("../kernels/gemm_bi_inference/sm120_f32_postbias.cu");
+    let sliced = include_str!("../kernels/gemm_bi_inference/sm120_f32_n64_sliced.cu");
     assert_eq!(
         production.strip_prefix(&base).unwrap(),
         format!("\n{candidate}\n{sliced}\n{postbias}")

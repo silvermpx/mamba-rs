@@ -2858,13 +2858,13 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
                 .union(NumericContractSet::TRIAD_MMA_SYNC_V1)
                 .union(NumericContractSet::FIXED_MATVEC_TREE_V1),
         ),
-        (BiGemmFamily::Fixed, false) => (
+        (BiGemmFamily::Inference, false) => (
             BackendSet::FIXED.union(BackendSet::TRIAD),
             NumericContractSet::FIXED_SCALAR_FMA_V1
                 .union(NumericContractSet::FIXED_MMA_SYNC_V1)
                 .union(NumericContractSet::TRIAD_SCALAR_FMA_V1),
         ),
-        (BiGemmFamily::Fixed, true) => (
+        (BiGemmFamily::Inference, true) => (
             BackendSet::FIXED.union(BackendSet::TRIAD),
             NumericContractSet::FIXED_SCALAR_FMA_V1
                 .union(NumericContractSet::FIXED_MMA_SYNC_V1)
@@ -6450,7 +6450,7 @@ mod cache_and_header_tests {
     #[ignore = "requires a CUDA device and NVRTC"]
     fn fixed_policy_accepts_only_declared_triad_fallback_contracts() {
         let ctx = graph_test_context();
-        ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
             ctx.validate_resolved_gemm_route(&scalar_test_route(&ctx, op), "fixed scalar")
                 .unwrap();

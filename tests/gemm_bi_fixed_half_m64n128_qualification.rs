@@ -14,9 +14,9 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedSm120HalfTile, FixedTile, fixed_forward,
-    fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceSm120HalfTile, InferenceTile, inference_forward,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -28,9 +28,9 @@ use sha2::{Digest as _, Sha256};
 const OUTPUT_ENV: &str = "MAMBA_RS_FIXED_HALF_M64N128_JSONL";
 const SCHEMA: &str = "MambaBiFixedHalfM64N128QualificationV1";
 const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_fixed_half_m64n128_qualification.rs");
-const RUST_DISPATCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_fixed.rs");
-const CUDA_SOURCE: &str = include_str!("../kernels/gemm_bi_fixed/sm120_tma.cu");
-const CANDIDATE_TILE: FixedSm120HalfTile = FixedSm120HalfTile::M64N128Bk64S2;
+const RUST_DISPATCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_inference.rs");
+const CUDA_SOURCE: &str = include_str!("../kernels/gemm_bi_inference/sm120_tma.cu");
+const CANDIDATE_TILE: InferenceSm120HalfTile = InferenceSm120HalfTile::M64N128Bk64S2;
 const EAGER_REPEATS: usize = 10;
 const GRAPH_WARMUPS: usize = 1;
 const GRAPH_REPLAYS: usize = 10;
@@ -59,15 +59,15 @@ impl BiasKind {
 #[derive(Clone, Copy, Debug)]
 struct QualCell {
     shape_name: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     dtype: WeightDtype,
     bias: BiasKind,
 }
 
-const SHAPES: [(&str, FixedShape); 12] = [
+const SHAPES: [(&str, InferenceShape); 12] = [
     (
         "m512_k1928_n2304",
-        FixedShape {
+        InferenceShape {
             m: 512,
             k: 1928,
             n: 2304,
@@ -75,7 +75,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1536_k1928_n2304",
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1928,
             n: 2304,
@@ -83,7 +83,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1536_k1928_n1928",
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1928,
             n: 1928,
@@ -91,7 +91,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m3072_k1928_n1928",
-        FixedShape {
+        InferenceShape {
             m: 3072,
             k: 1928,
             n: 1928,
@@ -99,7 +99,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m4096_k520_n1536",
-        FixedShape {
+        InferenceShape {
             m: 4096,
             k: 520,
             n: 1536,
@@ -107,7 +107,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m2048_k1928_n1536",
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 1928,
             n: 1536,
@@ -115,7 +115,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1024_k1928_n1928",
-        FixedShape {
+        InferenceShape {
             m: 1024,
             k: 1928,
             n: 1928,
@@ -123,7 +123,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1024_k1928_n2304",
-        FixedShape {
+        InferenceShape {
             m: 1024,
             k: 1928,
             n: 2304,
@@ -131,7 +131,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1536_k1032_n1536",
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1032,
             n: 1536,
@@ -139,7 +139,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1536_k1928_n1536",
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1928,
             n: 1536,
@@ -147,7 +147,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m4621_k1928_n1928",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 1928,
@@ -155,7 +155,7 @@ const SHAPES: [(&str, FixedShape); 12] = [
     ),
     (
         "m1536_k768_n1536",
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 768,
             n: 1536,
@@ -359,11 +359,11 @@ impl RunMetadata {
             QUALIFICATION_SOURCE,
         )?;
         let rust_dispatch_source_sha256 = verify_compiled_source(
-            &manifest.join("src/mamba_ssm/gpu/gemm_bi_fixed.rs"),
+            &manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"),
             RUST_DISPATCH_SOURCE,
         )?;
         let cuda_source_sha256 = verify_compiled_source(
-            &manifest.join("kernels/gemm_bi_fixed/sm120_tma.cu"),
+            &manifest.join("kernels/gemm_bi_inference/sm120_tma.cu"),
             CUDA_SOURCE,
         )?;
         let executable_sha256 = sha256_file(
@@ -487,12 +487,12 @@ impl CellBuffers {
         }
     }
 
-    fn operands(&self, cell: QualCell, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, cell: QualCell, arm: Arm) -> InferenceFwdOperands {
         let typed_ptr = |buffer: &DtypedBuf| TypedPtr {
             ptr: buffer.cached_ptr(),
             dtype: cell.dtype,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed_ptr(self.output(arm)),
             x: typed_ptr(&self.a),
             w: typed_ptr(&self.b),
@@ -684,7 +684,7 @@ fn synth_values(len: usize, seed: u64) -> Vec<f32> {
 }
 
 fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     match arm {
         Arm::Candidate | Arm::ProductionAuto => {
@@ -701,16 +701,16 @@ fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
 
 fn launch_arm(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     arm: Arm,
 ) -> Result<(), String> {
     match arm {
         Arm::Candidate => {
-            fixed_forward_with_tile(ctx, operands, shape, FixedTile::Sm120Half(CANDIDATE_TILE))
+            inference_forward_with_tile(ctx, operands, shape, InferenceTile::Sm120Half(CANDIDATE_TILE))
         }
         Arm::ProductionAuto => {
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 ctx,
                 operands.c,
                 operands.x,
@@ -718,7 +718,7 @@ fn launch_arm(
                 operands.bias_ptr,
                 (shape.m, shape.k, shape.n),
             )?;
-            if !matches!(selected, FixedTile::Sm120Half(_)) {
+            if !matches!(selected, InferenceTile::Sm120Half(_)) {
                 return Err(format!(
                     "production Fixed AUTO selected {selected:?}, expected an SM120 half tile"
                 ));
@@ -942,58 +942,58 @@ fn physical_snapshot(graph: &CudaGraph) -> Result<PhysicalSnapshot, String> {
     })
 }
 
-fn half_symbol(tile: FixedSm120HalfTile, dtype: WeightDtype) -> &'static str {
+fn half_symbol(tile: InferenceSm120HalfTile, dtype: WeightDtype) -> &'static str {
     match (tile, dtype) {
-        (FixedSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16"
         }
-        (FixedSm120HalfTile::M64N64Bk64S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16"
         }
-        (FixedSm120HalfTile::M64N128Bk64S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16"
         }
-        (FixedSm120HalfTile::M64N128Bk64S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16"
         }
-        (FixedSm120HalfTile::M128N64Bk32S3, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16"
         }
-        (FixedSm120HalfTile::M128N64Bk32S3, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S3, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16"
         }
         (_, WeightDtype::F32) => panic!("SM120 half qualification cannot use F32"),
     }
 }
 
-fn half_contract(tile: FixedSm120HalfTile) -> (usize, usize, u32, u32) {
+fn half_contract(tile: InferenceSm120HalfTile) -> (usize, usize, u32, u32) {
     match tile {
-        FixedSm120HalfTile::M64N64Bk64S2 => (64, 64, 128, 32_896),
-        FixedSm120HalfTile::M64N128Bk64S2 => (64, 128, 256, 49_280),
-        FixedSm120HalfTile::M128N64Bk32S3 => (128, 64, 256, 36_992),
-        FixedSm120HalfTile::M128N128Bk32S2 => (128, 128, 256, 32_896),
-        FixedSm120HalfTile::M128N128Bk32S3 => (128, 128, 256, 49_280),
+        InferenceSm120HalfTile::M64N64Bk64S2 => (64, 64, 128, 32_896),
+        InferenceSm120HalfTile::M64N128Bk64S2 => (64, 128, 256, 49_280),
+        InferenceSm120HalfTile::M128N64Bk32S3 => (128, 64, 256, 36_992),
+        InferenceSm120HalfTile::M128N128Bk32S2 => (128, 128, 256, 32_896),
+        InferenceSm120HalfTile::M128N128Bk32S3 => (128, 128, 256, 49_280),
     }
 }
 
-fn production_tile(snapshot: &PhysicalSnapshot, dtype: WeightDtype) -> Option<FixedSm120HalfTile> {
+fn production_tile(snapshot: &PhysicalSnapshot, dtype: WeightDtype) -> Option<InferenceSm120HalfTile> {
     [
-        FixedSm120HalfTile::M64N64Bk64S2,
-        FixedSm120HalfTile::M64N128Bk64S2,
-        FixedSm120HalfTile::M128N64Bk32S3,
-        FixedSm120HalfTile::M128N128Bk32S2,
+        InferenceSm120HalfTile::M64N64Bk64S2,
+        InferenceSm120HalfTile::M64N128Bk64S2,
+        InferenceSm120HalfTile::M128N64Bk32S3,
+        InferenceSm120HalfTile::M128N128Bk32S2,
     ]
     .into_iter()
     .find(|tile| snapshot.symbol == half_symbol(*tile, dtype))
@@ -2009,7 +2009,7 @@ mod tests {
 
     fn exact_safe_production_snapshot() -> PhysicalSnapshot {
         PhysicalSnapshot {
-            symbol: half_symbol(FixedSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16).to_owned(),
+            symbol: half_symbol(InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16).to_owned(),
             grid: (288, 1, 1),
             block: (128, 1, 1),
             dynamic_shared_bytes: 32_896,
@@ -2178,11 +2178,11 @@ mod tests {
                 QUALIFICATION_SOURCE,
             ),
             (
-                manifest.join("src/mamba_ssm/gpu/gemm_bi_fixed.rs"),
+                manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"),
                 RUST_DISPATCH_SOURCE,
             ),
             (
-                manifest.join("kernels/gemm_bi_fixed/sm120_tma.cu"),
+                manifest.join("kernels/gemm_bi_inference/sm120_tma.cu"),
                 CUDA_SOURCE,
             ),
         ] {
@@ -2213,7 +2213,7 @@ mod tests {
         let metadata = metadata_with_run_identity("run\"\\\n");
         let cell = QualCell {
             shape_name: "shape\tname",
-            shape: FixedShape { m: 1, k: 2, n: 3 },
+            shape: InferenceShape { m: 1, k: 2, n: 3 },
             dtype: WeightDtype::F16,
             bias: BiasKind::Synthesized,
         };

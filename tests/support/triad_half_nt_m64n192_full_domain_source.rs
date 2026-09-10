@@ -76,8 +76,8 @@ fn require_count(source: &str, needle: &str, expected: usize, label: &str) -> Re
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
     #[test]
     fn exact_export_inlines_literal_full_domain_into_the_measured_n192_body() {

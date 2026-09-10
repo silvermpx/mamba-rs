@@ -24,8 +24,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
@@ -441,7 +441,7 @@ fn typed_full_coverage_bit_match_f32_triad() {
 #[test]
 fn fixed_family_keeps_uncovered_typed_scalar_fallbacks() {
     let t = Ctx::new();
-    t.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    t.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let dims = (64, 128, 128);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         check_forward(&t, dtype, dims, true, true);
@@ -1154,13 +1154,13 @@ fn enqueue_ada_half(t: &Ctx, fixture: &AdaHalfFixture, arm: AdaHalfArm) -> Resul
         ),
         arm @ (AdaHalfArm::FixedSm89Tc128Pipeline | AdaHalfArm::FixedSm89Tc128Swizzle) => {
             let tile = match arm {
-                AdaHalfArm::FixedSm89Tc128Pipeline => FixedTile::Tc128Sm89Pipeline,
-                AdaHalfArm::FixedSm89Tc128Swizzle => FixedTile::Tc128Sm89Swizzle,
+                AdaHalfArm::FixedSm89Tc128Pipeline => InferenceTile::Tc128Sm89Pipeline,
+                AdaHalfArm::FixedSm89Tc128Swizzle => InferenceTile::Tc128Sm89Swizzle,
                 _ => unreachable!(),
             };
-            fixed_forward_with_tile(
+            inference_forward_with_tile(
                 &t.ctx,
-                FixedFwdOperands {
+                InferenceFwdOperands {
                     c: TypedPtr {
                         ptr: operands.y.ptr,
                         dtype: fixture.dtype,
@@ -1175,7 +1175,7 @@ fn enqueue_ada_half(t: &Ctx, fixture: &AdaHalfFixture, arm: AdaHalfArm) -> Resul
                     },
                     bias_ptr: None,
                 },
-                FixedShape { m, k, n },
+                InferenceShape { m, k, n },
                 tile,
             )
         }
@@ -2246,10 +2246,10 @@ impl AdaHalfNnN64Candidate {
 
 fn compile_ada_half_nn_n64_candidate(t: &Ctx) -> Result<AdaHalfNnN64Candidate, String> {
     let transformed = triad_half_nn_m128n64_source::candidate_source(
-        include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu"),
-        include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm89_half_n64.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
     )?;
-    let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()
@@ -3666,7 +3666,7 @@ fn compile_ada_half_tn_isolated_candidate(
     f16_symbol: &str,
     fixed_preamble: bool,
 ) -> Result<AdaHalfTnCandidate, String> {
-    let fixed_common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let fixed_common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()
@@ -3961,8 +3961,8 @@ fn compile_ada_half_tn_m64n128_compact_candidate(t: &Ctx) -> Result<AdaHalfTnCan
 
 fn compile_ada_half_tn_fixed_s3_candidate(t: &Ctx) -> Result<AdaHalfTnCandidate, String> {
     let transformed = triad_half_tn_fixed_s3_source::candidate_source(
-        include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
-        include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
+        include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu"),
     )?;
     let bf16_symbol = format!("{}bf16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX);
     let f16_symbol = format!("{}f16", triad_half_tn_fixed_s3_source::SYMBOL_PREFIX);
@@ -6201,24 +6201,24 @@ fn compile_ada_half_nt_candidate(
         ),
         AdaHalfNtCandidateKind::DirectEpilogue => (
             triad_half_nt_direct_epilogue_source::candidate_source(
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu"),
             )?,
             triad_half_nt_direct_epilogue_source::SYMBOL_PREFIX,
             true,
         ),
         AdaHalfNtCandidateKind::FixedS3Bxor => (
             triad_half_nt_fixed_s3_source::candidate_source(
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu"),
             )?,
             triad_half_nt_fixed_s3_source::SYMBOL_PREFIX,
             true,
         ),
         AdaHalfNtCandidateKind::FixedS3M64N128 => (
             triad_half_nt_m64n128_s3_source::candidate_source(
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
-                include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
+                include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu"),
             )?,
             triad_half_nt_m64n128_s3_source::SYMBOL_PREFIX,
             true,
@@ -6227,7 +6227,7 @@ fn compile_ada_half_nt_candidate(
             return Err("loaded NT TC128 does not require NVRTC composition".into());
         }
     };
-    let fixed_common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let fixed_common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()

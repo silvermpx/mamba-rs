@@ -564,17 +564,17 @@ impl Family {
         }
     }
 
-    fn candidate(self) -> FixedTile {
+    fn candidate(self) -> InferenceTile {
         match self {
-            Self::Exact => FixedTile::F32Sm89N64CopyPlan,
-            Self::Tf32 => FixedTile::Tf32M64S2,
+            Self::Exact => InferenceTile::F32Sm89N64CopyPlan,
+            Self::Tf32 => InferenceTile::Tf32M64S2,
         }
     }
 
-    fn incumbent(self) -> FixedTile {
+    fn incumbent(self) -> InferenceTile {
         match self {
-            Self::Exact => FixedTile::Legacy,
-            Self::Tf32 => FixedTile::Tf32RnaM128N128S3,
+            Self::Exact => InferenceTile::Legacy,
+            Self::Tf32 => InferenceTile::Tf32RnaM128N128S3,
         }
     }
 
@@ -771,13 +771,13 @@ impl Guarded {
 struct Case {
     mode: RunMode,
     family: Family,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
     a: Guarded,
     b: Guarded,
     bias: Guarded,
     outputs: Vec<Guarded>,
-    selected: Cell<Option<FixedTile>>,
+    selected: Cell<Option<InferenceTile>>,
 }
 
 impl Case {
@@ -785,7 +785,7 @@ impl Case {
         ctx: &GpuCtx,
         mode: RunMode,
         family: Family,
-        shape: FixedShape,
+        shape: InferenceShape,
         has_bias: bool,
     ) -> Result<Self, String> {
         let a = Guarded::new(ctx, synth(shape.m * shape.k, 0x0ada_a001))?;
@@ -807,8 +807,8 @@ impl Case {
         })
     }
 
-    fn operands(&self, arm: usize) -> FixedFwdOperands {
-        FixedFwdOperands {
+    fn operands(&self, arm: usize) -> InferenceFwdOperands {
+        InferenceFwdOperands {
             c: TypedPtr {
                 ptr: self.outputs[arm].ptr(),
                 dtype: WeightDtype::F32,
@@ -832,7 +832,7 @@ impl Case {
                 let selected = launch_fixed_auto_vendor_custom(ctx, operands, self.shape);
                 let expected = match self.mode {
                     RunMode::Task7 => self.family.incumbent(),
-                    RunMode::PostAuto44 => FixedTile::F32Sm89N64CopyPlan,
+                    RunMode::PostAuto44 => InferenceTile::F32Sm89N64CopyPlan,
                 };
                 if selected != expected {
                     return Err(format!(
@@ -851,10 +851,10 @@ impl Case {
                 Ok(())
             }
             (RunMode::Task7, 1) => {
-                fixed_forward_with_tile(ctx, operands, self.shape, self.family.candidate())
+                inference_forward_with_tile(ctx, operands, self.shape, self.family.candidate())
             }
             (RunMode::PostAuto44, 0) => {
-                fixed_forward_with_tile(ctx, operands, self.shape, FixedTile::Legacy)
+                inference_forward_with_tile(ctx, operands, self.shape, InferenceTile::Legacy)
             }
             (_, 2) => {
                 fixed_ada_vendor_launch(
@@ -1244,7 +1244,7 @@ fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
 fn source_sha() -> Result<String, String> {
     let mut digest = Sha256::new();
     for path in [
-        "src/mamba_ssm/gpu/gemm_bi_fixed.rs",
+        "src/mamba_ssm/gpu/gemm_bi_inference.rs",
         "src/mamba_ssm/gpu/kernel_identity.rs",
         "tests/gemm_bi_fixed_performance.rs",
         "tests/support/fixed_sm89_toolkit_admission.rs",
@@ -1264,7 +1264,7 @@ fn binary_sha() -> Result<String, String> {
     ))
 }
 
-fn literal(literal: &str) -> Result<(FixedShape, bool), String> {
+fn literal(literal: &str) -> Result<(InferenceShape, bool), String> {
     let (cell, bias) = literal
         .split_once(':')
         .ok_or_else(|| format!("malformed Task7 literal {literal}"))?;
@@ -1302,13 +1302,13 @@ fn ordered_dot(a: &[f32], b: &[f32], bias: Option<f32>) -> Result<u32, String> {
 fn single_term_controls(ctx: &GpuCtx, family: Family) -> Result<(), String> {
     let (shape, a_values, b_values, bias_values) = match family {
         Family::Exact => (
-            FixedShape { m: 2, k: 1, n: 3 },
+            InferenceShape { m: 2, k: 1, n: 3 },
             vec![2.0, -3.0],
             vec![5.0, 7.0, -11.0],
             vec![0.25, 0.5, 0.75],
         ),
         Family::Tf32 => (
-            FixedShape { m: 2, k: 4, n: 4 },
+            InferenceShape { m: 2, k: 4, n: 4 },
             vec![2.0, 0.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0],
             vec![
                 5.0, 7.0, -11.0, 13.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -1322,7 +1322,7 @@ fn single_term_controls(ctx: &GpuCtx, family: Family) -> Result<(), String> {
     for has_bias in [false, true] {
         for tile in [family.incumbent(), family.candidate()] {
             let output = Guarded::new(ctx, vec![0.0; shape.m * shape.n])?;
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: TypedPtr {
                     ptr: output.ptr(),
                     dtype: WeightDtype::F32,
@@ -1337,7 +1337,7 @@ fn single_term_controls(ctx: &GpuCtx, family: Family) -> Result<(), String> {
                 },
                 bias_ptr: has_bias.then(|| bias.ptr()),
             };
-            fixed_forward_with_tile(ctx, operands, shape, tile)?;
+            inference_forward_with_tile(ctx, operands, shape, tile)?;
             let actual = output.read(ctx)?;
             let mut expected = Vec::with_capacity(shape.m * shape.n);
             for row in 0..shape.m {
@@ -1364,7 +1364,7 @@ fn single_term_controls(ctx: &GpuCtx, family: Family) -> Result<(), String> {
                 ));
             }
             output.output_gate(ctx, &expected, || {
-                fixed_forward_with_tile(ctx, operands, shape, tile)
+                inference_forward_with_tile(ctx, operands, shape, tile)
             })?;
         }
     }
@@ -1554,7 +1554,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
         let (shape, has_bias) = literal(literal_name)?;
         if config.family == Family::Tf32
             && shape
-                != (FixedShape {
+                != (InferenceShape {
                     m: 4621,
                     k: 1928,
                     n: 384,
@@ -2266,8 +2266,8 @@ mod tests {
 
     #[test]
     fn tf32_actual_auto_contract_is_rna_wide_not_old_m128s2() {
-        assert_eq!(Family::Tf32.incumbent(), FixedTile::Tf32RnaM128N128S3);
-        assert_ne!(Family::Tf32.incumbent(), FixedTile::Tf32M128S2);
+        assert_eq!(Family::Tf32.incumbent(), InferenceTile::Tf32RnaM128N128S3);
+        assert_ne!(Family::Tf32.incumbent(), InferenceTile::Tf32M128S2);
         let bundle = [1.0f32.to_bits(), 0, 4621, 1928, 384, 1928, 384, 384];
         fixed_explicit_vendor_rna_wide_graph_contract(
             1,

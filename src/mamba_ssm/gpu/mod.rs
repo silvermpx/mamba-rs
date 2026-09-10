@@ -20,7 +20,7 @@ pub(crate) mod diagnostics;
 pub mod dtype;
 pub mod forward;
 pub mod forward_mixed;
-pub mod gemm_bi_fixed;
+pub mod gemm_bi_inference;
 pub mod gemm_bi_triad;
 pub mod grad_clip;
 pub mod graph_capture;

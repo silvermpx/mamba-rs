@@ -12,8 +12,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -30,7 +30,7 @@ const POISON_BITS: u16 = 0x7e31;
 struct Cell {
     label: &'static str,
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     symbol: &'static str,
     function: usize,
     bm: usize,
@@ -38,14 +38,14 @@ struct Cell {
     threads: u32,
     shared: u32,
     occupancy: u32,
-    control: FixedTile,
+    control: InferenceTile,
 }
 
 const CELLS: [Cell; 4] = [
     Cell {
         label: "b0_bf16_compact_s3",
         dtype: WeightDtype::Bf16,
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -57,12 +57,12 @@ const CELLS: [Cell; 4] = [
         threads: 256,
         shared: 98_304,
         occupancy: 1,
-        control: FixedTile::Tc128Sm89S3,
+        control: InferenceTile::Tc128Sm89S3,
     },
     Cell {
         label: "b0_f16_compact_s3",
         dtype: WeightDtype::F16,
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -74,12 +74,12 @@ const CELLS: [Cell; 4] = [
         threads: 256,
         shared: 98_304,
         occupancy: 1,
-        control: FixedTile::Tc128Sm89S3,
+        control: InferenceTile::Tc128Sm89S3,
     },
     Cell {
         label: "d0_f16_m64n64_bk64_s3",
         dtype: WeightDtype::F16,
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
@@ -91,12 +91,12 @@ const CELLS: [Cell; 4] = [
         threads: 128,
         shared: 49_152,
         occupancy: 2,
-        control: FixedTile::Tc128Sm89Swizzle,
+        control: InferenceTile::Tc128Sm89Swizzle,
     },
     Cell {
         label: "e0_f16_m128n64_bk64_s2",
         dtype: WeightDtype::F16,
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -108,7 +108,7 @@ const CELLS: [Cell; 4] = [
         threads: 128,
         shared: 49_152,
         occupancy: 2,
-        control: FixedTile::Tc128Sm89Pipeline,
+        control: InferenceTile::Tc128Sm89Pipeline,
     },
 ];
 
@@ -240,12 +240,12 @@ impl Fixture {
             Arm::Fast => &mut self.fast,
         }
     }
-    fn operands(&self, cell: Cell, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, cell: Cell, arm: Arm) -> InferenceFwdOperands {
         let typed = |ptr| TypedPtr {
             ptr,
             dtype: cell.dtype,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(self.output(arm).ptr()),
             x: typed(self.a.ptr()),
             w: typed(self.b.ptr()),
@@ -310,12 +310,12 @@ fn strip_local_include(source: &str) -> String {
 
 fn compose_source() -> String {
     let prelude = include_str!("../kernels/_typed_prelude.cuh");
-    let common = strip_local_include(include_str!("../kernels/gemm_bi_fixed/common.cuh"));
-    let layout = include_str!("../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh");
+    let common = strip_local_include(include_str!("../kernels/gemm_bi_inference/common.cuh"));
+    let layout = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
     let swizzle = strip_local_include(include_str!(
-        "../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
+        "../kernels/gemm_bi_inference/sm89_half_swizzle.cu"
     ));
-    let s3 = include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    let s3 = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
     [prelude, &common, layout, &swizzle, s3, CUDA_SOURCE].join("\n")
 }
 
@@ -443,7 +443,7 @@ fn validate_resource(runtime: &Runtime, cell: Cell) -> Result<(), String> {
 }
 
 fn configure(ctx: &GpuCtx, arm: Arm) {
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_batch_invariant(arm != Arm::Fast);
     ctx.set_fast_gemm(arm == Arm::Fast);
@@ -457,7 +457,7 @@ fn launch(runtime: &Runtime, fixture: &Fixture, cell: Cell, arm: Arm) -> Result<
             if cell.function >= 2 {
                 let legal = (cell.function == 2
                     && cell.shape
-                        == (FixedShape {
+                        == (InferenceShape {
                             m: 2048,
                             k: 768,
                             n: 2304,
@@ -465,7 +465,7 @@ fn launch(runtime: &Runtime, fixture: &Fixture, cell: Cell, arm: Arm) -> Result<
                     && cell.shape.k >= 128)
                     || (cell.function == 3
                         && cell.shape
-                            == (FixedShape {
+                            == (InferenceShape {
                                 m: 2048,
                                 k: 2304,
                                 n: 768,
@@ -514,7 +514,7 @@ fn launch(runtime: &Runtime, fixture: &Fixture, cell: Cell, arm: Arm) -> Result<
             .map_err(|error| format!("{} candidate launch: {error:?}", cell.label))
         }
         Arm::Control => {
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 &runtime.ctx,
                 ops.c,
                 ops.x,
@@ -641,7 +641,7 @@ fn pedantic_reference(
     cell: Cell,
 ) -> Result<Vec<f32>, String> {
     let reference = GpuBuffer::zeros(&runtime.ctx.stream, cell.shape.m * cell.shape.n)?;
-    let ops = FixedFwdOperands {
+    let ops = InferenceFwdOperands {
         c: TypedPtr {
             ptr: reference.cached_ptr(),
             dtype: WeightDtype::F32,

@@ -16,7 +16,7 @@ pub const K8_ISSUE_OFFSETS: [u32; 4] = parent::K8_ISSUE_OFFSETS;
 pub const FRAGMENT_WORDS_PER_BANK: u32 = 20;
 pub const REMOVED_OVERLAPPING_FRAGMENT_WORDS: u32 = 20;
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub const fn grid(m: usize, n: usize) -> usize {
     parent::grid(m, n)

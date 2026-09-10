@@ -5822,14 +5822,14 @@ mod tests {
     fn qualification_policy_guard_restores_every_setting_after_error() {
         let context = FakePolicyContext {
             batch_invariant: Cell::new(false),
-            family: Cell::new(BiGemmFamily::Fixed),
+            family: Cell::new(BiGemmFamily::Inference),
             tensor_cores: Cell::new(true),
             f32_policy: Cell::new(F32TriadPolicy::ExactScalarFmaV1),
         };
 
         assert!(fail_with_qualification_policy(&context).is_err());
         assert!(!context.batch_invariant());
-        assert_eq!(context.bi_gemm_family(), BiGemmFamily::Fixed);
+        assert_eq!(context.bi_gemm_family(), BiGemmFamily::Inference);
         assert!(context.bi_tensor_cores());
         assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
     }
@@ -8132,7 +8132,7 @@ mod tests {
                     // lease. Even when the physical tile is unchanged, drift
                     // in explicit numeric permission must reject before work.
                     ctx.set_batch_invariant(false);
-                    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+                    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
                     ctx.set_bi_tensor_cores(false);
                     ctx.set_fast_gemm(true);
                     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);

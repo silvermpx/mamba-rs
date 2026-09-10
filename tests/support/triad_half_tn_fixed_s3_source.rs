@@ -331,8 +331,8 @@ fn require_count(source: &str, anchor: &str, expected: usize) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
     fn b_index(reduction: usize, column: usize) -> usize {
         reduction * 128 + (column ^ ((reduction & 7) * 8))

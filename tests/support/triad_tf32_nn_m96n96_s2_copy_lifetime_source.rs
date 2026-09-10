@@ -15,7 +15,7 @@ pub const ACCUMULATORS_PER_THREAD: u32 = parent::ACCUMULATORS_PER_THREAD;
 pub const K8_ISSUE_OFFSETS: [u32; 4] = parent::K8_ISSUE_OFFSETS;
 pub const REMOVED_PERSISTENT_PLAN_SLOTS: u32 = 37;
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub const fn grid(m: usize, n: usize) -> usize {
     parent::grid(m, n)

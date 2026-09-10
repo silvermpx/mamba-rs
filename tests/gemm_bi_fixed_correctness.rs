@@ -1,5 +1,5 @@
 //! Correctness of the FIXED-tile batch-invariant GEMM
-//! (`kernels/gemm_bi_fixed/`, `BiGemmFamily::Fixed`) against a CPU
+//! (`kernels/gemm_bi_inference/`, `BiGemmFamily::Inference`) against a CPU
 //! reference, across shapes that exercise the tile tails.
 //!
 //! The family had no direct test while it sat off every dispatch path;
@@ -12,8 +12,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
@@ -78,7 +78,7 @@ fn fixed_tile_matches_cpu_across_tails() {
         let mut y = GpuBuffer::zeros(&stream, m * n).expect("y");
 
         ctx.set_batch_invariant(true);
-        ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
             .expect("fixed forward");
         let got = y.to_cpu(&stream).expect("d2h");
@@ -138,7 +138,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
         matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2)),
         "qualified RNA AUTO toolkit required"
     );
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 384,
         n: 1928,
@@ -147,7 +147,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     let b = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.k * shape.n, 73)).unwrap();
     let c = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).unwrap();
     let launch = || {
-        let tile = fixed_forward(
+        let tile = inference_forward(
             &ctx,
             f32_pointer(c.cached_ptr()),
             f32_pointer(a.cached_ptr()),
@@ -155,7 +155,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
             None,
             (shape.m, shape.k, shape.n),
         )?;
-        assert_eq!(tile, FixedTile::Tf32RnaM128N128S3);
+        assert_eq!(tile, InferenceTile::Tf32RnaM128N128S3);
         Ok::<(), String>(())
     };
     launch().expect("hot A actual AUTO");
@@ -167,7 +167,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     );
 }
 
-fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: FixedShape) {
+fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: InferenceShape) {
     use cudarc::driver::sys;
     let mut count = 0;
     assert_eq!(
@@ -233,7 +233,7 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: Fi
         ],
         "wide graph captured the wrong 32-byte parameter bundle",
     );
-    let (tile_n, shared_bytes) = if symbol == rna_qualification_symbol(FixedTile::Tf32RnaM128N96S3)
+    let (tile_n, shared_bytes) = if symbol == rna_qualification_symbol(InferenceTile::Tf32RnaM128N96S3)
     {
         (96, 86_016)
     } else {
@@ -259,7 +259,7 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: Fi
 fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let tile = FixedTile::Tf32M128N128S3;
+    let tile = InferenceTile::Tf32M128N128S3;
     let (rows, k, n) = (274, 36, 132);
     let sizes = [1, 15, 16, 17, 63, 64, 65, 127, 128, 129, 255, 256, 257];
     let finite_a: Vec<_> = synth(rows * k, 0xa128)
@@ -296,14 +296,14 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
         let a = GpuBuffer::from_cpu(&ctx.stream, &a_host).expect("A upload");
         for has_bias in [false, true] {
             let full = GpuBuffer::zeros(&ctx.stream, rows * n).expect("full output");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: f32_pointer(full.cached_ptr()),
                 x: f32_pointer(a.cached_ptr()),
                 w: f32_pointer(b.cached_ptr()),
                 bias_ptr: has_bias.then_some(bias.cached_ptr()),
             };
-            let full_shape = FixedShape { m: rows, k, n };
-            fixed_forward_with_tile(&ctx, operands, full_shape, tile)
+            let full_shape = InferenceShape { m: rows, k, n };
+            inference_forward_with_tile(&ctx, operands, full_shape, tile)
                 .expect("forced wide full reference launch");
             let reference = output_bits(&ctx, &full);
             if exceptional {
@@ -315,14 +315,14 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                 );
             } else {
                 let baseline = GpuBuffer::zeros(&ctx.stream, rows * n).expect("Fixed baseline");
-                fixed_forward_with_tile(
+                inference_forward_with_tile(
                     &ctx,
-                    FixedFwdOperands {
+                    InferenceFwdOperands {
                         c: f32_pointer(baseline.cached_ptr()),
                         ..operands
                     },
                     full_shape,
-                    FixedTile::Tf32M64S2,
+                    InferenceTile::Tf32M64S2,
                 )
                 .expect("finite Fixed baseline launch");
                 assert_eq!(
@@ -348,16 +348,16 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                 for (row_offset, output_offset) in [(0, 4), (17, 1)] {
                     let initial = vec![-913.25; output_offset + m * n + 8];
                     let mut output = GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded C");
-                    let view_operands = FixedFwdOperands {
+                    let view_operands = InferenceFwdOperands {
                         c: f32_pointer(output.cached_ptr() + (output_offset * 4) as u64),
                         x: f32_pointer(a.cached_ptr() + (row_offset * k * 4) as u64),
                         ..operands
                     };
-                    let shape = FixedShape { m, k, n };
+                    let shape = InferenceShape { m, k, n };
                     let mut expected: Vec<_> = initial.iter().map(|x| x.to_bits()).collect();
                     expected[output_offset..output_offset + m * n]
                         .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
-                    let run = || fixed_forward_with_tile(&ctx, view_operands, shape, tile);
+                    let run = || inference_forward_with_tile(&ctx, view_operands, shape, tile);
                     for repeat in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -414,73 +414,73 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
 fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let tile = FixedTile::Tf32M128N128S3;
+    let tile = InferenceTile::Tf32M128N128S3;
     let (m, k, n) = (17, 36, 132);
     let a = GpuBuffer::zeros(&ctx.stream, m * k + 4).expect("A");
     let b = GpuBuffer::zeros(&ctx.stream, k * n + 4).expect("B");
     let mut output = GpuBuffer::zeros(&ctx.stream, m * n).expect("C");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: f32_pointer(output.cached_ptr()),
         x: f32_pointer(a.cached_ptr()),
         w: f32_pointer(b.cached_ptr()),
         bias_ptr: None,
     };
-    let shape = FixedShape { m, k, n };
+    let shape = InferenceShape { m, k, n };
     for bad in [
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32_pointer(a.cached_ptr() + 4),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32_pointer(b.cached_ptr() + 4),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32_pointer(output.cached_ptr() + 1),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             bias_ptr: Some(1),
             ..operands
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, bad, shape, tile).is_err(),
+            inference_forward_with_tile(&ctx, bad, shape, tile).is_err(),
             "unsafe pointer admitted"
         );
     }
     for bad in [
-        FixedShape { k: k - 1, ..shape },
-        FixedShape { n: n - 1, ..shape },
-        FixedShape {
+        InferenceShape { k: k - 1, ..shape },
+        InferenceShape { n: n - 1, ..shape },
+        InferenceShape {
             n: i32::MAX as usize - 3,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize,
             n: 1 << 20,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: 65_536,
             n: 1 << 29,
             ..shape
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, operands, bad, tile).is_err(),
+            inference_forward_with_tile(&ctx, operands, bad, tile).is_err(),
             "unsafe shape admitted: {bad:?}"
         );
     }
@@ -490,15 +490,15 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
         output
             .upload(&ctx.stream, &vec![f32::NAN; m * n])
             .expect("poison zero-reduction C");
-        fixed_forward_with_tile(
+        inference_forward_with_tile(
             &ctx,
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 x: f32_pointer(0),
                 w: f32_pointer(0),
                 bias_ptr: has_bias.then_some(bias.cached_ptr()),
                 ..operands
             },
-            FixedShape { k: 0, ..shape },
+            InferenceShape { k: 0, ..shape },
             tile,
         )
         .expect("wide K=0 with null inputs");
@@ -516,48 +516,48 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(false, FixedTile::Tf32RnaM128N128S3);
+    check_rna_wide_prefix_views_and_graph_bits(false, InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9 Ada and a qualified forced N96 holder; all-three-toolkit finalist gate"]
 fn fixed_sm89_rna_n96_forced_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(false, FixedTile::Tf32RnaM128N96S3);
+    check_rna_wide_prefix_views_and_graph_bits(false, InferenceTile::Tf32RnaM128N96S3);
 }
 
-fn rna_qualification_symbol(tile: FixedTile) -> &'static [u8] {
+fn rna_qualification_symbol(tile: InferenceTile) -> &'static [u8] {
     match tile {
-        FixedTile::Tf32RnaM128N128S3 => b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-        FixedTile::Tf32RnaM128N96S3 => b"gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        InferenceTile::Tf32RnaM128N128S3 => b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+        InferenceTile::Tf32RnaM128N96S3 => b"gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
         _ => panic!("not an RNA qualification tile: {tile:?}"),
     }
 }
 
-fn rna_qualification_shapes(tile: FixedTile) -> Vec<(&'static str, FixedShape)> {
+fn rna_qualification_shapes(tile: InferenceTile) -> Vec<(&'static str, InferenceShape)> {
     let mut shapes = rna_wide_qualification_shapes();
-    if tile == FixedTile::Tf32RnaM128N96S3 {
+    if tile == InferenceTile::Tf32RnaM128N96S3 {
         shapes.retain(|(label, _)| matches!(*label, "tail" | "hot_e_boundary"));
     }
     shapes
 }
 
-fn rna_qualification_rungs(tile: FixedTile) -> Vec<FixedTile> {
+fn rna_qualification_rungs(tile: InferenceTile) -> Vec<InferenceTile> {
     let mut rungs = vec![
-        FixedTile::Tf32M128S2,
-        FixedTile::Tf32M128S3,
-        FixedTile::Tf32M64S2,
-        FixedTile::Tf32M64S3,
-        FixedTile::Tf32M16S4,
+        InferenceTile::Tf32M128S2,
+        InferenceTile::Tf32M128S3,
+        InferenceTile::Tf32M64S2,
+        InferenceTile::Tf32M64S3,
+        InferenceTile::Tf32M16S4,
     ];
-    if tile == FixedTile::Tf32RnaM128N96S3 {
-        rungs.push(FixedTile::Tf32RnaM128N128S3);
+    if tile == InferenceTile::Tf32RnaM128N96S3 {
+        rungs.push(InferenceTile::Tf32RnaM128N128S3);
     }
     rungs
 }
 
 #[test]
 fn rna_n96_qualification_targets_e_boundary_and_masked_tail_only() {
-    let shapes: Vec<_> = rna_qualification_shapes(FixedTile::Tf32RnaM128N96S3)
+    let shapes: Vec<_> = rna_qualification_shapes(InferenceTile::Tf32RnaM128N96S3)
         .into_iter()
         .map(|(label, s)| (label, s.m, s.k, s.n))
         .collect();
@@ -566,25 +566,25 @@ fn rna_n96_qualification_targets_e_boundary_and_masked_tail_only() {
         [("tail", 6018, 36, 132), ("hot_e_boundary", 2049, 2304, 768)]
     );
     assert_eq!(
-        rna_qualification_shapes(FixedTile::Tf32RnaM128N128S3).len(),
+        rna_qualification_shapes(InferenceTile::Tf32RnaM128N128S3).len(),
         6
     );
     assert_ne!(
-        rna_qualification_symbol(FixedTile::Tf32RnaM128N96S3),
-        rna_qualification_symbol(FixedTile::Tf32RnaM128N128S3)
+        rna_qualification_symbol(InferenceTile::Tf32RnaM128N96S3),
+        rna_qualification_symbol(InferenceTile::Tf32RnaM128N128S3)
     );
     assert!(
-        rna_qualification_rungs(FixedTile::Tf32RnaM128N96S3)
-            .contains(&FixedTile::Tf32RnaM128N128S3),
+        rna_qualification_rungs(InferenceTile::Tf32RnaM128N96S3)
+            .contains(&InferenceTile::Tf32RnaM128N128S3),
         "N96 must compare directly with current RNA"
     );
 }
 
-fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
+fn rna_wide_qualification_shapes() -> Vec<(&'static str, InferenceShape)> {
     vec![
         (
             "tail",
-            FixedShape {
+            InferenceShape {
                 m: 6018,
                 k: 36,
                 n: 132,
@@ -592,7 +592,7 @@ fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
         ),
         (
             "hot_a_boundary",
-            FixedShape {
+            InferenceShape {
                 m: 4622,
                 k: 384,
                 n: 1928,
@@ -600,7 +600,7 @@ fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
         ),
         (
             "hot_b_boundary",
-            FixedShape {
+            InferenceShape {
                 m: 4622,
                 k: 768,
                 n: 2304,
@@ -608,7 +608,7 @@ fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
         ),
         (
             "hot_c_boundary",
-            FixedShape {
+            InferenceShape {
                 m: 4622,
                 k: 1928,
                 n: 384,
@@ -616,7 +616,7 @@ fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
         ),
         (
             "hot_d_boundary",
-            FixedShape {
+            InferenceShape {
                 m: 2049,
                 k: 768,
                 n: 2304,
@@ -624,7 +624,7 @@ fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
         ),
         (
             "hot_e_boundary",
-            FixedShape {
+            InferenceShape {
                 m: 2049,
                 k: 2304,
                 n: 768,
@@ -653,16 +653,16 @@ fn rna_wide_force_corpus_contains_every_hot_shape_family() {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(true, FixedTile::Tf32RnaM128N128S3);
+    check_rna_wide_prefix_views_and_graph_bits(true, InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9/142SM Ada and qualified CUDA12.8/13.0/13.2 AUTO45"]
 fn fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(true, FixedTile::Tf32RnaM128N96S3);
+    check_rna_wide_prefix_views_and_graph_bits(true, InferenceTile::Tf32RnaM128N96S3);
 }
 
-fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile) {
+fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: InferenceTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
@@ -675,7 +675,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
         "qualified RNA AUTO toolkit required"
     );
     let shape_cases = rna_qualification_shapes(tile);
-    let n96 = tile == FixedTile::Tf32RnaM128N96S3;
+    let n96 = tile == InferenceTile::Tf32RnaM128N96S3;
     let symbol = rna_qualification_symbol(tile);
     let fixed_rungs = rna_qualification_rungs(tile);
     let special_bits = [
@@ -742,21 +742,21 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
             for has_bias in [false, true] {
                 let reference =
                     GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("RNA reference output");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: f32_pointer(reference.cached_ptr()),
                     x: f32_pointer(a.cached_ptr()),
                     w: f32_pointer(b.cached_ptr()),
                     bias_ptr: has_bias.then_some(bias.cached_ptr()),
                 };
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .expect("RNA-wide full reference launch");
                 let reference_bits = output_bits(&ctx, &reference);
                 for &incumbent in &fixed_rungs {
                     let output =
                         GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("incumbent output");
-                    fixed_forward_with_tile(
+                    inference_forward_with_tile(
                         &ctx,
-                        FixedFwdOperands {
+                        InferenceFwdOperands {
                             c: f32_pointer(output.cached_ptr()),
                             ..operands
                         },
@@ -813,12 +813,12 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                     let initial = vec![-819.25; output_offset + m * shape.n + 7];
                     let mut output =
                         GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA output");
-                    let view_shape = FixedShape {
+                    let view_shape = InferenceShape {
                         m,
                         k: shape.k,
                         n: shape.n,
                     };
-                    let view_operands = FixedFwdOperands {
+                    let view_operands = InferenceFwdOperands {
                         c: f32_pointer(output.cached_ptr() + (output_offset * 4) as u64),
                         x: f32_pointer(a.cached_ptr() + (row_offset * shape.k * 4) as u64),
                         w: operands.w,
@@ -833,7 +833,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                         output
                             .upload(&ctx.stream, &initial)
                             .expect("poison incumbent prefix/view C");
-                        fixed_forward_with_tile(&ctx, view_operands, view_shape, incumbent)
+                        inference_forward_with_tile(&ctx, view_operands, view_shape, incumbent)
                             .unwrap_or_else(|error| {
                                 panic!("{incumbent:?} prefix/view launch: {error}")
                             });
@@ -843,7 +843,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                             "RNA prefix differs from {incumbent:?}; case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional}"
                         );
                     }
-                    let launch = || fixed_forward_with_tile(&ctx, view_operands, view_shape, tile);
+                    let launch = || inference_forward_with_tile(&ctx, view_operands, view_shape, tile);
                     for repeat in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -876,12 +876,12 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                         // independent of the forced reference chosen above.
                         let expected_wide =
                             aligned_hot.then_some(if case == "hot_e_boundary" && !has_bias {
-                                FixedTile::Tf32RnaM128N96S3
+                                InferenceTile::Tf32RnaM128N96S3
                             } else {
-                                FixedTile::Tf32RnaM128N128S3
+                                InferenceTile::Tf32RnaM128N128S3
                             });
                         let launch_auto = || {
-                            let selected = fixed_forward(
+                            let selected = inference_forward(
                                 &ctx,
                                 view_operands.c,
                                 view_operands.x,
@@ -898,7 +898,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                                 assert!(
                                     !matches!(
                                         selected,
-                                        FixedTile::Tf32RnaM128N96S3 | FixedTile::Tf32RnaM128N128S3
+                                        InferenceTile::Tf32RnaM128N96S3 | InferenceTile::Tf32RnaM128N128S3
                                     ),
                                     "unqualified wide AUTO case={case} M={m} C-offset={output_offset}"
                                 );
@@ -947,7 +947,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                 }
             }
             if actual_auto && case != "tail" {
-                let hot = FixedShape {
+                let hot = InferenceShape {
                     m: shape.m - 1,
                     ..shape
                 };
@@ -960,7 +960,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                     for has_bias in [false, true] {
                         let initial = vec![-819.25; 4 + hot.m * hot.n + 7];
                         let mut output = GpuBuffer::from_cpu(&ctx.stream, &initial).unwrap();
-                        let operands = FixedFwdOperands {
+                        let operands = InferenceFwdOperands {
                             c: f32_pointer(output.cached_ptr() + 16),
                             x: f32_pointer(if misalign_a {
                                 shifted.cached_ptr() + 4
@@ -974,9 +974,9 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                             }),
                             bias_ptr: has_bias.then_some(bias.cached_ptr()),
                         };
-                        fixed_forward_with_tile(
+                        inference_forward_with_tile(
                             &ctx,
-                            FixedFwdOperands {
+                            InferenceFwdOperands {
                                 x: f32_pointer(a.cached_ptr()),
                                 w: f32_pointer(b.cached_ptr()),
                                 ..operands
@@ -990,11 +990,11 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                         let expected_old_auto = if case == "hot_c_boundary"
                             && ctx.kernels.compiler_identity().nvrtc_version != (13, 2)
                         {
-                            FixedTile::Tf32M128S2
+                            InferenceTile::Tf32M128S2
                         } else {
-                            FixedTile::Tf32M64S2
+                            InferenceTile::Tf32M64S2
                         };
-                        fixed_forward_with_tile(&ctx, operands, hot, expected_old_auto)
+                        inference_forward_with_tile(&ctx, operands, hot, expected_old_auto)
                             .expect("misaligned old AUTO control");
                         assert_eq!(
                             output_bits(&ctx, &output),
@@ -1002,7 +1002,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                             "misaligned control/RNA bits"
                         );
                         let launch_auto = || {
-                            let selected = fixed_forward(
+                            let selected = inference_forward(
                                 &ctx,
                                 operands.c,
                                 operands.x,
@@ -1069,42 +1069,42 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
-    check_rna_rejects_unsafe_inputs_and_handles_k0(FixedTile::Tf32RnaM128N128S3);
+    check_rna_rejects_unsafe_inputs_and_handles_k0(InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9 Ada and the independently admitted forced N96 holder"]
 fn fixed_sm89_rna_n96_rejects_unsafe_inputs_and_handles_k0() {
-    check_rna_rejects_unsafe_inputs_and_handles_k0(FixedTile::Tf32RnaM128N96S3);
+    check_rna_rejects_unsafe_inputs_and_handles_k0(InferenceTile::Tf32RnaM128N96S3);
 }
 
-fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
+fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: InferenceTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let null_operands = FixedFwdOperands {
+    let null_operands = InferenceFwdOperands {
         c: f32_pointer(0),
         x: f32_pointer(0),
         w: f32_pointer(0),
         bias_ptr: Some(1),
     };
     for empty in [
-        FixedShape {
+        InferenceShape {
             m: 0,
             k: usize::MAX,
             n: usize::MAX,
         },
-        FixedShape {
+        InferenceShape {
             m: usize::MAX,
             k: usize::MAX,
             n: 0,
         },
     ] {
-        fixed_forward_with_tile(&ctx, null_operands, empty, tile)
+        inference_forward_with_tile(&ctx, null_operands, empty, tile)
             .unwrap_or_else(|error| panic!("RNA empty output {empty:?}: {error}"));
     }
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 17,
         k: 36,
         n: 132,
@@ -1112,68 +1112,68 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
     let a = GpuBuffer::zeros(&ctx.stream, shape.m * shape.k + 4).expect("RNA A");
     let b = GpuBuffer::zeros(&ctx.stream, shape.k * shape.n + 4).expect("RNA B");
     let output = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("RNA C");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: f32_pointer(output.cached_ptr()),
         x: f32_pointer(a.cached_ptr()),
         w: f32_pointer(b.cached_ptr()),
         bias_ptr: None,
     };
     for bad in [
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32_pointer(a.cached_ptr() + 4),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32_pointer(b.cached_ptr() + 4),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32_pointer(0),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32_pointer(output.cached_ptr() + 1),
             ..operands
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             bias_ptr: Some(1),
             ..operands
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, bad, shape, tile).is_err(),
+            inference_forward_with_tile(&ctx, bad, shape, tile).is_err(),
             "unsafe RNA-wide pointer admitted"
         );
     }
     for bad in [
-        FixedShape {
+        InferenceShape {
             k: shape.k - 1,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             n: shape.n - 1,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             n: i32::MAX as usize - 3,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize,
             n: 1 << 20,
             ..shape
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, operands, bad, tile).is_err(),
+            inference_forward_with_tile(&ctx, operands, bad, tile).is_err(),
             "unsafe RNA-wide shape admitted: {bad:?}"
         );
     }
@@ -1183,7 +1183,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
         .collect();
     let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("RNA K0 bias");
     let fixed_rungs = rna_qualification_rungs(tile);
-    let k0_shape = FixedShape { k: 0, ..shape };
+    let k0_shape = InferenceShape { k: 0, ..shape };
     for has_bias in [false, true] {
         let output_offset = 1;
         let output_elements = shape.m * shape.n;
@@ -1191,7 +1191,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
         initial[output_offset..output_offset + output_elements].fill(f32::from_bits(0x7fc0_1234));
         let mut k0_output =
             GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA K0 output");
-        let k0_operands = FixedFwdOperands {
+        let k0_operands = InferenceFwdOperands {
             c: f32_pointer(k0_output.cached_ptr() + (output_offset * 4) as u64),
             x: f32_pointer(0),
             w: f32_pointer(0),
@@ -1212,7 +1212,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
                 k0_output
                     .upload(&ctx.stream, &initial)
                     .expect("poison incumbent K0 output");
-                fixed_forward_with_tile(&ctx, k0_operands, k0_shape, incumbent)
+                inference_forward_with_tile(&ctx, k0_operands, k0_shape, incumbent)
                     .unwrap_or_else(|error| panic!("{incumbent:?} K0 launch: {error}"));
                 assert_eq!(
                     output_bits(&ctx, &k0_output),
@@ -1222,7 +1222,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
             }
         }
 
-        let launch = || fixed_forward_with_tile(&ctx, k0_operands, k0_shape, tile);
+        let launch = || inference_forward_with_tile(&ctx, k0_operands, k0_shape, tile);
         for repeat in 0..2 {
             k0_output
                 .upload(&ctx.stream, &initial)

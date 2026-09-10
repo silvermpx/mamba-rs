@@ -275,7 +275,7 @@ const SHAPES: &[(usize, usize)] = &[
 fn fixed_f32_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for &(k, n) in SHAPES {
         let fx = Fixture::new(&ctx, k, n);
         let mut launch = |m: usize| -> Vec<u32> {
@@ -312,7 +312,7 @@ fn fixed_f32_is_strictly_invariant() {
 fn fixed_bf16_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for &(k, n) in &[(64usize, 64usize), (384, 384), (768, 2304)] {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
@@ -512,7 +512,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
 fn fixed_f32_row_position_invariance() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let (k, n, m) = (384usize, 384usize, 129usize);
     let probe: Vec<f32> = (0..k).map(|i| ((i % 17) as f32 - 8.0) * 0.03).collect();
     let positions = [0usize, 1, m / 2, m - 1];

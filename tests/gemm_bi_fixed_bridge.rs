@@ -1,5 +1,5 @@
 //! The bridge census between the two kernels: the FIXED inference
-//! ladder (`kernels/gemm_bi_fixed/`, GBF namespace) must stay
+//! ladder (`kernels/gemm_bi_inference/`, GBF namespace) must stay
 //! byte-identical to the triad forward tiles it was copied from at the
 //! split point. This suite is permanent - it is what makes the
 //! two-kernel split safe: any arithmetic drift between the inference
@@ -17,8 +17,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
@@ -64,14 +64,14 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
     let ctx = GpuCtx::new(&dev).expect("ctx");
 
     // (m, k, n, expected fixed tile, matching forced triad tile)
-    let cases: &[(usize, usize, usize, FixedTile, TcTile)] = &[
-        (5, 768, 2560, FixedTile::Tc16, TcTile::Thin16),
-        (64, 384, 384, FixedTile::Tc16, TcTile::Thin16),
-        (300, 768, 40, FixedTile::Tc16, TcTile::Thin16),
-        (129, 384, 1928, FixedTile::Tc64, TcTile::Tile64),
-        (100, 383, 383, FixedTile::Tc16, TcTile::Thin16),
-        (4621, 768, 2304, FixedTile::Tc128, TcTile::Tile128),
-        (2048, 1024, 3072, FixedTile::Tc128, TcTile::Tile128),
+    let cases: &[(usize, usize, usize, InferenceTile, TcTile)] = &[
+        (5, 768, 2560, InferenceTile::Tc16, TcTile::Thin16),
+        (64, 384, 384, InferenceTile::Tc16, TcTile::Thin16),
+        (300, 768, 40, InferenceTile::Tc16, TcTile::Thin16),
+        (129, 384, 1928, InferenceTile::Tc64, TcTile::Tile64),
+        (100, 383, 383, InferenceTile::Tc16, TcTile::Thin16),
+        (4621, 768, 2304, InferenceTile::Tc128, TcTile::Tile128),
+        (2048, 1024, 3072, InferenceTile::Tc128, TcTile::Tile128),
     ];
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
         for &(m, k, n, want_fixed, force_triad) in cases {
@@ -88,15 +88,15 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
                 ptr: b.cached_ptr(),
                 dtype: dt,
             };
-            fixed_forward_with_tile(
+            inference_forward_with_tile(
                 &ctx,
-                FixedFwdOperands {
+                InferenceFwdOperands {
                     c: tp(&c_fixed),
                     x: tp(&a),
                     w: tp(&w),
                     bias_ptr: None,
                 },
-                FixedShape { m, k, n },
+                InferenceShape { m, k, n },
                 want_fixed,
             )
             .expect("forced Fixed bridge launch");
@@ -158,7 +158,7 @@ fn misaligned_subview_matches_aligned_bits() {
     let c1 = DtypedBuf::zeros(&ctx.stream, m * n, dt).unwrap();
 
     let tp = |p: u64| TypedPtr { ptr: p, dtype: dt };
-    fixed_forward(
+    inference_forward(
         &ctx,
         tp(c0.cached_ptr()),
         tp(a0.cached_ptr()),
@@ -167,7 +167,7 @@ fn misaligned_subview_matches_aligned_bits() {
         (m, k, n),
     )
     .unwrap();
-    fixed_forward(
+    inference_forward(
         &ctx,
         tp(c1.cached_ptr()),
         tp(a1_view),

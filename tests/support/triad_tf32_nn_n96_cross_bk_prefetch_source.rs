@@ -20,7 +20,7 @@ pub const fn cross_bk_prefetch_boundaries(tile_count: usize) -> usize {
     tile_count.saturating_sub(2)
 }
 
-const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+const FIXED_N96_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
 pub const fn grid(m: usize, n: usize) -> usize {
     direct_parent::n96_grid(m, n)

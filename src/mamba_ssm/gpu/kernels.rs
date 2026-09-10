@@ -89,7 +89,7 @@ pub struct FixedSm120HalfKernels {
     pub m128n128_bk32_s3: HalfKernel,
 }
 
-/// Fixed-owned exact-F32 TMA tiles with post-dot bias or no-bias epilogues,
+/// Inference-owned exact-F32 TMA tiles with post-dot bias or no-bias epilogues,
 /// matching the deterministic inference arithmetic contract.
 pub struct FixedSm120FmaPostbiasKernels {
     pub m128n64: CudaFunction,
@@ -499,7 +499,7 @@ pub struct MambaKernels {
     pub matvec_bi_f16_f32: CudaFunction,
     pub matvec_bi_f32_f32: CudaFunction,
 
-    /// The fixed family's inference ladder (`kernels/gemm_bi_fixed/`,
+    /// The Inference family's inference ladder (`kernels/gemm_bi_inference/`,
     /// GBF namespace): bit-identical copies of the forward TC tiles,
     /// owned by the inference kernel.
     pub gemm_bi_nn_tc128_typed: HalfKernel,

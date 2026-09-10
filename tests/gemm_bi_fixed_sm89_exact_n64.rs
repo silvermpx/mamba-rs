@@ -10,15 +10,15 @@ use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_f32_legacy_baseline,
-    fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_f32_legacy_baseline,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
 const SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
 const LEGACY_SYMBOL: &str = "gemm_bi_f32_f32_s2";
-const CANDIDATE: FixedTile = FixedTile::F32Sm89N64CopyPlan;
+const CANDIDATE: InferenceTile = InferenceTile::F32Sm89N64CopyPlan;
 const GUARD: usize = 64;
 const POISON: u32 = 0xa5a5_a5a5;
 const SPECIAL: [u32; 16] = [
@@ -326,12 +326,12 @@ impl Inputs {
         bias.reset(ctx);
         Self { a, b, bias }
     }
-    fn operands(&self, output: &Guarded, f: Fixture) -> FixedFwdOperands {
+    fn operands(&self, output: &Guarded, f: Fixture) -> InferenceFwdOperands {
         let typed = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(output.ptr() + (f.row * f.ldc * 4) as u64),
             x: typed(if f.k == 0 {
                 0
@@ -379,17 +379,17 @@ fn launch(
     arm: Arm,
 ) -> Result<(), String> {
     let operands = inputs.operands(out, f);
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: f.m,
         k: f.k,
         n: f.n,
     };
     if f.public() {
         return match arm {
-            Arm::OldOracle => fixed_forward_f32_legacy_baseline(ctx, operands, shape),
-            Arm::Legacy => fixed_forward_with_tile(ctx, operands, shape, FixedTile::Legacy),
-            Arm::N128 => fixed_forward_with_tile(ctx, operands, shape, FixedTile::F32N128S2),
-            Arm::Candidate => fixed_forward_with_tile(ctx, operands, shape, CANDIDATE),
+            Arm::OldOracle => inference_forward_f32_legacy_baseline(ctx, operands, shape),
+            Arm::Legacy => inference_forward_with_tile(ctx, operands, shape, InferenceTile::Legacy),
+            Arm::N128 => inference_forward_with_tile(ctx, operands, shape, InferenceTile::F32N128S2),
+            Arm::Candidate => inference_forward_with_tile(ctx, operands, shape, CANDIDATE),
         };
     }
     // Private raw controls exercise existing arithmetic contracts (padded
@@ -563,19 +563,19 @@ fn graph_parameter<T: Copy>(params: &sys::CUDA_KERNEL_NODE_PARAMS_v2, index: usi
     unsafe { pointer.cast::<T>().read_unaligned() }
 }
 
-fn assert_candidate_graph(graph: &CudaGraph, operands: FixedFwdOperands, f: Fixture) {
+fn assert_candidate_graph(graph: &CudaGraph, operands: InferenceFwdOperands, f: Fixture) {
     assert_exact_n64_graph(graph, operands, f, CANDIDATE);
 }
 
 fn assert_exact_n64_graph(
     graph: &CudaGraph,
-    operands: FixedFwdOperands,
+    operands: InferenceFwdOperands,
     f: Fixture,
-    tile: FixedTile,
+    tile: InferenceTile,
 ) {
     let (symbol, compact) = match tile {
         CANDIDATE => (SYMBOL, true),
-        FixedTile::Legacy => (LEGACY_SYMBOL, false),
+        InferenceTile::Legacy => (LEGACY_SYMBOL, false),
         _ => panic!("unqualified exact N64 AUTO tile: {tile:?}"),
     };
     let mut count = 0;
@@ -982,128 +982,128 @@ fn fixed_sm89_exact_n64_rejects_unsafe_inputs_and_empty_is_noop() {
     let inputs = Inputs::new(&ctx, f);
     let mut out = output(&ctx, f);
     let good = inputs.operands(&out, f);
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: f.m,
         k: f.k,
         n: f.n,
     };
-    fixed_forward_with_tile(&ctx, good, shape, CANDIDATE).expect("positive guard control");
+    inference_forward_with_tile(&ctx, good, shape, CANDIDATE).expect("positive guard control");
     out.reset(&ctx);
     let f32ptr = |ptr| TypedPtr {
         ptr,
         dtype: WeightDtype::F32,
     };
     for bad in [
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32ptr(0),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32ptr(0),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32ptr(0),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32ptr(good.x.ptr + 1),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32ptr(good.w.ptr + 2),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32ptr(good.c.ptr + 3),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             bias_ptr: Some(1),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: TypedPtr {
                 dtype: WeightDtype::Bf16,
                 ..good.x
             },
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: TypedPtr {
                 dtype: WeightDtype::F16,
                 ..good.w
             },
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: TypedPtr {
                 dtype: WeightDtype::Bf16,
                 ..good.c
             },
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             x: f32ptr(u64::MAX - 3),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             w: f32ptr(u64::MAX - 3),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32ptr(u64::MAX - 3),
             ..good
         },
-        FixedFwdOperands {
+        InferenceFwdOperands {
             bias_ptr: Some(u64::MAX - 3),
             ..good
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, bad, shape, CANDIDATE).is_err(),
+            inference_forward_with_tile(&ctx, bad, shape, CANDIDATE).is_err(),
             "unsafe force operands were admitted"
         );
         out.unchanged(&ctx, "rejected operands enqueued output work");
         inputs.unchanged(&ctx);
     }
     for bad in [
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             k: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             n: i32::MAX as usize,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: i32::MAX as usize + 1,
             ..shape
         },
-        FixedShape {
+        InferenceShape {
             m: 1 << 20,
             n: 1 << 29,
             ..shape
         },
     ] {
         assert!(
-            fixed_forward_with_tile(&ctx, good, bad, CANDIDATE).is_err(),
+            inference_forward_with_tile(&ctx, good, bad, CANDIDATE).is_err(),
             "unsafe dimensions were admitted {bad:?}"
         );
         out.unchanged(&ctx, "rejected dimensions enqueued output work");
     }
-    let null = FixedFwdOperands {
+    let null = InferenceFwdOperands {
         c: f32ptr(0),
         x: f32ptr(0),
         w: f32ptr(0),
         bias_ptr: None,
     };
-    for empty in [FixedShape { m: 0, ..shape }, FixedShape { n: 0, ..shape }] {
-        fixed_forward_with_tile(&ctx, null, empty, CANDIDATE)
+    for empty in [InferenceShape { m: 0, ..shape }, InferenceShape { n: 0, ..shape }] {
+        inference_forward_with_tile(&ctx, null, empty, CANDIDATE)
             .expect("empty output must not launch");
     }
 }
@@ -1113,13 +1113,13 @@ fn launch_auto(
     inputs: &Inputs,
     out: &Guarded,
     f: Fixture,
-) -> Result<FixedTile, String> {
+) -> Result<InferenceTile, String> {
     assert!(
         f.public(),
         "AUTO exercises only public contiguous alpha1/beta+0"
     );
     let operands = inputs.operands(out, f);
-    fixed_forward(
+    inference_forward(
         ctx,
         operands.c,
         operands.x,
@@ -1134,7 +1134,7 @@ fn run_auto_view(
     inputs: &Inputs,
     f: Fixture,
     full_legacy: &[u32],
-    expected_tile: FixedTile,
+    expected_tile: InferenceTile,
 ) {
     assert_eq!(full_legacy.len(), f.storage_rows * f.n);
     let expected = &full_legacy[f.row * f.n..(f.row + f.m) * f.n];
@@ -1182,7 +1182,7 @@ fn run_auto_view(
     assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
     let actual_symbol = match actual_tile {
         CANDIDATE => SYMBOL,
-        FixedTile::Legacy => LEGACY_SYMBOL,
+        InferenceTile::Legacy => LEGACY_SYMBOL,
         _ => unreachable!("graph contract already rejects other AUTO symbols"),
     };
     println!(
@@ -1230,7 +1230,7 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
     ));
     assert!(compiler.nvrtc_library_known);
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
@@ -1271,21 +1271,21 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
                 for row in [0, 17] {
                     for (m, aligned_expected) in [
                         (hot_m, CANDIDATE),
-                        (hot_m - 1, FixedTile::Legacy),
-                        (hot_m + 1, FixedTile::Legacy),
-                        (1, FixedTile::Legacy),
-                        (17, FixedTile::Legacy),
-                        (63, FixedTile::Legacy),
-                        (64, FixedTile::Legacy),
-                        (65, FixedTile::Legacy),
-                        (127, FixedTile::Legacy),
-                        (128, FixedTile::Legacy),
-                        (129, FixedTile::Legacy),
+                        (hot_m - 1, InferenceTile::Legacy),
+                        (hot_m + 1, InferenceTile::Legacy),
+                        (1, InferenceTile::Legacy),
+                        (17, InferenceTile::Legacy),
+                        (63, InferenceTile::Legacy),
+                        (64, InferenceTile::Legacy),
+                        (65, InferenceTile::Legacy),
+                        (127, InferenceTile::Legacy),
+                        (128, InferenceTile::Legacy),
+                        (129, InferenceTile::Legacy),
                     ] {
                         let expected = if (a_shift, b_shift, c_shift) == (0, 0, 0) {
                             aligned_expected
                         } else {
-                            FixedTile::Legacy
+                            InferenceTile::Legacy
                         };
                         run_auto_view(
                             &ctx,

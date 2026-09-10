@@ -69,7 +69,7 @@ mod tests {
 
     const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
     const FIXED_LAYOUT: &str =
-        include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh");
+        include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
 
     fn offset(row: usize, column: usize) -> usize {
         row * 64 + (column ^ ((row & 7) * 8))

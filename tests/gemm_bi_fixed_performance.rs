@@ -14,9 +14,9 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedSm120HalfTile, FixedTile, fixed_forward,
-    fixed_forward_f32_legacy_baseline, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceSm120HalfTile, InferenceTile, inference_forward,
+    inference_forward_f32_legacy_baseline, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, Sm120Bk, Sm120ForcedRoute,
@@ -351,7 +351,7 @@ mod ada_s3_pair {
             .collect()
     }
 
-    fn fast(ctx: &GpuCtx, ops: FixedFwdOperands, shape: FixedShape) {
+    fn fast(ctx: &GpuCtx, ops: InferenceFwdOperands, shape: InferenceShape) {
         use cudarc::cublas::{result, sys};
         assert!(ops.bias_ptr.is_none());
         let alpha = 1.0f32;
@@ -410,8 +410,8 @@ mod ada_s3_pair {
     fn inventory(
         graph: &CudaGraph,
         arm: usize,
-        ops: FixedFwdOperands,
-        shape: FixedShape,
+        ops: InferenceFwdOperands,
+        shape: InferenceShape,
         logical_ops: usize,
         vendor_nodes_per_op: usize,
     ) -> (String, usize) {
@@ -483,9 +483,9 @@ mod ada_s3_pair {
                 let bundle = unsafe { bundle_ptr.cast::<[u32; 8]>().read_unaligned() };
                 fixed_explicit_vendor_pipeline_graph_contract(
                     if arm == 0 {
-                        FixedTile::Tc128Sm89Swizzle
+                        InferenceTile::Tc128Sm89Swizzle
                     } else {
-                        FixedTile::Tc128Sm89S3
+                        InferenceTile::Tc128Sm89S3
                     },
                     ops.x.dtype,
                     1,
@@ -588,7 +588,7 @@ mod ada_s3_pair {
             digest_hex(&compiler.header_manifest_digest),
             digest_hex(&compiler.nvrtc_library_domain)
         );
-        let shape = FixedShape {
+        let shape = InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -618,7 +618,7 @@ mod ada_s3_pair {
                 .collect();
             let operands: Vec<_> = owners
                 .iter()
-                .map(|owner| FixedFwdOperands {
+                .map(|owner| InferenceFwdOperands {
                     c: TypedPtr {
                         ptr: owner.cached_ptr() + GUARD as u64,
                         dtype,
@@ -635,28 +635,28 @@ mod ada_s3_pair {
                         let actual = launch_fixed_auto_vendor_custom(&ctx, operands[0], shape);
                         assert_eq!(
                             actual,
-                            FixedTile::Tc128Sm89Swizzle,
+                            InferenceTile::Tc128Sm89Swizzle,
                             "historical actual AUTO must remain rev42 incumbent"
                         );
                     } else {
-                        fixed_forward_with_tile(
+                        inference_forward_with_tile(
                             &ctx,
                             operands[0],
                             shape,
-                            FixedTile::Tc128Sm89Swizzle,
+                            InferenceTile::Tc128Sm89Swizzle,
                         )
                         .expect("public forced Swizzle control");
                     }
                 }
                 1 => {
                     if stage == Stage::PrePromotion42 {
-                        fixed_forward_with_tile(&ctx, operands[1], shape, FixedTile::Tc128Sm89S3)
+                        inference_forward_with_tile(&ctx, operands[1], shape, InferenceTile::Tc128Sm89S3)
                             .expect("public S3 force");
                     } else {
                         let actual = launch_fixed_auto_vendor_custom(&ctx, operands[1], shape);
                         assert_eq!(
                             actual,
-                            FixedTile::Tc128Sm89S3,
+                            InferenceTile::Tc128Sm89S3,
                             "post-AUTO must use actual public S3 selection"
                         );
                     }
@@ -675,7 +675,7 @@ mod ada_s3_pair {
             let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32).unwrap();
             fixed_ada_vendor_launch(
                 &ctx,
-                FixedFwdOperands {
+                InferenceFwdOperands {
                     c: typed(&reference, WeightDtype::F32),
                     ..operands[0]
                 },
@@ -963,9 +963,9 @@ fn average_us(ctx: &GpuCtx, mut run: impl FnMut()) -> f64 {
 
 fn fixed_tile_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-    tile: FixedTile,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    tile: InferenceTile,
     iterations: usize,
 ) -> f64 {
     let start = ctx
@@ -973,7 +973,7 @@ fn fixed_tile_window_us(
         .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
         .expect("record Fixed window start");
     for _ in 0..iterations {
-        fixed_forward_with_tile(ctx, operands, shape, tile)
+        inference_forward_with_tile(ctx, operands, shape, tile)
             .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
     }
     let end = ctx
@@ -985,9 +985,9 @@ fn fixed_tile_window_us(
 
 fn fixed_tile_window_iterations(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-    tile: FixedTile,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    tile: InferenceTile,
 ) -> usize {
     let pilot_iterations = 16;
     let pilot_us = fixed_tile_window_us(ctx, operands, shape, tile, pilot_iterations);
@@ -1066,40 +1066,40 @@ fn single_graph_kernel_name(graph: &CudaGraph, label: &str) -> String {
 #[test]
 fn fixed_sm120_copyplan_t256_spike_mapping_and_graph_geometry() {
     let control = fixed_sm120_fma_spike_tile(Some("copyplan")).unwrap();
-    assert_eq!(control, FixedTile::F32Sm120N64CopyPlan);
+    assert_eq!(control, InferenceTile::F32Sm120N64CopyPlan);
     assert_eq!(sm120_exact_tma_graph_geometry(control), (64, 64, 128, 0));
     let wide = fixed_sm120_fma_spike_tile(Some("copyplan_m128n64_t256")).unwrap();
-    assert_eq!(wide, FixedTile::F32Sm120M128N64CopyPlanT256);
+    assert_eq!(wide, InferenceTile::F32Sm120M128N64CopyPlanT256);
     assert_eq!(sm120_exact_tma_graph_geometry(wide), (128, 64, 256, 0));
     let tile = fixed_sm120_fma_spike_tile(Some("copyplan_t256")).unwrap();
-    assert_eq!(tile, FixedTile::F32Sm120N64CopyPlanT256);
+    assert_eq!(tile, InferenceTile::F32Sm120N64CopyPlanT256);
     assert_eq!(sm120_exact_tma_graph_geometry(tile), (64, 64, 256, 0));
 }
 
 #[test]
 fn fixed_sm120_nobias_t256_spike_mapping_and_graph_geometry() {
     let tile = fixed_sm120_fma_spike_tile(Some("nobias_m128n64_t256")).unwrap();
-    assert_eq!(tile, FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256);
+    assert_eq!(tile, InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256);
     assert_eq!(sm120_exact_tma_graph_geometry(tile), (128, 64, 256, 24_592));
     assert_eq!(
         fixed_sm120_fma_spike_tile(Some("postbias_m128n64_t256")).unwrap(),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
     );
     assert!(fixed_sm120_fma_spike_tile(Some("nobias_m128n64")).is_err());
 }
 
-fn sm120_exact_tma_graph_geometry(tile: FixedTile) -> (usize, usize, u32, u32) {
+fn sm120_exact_tma_graph_geometry(tile: InferenceTile) -> (usize, usize, u32, u32) {
     match tile {
-        FixedTile::F32Sm120N64CopyPlan => (64, 64, 128, 0),
-        FixedTile::F32Sm120N64CopyPlanT256 => (64, 64, 256, 0),
-        FixedTile::F32Sm120M128N64CopyPlanT256 => (128, 64, 256, 0),
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (128, 64, 256, 24_592),
-        FixedTile::F32Sm120TmaFmaM128N64
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => (128, 64, 128, 24_592),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (128, 96, 256, 28_688),
-        FixedTile::F32Sm120TmaFmaM64N128 | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
+        InferenceTile::F32Sm120N64CopyPlan => (64, 64, 128, 0),
+        InferenceTile::F32Sm120N64CopyPlanT256 => (64, 64, 256, 0),
+        InferenceTile::F32Sm120M128N64CopyPlanT256 => (128, 64, 256, 0),
+        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (128, 64, 256, 24_592),
+        InferenceTile::F32Sm120TmaFmaM128N64
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => (128, 64, 128, 24_592),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (128, 96, 256, 28_688),
+        InferenceTile::F32Sm120TmaFmaM64N128 | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
             (64, 128, 128, 24_592)
         }
         _ => panic!("non-TMA tile in exact-TMA graph contract: {tile:?}"),
@@ -1109,9 +1109,9 @@ fn sm120_exact_tma_graph_geometry(tile: FixedTile) -> (usize, usize, u32, u32) {
 fn assert_sm120_exact_tma_graph_contract(
     graph: &CudaGraph,
     output: u64,
-    shape: FixedShape,
+    shape: InferenceShape,
     bias: Option<u64>,
-    tile: FixedTile,
+    tile: InferenceTile,
 ) {
     use cudarc::driver::sys;
 
@@ -1147,9 +1147,9 @@ fn assert_sm120_exact_tma_graph_contract(
     assert_eq!(params.sharedMemBytes, dynamic_shared);
     if matches!(
         tile,
-        FixedTile::F32Sm120N64CopyPlan
-            | FixedTile::F32Sm120N64CopyPlanT256
-            | FixedTile::F32Sm120M128N64CopyPlanT256
+        InferenceTile::F32Sm120N64CopyPlan
+            | InferenceTile::F32Sm120N64CopyPlanT256
+            | InferenceTile::F32Sm120M128N64CopyPlanT256
     ) {
         let mut layout = Vec::new();
         for index in 0..5 {
@@ -1248,8 +1248,8 @@ fn assert_sm120_exact_tma_graph_contract(
 
 #[test]
 fn forced_fixed_launch_uses_structured_arguments() {
-    let _: fn(&GpuCtx, FixedFwdOperands, FixedShape, FixedTile) -> Result<(), String> =
-        fixed_forward_with_tile;
+    let _: fn(&GpuCtx, InferenceFwdOperands, InferenceShape, InferenceTile) -> Result<(), String> =
+        inference_forward_with_tile;
 }
 
 #[test]
@@ -1304,7 +1304,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
     for (cell, shape, output_offset, has_bias) in [
         (
             "A",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
@@ -1314,7 +1314,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "B",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
@@ -1324,7 +1324,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "C",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 384,
@@ -1334,7 +1334,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "D",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -1344,7 +1344,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "E",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -1354,7 +1354,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "A_bias",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
@@ -1364,7 +1364,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "B_bias",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
@@ -1374,7 +1374,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "D_bias",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -1384,7 +1384,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "A_misaligned",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
@@ -1394,7 +1394,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         ),
         (
             "D_misaligned",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -1427,7 +1427,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         bias.upload_f32(&ctx.stream, &synth(shape.n, 0xb1a5_5052_4f44_0003))
             .expect("production bias upload");
         let bias_ptr = has_bias.then(|| bias.cached_ptr());
-        let forced_operands = FixedFwdOperands {
+        let forced_operands = InferenceFwdOperands {
             c: TypedPtr {
                 ptr: forced.cached_ptr() + (output_offset * std::mem::size_of::<f32>()) as u64,
                 dtype: WeightDtype::F32,
@@ -1436,16 +1436,16 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
             w: typed(&b, WeightDtype::F32),
             bias_ptr,
         };
-        let production_operands = FixedFwdOperands {
+        let production_operands = InferenceFwdOperands {
             c: TypedPtr {
                 ptr: production.cached_ptr() + (output_offset * std::mem::size_of::<f32>()) as u64,
                 dtype: WeightDtype::F32,
             },
             ..forced_operands
         };
-        fixed_forward_with_tile(&ctx, forced_operands, shape, FixedTile::Tf32Sm120M64S2)
+        inference_forward_with_tile(&ctx, forced_operands, shape, InferenceTile::Tf32Sm120M64S2)
             .expect("forced incumbent launch");
-        let selected = fixed_forward(
+        let selected = inference_forward(
             &ctx,
             production_operands.c,
             production_operands.x,
@@ -1464,13 +1464,13 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         let uses_d_pair_store = uses_d_schedule && production_operands.c.ptr.is_multiple_of(8);
         let uses_d_producer_warp = uses_d_schedule && !uses_d_pair_store;
         let expected_tile = if uses_wide_tile {
-            FixedTile::Tf32Sm120M128S2
+            InferenceTile::Tf32Sm120M128S2
         } else if uses_d_pair_store {
-            FixedTile::Tf32Sm120M64S2PairStore
+            InferenceTile::Tf32Sm120M64S2PairStore
         } else if uses_d_producer_warp {
-            FixedTile::Tf32Sm120M64S2ProducerWarp
+            InferenceTile::Tf32Sm120M64S2ProducerWarp
         } else {
-            FixedTile::Tf32Sm120M64S2
+            InferenceTile::Tf32Sm120M64S2
         };
         assert_eq!(selected, expected_tile, "{cell} route identity");
         ctx.stream.synchronize().expect("production eager sync");
@@ -1482,7 +1482,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         );
         let graph = unsafe {
             capture_into_graph(&ctx.stream, || {
-                fixed_forward(
+                inference_forward(
                     &ctx,
                     production_operands.c,
                     production_operands.x,
@@ -1583,7 +1583,7 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         if cell == "D" {
             let forced_graph = unsafe {
                 capture_into_graph(&ctx.stream, || {
-                    fixed_forward_with_tile(&ctx, forced_operands, shape, FixedTile::Tf32Sm120M64S2)
+                    inference_forward_with_tile(&ctx, forced_operands, shape, InferenceTile::Tf32Sm120M64S2)
                 })
             }
             .expect("capture forced incumbent graph");
@@ -1651,8 +1651,8 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
 
 #[test]
 fn f32_legacy_baseline_launch_uses_structured_arguments() {
-    let _: fn(&GpuCtx, FixedFwdOperands, FixedShape) -> Result<(), String> =
-        fixed_forward_f32_legacy_baseline;
+    let _: fn(&GpuCtx, InferenceFwdOperands, InferenceShape) -> Result<(), String> =
+        inference_forward_f32_legacy_baseline;
 }
 
 #[test]
@@ -1661,35 +1661,35 @@ fn f32_s2_production_matches_legacy_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for shape in [
-        FixedShape { m: 1, k: 0, n: 1 },
-        FixedShape {
+        InferenceShape { m: 1, k: 0, n: 1 },
+        InferenceShape {
             m: 63,
             k: 31,
             n: 63,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 32,
             n: 64,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 33,
             n: 65,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 36,
             n: 68,
         },
-        FixedShape {
+        InferenceShape {
             m: 129,
             k: 97,
             n: 193,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 384,
@@ -1712,19 +1712,19 @@ fn f32_s2_production_matches_legacy_bits() {
         bias.upload_f32(&ctx.stream, &synth(shape.n, 0xb1a5))
             .expect("bias upload");
         for bias_ptr in [None, Some(bias.cached_ptr())] {
-            let baseline_operands = FixedFwdOperands {
+            let baseline_operands = InferenceFwdOperands {
                 c: typed(&baseline, WeightDtype::F32),
                 x: typed(&a, WeightDtype::F32),
                 w: typed(&b, WeightDtype::F32),
                 bias_ptr,
             };
-            let candidate_operands = FixedFwdOperands {
+            let candidate_operands = InferenceFwdOperands {
                 c: typed(&candidate, WeightDtype::F32),
                 ..baseline_operands
             };
-            fixed_forward_f32_legacy_baseline(&ctx, baseline_operands, shape)
+            inference_forward_f32_legacy_baseline(&ctx, baseline_operands, shape)
                 .expect("legacy Fixed launch");
-            let tile = fixed_forward(
+            let tile = inference_forward(
                 &ctx,
                 candidate_operands.c,
                 candidate_operands.x,
@@ -1733,7 +1733,7 @@ fn f32_s2_production_matches_legacy_bits() {
                 (shape.m, shape.k, shape.n),
             )
             .expect("production S2 launch");
-            assert_eq!(tile, FixedTile::Legacy);
+            assert_eq!(tile, InferenceTile::Legacy);
             ctx.stream.synchronize().expect("S2 sync");
             assert_eq!(
                 f32_bits(&ctx, &candidate, shape.m * shape.n),
@@ -1754,28 +1754,28 @@ fn fixed_tf32_forward_is_repeatable_and_tile_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let tiles = [
-        FixedTile::Tf32M128S2,
-        FixedTile::Tf32M128S3,
-        FixedTile::Tf32M64S2,
-        FixedTile::Tf32M64S3,
-        FixedTile::Tf32M16S4,
+        InferenceTile::Tf32M128S2,
+        InferenceTile::Tf32M128S3,
+        InferenceTile::Tf32M64S2,
+        InferenceTile::Tf32M64S3,
+        InferenceTile::Tf32M16S4,
     ];
     for shape in [
-        FixedShape { m: 1, k: 0, n: 1 },
-        FixedShape {
+        InferenceShape { m: 1, k: 0, n: 1 },
+        InferenceShape {
             m: 15,
             k: 31,
             n: 31,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 36,
             n: 68,
         },
-        FixedShape {
+        InferenceShape {
             m: 129,
             k: 97,
             n: 193,
@@ -1798,17 +1798,17 @@ fn fixed_tf32_forward_is_repeatable_and_tile_invariant() {
             for tile in tiles {
                 let output = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                     .expect("output allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&output, WeightDtype::F32),
                     x: typed(&a, WeightDtype::F32),
                     w: typed(&b, WeightDtype::F32),
                     bias_ptr,
                 };
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 ctx.stream.synchronize().expect("first TF32 sync");
                 let first = f32_bits(&ctx, &output, shape.m * shape.n);
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("repeated {tile:?}: {error}"));
                 ctx.stream.synchronize().expect("second TF32 sync");
                 let second = f32_bits(&ctx, &output, shape.m * shape.n);
@@ -1843,23 +1843,23 @@ fn fixed_sm120_tf32_is_portable_bit_exact_and_selected() {
         return;
     }
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let specialized = [
-        FixedTile::Tf32Sm120M128S2,
-        FixedTile::Tf32Sm120M128S3,
-        FixedTile::Tf32Sm120M64N128S2,
-        FixedTile::Tf32Sm120M64N128S3,
-        FixedTile::Tf32Sm120M64S2ProducerWarp,
-        FixedTile::Tf32Sm120M64S2,
+        InferenceTile::Tf32Sm120M128S2,
+        InferenceTile::Tf32Sm120M128S3,
+        InferenceTile::Tf32Sm120M64N128S2,
+        InferenceTile::Tf32Sm120M64N128S3,
+        InferenceTile::Tf32Sm120M64S2ProducerWarp,
+        InferenceTile::Tf32Sm120M64S2,
     ];
     for shape in [
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 36,
             n: 68,
         },
-        FixedShape {
+        InferenceShape {
             m: 129,
             k: 96,
             n: 196,
@@ -1880,28 +1880,28 @@ fn fixed_sm120_tf32_is_portable_bit_exact_and_selected() {
         for bias_ptr in [None, Some(bias.cached_ptr())] {
             let portable = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                 .expect("portable output");
-            let portable_operands = FixedFwdOperands {
+            let portable_operands = InferenceFwdOperands {
                 c: typed(&portable, WeightDtype::F32),
                 x: typed(&a, WeightDtype::F32),
                 w: typed(&b, WeightDtype::F32),
                 bias_ptr,
             };
-            fixed_forward_with_tile(&ctx, portable_operands, shape, FixedTile::Tf32M64S2)
+            inference_forward_with_tile(&ctx, portable_operands, shape, InferenceTile::Tf32M64S2)
                 .expect("portable TF32 launch");
             ctx.stream.synchronize().expect("portable sync");
             let expected = f32_bits(&ctx, &portable, shape.m * shape.n);
             for tile in specialized {
                 let output = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                     .expect("SM120 output");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&output, WeightDtype::F32),
                     ..portable_operands
                 };
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 ctx.stream.synchronize().expect("first SM120 TF32 sync");
                 let first = f32_bits(&ctx, &output, shape.m * shape.n);
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("repeated {tile:?}: {error}"));
                 ctx.stream.synchronize().expect("second SM120 TF32 sync");
                 assert_eq!(
@@ -1916,7 +1916,7 @@ fn fixed_sm120_tf32_is_portable_bit_exact_and_selected() {
                     bias_ptr.is_some()
                 );
             }
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 &ctx,
                 portable_operands.c,
                 portable_operands.x,
@@ -1925,7 +1925,7 @@ fn fixed_sm120_tf32_is_portable_bit_exact_and_selected() {
                 (shape.m, shape.k, shape.n),
             )
             .expect("automatic SM120 TF32 launch");
-            assert_eq!(selected, FixedTile::Tf32Sm120M64S2);
+            assert_eq!(selected, InferenceTile::Tf32Sm120M64S2);
         }
     }
 }
@@ -1944,15 +1944,15 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
         "producer-warp candidate screen is qualified on SM120",
     );
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
 
-    let incumbent = FixedTile::Tf32Sm120M64S2;
-    let candidate = FixedTile::Tf32Sm120M64S2ProducerWarp;
+    let incumbent = InferenceTile::Tf32Sm120M64S2;
+    let candidate = InferenceTile::Tf32Sm120M64S2ProducerWarp;
     for (label, shape) in [
         (
             "A",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
@@ -1960,7 +1960,7 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
         ),
         (
             "B",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
@@ -1968,7 +1968,7 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
         ),
         (
             "D",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -1994,19 +1994,19 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
             .expect("bias upload");
 
         for (bias_label, bias_ptr) in [("none", None), ("bias", Some(bias.cached_ptr()))] {
-            let incumbent_operands = FixedFwdOperands {
+            let incumbent_operands = InferenceFwdOperands {
                 c: typed(&incumbent_output, WeightDtype::F32),
                 x: typed(&a, WeightDtype::F32),
                 w: typed(&b, WeightDtype::F32),
                 bias_ptr,
             };
-            let candidate_operands = FixedFwdOperands {
+            let candidate_operands = InferenceFwdOperands {
                 c: typed(&candidate_output, WeightDtype::F32),
                 ..incumbent_operands
             };
-            fixed_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
+            inference_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
                 .expect("incumbent exact-bit launch");
-            fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate)
+            inference_forward_with_tile(&ctx, candidate_operands, shape, candidate)
                 .expect("candidate exact-bit launch");
             ctx.stream.synchronize().expect("exact-bit synchronization");
             let expected = f32_bits(&ctx, &incumbent_output, output_len);
@@ -2018,7 +2018,7 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
 
             let graph = unsafe {
                 capture_into_graph(&ctx.stream, || {
-                    fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate)
+                    inference_forward_with_tile(&ctx, candidate_operands, shape, candidate)
                 })
             }
             .expect("capture producer-warp graph");
@@ -2037,9 +2037,9 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
             }
 
             for _ in 0..128 {
-                fixed_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
+                inference_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
                     .expect("incumbent warmup");
-                fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate)
+                inference_forward_with_tile(&ctx, candidate_operands, shape, candidate)
                     .expect("candidate warmup");
             }
             ctx.stream.synchronize().expect("candidate warmup sync");
@@ -2115,9 +2115,9 @@ fn fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails() {
         return;
     }
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 65,
         k: 36,
         n: 68,
@@ -2133,7 +2133,7 @@ fn fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails() {
     b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xc120b))
         .expect("B upload");
     let run = || {
-        fixed_forward(
+        inference_forward(
             &ctx,
             typed(&output, WeightDtype::F32),
             typed(&a, WeightDtype::F32),
@@ -2142,7 +2142,7 @@ fn fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails() {
             (shape.m, shape.k, shape.n),
         )
         .and_then(|tile| {
-            if tile == FixedTile::Tf32Sm120M64S2 {
+            if tile == InferenceTile::Tf32Sm120M64S2 {
                 Ok(())
             } else {
                 Err(format!("unexpected production tile {tile:?}"))
@@ -2169,7 +2169,7 @@ fn fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails() {
         .expect("cold B allocation");
     let cold_capture = unsafe {
         capture_into_graph(&ctx.stream, || {
-            fixed_forward(
+            inference_forward(
                 &ctx,
                 typed(&output, WeightDtype::F32),
                 typed(&cold_a, WeightDtype::F32),
@@ -2196,7 +2196,7 @@ fn fixed_tf32_forward_is_batch_prefix_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let (large_m, k, n) = (129usize, 96usize, 196usize);
     let large_a_host = synth(large_m * k, 0xba7c4);
@@ -2217,7 +2217,7 @@ fn fixed_tf32_forward_is_batch_prefix_invariant() {
     b.upload_f32(&ctx.stream, &b_host).expect("B upload");
     bias.upload_f32(&ctx.stream, &bias_host)
         .expect("bias upload");
-    let small_tile = fixed_forward(
+    let small_tile = inference_forward(
         &ctx,
         typed(&small_c, WeightDtype::F32),
         typed(&small_a, WeightDtype::F32),
@@ -2226,7 +2226,7 @@ fn fixed_tf32_forward_is_batch_prefix_invariant() {
         (1, k, n),
     )
     .expect("small TF32 launch");
-    let large_tile = fixed_forward(
+    let large_tile = inference_forward(
         &ctx,
         typed(&large_c, WeightDtype::F32),
         typed(&large_a, WeightDtype::F32),
@@ -2255,10 +2255,10 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
     assert_eq!(compiler.nvrtc_version, (13, 2));
     assert!(compiler.nvrtc_library_known);
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
 
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 1928,
         n: 384,
@@ -2302,24 +2302,24 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
             .expect("C-row old AUTO output");
         let prefix =
             DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32).expect("C-row prefix output");
-        let inputs = FixedFwdOperands {
+        let inputs = InferenceFwdOperands {
             c: typed(&auto, WeightDtype::F32),
             x: typed(&a, WeightDtype::F32),
             w: typed(&b, WeightDtype::F32),
             bias_ptr,
         };
-        fixed_forward_with_tile(
+        inference_forward_with_tile(
             &ctx,
-            FixedFwdOperands {
+            InferenceFwdOperands {
                 c: typed(&old_auto, WeightDtype::F32),
                 ..inputs
             },
             shape,
-            FixedTile::Tf32M128S2,
+            InferenceTile::Tf32M128S2,
         )
         .expect("forced prior C AUTO");
         let launch_auto = || {
-            fixed_forward(
+            inference_forward(
                 &ctx,
                 inputs.c,
                 inputs.x,
@@ -2328,13 +2328,13 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
                 (shape.m, shape.k, shape.n),
             )
             .and_then(|tile| {
-                (tile == FixedTile::Tf32RnaM128N128S3)
+                (tile == InferenceTile::Tf32RnaM128N128S3)
                     .then_some(())
                     .ok_or_else(|| format!("unexpected Ada C AUTO tile {tile:?}"))
             })
         };
         launch_auto().expect("eager Ada C AUTO");
-        let prefix_tile = fixed_forward(
+        let prefix_tile = inference_forward(
             &ctx,
             typed(&prefix, WeightDtype::F32),
             inputs.x,
@@ -2343,7 +2343,7 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
             (1, shape.k, shape.n),
         )
         .expect("Ada C prefix AUTO");
-        assert_eq!(prefix_tile, FixedTile::Tf32M16S4);
+        assert_eq!(prefix_tile, InferenceTile::Tf32M16S4);
         ctx.stream.synchronize().expect("Ada C eager sync");
         let eager = f32_bits(&ctx, &auto, shape.m * shape.n);
         assert_eq!(eager, f32_bits(&ctx, &old_auto, shape.m * shape.n));
@@ -2365,38 +2365,38 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
 #[ignore = "requires an SM80+ CUDA device and emits TF32 performance data"]
 fn fixed_tf32_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
     ];
     let mut tiles = vec![
-        FixedTile::Tf32M128S2,
-        FixedTile::Tf32M128S3,
-        FixedTile::Tf32M64S2,
-        FixedTile::Tf32M64S3,
-        FixedTile::Tf32M16S4,
+        InferenceTile::Tf32M128S2,
+        InferenceTile::Tf32M128S3,
+        InferenceTile::Tf32M64S2,
+        InferenceTile::Tf32M64S3,
+        InferenceTile::Tf32M16S4,
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
@@ -2408,15 +2408,15 @@ fn fixed_tf32_hot_shapes_smoke() {
         (12, 0) | (12, 1)
     ) {
         tiles.extend([
-            FixedTile::Tf32Sm120M128S2,
-            FixedTile::Tf32Sm120M128S3,
-            FixedTile::Tf32Sm120M64N128S2,
-            FixedTile::Tf32Sm120M64N128S3,
-            FixedTile::Tf32Sm120M64S2,
+            InferenceTile::Tf32Sm120M128S2,
+            InferenceTile::Tf32Sm120M128S3,
+            InferenceTile::Tf32Sm120M64N128S2,
+            InferenceTile::Tf32Sm120M64N128S3,
+            InferenceTile::Tf32Sm120M64S2,
         ]);
     }
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     for shape in shapes {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32)
@@ -2425,7 +2425,7 @@ fn fixed_tf32_hot_shapes_smoke() {
             .expect("B allocation");
         let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
             .expect("C allocation");
-        let operands = FixedFwdOperands {
+        let operands = InferenceFwdOperands {
             c: typed(&c, WeightDtype::F32),
             x: typed(&a, WeightDtype::F32),
             w: typed(&b, WeightDtype::F32),
@@ -2433,7 +2433,7 @@ fn fixed_tf32_hot_shapes_smoke() {
         };
         for &tile in &tiles {
             let elapsed_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
             });
             println!(
@@ -2441,9 +2441,9 @@ fn fixed_tf32_hot_shapes_smoke() {
                 shape.m, shape.k, shape.n
             );
         }
-        let mut selected = FixedTile::Legacy;
+        let mut selected = InferenceTile::Legacy;
         let auto_us = average_us(&ctx, || {
-            selected = fixed_forward(
+            selected = inference_forward(
                 &ctx,
                 operands.c,
                 operands.x,
@@ -2481,27 +2481,27 @@ fn fixed_tf32_hot_shapes_smoke() {
 #[ignore = "requires an SM120 CUDA device and emits specialized TF32 reference data"]
 fn triad_sm120_tf32_nn_reference_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -2545,42 +2545,42 @@ fn fixed_vs_triad_pairwise_census() {
     fixed_sm120_tf32_bd_environment_preflight("pairwise census")
         .expect("pairwise census preflight");
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 3072,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 1536,
             n: 768,
         },
-        FixedShape {
+        InferenceShape {
             m: 10400,
             k: 768,
             n: 384,
@@ -2590,7 +2590,7 @@ fn fixed_vs_triad_pairwise_census() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let sm120 = matches!(device.compute_capability, (12, 0) | (12, 1));
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let iterations = 200;
     // The half routes stage an upcast scratch that cannot grow once a
@@ -2631,17 +2631,17 @@ fn fixed_vs_triad_pairwise_census() {
         }
     };
     let fixed_us =
-        |operands: FixedFwdOperands, shape: FixedShape, tile: FixedTile| -> Option<f64> {
-            if let Err(error) = fixed_forward_with_tile(&ctx, operands, shape, tile) {
+        |operands: InferenceFwdOperands, shape: InferenceShape, tile: InferenceTile| -> Option<f64> {
+            if let Err(error) = inference_forward_with_tile(&ctx, operands, shape, tile) {
                 println!("fixed {tile:?}: unavailable ({error})");
                 return None;
             }
             Some(average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
             }))
         };
-    let report = |shape: FixedShape, pair: &str, fixed: Option<f64>, triad: Option<f64>| {
+    let report = |shape: InferenceShape, pair: &str, fixed: Option<f64>, triad: Option<f64>| {
         let verdict = match (fixed, triad) {
             (Some(fixed), Some(triad)) if fixed < triad => {
                 format!("fixed faster by {:.3}x", triad / fixed)
@@ -2666,7 +2666,7 @@ fn fixed_vs_triad_pairwise_census() {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32).expect("A");
         let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, WeightDtype::F32).expect("B");
         let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32).expect("C");
-        let f32_operands = FixedFwdOperands {
+        let f32_operands = InferenceFwdOperands {
             c: typed(&c, WeightDtype::F32),
             x: typed(&a, WeightDtype::F32),
             w: typed(&b, WeightDtype::F32),
@@ -2675,31 +2675,31 @@ fn fixed_vs_triad_pairwise_census() {
         let portable = [
             (
                 "tf32_m128n64_s2",
-                FixedTile::Tf32M128S2,
+                InferenceTile::Tf32M128S2,
                 Tf32PortableTile::M128N64,
                 Tf32PortableStages::S2,
             ),
             (
                 "tf32_m128n64_s3",
-                FixedTile::Tf32M128S3,
+                InferenceTile::Tf32M128S3,
                 Tf32PortableTile::M128N64,
                 Tf32PortableStages::S3,
             ),
             (
                 "tf32_m64n64_s2",
-                FixedTile::Tf32M64S2,
+                InferenceTile::Tf32M64S2,
                 Tf32PortableTile::M64N64,
                 Tf32PortableStages::S2,
             ),
             (
                 "tf32_m64n64_s3",
-                FixedTile::Tf32M64S3,
+                InferenceTile::Tf32M64S3,
                 Tf32PortableTile::M64N64,
                 Tf32PortableStages::S3,
             ),
             (
                 "tf32_m16n32_s4",
-                FixedTile::Tf32M16S4,
+                InferenceTile::Tf32M16S4,
                 Tf32PortableTile::M16N32,
                 Tf32PortableStages::S4,
             ),
@@ -2722,31 +2722,31 @@ fn fixed_vs_triad_pairwise_census() {
             let tma = [
                 (
                     "tf32_sm120_m128n64_s2",
-                    FixedTile::Tf32Sm120M128S2,
+                    InferenceTile::Tf32Sm120M128S2,
                     Tf32Sm120Tile::M128N64,
                     Tf32Sm120Stages::S2,
                 ),
                 (
                     "tf32_sm120_m128n64_s3",
-                    FixedTile::Tf32Sm120M128S3,
+                    InferenceTile::Tf32Sm120M128S3,
                     Tf32Sm120Tile::M128N64,
                     Tf32Sm120Stages::S3,
                 ),
                 (
                     "tf32_sm120_m64n128_s2",
-                    FixedTile::Tf32Sm120M64N128S2,
+                    InferenceTile::Tf32Sm120M64N128S2,
                     Tf32Sm120Tile::M64N128,
                     Tf32Sm120Stages::S2,
                 ),
                 (
                     "tf32_sm120_m64n128_s3",
-                    FixedTile::Tf32Sm120M64N128S3,
+                    InferenceTile::Tf32Sm120M64N128S3,
                     Tf32Sm120Tile::M64N128,
                     Tf32Sm120Stages::S3,
                 ),
                 (
                     "tf32_sm120_m64n64_s2",
-                    FixedTile::Tf32Sm120M64S2,
+                    InferenceTile::Tf32Sm120M64S2,
                     Tf32Sm120Tile::M64N64,
                     Tf32Sm120Stages::S2,
                 ),
@@ -2772,15 +2772,15 @@ fn fixed_vs_triad_pairwise_census() {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C");
-            let half_operands = FixedFwdOperands {
+            let half_operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
             for (pair, fixed_tile, tile) in [
-                ("half_tc64", FixedTile::Tc64, TcTile::Tile64),
-                ("half_tc16", FixedTile::Tc16, TcTile::Thin16),
+                ("half_tc64", InferenceTile::Tc64, TcTile::Tile64),
+                ("half_tc16", InferenceTile::Tc16, TcTile::Thin16),
             ] {
                 let pair = format!("{pair}_{dtype:?}");
                 let request = PhysicalQualificationRequest::contiguous(
@@ -2804,35 +2804,35 @@ fn fixed_vs_triad_pairwise_census() {
             let tiles = [
                 (
                     "half_sm120_m64n64_bk64_s2",
-                    FixedSm120HalfTile::M64N64Bk64S2,
+                    InferenceSm120HalfTile::M64N64Bk64S2,
                     Sm120Tile::M64N64,
                     Sm120Bk::Bk64,
                     Sm120Stages::S2,
                 ),
                 (
                     "half_sm120_m64n128_bk64_s2",
-                    FixedSm120HalfTile::M64N128Bk64S2,
+                    InferenceSm120HalfTile::M64N128Bk64S2,
                     Sm120Tile::M64N128,
                     Sm120Bk::Bk64,
                     Sm120Stages::S2,
                 ),
                 (
                     "half_sm120_m128n64_bk32_s3",
-                    FixedSm120HalfTile::M128N64Bk32S3,
+                    InferenceSm120HalfTile::M128N64Bk32S3,
                     Sm120Tile::M128N64,
                     Sm120Bk::Bk32,
                     Sm120Stages::S3,
                 ),
                 (
                     "half_sm120_m128n128_bk32_s2",
-                    FixedSm120HalfTile::M128N128Bk32S2,
+                    InferenceSm120HalfTile::M128N128Bk32S2,
                     Sm120Tile::M128N128,
                     Sm120Bk::Bk32,
                     Sm120Stages::S2,
                 ),
                 (
                     "half_sm120_m128n128_bk32_s3",
-                    FixedSm120HalfTile::M128N128Bk32S3,
+                    InferenceSm120HalfTile::M128N128Bk32S3,
                     Sm120Tile::M128N128,
                     Sm120Bk::Bk32,
                     Sm120Stages::S3,
@@ -2914,7 +2914,7 @@ fn fixed_vs_triad_pairwise_census() {
                 report(
                     shape,
                     &pair,
-                    fixed_us(half_operands, shape, FixedTile::Sm120Half(fixed_tile)),
+                    fixed_us(half_operands, shape, InferenceTile::Sm120Half(fixed_tile)),
                     triad,
                 );
             }
@@ -2928,21 +2928,21 @@ fn half_to_f32_portable_ladder_matches_legacy_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
-            FixedShape { m: 9, k: 33, n: 17 },
-            FixedShape {
+            InferenceShape { m: 9, k: 33, n: 17 },
+            InferenceShape {
                 m: 65,
                 k: 63,
                 n: 127,
             },
-            FixedShape {
+            InferenceShape {
                 m: 128,
                 k: 64,
                 n: 128,
             },
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 384,
@@ -2958,21 +2958,21 @@ fn half_to_f32_portable_ladder_matches_legacy_bits() {
                 .expect("A upload");
             b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xb0b))
                 .expect("B upload");
-            let baseline_operands = FixedFwdOperands {
+            let baseline_operands = InferenceFwdOperands {
                 c: typed(&baseline, WeightDtype::F32),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let candidate_operands = FixedFwdOperands {
+            let candidate_operands = InferenceFwdOperands {
                 c: typed(&candidate, WeightDtype::F32),
                 ..baseline_operands
             };
-            fixed_forward_with_tile(&ctx, baseline_operands, shape, FixedTile::Legacy)
+            inference_forward_with_tile(&ctx, baseline_operands, shape, InferenceTile::Legacy)
                 .expect("legacy mixed-output launch");
             let baseline_bits = f32_bits(&ctx, &baseline, shape.m * shape.n);
-            for tile in [FixedTile::Tc16, FixedTile::Tc64, FixedTile::Tc128] {
-                fixed_forward_with_tile(&ctx, candidate_operands, shape, tile)
+            for tile in [InferenceTile::Tc16, InferenceTile::Tc64, InferenceTile::Tc128] {
+                inference_forward_with_tile(&ctx, candidate_operands, shape, tile)
                     .unwrap_or_else(|error| panic!("mixed-output {tile:?} launch: {error}"));
                 ctx.stream.synchronize().expect("mixed-output sync");
                 assert_eq!(
@@ -2984,7 +2984,7 @@ fn half_to_f32_portable_ladder_matches_legacy_bits() {
                     shape.n,
                 );
             }
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 &ctx,
                 candidate_operands.c,
                 candidate_operands.x,
@@ -2996,7 +2996,7 @@ fn half_to_f32_portable_ladder_matches_legacy_bits() {
             assert!(
                 matches!(
                     selected,
-                    FixedTile::Tc16 | FixedTile::Tc64 | FixedTile::Tc128 | FixedTile::Sm120Half(_)
+                    InferenceTile::Tc16 | InferenceTile::Tc64 | InferenceTile::Tc128 | InferenceTile::Sm120Half(_)
                 ),
                 "production mixed-output route retained {selected:?}"
             );
@@ -3027,35 +3027,35 @@ fn half_to_f32_sm120_tma_ladder_matches_portable_bits() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for (tile, shape) in [
         (
-            FixedSm120HalfTile::M64N64Bk64S2,
-            FixedShape {
+            InferenceSm120HalfTile::M64N64Bk64S2,
+            InferenceShape {
                 m: 65,
                 k: 136,
                 n: 72,
             },
         ),
         (
-            FixedSm120HalfTile::M64N128Bk64S2,
-            FixedShape {
+            InferenceSm120HalfTile::M64N128Bk64S2,
+            InferenceShape {
                 m: 65,
                 k: 136,
                 n: 136,
             },
         ),
         (
-            FixedSm120HalfTile::M128N64Bk32S3,
-            FixedShape {
+            InferenceSm120HalfTile::M128N64Bk32S3,
+            InferenceShape {
                 m: 129,
                 k: 104,
                 n: 72,
             },
         ),
         (
-            FixedSm120HalfTile::M128N128Bk32S2,
-            FixedShape {
+            InferenceSm120HalfTile::M128N128Bk32S2,
+            InferenceShape {
                 m: 129,
                 k: 72,
                 n: 136,
@@ -3078,13 +3078,13 @@ fn half_to_f32_sm120_tma_ladder_matches_portable_bits() {
                 let output_len = shape.m * shape.n;
                 let portable = DtypedBuf::zeros(&ctx.stream, output_len, WeightDtype::F32)
                     .expect("portable allocation");
-                let portable_operands = FixedFwdOperands {
+                let portable_operands = InferenceFwdOperands {
                     c: typed(&portable, WeightDtype::F32),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr,
                 };
-                fixed_forward_with_tile(&ctx, portable_operands, shape, FixedTile::Tc128)
+                inference_forward_with_tile(&ctx, portable_operands, shape, InferenceTile::Tc128)
                     .expect("portable mixed-output launch");
                 ctx.stream.synchronize().expect("portable sync");
                 let expected = f32_bits(&ctx, &portable, output_len);
@@ -3094,7 +3094,7 @@ fn half_to_f32_sm120_tma_ladder_matches_portable_bits() {
                     let storage_len = output_start + output_len + GUARD;
                     let candidate = DtypedBuf::zeros(&ctx.stream, storage_len, WeightDtype::F32)
                         .expect("candidate allocation");
-                    let candidate_operands = FixedFwdOperands {
+                    let candidate_operands = InferenceFwdOperands {
                         c: TypedPtr {
                             ptr: candidate.cached_ptr()
                                 + (output_start * WeightDtype::F32.size_bytes()) as u64,
@@ -3108,11 +3108,11 @@ fn half_to_f32_sm120_tma_ladder_matches_portable_bits() {
                         candidate
                             .upload_f32(&ctx.stream, &reset)
                             .expect("candidate reset");
-                        fixed_forward_with_tile(
+                        inference_forward_with_tile(
                             &ctx,
                             candidate_operands,
                             shape,
-                            FixedTile::Sm120Half(tile),
+                            InferenceTile::Sm120Half(tile),
                         )
                         .unwrap_or_else(|error| {
                             panic!("SM120 mixed-output {dtype:?} {tile:?}: {error}")
@@ -3149,9 +3149,9 @@ fn half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails() {
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 128,
         k: 96,
         n: 1536,
@@ -3166,19 +3166,19 @@ fn half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails() {
         .expect("A upload");
     b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xc120b))
         .expect("B upload");
-    let base_operands = FixedFwdOperands {
+    let base_operands = InferenceFwdOperands {
         c: typed(&reference, WeightDtype::F32),
         x: typed(&a, dtype),
         w: typed(&b, dtype),
         bias_ptr: None,
     };
-    fixed_forward_with_tile(&ctx, base_operands, shape, FixedTile::Tc128)
+    inference_forward_with_tile(&ctx, base_operands, shape, InferenceTile::Tc128)
         .expect("portable reference launch");
     ctx.stream.synchronize().expect("portable reference sync");
     let expected = f32_bits(&ctx, &reference, shape.m * shape.n);
 
     let run = || {
-        fixed_forward(
+        inference_forward(
             &ctx,
             typed(&output, WeightDtype::F32),
             base_operands.x,
@@ -3187,7 +3187,7 @@ fn half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails() {
             (shape.m, shape.k, shape.n),
         )
         .and_then(|tile| match tile {
-            FixedTile::Sm120Half(_) => Ok(()),
+            InferenceTile::Sm120Half(_) => Ok(()),
             _ => Err(format!("unexpected production tile {tile:?}")),
         })
     };
@@ -3216,7 +3216,7 @@ fn half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails() {
     let cold_b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("cold B");
     let cold_capture = unsafe {
         capture_into_graph(&ctx.stream, || {
-            fixed_forward(
+            inference_forward(
                 &ctx,
                 typed(&output, WeightDtype::F32),
                 typed(&cold_a, dtype),
@@ -3243,7 +3243,7 @@ fn half_sm120_exceptional_values_match_portable_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let shape = FixedShape { m: 65, k: 8, n: 8 };
+    let shape = InferenceShape { m: 65, k: 8, n: 8 };
     let exceptional = [
         0.0,
         -0.0,
@@ -3282,25 +3282,25 @@ fn half_sm120_exceptional_values_match_portable_bits() {
                     .expect("reference allocation");
                 let candidate = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, output_dtype)
                     .expect("candidate allocation");
-                let reference_operands = FixedFwdOperands {
+                let reference_operands = InferenceFwdOperands {
                     c: typed(&reference, output_dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr,
                 };
-                fixed_forward_with_tile(&ctx, reference_operands, shape, FixedTile::Tc128)
+                inference_forward_with_tile(&ctx, reference_operands, shape, InferenceTile::Tc128)
                     .expect("portable exceptional reference");
                 ctx.stream.synchronize().expect("portable exceptional sync");
                 let expected = f32_bits(&ctx, &reference, shape.m * shape.n);
-                for tile in FixedSm120HalfTile::ALL {
-                    fixed_forward_with_tile(
+                for tile in InferenceSm120HalfTile::ALL {
+                    inference_forward_with_tile(
                         &ctx,
-                        FixedFwdOperands {
+                        InferenceFwdOperands {
                             c: typed(&candidate, output_dtype),
                             ..reference_operands
                         },
                         shape,
-                        FixedTile::Sm120Half(tile),
+                        InferenceTile::Sm120Half(tile),
                     )
                     .unwrap_or_else(|error| panic!("exceptional {dtype:?} {tile:?}: {error}"));
                     ctx.stream
@@ -3322,27 +3322,27 @@ fn half_sm120_exceptional_values_match_portable_bits() {
 #[ignore = "requires a quiet SM120 CUDA device and emits mixed-output TMA data"]
 fn half_to_f32_sm120_tma_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -3350,22 +3350,22 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
         // The projection shapes the performance matrix measures: this is
         // where the automatic selector still falls back to the older tensor
         // core tiles instead of the TMA ones.
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 3072,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 1536,
             n: 768,
         },
-        FixedShape {
+        InferenceShape {
             m: 4096,
             k: 3072,
             n: 1536,
@@ -3375,7 +3375,7 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -3384,15 +3384,15 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
                 .expect("output allocation");
             let cublas = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                 .expect("cuBLAS allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&output, WeightDtype::F32),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let mut auto_tile = FixedTile::Legacy;
+            let mut auto_tile = InferenceTile::Legacy;
             let auto_us = average_us(&ctx, || {
-                auto_tile = fixed_forward(
+                auto_tile = inference_forward(
                     &ctx,
                     operands.c,
                     operands.x,
@@ -3402,9 +3402,9 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
                 )
                 .expect("automatic mixed-output launch");
             });
-            let tma_us = FixedSm120HalfTile::ALL.map(|tile| {
+            let tma_us = InferenceSm120HalfTile::ALL.map(|tile| {
                 average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Sm120Half(tile))
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Sm120Half(tile))
                         .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 })
             });
@@ -3448,7 +3448,7 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
     assert_eq!(device.compute_capability, (12, 0));
     assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 768,
         n: 2304,
@@ -3464,23 +3464,23 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
             .expect("A upload");
         b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xb170_0005))
             .expect("B upload");
-        let candidate_operands = FixedFwdOperands {
+        let candidate_operands = InferenceFwdOperands {
             c: typed(&candidate, WeightDtype::F32),
             x: typed(&a, dtype),
             w: typed(&b, dtype),
             bias_ptr: None,
         };
-        let vendor_operands = FixedFwdOperands {
+        let vendor_operands = InferenceFwdOperands {
             c: typed(&vendor, WeightDtype::F32),
             ..candidate_operands
         };
-        for tile in FixedSm120HalfTile::ALL {
+        for tile in InferenceSm120HalfTile::ALL {
             for _ in 0..128 {
-                fixed_forward_with_tile(
+                inference_forward_with_tile(
                     &ctx,
                     candidate_operands,
                     shape,
-                    FixedTile::Sm120Half(tile),
+                    InferenceTile::Sm120Half(tile),
                 )
                 .unwrap_or_else(|error| panic!("warm {tile:?}: {error}"));
             }
@@ -3494,7 +3494,7 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
                 &ctx,
                 candidate_operands,
                 shape,
-                FixedTile::Sm120Half(tile),
+                InferenceTile::Sm120Half(tile),
             );
             let vendor_iterations =
                 fixed_auto_vendor_iterations(fixed_auto_vendor_vendor_window_us(
@@ -3515,7 +3515,7 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
                                 &ctx,
                                 candidate_operands,
                                 shape,
-                                FixedTile::Sm120Half(tile),
+                                InferenceTile::Sm120Half(tile),
                                 candidate_iterations,
                             ),
                             fixed_auto_vendor_vendor_window_us(
@@ -3538,7 +3538,7 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
                             &ctx,
                             candidate_operands,
                             shape,
-                            FixedTile::Sm120Half(tile),
+                            InferenceTile::Sm120Half(tile),
                             candidate_iterations,
                         );
                         (candidate_elapsed, vendor_elapsed)
@@ -3576,12 +3576,12 @@ fn half_to_f32_sm120_hot_b_auto_vs_forced() {
     assert_eq!(device.compute_capability, (12, 0));
     assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 768,
         n: 2304,
     };
-    let tile = FixedTile::Sm120Half(FixedSm120HalfTile::M64N128Bk64S2);
+    let tile = InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N128Bk64S2);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
         let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
@@ -3593,19 +3593,19 @@ fn half_to_f32_sm120_hot_b_auto_vs_forced() {
             .expect("A upload");
         b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xb170_0005))
             .expect("B upload");
-        let auto_operands = FixedFwdOperands {
+        let auto_operands = InferenceFwdOperands {
             c: typed(&auto_output, WeightDtype::F32),
             x: typed(&a, dtype),
             w: typed(&b, dtype),
             bias_ptr: None,
         };
-        let forced_operands = FixedFwdOperands {
+        let forced_operands = InferenceFwdOperands {
             c: typed(&forced_output, WeightDtype::F32),
             ..auto_operands
         };
         for _ in 0..128 {
             launch_fixed_auto_vendor_custom(&ctx, auto_operands, shape);
-            fixed_forward_with_tile(&ctx, forced_operands, shape, tile)
+            inference_forward_with_tile(&ctx, forced_operands, shape, tile)
                 .expect("forced warmup launch");
         }
         ctx.stream.synchronize().expect("AUTO/forced warmup sync");
@@ -3672,33 +3672,33 @@ fn half_to_f32_sm120_hot_b_auto_vs_forced() {
 #[ignore = "requires a quiet SM80+ CUDA device and emits mixed-output ladder data"]
 fn half_to_f32_portable_ladder_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 1,
             k: 768,
             n: 17,
         },
-        FixedShape { m: 9, k: 33, n: 17 },
-        FixedShape {
+        InferenceShape { m: 9, k: 33, n: 17 },
+        InferenceShape {
             m: 64,
             k: 768,
             n: 24,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 63,
             n: 127,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 64,
             n: 128,
         },
-        FixedShape {
+        InferenceShape {
             m: 512,
             k: 768,
             n: 512,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 384,
@@ -3707,27 +3707,27 @@ fn half_to_f32_portable_ladder_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                 .expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, WeightDtype::F32),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
             for tile in [
-                FixedTile::Legacy,
-                FixedTile::Tc16,
-                FixedTile::Tc64,
-                FixedTile::Tc128,
+                InferenceTile::Legacy,
+                InferenceTile::Tc16,
+                InferenceTile::Tc64,
+                InferenceTile::Tc128,
             ] {
                 let elapsed_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    inference_forward_with_tile(&ctx, operands, shape, tile)
                         .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 });
                 println!(
@@ -3745,28 +3745,28 @@ fn half_to_f32_portable_selector_grid_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [
             1usize, 16, 64, 128, 256, 512, 768, 1024, 1536, 2048, 3072, 4621,
         ] {
             for n in [17usize, 32, 64, 128, 256, 384, 512, 768, 1024, 1536, 2304] {
-                let shape = FixedShape { m, k: 768, n };
+                let shape = InferenceShape { m, k: 768, n };
                 let a =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
                 let b =
                     DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
                 let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                     .expect("C allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&c, WeightDtype::F32),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr: None,
                 };
-                for tile in [FixedTile::Tc16, FixedTile::Tc64, FixedTile::Tc128] {
+                for tile in [InferenceTile::Tc16, InferenceTile::Tc64, InferenceTile::Tc128] {
                     let elapsed_us = average_us(&ctx, || {
-                        fixed_forward_with_tile(&ctx, operands, shape, tile)
+                        inference_forward_with_tile(&ctx, operands, shape, tile)
                             .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                     });
                     println!(
@@ -3784,27 +3784,27 @@ fn half_to_f32_portable_k_axis_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [2048usize, 4621] {
             for n in [384usize, 768, 1928, 2304] {
                 for k in [384usize, 768, 1928, 2304] {
-                    let shape = FixedShape { m, k, n };
+                    let shape = InferenceShape { m, k, n };
                     let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype)
                         .expect("A allocation");
                     let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype)
                         .expect("B allocation");
                     let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                         .expect("C allocation");
-                    let operands = FixedFwdOperands {
+                    let operands = InferenceFwdOperands {
                         c: typed(&c, WeightDtype::F32),
                         x: typed(&a, dtype),
                         w: typed(&b, dtype),
                         bias_ptr: None,
                     };
-                    for tile in [FixedTile::Tc64, FixedTile::Tc128] {
+                    for tile in [InferenceTile::Tc64, InferenceTile::Tc128] {
                         let elapsed_us = average_us(&ctx, || {
-                            fixed_forward_with_tile(&ctx, operands, shape, tile)
+                            inference_forward_with_tile(&ctx, operands, shape, tile)
                                 .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                         });
                         println!(
@@ -3824,17 +3824,17 @@ fn tcw64_matches_tc128_bits() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
-            FixedShape {
+            InferenceShape {
                 m: 65,
                 k: 63,
                 n: 127,
             },
-            FixedShape {
+            InferenceShape {
                 m: 128,
                 k: 64,
                 n: 128,
             },
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -3850,21 +3850,21 @@ fn tcw64_matches_tc128_bits() {
                 .expect("A upload");
             b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xb0b))
                 .expect("B upload");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&square, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc128).expect("Tc128 launch");
-            fixed_forward_with_tile(
+            inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc128).expect("Tc128 launch");
+            inference_forward_with_tile(
                 &ctx,
-                FixedFwdOperands {
+                InferenceFwdOperands {
                     c: typed(&reuse, dtype),
                     ..operands
                 },
                 shape,
-                FixedTile::TcW64,
+                InferenceTile::TcW64,
             )
             .expect("TcW64 launch");
             ctx.stream.synchronize().expect("W64 comparison sync");
@@ -3886,26 +3886,26 @@ fn fixed_portable_half_epilogues_are_tile_and_alignment_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
 
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
-            FixedShape {
+            InferenceShape {
                 m: 15,
                 k: 63,
                 n: 31,
             },
-            FixedShape {
+            InferenceShape {
                 m: 17,
                 k: 64,
                 n: 32,
             },
-            FixedShape {
+            InferenceShape {
                 m: 65,
                 k: 96,
                 n: 65,
             },
-            FixedShape {
+            InferenceShape {
                 m: 129,
                 k: 97,
                 n: 132,
@@ -3931,23 +3931,23 @@ fn fixed_portable_half_epilogues_are_tile_and_alignment_invariant() {
                         ptr: reference.cached_ptr() + (output_offset * dtype.size_bytes()) as u64,
                         dtype,
                     };
-                    let base_operands = FixedFwdOperands {
+                    let base_operands = InferenceFwdOperands {
                         c: reference_ptr,
                         x: typed(&a, dtype),
                         w: typed(&b, dtype),
                         bias_ptr,
                     };
-                    fixed_forward_with_tile(&ctx, base_operands, shape, FixedTile::Tc128)
+                    inference_forward_with_tile(&ctx, base_operands, shape, InferenceTile::Tc128)
                         .expect("Tc128 reference");
                     ctx.stream.synchronize().expect("reference sync");
                     let expected = f32_bits(&ctx, &reference, elements + 1)[output_offset..]
                         [..elements]
                         .to_vec();
 
-                    for tile in [FixedTile::Tc16, FixedTile::Tc64] {
+                    for tile in [InferenceTile::Tc16, InferenceTile::Tc64] {
                         let output = DtypedBuf::zeros(&ctx.stream, elements + 1, dtype)
                             .expect("candidate allocation");
-                        let operands = FixedFwdOperands {
+                        let operands = InferenceFwdOperands {
                             c: TypedPtr {
                                 ptr: output.cached_ptr()
                                     + (output_offset * dtype.size_bytes()) as u64,
@@ -3955,7 +3955,7 @@ fn fixed_portable_half_epilogues_are_tile_and_alignment_invariant() {
                             },
                             ..base_operands
                         };
-                        fixed_forward_with_tile(&ctx, operands, shape, tile)
+                        inference_forward_with_tile(&ctx, operands, shape, tile)
                             .unwrap_or_else(|error| panic!("{tile:?} launch: {error}"));
                         ctx.stream.synchronize().expect("candidate sync");
                         assert_eq!(
@@ -3977,15 +3977,15 @@ fn fixed_sm120_half_tma_matches_portable_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
-            FixedShape {
+            InferenceShape {
                 m: 65,
                 k: 40,
                 n: 72,
             },
-            FixedShape {
+            InferenceShape {
                 m: 129,
                 k: 96,
                 n: 136,
@@ -4004,29 +4004,29 @@ fn fixed_sm120_half_tma_matches_portable_bits() {
             for bias_ptr in [None, Some(bias.cached_ptr())] {
                 let reference =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("reference");
-                let reference_operands = FixedFwdOperands {
+                let reference_operands = InferenceFwdOperands {
                     c: typed(&reference, dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr,
                 };
-                fixed_forward_with_tile(&ctx, reference_operands, shape, FixedTile::Tc128)
+                inference_forward_with_tile(&ctx, reference_operands, shape, InferenceTile::Tc128)
                     .expect("portable reference launch");
                 ctx.stream.synchronize().expect("portable reference sync");
                 let expected = f32_bits(&ctx, &reference, shape.m * shape.n);
-                for candidate in FixedSm120HalfTile::ALL {
+                for candidate in InferenceSm120HalfTile::ALL {
                     let output = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype)
                         .expect("candidate output");
-                    let operands = FixedFwdOperands {
+                    let operands = InferenceFwdOperands {
                         c: typed(&output, dtype),
                         ..reference_operands
                     };
-                    let tile = FixedTile::Sm120Half(candidate);
-                    fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    let tile = InferenceTile::Sm120Half(candidate);
+                    inference_forward_with_tile(&ctx, operands, shape, tile)
                         .unwrap_or_else(|error| panic!("first {candidate:?}: {error}"));
                     ctx.stream.synchronize().expect("first candidate sync");
                     let first = f32_bits(&ctx, &output, shape.m * shape.n);
-                    fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    inference_forward_with_tile(&ctx, operands, shape, tile)
                         .unwrap_or_else(|error| panic!("repeat {candidate:?}: {error}"));
                     ctx.stream.synchronize().expect("repeat candidate sync");
                     let second = f32_bits(&ctx, &output, shape.m * shape.n);
@@ -4043,36 +4043,36 @@ fn fixed_sm120_half_tma_matches_portable_bits() {
     }
 }
 
-fn fixed_sm120_half_symbol(tile: FixedSm120HalfTile, dtype: WeightDtype) -> &'static str {
+fn fixed_sm120_half_symbol(tile: InferenceSm120HalfTile, dtype: WeightDtype) -> &'static str {
     match (tile, dtype) {
-        (FixedSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16"
         }
-        (FixedSm120HalfTile::M64N64Bk64S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16"
         }
-        (FixedSm120HalfTile::M64N128Bk64S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16"
         }
-        (FixedSm120HalfTile::M64N128Bk64S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16"
         }
-        (FixedSm120HalfTile::M128N64Bk32S3, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16"
         }
-        (FixedSm120HalfTile::M128N64Bk32S3, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S2, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S2, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S3, WeightDtype::Bf16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::Bf16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16"
         }
-        (FixedSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
+        (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
             "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16"
         }
         (_, WeightDtype::F32) => panic!("SM120 half symbol requested for F32"),
@@ -4083,10 +4083,10 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
     ctx: &GpuCtx,
     label: &str,
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-    promoted: FixedSm120HalfTile,
-    incumbent: FixedSm120HalfTile,
+    promoted: InferenceSm120HalfTile,
+    incumbent: InferenceSm120HalfTile,
 ) {
     let elements = shape.m * shape.n;
     let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -4108,19 +4108,19 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
 
     let forced = DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("forced output");
     let production = DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("AUTO output");
-    let forced_operands = FixedFwdOperands {
+    let forced_operands = InferenceFwdOperands {
         c: typed(&forced, dtype),
         x: typed(&a, dtype),
         w: typed(&b, dtype),
         bias_ptr,
     };
-    let production_operands = FixedFwdOperands {
+    let production_operands = InferenceFwdOperands {
         c: typed(&production, dtype),
         ..forced_operands
     };
-    fixed_forward_with_tile(ctx, forced_operands, shape, FixedTile::Sm120Half(incumbent))
+    inference_forward_with_tile(ctx, forced_operands, shape, InferenceTile::Sm120Half(incumbent))
         .expect("forced pre-overlay incumbent");
-    let selected = fixed_forward(
+    let selected = inference_forward(
         ctx,
         production_operands.c,
         production_operands.x,
@@ -4131,7 +4131,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
     .expect("production AUTO launch");
     assert_eq!(
         selected,
-        FixedTile::Sm120Half(promoted),
+        InferenceTile::Sm120Half(promoted),
         "{label} AUTO tile"
     );
     ctx.stream.synchronize().expect("eager synchronization");
@@ -4142,7 +4142,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
         "{label} eager bits"
     );
 
-    let repeated = fixed_forward(
+    let repeated = inference_forward(
         ctx,
         production_operands.c,
         production_operands.x,
@@ -4153,7 +4153,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
     .expect("production AUTO repeat");
     assert_eq!(
         repeated,
-        FixedTile::Sm120Half(promoted),
+        InferenceTile::Sm120Half(promoted),
         "{label} repeat tile"
     );
     ctx.stream.synchronize().expect("repeat synchronization");
@@ -4165,7 +4165,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
 
     let graph = unsafe {
         capture_into_graph(&ctx.stream, || {
-            fixed_forward(
+            inference_forward(
                 ctx,
                 production_operands.c,
                 production_operands.x,
@@ -4174,7 +4174,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
                 (shape.m, shape.k, shape.n),
             )
             .and_then(|tile| {
-                (tile == FixedTile::Sm120Half(promoted))
+                (tile == InferenceTile::Sm120Half(promoted))
                     .then_some(())
                     .ok_or_else(|| format!("{label} graph selected {tile:?}"))
             })
@@ -4198,7 +4198,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
 
     let misaligned =
         DtypedBuf::zeros(&ctx.stream, elements + 1, dtype).expect("misaligned AUTO output");
-    let misaligned_operands = FixedFwdOperands {
+    let misaligned_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: misaligned.cached_ptr() + dtype.size_bytes() as u64,
             dtype,
@@ -4206,7 +4206,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
         ..forced_operands
     };
     assert_eq!(misaligned_operands.c.ptr & 3, 2, "{label} C+2 setup");
-    let misaligned_tile = fixed_forward(
+    let misaligned_tile = inference_forward(
         ctx,
         misaligned_operands.c,
         misaligned_operands.x,
@@ -4217,7 +4217,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
     .expect("misaligned AUTO launch");
     assert_eq!(
         misaligned_tile,
-        FixedTile::Sm120Half(incumbent),
+        InferenceTile::Sm120Half(incumbent),
         "{label} C+2 fallback tile"
     );
     ctx.stream
@@ -4227,7 +4227,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
     assert_eq!(&misaligned_bits[1..], expected, "{label} C+2 fallback bits");
     let misaligned_graph = unsafe {
         capture_into_graph(&ctx.stream, || {
-            fixed_forward(
+            inference_forward(
                 ctx,
                 misaligned_operands.c,
                 misaligned_operands.x,
@@ -4249,7 +4249,7 @@ fn run_fixed_sm120_half_exact_overlay_route_case(
 #[test]
 #[ignore = "requires an RTX5090 with the Fixed module loaded by NVRTC 13.2"]
 fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
-    use FixedSm120HalfTile::{
+    use InferenceSm120HalfTile::{
         M64N64Bk64S2 as C, M64N128Bk64S2 as D, M128N64Bk32S3 as A, M128N128Bk32S2 as B,
     };
 
@@ -4259,13 +4259,13 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
 
     for (label, dtype, shape, has_bias, expected) in [
         (
             "A1_bf16_none_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -4276,7 +4276,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A1_bf16_bias_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -4287,7 +4287,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A1_f16_none_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -4298,7 +4298,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A1_f16_bias_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -4309,7 +4309,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A2_bf16_bias_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1536,
@@ -4320,7 +4320,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A2_f16_bias_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1536,
@@ -4331,7 +4331,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A3_f16_none_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -4342,7 +4342,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A3_f16_bias_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -4353,7 +4353,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "B_bf16_none_promoted",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1928,
@@ -4364,7 +4364,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "B_bf16_bias_promoted",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1928,
@@ -4375,7 +4375,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "B_f16_none_promoted",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1928,
@@ -4386,7 +4386,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "B_f16_bias_promoted",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1928,
@@ -4397,7 +4397,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A2_bf16_none_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1536,
@@ -4408,7 +4408,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A2_f16_none_rejected",
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1536,
@@ -4419,7 +4419,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A3_bf16_none_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -4430,7 +4430,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         (
             "A3_bf16_bias_rejected",
             WeightDtype::Bf16,
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -4446,7 +4446,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
     for (shape_name, shape, incumbent) in [
         (
             "m1024_k1928_n1928",
-            FixedShape {
+            InferenceShape {
                 m: 1024,
                 k: 1928,
                 n: 1928,
@@ -4455,7 +4455,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         ),
         (
             "m1024_k1928_n2304",
-            FixedShape {
+            InferenceShape {
                 m: 1024,
                 k: 1928,
                 n: 2304,
@@ -4464,7 +4464,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         ),
         (
             "m1536_k1032_n1536",
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1032,
                 n: 1536,
@@ -4473,7 +4473,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         ),
         (
             "m1536_k1928_n1536",
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1928,
                 n: 1536,
@@ -4482,7 +4482,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         ),
         (
             "m4621_k1928_n1928",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 1928,
@@ -4491,7 +4491,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
         ),
         (
             "m1536_k768_n1536",
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1536,
@@ -4515,7 +4515,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
                                 (shape.m, shape.k, shape.n),
                                 (1024, 1928, 1928) | (1024, 1928, 2304) | (1536, 1928, 1536)
                             ))) {
-                    FixedSm120HalfTile::M128N128Bk32S3
+                    InferenceSm120HalfTile::M128N128Bk32S3
                 } else {
                     D
                 };
@@ -4542,22 +4542,22 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
         "Fixed SM120 half module must be loaded",
     );
     assert_eq!(
-        FixedSm120HalfTile::ALL,
+        InferenceSm120HalfTile::ALL,
         [
-            FixedSm120HalfTile::M64N64Bk64S2,
-            FixedSm120HalfTile::M64N128Bk64S2,
-            FixedSm120HalfTile::M128N64Bk32S3,
-            FixedSm120HalfTile::M128N128Bk32S2,
-            FixedSm120HalfTile::M128N128Bk32S3,
+            InferenceSm120HalfTile::M64N64Bk64S2,
+            InferenceSm120HalfTile::M64N128Bk64S2,
+            InferenceSm120HalfTile::M128N64Bk32S3,
+            InferenceSm120HalfTile::M128N128Bk32S2,
+            InferenceSm120HalfTile::M128N128Bk32S3,
         ],
     );
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
 
     for (tile, shape, geometry) in [
         (
-            FixedSm120HalfTile::M64N64Bk64S2,
-            FixedShape {
+            InferenceSm120HalfTile::M64N64Bk64S2,
+            InferenceShape {
                 m: 65,
                 k: 136,
                 n: 72,
@@ -4565,8 +4565,8 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
             (64usize, 64usize, 64usize, 2usize),
         ),
         (
-            FixedSm120HalfTile::M128N64Bk32S3,
-            FixedShape {
+            InferenceSm120HalfTile::M128N64Bk32S3,
+            InferenceShape {
                 m: 129,
                 k: 104,
                 n: 72,
@@ -4574,8 +4574,8 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
             (128, 64, 32, 3),
         ),
         (
-            FixedSm120HalfTile::M64N128Bk64S2,
-            FixedShape {
+            InferenceSm120HalfTile::M64N128Bk64S2,
+            InferenceShape {
                 m: 65,
                 k: 136,
                 n: 136,
@@ -4583,8 +4583,8 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
             (64, 128, 64, 2),
         ),
         (
-            FixedSm120HalfTile::M128N128Bk32S2,
-            FixedShape {
+            InferenceSm120HalfTile::M128N128Bk32S2,
+            InferenceShape {
                 m: 129,
                 k: 72,
                 n: 136,
@@ -4592,8 +4592,8 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
             (128, 128, 32, 2),
         ),
         (
-            FixedSm120HalfTile::M128N128Bk32S3,
-            FixedShape {
+            InferenceSm120HalfTile::M128N128Bk32S3,
+            InferenceShape {
                 m: 129,
                 k: 104,
                 n: 136,
@@ -4646,13 +4646,13 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
             for candidate_bias in [None, Some(bias_ptr)] {
                 let reference =
                     DtypedBuf::zeros(&ctx.stream, output_len, dtype).expect("portable reference");
-                let reference_operands = FixedFwdOperands {
+                let reference_operands = InferenceFwdOperands {
                     c: typed(&reference, dtype),
                     x: TypedPtr { ptr: a_ptr, dtype },
                     w: TypedPtr { ptr: b_ptr, dtype },
                     bias_ptr: candidate_bias,
                 };
-                fixed_forward_with_tile(&ctx, reference_operands, shape, FixedTile::Tc128)
+                inference_forward_with_tile(&ctx, reference_operands, shape, InferenceTile::Tc128)
                     .expect("portable reference launch");
                 ctx.stream.synchronize().expect("portable reference sync");
                 let expected = f32_bits(&ctx, &reference, output_len);
@@ -4680,7 +4680,7 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
                     } else {
                         assert_eq!(candidate_ptr & 3, 2);
                     }
-                    let candidate_operands = FixedFwdOperands {
+                    let candidate_operands = InferenceFwdOperands {
                         c: TypedPtr {
                             ptr: candidate_ptr,
                             dtype,
@@ -4694,11 +4694,11 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
                         candidate
                             .upload_f32(&ctx.stream, &reset)
                             .expect("candidate reset");
-                        fixed_forward_with_tile(
+                        inference_forward_with_tile(
                             &ctx,
                             candidate_operands,
                             shape,
-                            FixedTile::Sm120Half(tile),
+                            InferenceTile::Sm120Half(tile),
                         )
                         .expect("SM120 guarded launch");
                         ctx.stream.synchronize().expect("SM120 guarded sync");
@@ -4752,9 +4752,9 @@ fn fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 128,
         k: 96,
         n: 1536,
@@ -4767,7 +4767,7 @@ fn fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails() {
     b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xc120b))
         .expect("B upload");
     let run = || {
-        fixed_forward(
+        inference_forward(
             &ctx,
             typed(&output, dtype),
             typed(&a, dtype),
@@ -4776,7 +4776,7 @@ fn fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails() {
             (shape.m, shape.k, shape.n),
         )
         .and_then(|tile| match tile {
-            FixedTile::Sm120Half(_) => Ok(()),
+            InferenceTile::Sm120Half(_) => Ok(()),
             _ => Err(format!("unexpected production tile {tile:?}")),
         })
     };
@@ -4798,7 +4798,7 @@ fn fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails() {
     let cold_b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("cold B");
     let cold_capture = unsafe {
         capture_into_graph(&ctx.stream, || {
-            fixed_forward(
+            inference_forward(
                 &ctx,
                 typed(&output, dtype),
                 typed(&cold_a, dtype),
@@ -4825,8 +4825,8 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
-    let shape = FixedShape {
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    let shape = InferenceShape {
         m: 128,
         k: 96,
         n: 1536,
@@ -4849,7 +4849,7 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
         }
 
         for weight in &weights {
-            let tile = fixed_forward(
+            let tile = inference_forward(
                 &ctx,
                 typed(&output, dtype),
                 typed(&a, dtype),
@@ -4858,7 +4858,7 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
                 (shape.m, shape.k, shape.n),
             )
             .expect("warm tensor map");
-            assert!(matches!(tile, FixedTile::Sm120Half(_)));
+            assert!(matches!(tile, InferenceTile::Sm120Half(_)));
         }
         ctx.stream.synchronize().expect("warmup synchronization");
         let eager = f32_bits(&ctx, &output, shape.m * shape.n);
@@ -4866,7 +4866,7 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
         let graph = unsafe {
             capture_into_graph(&ctx.stream, || {
                 for weight in &weights {
-                    let tile = fixed_forward(
+                    let tile = inference_forward(
                         &ctx,
                         typed(&output, dtype),
                         typed(&a, dtype),
@@ -4874,7 +4874,7 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
                         None,
                         (shape.m, shape.k, shape.n),
                     )?;
-                    if !matches!(tile, FixedTile::Sm120Half(_)) {
+                    if !matches!(tile, InferenceTile::Sm120Half(_)) {
                         return Err(format!("unexpected production tile {tile:?}"));
                     }
                 }
@@ -4898,7 +4898,7 @@ fn fixed_sm120_half_is_batch_prefix_invariant_across_selectors() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let (small_m, large_m, k, n) = (64usize, 512usize, 384usize, 1536usize);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         let large_a_host = synth(large_m * k, 0xba7c4);
@@ -4919,7 +4919,7 @@ fn fixed_sm120_half_is_batch_prefix_invariant_across_selectors() {
         b.upload_f32(&ctx.stream, &b_host).expect("B upload");
         bias.upload_f32(&ctx.stream, &bias_host)
             .expect("bias upload");
-        let small_tile = fixed_forward(
+        let small_tile = inference_forward(
             &ctx,
             typed(&small_c, dtype),
             typed(&small_a, dtype),
@@ -4928,7 +4928,7 @@ fn fixed_sm120_half_is_batch_prefix_invariant_across_selectors() {
             (small_m, k, n),
         )
         .expect("small launch");
-        let large_tile = fixed_forward(
+        let large_tile = inference_forward(
             &ctx,
             typed(&large_c, dtype),
             typed(&large_a, dtype),
@@ -4940,7 +4940,7 @@ fn fixed_sm120_half_is_batch_prefix_invariant_across_selectors() {
         ctx.stream.synchronize().expect("prefix sync");
         assert_ne!(small_tile, large_tile, "test must cross selector rungs");
         assert!(
-            matches!(large_tile, FixedTile::Sm120Half(_)),
+            matches!(large_tile, InferenceTile::Sm120Half(_)),
             "large shape did not select SM120 TMA: {large_tile:?}"
         );
         assert_eq!(
@@ -4957,7 +4957,7 @@ fn fixed_half_narrow_n_uses_portable_numeric_family() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let (small_m, large_m, k, n) = (16usize, 8192usize, 768usize, 24usize);
 
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -4981,7 +4981,7 @@ fn fixed_half_narrow_n_uses_portable_numeric_family() {
         for bias_ptr in [None, Some(bias.cached_ptr())] {
             let small_c = DtypedBuf::zeros(&ctx.stream, small_m * n, dtype).expect("small C");
             let large_c = DtypedBuf::zeros(&ctx.stream, large_m * n, dtype).expect("large C");
-            let small_tile = fixed_forward(
+            let small_tile = inference_forward(
                 &ctx,
                 typed(&small_c, dtype),
                 typed(&small_a, dtype),
@@ -4990,7 +4990,7 @@ fn fixed_half_narrow_n_uses_portable_numeric_family() {
                 (small_m, k, n),
             )
             .expect("small narrow-N launch");
-            let large_tile = fixed_forward(
+            let large_tile = inference_forward(
                 &ctx,
                 typed(&large_c, dtype),
                 typed(&large_a, dtype),
@@ -5000,8 +5000,8 @@ fn fixed_half_narrow_n_uses_portable_numeric_family() {
             )
             .expect("large narrow-N launch");
             ctx.stream.synchronize().expect("narrow-N prefix sync");
-            assert_eq!(small_tile, FixedTile::Tc16);
-            assert_eq!(large_tile, FixedTile::Tc16);
+            assert_eq!(small_tile, InferenceTile::Tc16);
+            assert_eq!(large_tile, InferenceTile::Tc16);
             assert_eq!(
                 f32_bits(&ctx, &small_c, small_m * n),
                 f32_bits(&ctx, &large_c, large_m * n)[..small_m * n],
@@ -5018,30 +5018,30 @@ fn fixed_half_narrow_n_performance_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
-            FixedShape {
+            InferenceShape {
                 m: 1,
                 k: 768,
                 n: 17,
             },
-            FixedShape {
+            InferenceShape {
                 m: 16,
                 k: 768,
                 n: 24,
             },
-            FixedShape {
+            InferenceShape {
                 m: 64,
                 k: 768,
                 n: 24,
             },
-            FixedShape {
+            InferenceShape {
                 m: 512,
                 k: 768,
                 n: 24,
             },
-            FixedShape {
+            InferenceShape {
                 m: 8192,
                 k: 768,
                 n: 24,
@@ -5055,26 +5055,26 @@ fn fixed_half_narrow_n_performance_smoke() {
                 .expect("candidate allocation");
             let vendor =
                 DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("vendor allocation");
-            let legacy_ops = FixedFwdOperands {
+            let legacy_ops = InferenceFwdOperands {
                 c: typed(&legacy, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let candidate_ops = FixedFwdOperands {
+            let candidate_ops = InferenceFwdOperands {
                 c: typed(&candidate, dtype),
                 ..legacy_ops
             };
-            let vendor_ops = FixedFwdOperands {
+            let vendor_ops = InferenceFwdOperands {
                 c: typed(&vendor, dtype),
                 ..legacy_ops
             };
             let legacy_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, legacy_ops, shape, FixedTile::Legacy)
+                inference_forward_with_tile(&ctx, legacy_ops, shape, InferenceTile::Legacy)
                     .expect("legacy launch");
             });
             let tc16_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, candidate_ops, shape, FixedTile::Tc16)
+                inference_forward_with_tile(&ctx, candidate_ops, shape, InferenceTile::Tc16)
                     .expect("Tc16 launch");
             });
             ctx.set_batch_invariant(false);
@@ -5108,27 +5108,27 @@ fn fixed_half_narrow_n_performance_smoke() {
 #[ignore = "requires an SM120 CUDA device and emits performance data"]
 fn fixed_sm120_half_hot_census() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -5137,20 +5137,20 @@ fn fixed_sm120_half_hot_census() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
             let portable_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc128)
+                inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc128)
                     .expect("portable launch");
             });
             ctx.set_batch_invariant(false);
@@ -5168,9 +5168,9 @@ fn fixed_sm120_half_hot_census() {
             });
             ctx.set_batch_invariant(true);
             ctx.set_fast_gemm(false);
-            for candidate in FixedSm120HalfTile::ALL {
+            for candidate in InferenceSm120HalfTile::ALL {
                 let elapsed_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Sm120Half(candidate))
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Sm120Half(candidate))
                         .unwrap_or_else(|error| panic!("forced {candidate:?}: {error}"));
                 });
                 println!(
@@ -5190,33 +5190,33 @@ fn fixed_sm120_half_hot_census() {
 #[ignore = "requires an SM120 CUDA device and emits selector data"]
 fn fixed_sm120_half_selector_census() {
     let candidates = [
-        FixedSm120HalfTile::M64N64Bk64S2,
-        FixedSm120HalfTile::M128N64Bk32S3,
-        FixedSm120HalfTile::M128N128Bk32S2,
+        InferenceSm120HalfTile::M64N64Bk64S2,
+        InferenceSm120HalfTile::M128N64Bk32S3,
+        InferenceSm120HalfTile::M128N128Bk32S2,
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
     for m in [16usize, 64, 128] {
         for k in [64usize, 384, 768, 1928] {
             for n in [384usize, 1536] {
-                run_fixed_sm120_half_selector_cell(&ctx, dtype, FixedShape { m, k, n }, candidates);
+                run_fixed_sm120_half_selector_cell(&ctx, dtype, InferenceShape { m, k, n }, candidates);
             }
         }
     }
     for m in [256usize, 512, 1024] {
         for k in [384usize, 768, 1928] {
             for n in [384usize, 1536, 2304] {
-                run_fixed_sm120_half_selector_cell(&ctx, dtype, FixedShape { m, k, n }, candidates);
+                run_fixed_sm120_half_selector_cell(&ctx, dtype, InferenceShape { m, k, n }, candidates);
             }
         }
     }
     for m in [1536usize, 2048, 3072, 4096, 4621] {
         for k in [384usize, 768, 1928] {
             for n in [1536usize, 1928, 2304] {
-                run_fixed_sm120_half_selector_cell(&ctx, dtype, FixedShape { m, k, n }, candidates);
+                run_fixed_sm120_half_selector_cell(&ctx, dtype, InferenceShape { m, k, n }, candidates);
             }
         }
     }
@@ -5225,12 +5225,12 @@ fn fixed_sm120_half_selector_census() {
 #[test]
 #[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired selector evidence"]
 fn fixed_sm120_half_selector_paired_gaps() {
-    use FixedSm120HalfTile::M128N128Bk32S2 as B;
-    use FixedSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
+    use InferenceSm120HalfTile::M128N128Bk32S2 as B;
+    use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
 
     let cells = [
         (
-            FixedShape {
+            InferenceShape {
                 m: 512,
                 k: 1928,
                 n: 2304,
@@ -5239,7 +5239,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             C,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 384,
                 n: 1536,
@@ -5248,7 +5248,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1536,
@@ -5257,7 +5257,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1928,
                 n: 1536,
@@ -5266,7 +5266,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1928,
                 n: 2304,
@@ -5275,7 +5275,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             C,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 384,
                 n: 1928,
@@ -5284,7 +5284,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 1928,
@@ -5293,7 +5293,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 1928,
                 n: 2304,
@@ -5302,7 +5302,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1536,
@@ -5311,7 +5311,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 768,
                 n: 2304,
@@ -5320,7 +5320,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 2304,
@@ -5329,7 +5329,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1024,
                 k: 1928,
                 n: 1536,
@@ -5338,7 +5338,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1024,
                 k: 1928,
                 n: 2304,
@@ -5347,7 +5347,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             C,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 1928,
                 n: 1536,
@@ -5356,7 +5356,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 2304,
@@ -5374,24 +5374,24 @@ fn fixed_sm120_half_selector_paired_gaps() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let incumbent = FixedTile::Sm120Half(incumbent);
-            let challenger = FixedTile::Sm120Half(challenger);
+            let incumbent = InferenceTile::Sm120Half(incumbent);
+            let challenger = InferenceTile::Sm120Half(challenger);
             for _ in 0..128 {
-                fixed_forward_with_tile(&ctx, operands, shape, incumbent)
+                inference_forward_with_tile(&ctx, operands, shape, incumbent)
                     .expect("incumbent warmup");
-                fixed_forward_with_tile(&ctx, operands, shape, challenger)
+                inference_forward_with_tile(&ctx, operands, shape, challenger)
                     .expect("challenger warmup");
             }
             ctx.stream.synchronize().expect("paired warmup sync");
@@ -5455,77 +5455,77 @@ fn fixed_sm120_half_selector_paired_gaps() {
 #[ignore = "requires a quiet 170-SM CC12 CUDA device and screens every SM120 half tile"]
 fn fixed_sm120_half_remaining_gap_all_tile_screen() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 512,
             k: 1928,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 1024,
             k: 1928,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 1024,
             k: 1928,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1032,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1928,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 1928,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 1928,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 1928,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 384,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 1536,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 3072,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 1536,
@@ -5536,11 +5536,11 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
     assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let candidate_filter = std::env::var("MAMBA_FIXED_HALF_TILE_CANDIDATE").ok();
     if let Some(filter) = candidate_filter.as_deref() {
         assert!(
-            FixedSm120HalfTile::ALL
+            InferenceSm120HalfTile::ALL
                 .iter()
                 .any(|tile| format!("{tile:?}") == filter),
             "unknown Fixed SM120 half candidate filter: {filter}"
@@ -5557,13 +5557,13 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
                 .expect("A upload");
             b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0xb170_5010))
                 .expect("B upload");
-            let incumbent_operands = FixedFwdOperands {
+            let incumbent_operands = InferenceFwdOperands {
                 c: typed(&incumbent_output, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 &ctx,
                 incumbent_operands.c,
                 incumbent_operands.x,
@@ -5572,31 +5572,31 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
                 (shape.m, shape.k, shape.n),
             )
             .expect("production AUTO launch");
-            let FixedTile::Sm120Half(incumbent) = selected else {
+            let InferenceTile::Sm120Half(incumbent) = selected else {
                 panic!("production AUTO selected {selected:?} for {shape:?}");
             };
             ctx.stream.synchronize().expect("incumbent result sync");
             let expected = f32_bits(&ctx, &incumbent_output, shape.m * shape.n);
-            let incumbent = FixedTile::Sm120Half(incumbent);
+            let incumbent = InferenceTile::Sm120Half(incumbent);
 
-            for candidate in FixedSm120HalfTile::ALL {
+            for candidate in InferenceSm120HalfTile::ALL {
                 if candidate_filter
                     .as_deref()
                     .is_some_and(|filter| format!("{candidate:?}") != filter)
                 {
                     continue;
                 }
-                let candidate = FixedTile::Sm120Half(candidate);
+                let candidate = InferenceTile::Sm120Half(candidate);
                 if candidate == incumbent {
                     continue;
                 }
                 let candidate_output = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype)
                     .expect("candidate output");
-                let candidate_operands = FixedFwdOperands {
+                let candidate_operands = InferenceFwdOperands {
                     c: typed(&candidate_output, dtype),
                     ..incumbent_operands
                 };
-                fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate)
+                inference_forward_with_tile(&ctx, candidate_operands, shape, candidate)
                     .expect("candidate bit-gate launch");
                 ctx.stream.synchronize().expect("candidate bit-gate sync");
                 assert_eq!(
@@ -5605,9 +5605,9 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
                     "candidate bits for {dtype:?} {shape:?} {candidate:?}"
                 );
                 for _ in 0..128 {
-                    fixed_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
+                    inference_forward_with_tile(&ctx, incumbent_operands, shape, incumbent)
                         .expect("incumbent warmup");
-                    fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate)
+                    inference_forward_with_tile(&ctx, candidate_operands, shape, candidate)
                         .expect("candidate warmup");
                 }
                 ctx.stream.synchronize().expect("paired warmup sync");
@@ -5688,12 +5688,12 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
 #[test]
 #[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired selector boundary evidence"]
 fn fixed_sm120_half_selector_paired_boundaries() {
-    use FixedSm120HalfTile::M128N128Bk32S2 as B;
-    use FixedSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
+    use InferenceSm120HalfTile::M128N128Bk32S2 as B;
+    use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
 
     let cells = [
         (
-            FixedShape {
+            InferenceShape {
                 m: 1024,
                 k: 1928,
                 n: 1928,
@@ -5702,7 +5702,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1928,
                 n: 1928,
@@ -5711,7 +5711,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 1928,
                 n: 1928,
@@ -5720,7 +5720,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 1928,
                 n: 1928,
@@ -5729,7 +5729,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 1928,
@@ -5738,7 +5738,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 1032,
                 n: 1536,
@@ -5747,7 +5747,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 1032,
                 n: 1536,
@@ -5756,7 +5756,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             B,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 384,
                 n: 1928,
@@ -5765,7 +5765,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -5774,7 +5774,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 384,
                 n: 1536,
@@ -5783,7 +5783,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 1536,
@@ -5801,7 +5801,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             for challenger_first in [true, false] {
@@ -5821,12 +5821,12 @@ fn fixed_sm120_half_selector_paired_boundaries() {
 #[test]
 #[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired shallow selector boundary evidence"]
 fn fixed_sm120_half_selector_paired_shallow_boundaries() {
-    use FixedSm120HalfTile::M128N128Bk32S2 as B;
-    use FixedSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
+    use InferenceSm120HalfTile::M128N128Bk32S2 as B;
+    use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
 
     let cells = [
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 384,
                 n: 1928,
@@ -5835,7 +5835,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -5844,7 +5844,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1536,
@@ -5853,7 +5853,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 768,
                 n: 1536,
@@ -5862,7 +5862,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 384,
                 n: 1928,
@@ -5871,7 +5871,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4096,
                 k: 768,
                 n: 1928,
@@ -5880,7 +5880,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1536,
@@ -5889,7 +5889,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             C,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 1536,
@@ -5898,7 +5898,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             C,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 2304,
@@ -5907,7 +5907,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
             A,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
@@ -5925,7 +5925,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             for challenger_first in [true, false] {
@@ -5945,25 +5945,25 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
 fn run_fixed_sm120_half_selector_boundary_cohort(
     ctx: &GpuCtx,
     dtype: WeightDtype,
-    shape: FixedShape,
-    incumbent: FixedSm120HalfTile,
-    challenger: FixedSm120HalfTile,
+    shape: InferenceShape,
+    incumbent: InferenceSm120HalfTile,
+    challenger: InferenceSm120HalfTile,
     challenger_first: bool,
 ) {
     let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
     let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
     let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: typed(&c, dtype),
         x: typed(&a, dtype),
         w: typed(&b, dtype),
         bias_ptr: None,
     };
-    let incumbent = FixedTile::Sm120Half(incumbent);
-    let challenger = FixedTile::Sm120Half(challenger);
+    let incumbent = InferenceTile::Sm120Half(incumbent);
+    let challenger = InferenceTile::Sm120Half(challenger);
     for _ in 0..128 {
-        fixed_forward_with_tile(ctx, operands, shape, incumbent).expect("incumbent warmup");
-        fixed_forward_with_tile(ctx, operands, shape, challenger).expect("challenger warmup");
+        inference_forward_with_tile(ctx, operands, shape, incumbent).expect("incumbent warmup");
+        inference_forward_with_tile(ctx, operands, shape, challenger).expect("challenger warmup");
     }
     ctx.stream.synchronize().expect("paired warmup sync");
     let incumbent_iterations = fixed_tile_window_iterations(ctx, operands, shape, incumbent);
@@ -6016,10 +6016,10 @@ const FIXED_SM120_HALF_EXACT_JSONL_ENV: &str = "GEMM_BI_FIXED_HALF_EXACT_JSONL";
 struct FixedSm120HalfRequalificationCell {
     label: &'static str,
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-    candidate: FixedSm120HalfTile,
-    incumbent: FixedSm120HalfTile,
+    candidate: InferenceSm120HalfTile,
+    incumbent: InferenceSm120HalfTile,
 }
 
 fn sha256_file(path: &std::path::Path) -> String {
@@ -6061,17 +6061,17 @@ fn fixed_sm120_half_emit_requalification_cohort(
         ),
     )
     .expect("paired B upload");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: typed(&output, cell.dtype),
         x: typed(&a, cell.dtype),
         w: typed(&b, cell.dtype),
         bias_ptr,
     };
-    let candidate = FixedTile::Sm120Half(cell.candidate);
-    let incumbent = FixedTile::Sm120Half(cell.incumbent);
+    let candidate = InferenceTile::Sm120Half(cell.candidate);
+    let incumbent = InferenceTile::Sm120Half(cell.incumbent);
     for _ in 0..128 {
-        fixed_forward_with_tile(ctx, operands, cell.shape, candidate).expect("candidate warmup");
-        fixed_forward_with_tile(ctx, operands, cell.shape, incumbent).expect("incumbent warmup");
+        inference_forward_with_tile(ctx, operands, cell.shape, candidate).expect("candidate warmup");
+        inference_forward_with_tile(ctx, operands, cell.shape, incumbent).expect("incumbent warmup");
     }
     ctx.stream
         .synchronize()
@@ -6155,7 +6155,7 @@ fn fixed_sm120_half_emit_requalification_cohort(
 #[test]
 #[ignore = "requires a quiet RTX5090 with NVRTC 13.2 and a create-new JSONL sink"]
 fn fixed_sm120_half_legacy_overlay_requalification() {
-    use FixedSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
+    use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
 
     let path = std::env::var_os(FIXED_SM120_HALF_EXACT_JSONL_ENV)
         .expect("GEMM_BI_FIXED_HALF_EXACT_JSONL must name a new JSONL sink");
@@ -6174,11 +6174,11 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(compiler.nvrtc_version, (13, 2));
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let rust_source_sha256 = sha256_file(&manifest.join("src/mamba_ssm/gpu/gemm_bi_fixed.rs"));
-    let cuda_source_sha256 = sha256_file(&manifest.join("kernels/gemm_bi_fixed/sm120_tma.cu"));
+    let rust_source_sha256 = sha256_file(&manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"));
+    let cuda_source_sha256 = sha256_file(&manifest.join("kernels/gemm_bi_inference/sm120_tma.cu"));
     let executable_sha256 =
         sha256_file(&std::env::current_exe().expect("current qualification executable path"));
     let fixed_module_source_sha256 = digest_hex(&compiler.source_digest);
@@ -6197,7 +6197,7 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
         FixedSm120HalfRequalificationCell {
             label: "A1_f16_none",
             dtype: WeightDtype::F16,
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -6209,7 +6209,7 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
         FixedSm120HalfRequalificationCell {
             label: "A1_f16_bias",
             dtype: WeightDtype::F16,
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: 3072,
                 k: 768,
                 n: 1928,
@@ -6221,7 +6221,7 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
         FixedSm120HalfRequalificationCell {
             label: "A3_f16_none",
             dtype: WeightDtype::F16,
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -6233,7 +6233,7 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
         FixedSm120HalfRequalificationCell {
             label: "A3_f16_bias",
             dtype: WeightDtype::F16,
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: 1536,
                 k: 768,
                 n: 1928,
@@ -6281,21 +6281,21 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
 fn run_fixed_sm120_half_selector_cell(
     ctx: &GpuCtx,
     dtype: WeightDtype,
-    shape: FixedShape,
-    candidates: [FixedSm120HalfTile; 3],
+    shape: InferenceShape,
+    candidates: [InferenceSm120HalfTile; 3],
 ) {
     let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
     let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
     let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: typed(&c, dtype),
         x: typed(&a, dtype),
         w: typed(&b, dtype),
         bias_ptr: None,
     };
-    let mut portable_tile = FixedTile::Legacy;
+    let mut portable_tile = InferenceTile::Legacy;
     let portable_us = average_us(ctx, || {
-        portable_tile = fixed_forward(
+        portable_tile = inference_forward(
             ctx,
             operands.c,
             operands.x,
@@ -6307,7 +6307,7 @@ fn run_fixed_sm120_half_selector_cell(
     });
     for candidate in candidates {
         let elapsed_us = average_us(ctx, || {
-            fixed_forward_with_tile(ctx, operands, shape, FixedTile::Sm120Half(candidate))
+            inference_forward_with_tile(ctx, operands, shape, InferenceTile::Sm120Half(candidate))
                 .unwrap_or_else(|error| panic!("forced {candidate:?}: {error}"));
         });
         println!(
@@ -6324,27 +6324,27 @@ fn run_fixed_sm120_half_selector_cell(
 #[ignore = "requires an SM80+ CUDA device and emits mixed-output data"]
 fn half_to_f32_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -6353,7 +6353,7 @@ fn half_to_f32_hot_shapes_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -6364,33 +6364,33 @@ fn half_to_f32_hot_shapes_smoke() {
                 .expect("candidate allocation");
             let cublas = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
                 .expect("cuBLAS allocation");
-            let legacy_ops = FixedFwdOperands {
+            let legacy_ops = InferenceFwdOperands {
                 c: typed(&legacy, WeightDtype::F32),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            let candidate_ops = FixedFwdOperands {
+            let candidate_ops = InferenceFwdOperands {
                 c: typed(&candidate, WeightDtype::F32),
                 ..legacy_ops
             };
-            let cublas_ops = FixedFwdOperands {
+            let cublas_ops = InferenceFwdOperands {
                 c: typed(&cublas, WeightDtype::F32),
                 ..legacy_ops
             };
             let legacy_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, legacy_ops, shape, FixedTile::Legacy)
+                inference_forward_with_tile(&ctx, legacy_ops, shape, InferenceTile::Legacy)
                     .expect("legacy mixed-output launch");
             });
-            let forced_us = [FixedTile::Tc16, FixedTile::Tc64, FixedTile::Tc128].map(|tile| {
+            let forced_us = [InferenceTile::Tc16, InferenceTile::Tc64, InferenceTile::Tc128].map(|tile| {
                 average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, candidate_ops, shape, tile)
+                    inference_forward_with_tile(&ctx, candidate_ops, shape, tile)
                         .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 })
             });
-            let mut selected = FixedTile::Legacy;
+            let mut selected = InferenceTile::Legacy;
             let candidate_us = average_us(&ctx, || {
-                selected = fixed_forward(
+                selected = inference_forward(
                     &ctx,
                     candidate_ops.c,
                     candidate_ops.x,
@@ -6402,7 +6402,7 @@ fn half_to_f32_hot_shapes_smoke() {
             });
             assert!(matches!(
                 selected,
-                FixedTile::Tc16 | FixedTile::Tc64 | FixedTile::Tc128
+                InferenceTile::Tc16 | InferenceTile::Tc64 | InferenceTile::Tc128
             ));
             ctx.set_batch_invariant(false);
             ctx.set_fast_gemm(true);
@@ -6438,27 +6438,27 @@ fn half_to_f32_hot_shapes_smoke() {
 #[ignore = "requires an SM80+ CUDA device and emits F32 candidate data"]
 fn f32_s2_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -6467,7 +6467,7 @@ fn f32_s2_hot_shapes_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for shape in shapes {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32)
             .expect("A allocation");
@@ -6479,25 +6479,25 @@ fn f32_s2_hot_shapes_smoke() {
             .expect("candidate allocation");
         let cublas = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
             .expect("cuBLAS allocation");
-        let base_ops = FixedFwdOperands {
+        let base_ops = InferenceFwdOperands {
             c: typed(&baseline, WeightDtype::F32),
             x: typed(&a, WeightDtype::F32),
             w: typed(&b, WeightDtype::F32),
             bias_ptr: None,
         };
-        let candidate_ops = FixedFwdOperands {
+        let candidate_ops = InferenceFwdOperands {
             c: typed(&candidate, WeightDtype::F32),
             ..base_ops
         };
-        let cublas_ops = FixedFwdOperands {
+        let cublas_ops = InferenceFwdOperands {
             c: typed(&cublas, WeightDtype::F32),
             ..base_ops
         };
         let baseline_us = average_us(&ctx, || {
-            fixed_forward_f32_legacy_baseline(&ctx, base_ops, shape).expect("legacy Fixed launch");
+            inference_forward_f32_legacy_baseline(&ctx, base_ops, shape).expect("legacy Fixed launch");
         });
         let candidate_us = average_us(&ctx, || {
-            fixed_forward(
+            inference_forward(
                 &ctx,
                 candidate_ops.c,
                 candidate_ops.x,
@@ -6539,8 +6539,8 @@ fn forced_fixed_portable_tiles_execute() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
-    let shape = FixedShape {
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    let shape = InferenceShape {
         m: 128,
         k: 128,
         n: 128,
@@ -6551,7 +6551,7 @@ fn forced_fixed_portable_tiles_execute() {
         DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, WeightDtype::Bf16).expect("B allocation");
     let c =
         DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::Bf16).expect("C allocation");
-    let operands = FixedFwdOperands {
+    let operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: c.cached_ptr(),
             dtype: WeightDtype::Bf16,
@@ -6567,12 +6567,12 @@ fn forced_fixed_portable_tiles_execute() {
         bias_ptr: None,
     };
     for tile in [
-        FixedTile::Tc16,
-        FixedTile::Tc64,
-        FixedTile::Tc128,
-        FixedTile::TcWn64,
+        InferenceTile::Tc16,
+        InferenceTile::Tc64,
+        InferenceTile::Tc128,
+        InferenceTile::TcWn64,
     ] {
-        fixed_forward_with_tile(&ctx, operands, shape, tile)
+        inference_forward_with_tile(&ctx, operands, shape, tile)
             .unwrap_or_else(|error| panic!("forced {tile:?} launch: {error}"));
     }
     ctx.stream.synchronize().expect("forced launch sync");
@@ -6582,27 +6582,27 @@ fn forced_fixed_portable_tiles_execute() {
 #[ignore = "requires an SM80+ CUDA device and emits performance data"]
 fn fixed_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -6615,7 +6615,7 @@ fn fixed_hot_shapes_smoke() {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
@@ -6624,10 +6624,10 @@ fn fixed_hot_shapes_smoke() {
 
             ctx.set_fast_gemm(false);
             ctx.set_batch_invariant(true);
-            ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
-            let mut selected = FixedTile::Legacy;
+            ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+            let mut selected = InferenceTile::Legacy;
             let fixed_us = average_us(&ctx, || {
-                selected = fixed_forward(
+                selected = inference_forward(
                     &ctx,
                     operands.c,
                     operands.x,
@@ -6666,49 +6666,49 @@ fn fixed_hot_shapes_smoke() {
 #[ignore = "requires an SM80+ CUDA device and emits forced-route performance data"]
 fn fixed_forced_hot_shapes_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
     ];
     let tiles = [
-        FixedTile::Tc16,
-        FixedTile::Tc64,
-        FixedTile::Tc128,
-        FixedTile::TcW64,
-        FixedTile::TcWn64,
+        InferenceTile::Tc16,
+        InferenceTile::Tc64,
+        InferenceTile::Tc128,
+        InferenceTile::TcW64,
+        InferenceTile::TcWn64,
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for shape in shapes {
         let dtype = WeightDtype::Bf16;
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
         let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
         let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-        let operands = FixedFwdOperands {
+        let operands = InferenceFwdOperands {
             c: typed(&c, dtype),
             x: typed(&a, dtype),
             w: typed(&b, dtype),
@@ -6716,7 +6716,7 @@ fn fixed_forced_hot_shapes_smoke() {
         };
         for tile in tiles {
             let elapsed_us = average_us(&ctx, || {
-                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                inference_forward_with_tile(&ctx, operands, shape, tile)
                     .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
             });
             println!(
@@ -6733,29 +6733,29 @@ fn fixed_w64_deep_k_grid_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [1024usize, 2048, 4621] {
             for (k, n) in [(1024usize, 384usize), (1536, 768), (1928, 384), (2304, 768)] {
-                let shape = FixedShape { m, k, n };
+                let shape = InferenceShape { m, k, n };
                 let a =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
                 let b =
                     DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
                 let c =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&c, dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr: None,
                 };
                 let square_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc128)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc128)
                         .expect("Tc128 launch");
                 });
                 let reuse_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::TcW64)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::TcW64)
                         .expect("TcW64 launch");
                 });
                 println!(
@@ -6786,16 +6786,16 @@ fn fixed_portable_resource_smoke() {
     assert_eq!(f32_local_bytes, 0, "F32 S2 spills to local memory");
     for (tile, function) in [
         (
-            FixedTile::Tf32M128S2,
+            InferenceTile::Tf32M128S2,
             &ctx.kernels.gemm_bi_nn_tf32.m128n64_s2,
         ),
         (
-            FixedTile::Tf32M128S3,
+            InferenceTile::Tf32M128S3,
             &ctx.kernels.gemm_bi_nn_tf32.m128n64_s3,
         ),
-        (FixedTile::Tf32M64S2, &ctx.kernels.gemm_bi_nn_tf32.m64n64_s2),
-        (FixedTile::Tf32M64S3, &ctx.kernels.gemm_bi_nn_tf32.m64n64_s3),
-        (FixedTile::Tf32M16S4, &ctx.kernels.gemm_bi_nn_tf32.m16n32_s4),
+        (InferenceTile::Tf32M64S2, &ctx.kernels.gemm_bi_nn_tf32.m64n64_s2),
+        (InferenceTile::Tf32M64S3, &ctx.kernels.gemm_bi_nn_tf32.m64n64_s3),
+        (InferenceTile::Tf32M16S4, &ctx.kernels.gemm_bi_nn_tf32.m16n32_s4),
     ] {
         let registers = function.num_regs().expect("TF32 register count");
         let local_bytes = function.local_size_bytes().expect("TF32 local size");
@@ -6818,15 +6818,15 @@ fn fixed_portable_resource_smoke() {
     }
     if let Some(kernels) = &ctx.kernels.gemm_bi_nn_tf32_sm120 {
         for (tile, function) in [
-            (FixedTile::Tf32Sm120M128S2, &kernels.m128n64_s2),
-            (FixedTile::Tf32Sm120M128S3, &kernels.m128n64_s3),
+            (InferenceTile::Tf32Sm120M128S2, &kernels.m128n64_s2),
+            (InferenceTile::Tf32Sm120M128S3, &kernels.m128n64_s3),
             (
-                FixedTile::Tf32Sm120M64S2ProducerWarp,
+                InferenceTile::Tf32Sm120M64S2ProducerWarp,
                 &kernels.m64n64_s2_producer_warp,
             ),
-            (FixedTile::Tf32Sm120M64N128S2, &kernels.m64n128_s2),
-            (FixedTile::Tf32Sm120M64N128S3, &kernels.m64n128_s3),
-            (FixedTile::Tf32Sm120M64S2, &kernels.m64n64_s2),
+            (InferenceTile::Tf32Sm120M64N128S2, &kernels.m64n128_s2),
+            (InferenceTile::Tf32Sm120M64N128S3, &kernels.m64n128_s3),
+            (InferenceTile::Tf32Sm120M64S2, &kernels.m64n64_s2),
         ] {
             let registers = function.num_regs().expect("SM120 TF32 register count");
             let local_bytes = function.local_size_bytes().expect("SM120 TF32 local size");
@@ -6863,15 +6863,15 @@ fn fixed_portable_resource_smoke() {
     ] {
         if let Some(kernels) = kernels {
             for (tile, functions) in [
-                (FixedSm120HalfTile::M64N64Bk64S2, &kernels.m64n64_bk64_s2),
-                (FixedSm120HalfTile::M64N128Bk64S2, &kernels.m64n128_bk64_s2),
-                (FixedSm120HalfTile::M128N64Bk32S3, &kernels.m128n64_bk32_s3),
+                (InferenceSm120HalfTile::M64N64Bk64S2, &kernels.m64n64_bk64_s2),
+                (InferenceSm120HalfTile::M64N128Bk64S2, &kernels.m64n128_bk64_s2),
+                (InferenceSm120HalfTile::M128N64Bk32S3, &kernels.m128n64_bk32_s3),
                 (
-                    FixedSm120HalfTile::M128N128Bk32S2,
+                    InferenceSm120HalfTile::M128N128Bk32S2,
                     &kernels.m128n128_bk32_s2,
                 ),
                 (
-                    FixedSm120HalfTile::M128N128Bk32S3,
+                    InferenceSm120HalfTile::M128N128Bk32S3,
                     &kernels.m128n128_bk32_s3,
                 ),
             ] {
@@ -6893,23 +6893,23 @@ fn fixed_portable_resource_smoke() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (tile, function) in [
             (
-                FixedTile::Tc16,
+                InferenceTile::Tc16,
                 ctx.kernels.gemm_bi_nn_tc16_typed.get(dtype),
             ),
             (
-                FixedTile::Tc64,
+                InferenceTile::Tc64,
                 ctx.kernels.gemm_bi_nn_tc64_typed.get(dtype),
             ),
             (
-                FixedTile::Tc128,
+                InferenceTile::Tc128,
                 ctx.kernels.gemm_bi_nn_tc128_typed.get(dtype),
             ),
             (
-                FixedTile::TcW64,
+                InferenceTile::TcW64,
                 ctx.kernels.gemm_bi_nn_tcw64_typed.get(dtype),
             ),
             (
-                FixedTile::TcWn64,
+                InferenceTile::TcWn64,
                 ctx.kernels.gemm_bi_nn_tcwn64_typed.get(dtype),
             ),
         ] {
@@ -6920,7 +6920,7 @@ fn fixed_portable_resource_smoke() {
                 "dtype={dtype:?} tile={tile:?} registers={registers} local_bytes={local_bytes} static_shared_bytes={static_shared_bytes}"
             );
             assert_eq!(local_bytes, 0, "{dtype:?} {tile:?} spills to local memory");
-            if tile == FixedTile::Tc16 {
+            if tile == InferenceTile::Tc16 {
                 assert_eq!(static_shared_bytes, 24_576);
                 if ctx
                     .stream
@@ -6957,31 +6957,31 @@ fn fixed_sm120_half_loaded_resources_are_safe() {
         .expect("Fixed SM120 half module");
     for (tile, functions, threads, dynamic_shared_bytes) in [
         (
-            FixedSm120HalfTile::M64N64Bk64S2,
+            InferenceSm120HalfTile::M64N64Bk64S2,
             &kernels.m64n64_bk64_s2,
             128,
             32_896,
         ),
         (
-            FixedSm120HalfTile::M128N64Bk32S3,
+            InferenceSm120HalfTile::M128N64Bk32S3,
             &kernels.m128n64_bk32_s3,
             256,
             36_992,
         ),
         (
-            FixedSm120HalfTile::M64N128Bk64S2,
+            InferenceSm120HalfTile::M64N128Bk64S2,
             &kernels.m64n128_bk64_s2,
             256,
             49_280,
         ),
         (
-            FixedSm120HalfTile::M128N128Bk32S2,
+            InferenceSm120HalfTile::M128N128Bk32S2,
             &kernels.m128n128_bk32_s2,
             256,
             32_896,
         ),
         (
-            FixedSm120HalfTile::M128N128Bk32S3,
+            InferenceSm120HalfTile::M128N128Bk32S3,
             &kernels.m128n128_bk32_s3,
             256,
             49_280,
@@ -7039,47 +7039,47 @@ fn fixed_sm120_half_loaded_resources_are_safe() {
 #[ignore = "requires an SM80+ CUDA device and emits selector performance data"]
 fn fixed_thin_selector_smoke() {
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 96,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 1536,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 2560,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 160,
             k: 1536,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 129,
             k: 1537,
             n: 1535,
@@ -7092,15 +7092,15 @@ fn fixed_thin_selector_smoke() {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
-            for tile in [FixedTile::Tc16, FixedTile::Tc64, FixedTile::Tc128] {
+            for tile in [InferenceTile::Tc16, InferenceTile::Tc64, InferenceTile::Tc128] {
                 let elapsed_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    inference_forward_with_tile(&ctx, operands, shape, tile)
                         .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
                 });
                 println!(
@@ -7120,25 +7120,25 @@ fn fixed_thin_selector_grid_smoke() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [65usize, 80, 96, 112, 128, 129, 160] {
             for n in [512usize, 1024, 1536, 1928, 2304] {
-                let shape = FixedShape { m, k: 768, n };
+                let shape = InferenceShape { m, k: 768, n };
                 let a =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
                 let b =
                     DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
                 let c =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&c, dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr: None,
                 };
                 let thin_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc16)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc16)
                         .expect("forced Tc16");
                 });
                 let square_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc64)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc64)
                         .expect("forced Tc64");
                 });
                 println!(
@@ -7158,25 +7158,25 @@ fn fixed_thin_selector_large_m_smoke() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [192usize, 256, 320, 384, 512, 768] {
             for n in [512usize, 1024, 1536] {
-                let shape = FixedShape { m, k: 768, n };
+                let shape = InferenceShape { m, k: 768, n };
                 let a =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
                 let b =
                     DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
                 let c =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&c, dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr: None,
                 };
                 let thin_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc16)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc16)
                         .expect("forced Tc16");
                 });
                 let square_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc64)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc64)
                         .expect("forced Tc64");
                 });
                 println!(
@@ -7204,25 +7204,25 @@ fn fixed_thin_selector_k_axis_smoke() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (m, n) in mn_pairs {
             for k in [64usize, 128, 256, 384, 768, 1536, 2560] {
-                let shape = FixedShape { m, k, n };
+                let shape = InferenceShape { m, k, n };
                 let a =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
                 let b =
                     DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
                 let c =
                     DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-                let operands = FixedFwdOperands {
+                let operands = InferenceFwdOperands {
                     c: typed(&c, dtype),
                     x: typed(&a, dtype),
                     w: typed(&b, dtype),
                     bias_ptr: None,
                 };
                 let thin_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc16)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc16)
                         .expect("forced Tc16");
                 });
                 let square_us = average_us(&ctx, || {
-                    fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc64)
+                    inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc64)
                         .expect("forced Tc64");
                 });
                 println!(
@@ -7241,119 +7241,119 @@ fn fixed_thin_selector_sm89_paired_boundary() {
     assert_eq!(device.compute_capability, (8, 9), "SM89 required");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 96,
             k: 64,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 96,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 96,
             k: 2560,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 112,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 112,
             k: 1536,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 129,
             k: 768,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 160,
             k: 768,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 160,
             k: 1536,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 160,
             k: 2560,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 320,
             k: 768,
             n: 512,
         },
-        FixedShape {
+        InferenceShape {
             m: 336,
             k: 768,
             n: 512,
         },
-        FixedShape {
+        InferenceShape {
             m: 512,
             k: 768,
             n: 512,
         },
-        FixedShape {
+        InferenceShape {
             m: 576,
             k: 768,
             n: 512,
         },
-        FixedShape {
+        InferenceShape {
             m: 256,
             k: 768,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 288,
             k: 768,
             n: 1024,
         },
-        FixedShape {
+        InferenceShape {
             m: 176,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 192,
             k: 768,
             n: 1536,
         },
-        FixedShape {
+        InferenceShape {
             m: 96,
             k: 768,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 112,
             k: 768,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 112,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 128,
             k: 768,
             n: 2304,
@@ -7365,21 +7365,21 @@ fn fixed_thin_selector_sm89_paired_boundary() {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
             for _ in 0..64 {
-                fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc16).expect("warm Tc16");
-                fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc64).expect("warm Tc64");
+                inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc16).expect("warm Tc16");
+                inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc64).expect("warm Tc64");
             }
             ctx.stream.synchronize().expect("selector warmup sync");
             let thin_iterations =
-                fixed_tile_window_iterations(&ctx, operands, shape, FixedTile::Tc16);
+                fixed_tile_window_iterations(&ctx, operands, shape, InferenceTile::Tc16);
             let square_iterations =
-                fixed_tile_window_iterations(&ctx, operands, shape, FixedTile::Tc64);
+                fixed_tile_window_iterations(&ctx, operands, shape, InferenceTile::Tc64);
             let mut ratios = Vec::with_capacity(101);
             for window in 0..101 {
                 let (thin_us, square_us) = if window % 2 == 0 {
@@ -7388,14 +7388,14 @@ fn fixed_thin_selector_sm89_paired_boundary() {
                             &ctx,
                             operands,
                             shape,
-                            FixedTile::Tc16,
+                            InferenceTile::Tc16,
                             thin_iterations,
                         ),
                         fixed_tile_window_us(
                             &ctx,
                             operands,
                             shape,
-                            FixedTile::Tc64,
+                            InferenceTile::Tc64,
                             square_iterations,
                         ),
                     )
@@ -7404,14 +7404,14 @@ fn fixed_thin_selector_sm89_paired_boundary() {
                         &ctx,
                         operands,
                         shape,
-                        FixedTile::Tc64,
+                        InferenceTile::Tc64,
                         square_iterations,
                     );
                     let thin_us = fixed_tile_window_us(
                         &ctx,
                         operands,
                         shape,
-                        FixedTile::Tc16,
+                        InferenceTile::Tc16,
                         thin_iterations,
                     );
                     (thin_us, square_us)
@@ -7455,34 +7455,34 @@ fn fixed_tc16_occupancy_cliff_paired_census() {
     );
     assert_eq!(device.multiprocessor_count(), 142);
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let shapes = [
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 768,
             n: 3392,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 768,
             n: 3424,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 768,
             n: 4544,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 1536,
             n: 3424,
         },
-        FixedShape {
+        InferenceShape {
             m: 1,
             k: 768,
             n: 32768,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 768,
             n: 4096,
@@ -7493,36 +7493,36 @@ fn fixed_tc16_occupancy_cliff_paired_census() {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
             let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B allocation");
             let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C allocation");
-            let operands = FixedFwdOperands {
+            let operands = InferenceFwdOperands {
                 c: typed(&c, dtype),
                 x: typed(&a, dtype),
                 w: typed(&b, dtype),
                 bias_ptr: None,
             };
             for _ in 0..10 {
-                fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc16)
+                inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc16)
                     .expect("Tc16 warmup");
-                fixed_forward_with_tile(&ctx, operands, shape, FixedTile::Tc64)
+                inference_forward_with_tile(&ctx, operands, shape, InferenceTile::Tc64)
                     .expect("Tc64 warmup");
             }
             ctx.stream.synchronize().expect("occupancy warmup sync");
             let iterations =
-                fixed_tile_window_iterations(&ctx, operands, shape, FixedTile::Tc16).max(
-                    fixed_tile_window_iterations(&ctx, operands, shape, FixedTile::Tc64),
+                fixed_tile_window_iterations(&ctx, operands, shape, InferenceTile::Tc16).max(
+                    fixed_tile_window_iterations(&ctx, operands, shape, InferenceTile::Tc64),
                 );
             let mut ratios = Vec::with_capacity(101);
             for round in 0..101 {
                 let (tc16_us, tc64_us) = if round & 1 == 0 {
                     let thin =
-                        fixed_tile_window_us(&ctx, operands, shape, FixedTile::Tc16, iterations);
+                        fixed_tile_window_us(&ctx, operands, shape, InferenceTile::Tc16, iterations);
                     let square =
-                        fixed_tile_window_us(&ctx, operands, shape, FixedTile::Tc64, iterations);
+                        fixed_tile_window_us(&ctx, operands, shape, InferenceTile::Tc64, iterations);
                     (thin, square)
                 } else {
                     let square =
-                        fixed_tile_window_us(&ctx, operands, shape, FixedTile::Tc64, iterations);
+                        fixed_tile_window_us(&ctx, operands, shape, InferenceTile::Tc64, iterations);
                     let thin =
-                        fixed_tile_window_us(&ctx, operands, shape, FixedTile::Tc16, iterations);
+                        fixed_tile_window_us(&ctx, operands, shape, InferenceTile::Tc16, iterations);
                     (thin, square)
                 };
                 ratios.push(tc16_us / tc64_us);
@@ -7546,10 +7546,10 @@ fn fixed_tc16_occupancy_cliff_paired_census() {
 struct FixedSm120Tf32BdComparison {
     id: &'static str,
     cell: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     dtype: WeightDtype,
-    incumbent: FixedTile,
-    candidate: FixedTile,
+    incumbent: InferenceTile,
+    candidate: InferenceTile,
     incumbent_gap_close_ratio: f64,
 }
 
@@ -7557,40 +7557,40 @@ const FIXED_SM120_TF32_BD_PAIRED_COMPARISONS: [FixedSm120Tf32BdComparison; 3] = 
     FixedSm120Tf32BdComparison {
         id: "b_m128_vs_sm120_m64",
         cell: "B",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
         dtype: WeightDtype::F32,
-        incumbent: FixedTile::Tf32Sm120M64S2,
-        candidate: FixedTile::Tf32Sm120M128S2,
+        incumbent: InferenceTile::Tf32Sm120M64S2,
+        candidate: InferenceTile::Tf32Sm120M128S2,
         incumbent_gap_close_ratio: 0.936040362,
     },
     FixedSm120Tf32BdComparison {
         id: "d_m128_vs_sm120_m64",
         cell: "D",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
         dtype: WeightDtype::F32,
-        incumbent: FixedTile::Tf32Sm120M64S2,
-        candidate: FixedTile::Tf32Sm120M128S2,
+        incumbent: InferenceTile::Tf32Sm120M64S2,
+        candidate: InferenceTile::Tf32Sm120M128S2,
         incumbent_gap_close_ratio: 0.974839395,
     },
     FixedSm120Tf32BdComparison {
         id: "d_portable_m64_vs_sm120_m64",
         cell: "D",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
         dtype: WeightDtype::F32,
-        incumbent: FixedTile::Tf32Sm120M64S2,
-        candidate: FixedTile::Tf32M64S2,
+        incumbent: InferenceTile::Tf32Sm120M64S2,
+        candidate: InferenceTile::Tf32M64S2,
         incumbent_gap_close_ratio: 0.0,
     },
 ];
@@ -7741,9 +7741,9 @@ struct FixedSm120Tf32BdRecordContext<'a> {
     emitter: &'a FixedSm120Tf32BdComparisonEmitter<'a>,
 }
 
-fn fixed_sm120_tf32_bd_route_spec(tile: FixedTile) -> FixedSm120Tf32BdRouteSpec {
+fn fixed_sm120_tf32_bd_route_spec(tile: InferenceTile) -> FixedSm120Tf32BdRouteSpec {
     match tile {
-        FixedTile::Tf32Sm120M64S2 => FixedSm120Tf32BdRouteSpec {
+        InferenceTile::Tf32Sm120M64S2 => FixedSm120Tf32BdRouteSpec {
             tile_label: "Tf32Sm120M64S2",
             symbol: "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
             block_m: 64,
@@ -7752,7 +7752,7 @@ fn fixed_sm120_tf32_bd_route_spec(tile: FixedTile) -> FixedSm120Tf32BdRouteSpec 
             dynamic_shared_bytes: 32_896,
             minimum_occupancy: 3,
         },
-        FixedTile::Tf32Sm120M128S2 => FixedSm120Tf32BdRouteSpec {
+        InferenceTile::Tf32Sm120M128S2 => FixedSm120Tf32BdRouteSpec {
             tile_label: "Tf32Sm120M128S2",
             symbol: "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
             block_m: 128,
@@ -7761,7 +7761,7 @@ fn fixed_sm120_tf32_bd_route_spec(tile: FixedTile) -> FixedSm120Tf32BdRouteSpec 
             dynamic_shared_bytes: 49_280,
             minimum_occupancy: 2,
         },
-        FixedTile::Tf32M64S2 => FixedSm120Tf32BdRouteSpec {
+        InferenceTile::Tf32M64S2 => FixedSm120Tf32BdRouteSpec {
             tile_label: "Tf32M64S2",
             symbol: "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
             block_m: 64,
@@ -7776,26 +7776,26 @@ fn fixed_sm120_tf32_bd_route_spec(tile: FixedTile) -> FixedSm120Tf32BdRouteSpec 
 
 fn fixed_sm120_tf32_bd_resource_snapshot(
     ctx: &GpuCtx,
-    shape: FixedShape,
-    tile: FixedTile,
+    shape: InferenceShape,
+    tile: InferenceTile,
 ) -> Result<FixedSm120Tf32BdResourceSnapshot, String> {
     let spec = fixed_sm120_tf32_bd_route_spec(tile);
     let function = match tile {
-        FixedTile::Tf32Sm120M64S2 => {
+        InferenceTile::Tf32Sm120M64S2 => {
             &ctx.kernels
                 .gemm_bi_nn_tf32_sm120
                 .as_ref()
                 .ok_or("Fixed SM120 TF32 function holder is absent")?
                 .m64n64_s2
         }
-        FixedTile::Tf32Sm120M128S2 => {
+        InferenceTile::Tf32Sm120M128S2 => {
             &ctx.kernels
                 .gemm_bi_nn_tf32_sm120
                 .as_ref()
                 .ok_or("Fixed SM120 TF32 function holder is absent")?
                 .m128n64_s2
         }
-        FixedTile::Tf32M64S2 => &ctx.kernels.gemm_bi_nn_tf32.m64n64_s2,
+        InferenceTile::Tf32M64S2 => &ctx.kernels.gemm_bi_nn_tf32.m64n64_s2,
         _ => {
             return Err(format!(
                 "{tile:?} is outside the TF32 B/D resource inventory"
@@ -7837,7 +7837,7 @@ fn fixed_sm120_tf32_bd_resource_snapshot(
 fn fixed_sm120_tf32_bd_resource_disposition(
     comparison: FixedSm120Tf32BdComparison,
     arm: &str,
-    tile: FixedTile,
+    tile: InferenceTile,
     snapshot: FixedSm120Tf32BdResourceSnapshot,
 ) -> FixedSm120Tf32BdResourceDisposition {
     let expected = fixed_sm120_tf32_bd_route_spec(tile);
@@ -7883,7 +7883,7 @@ fn fixed_sm120_tf32_bd_resource_disposition(
     if snapshot.registers > 128 {
         if comparison.id == "d_portable_m64_vs_sm120_m64"
             && arm == "candidate"
-            && tile == FixedTile::Tf32M64S2
+            && tile == InferenceTile::Tf32M64S2
             && snapshot.spec.symbol == "gemm_bi_nn_tf32_v1_m64n64_bk32_s2"
             && snapshot.spec.dynamic_shared_bytes == 32_768
         {
@@ -8042,9 +8042,9 @@ fn fixed_sm120_tf32_bd_emit_bit_gate(
 
 fn fixed_sm120_tf32_bd_forced_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-    tile: FixedTile,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    tile: InferenceTile,
     iterations: usize,
 ) -> f64 {
     configure_fixed_auto_vendor_custom(ctx, F32TriadPolicy::AllowDeterministicTf32V1);
@@ -8053,7 +8053,7 @@ fn fixed_sm120_tf32_bd_forced_window_us(
         .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
         .expect("record forced Fixed window start");
     for _ in 0..iterations {
-        fixed_forward_with_tile(ctx, operands, shape, tile)
+        inference_forward_with_tile(ctx, operands, shape, tile)
             .unwrap_or_else(|error| panic!("forced Fixed {tile:?}: {error}"));
     }
     let end = ctx
@@ -8066,9 +8066,9 @@ fn fixed_sm120_tf32_bd_forced_window_us(
 
 fn fixed_sm120_tf32_bd_forced_iterations(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-    tile: FixedTile,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    tile: InferenceTile,
 ) -> usize {
     let pilot_us = fixed_sm120_tf32_bd_forced_window_us(
         ctx,
@@ -8200,40 +8200,40 @@ fn fixed_sm120_tf32_bd_paired_inventory_is_frozen() {
             FixedSm120Tf32BdComparison {
                 id: "b_m128_vs_sm120_m64",
                 cell: "B",
-                shape: FixedShape {
+                shape: InferenceShape {
                     m: 4621,
                     k: 768,
                     n: 2304,
                 },
                 dtype: WeightDtype::F32,
-                incumbent: FixedTile::Tf32Sm120M64S2,
-                candidate: FixedTile::Tf32Sm120M128S2,
+                incumbent: InferenceTile::Tf32Sm120M64S2,
+                candidate: InferenceTile::Tf32Sm120M128S2,
                 incumbent_gap_close_ratio: 0.936040362,
             },
             FixedSm120Tf32BdComparison {
                 id: "d_m128_vs_sm120_m64",
                 cell: "D",
-                shape: FixedShape {
+                shape: InferenceShape {
                     m: 2048,
                     k: 768,
                     n: 2304,
                 },
                 dtype: WeightDtype::F32,
-                incumbent: FixedTile::Tf32Sm120M64S2,
-                candidate: FixedTile::Tf32Sm120M128S2,
+                incumbent: InferenceTile::Tf32Sm120M64S2,
+                candidate: InferenceTile::Tf32Sm120M128S2,
                 incumbent_gap_close_ratio: 0.974839395,
             },
             FixedSm120Tf32BdComparison {
                 id: "d_portable_m64_vs_sm120_m64",
                 cell: "D",
-                shape: FixedShape {
+                shape: InferenceShape {
                     m: 2048,
                     k: 768,
                     n: 2304,
                 },
                 dtype: WeightDtype::F32,
-                incumbent: FixedTile::Tf32Sm120M64S2,
-                candidate: FixedTile::Tf32M64S2,
+                incumbent: InferenceTile::Tf32Sm120M64S2,
+                candidate: InferenceTile::Tf32M64S2,
                 incumbent_gap_close_ratio: 0.0,
             },
         ]
@@ -8264,7 +8264,7 @@ fn fixed_sm120_tf32_bd_paired_inventory_is_frozen() {
 fn fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
     let comparison = FIXED_SM120_TF32_BD_PAIRED_COMPARISONS[2];
     let sealed_snapshot = FixedSm120Tf32BdResourceSnapshot {
-        spec: fixed_sm120_tf32_bd_route_spec(FixedTile::Tf32M64S2),
+        spec: fixed_sm120_tf32_bd_route_spec(InferenceTile::Tf32M64S2),
         grid: 1152,
         registers: 167,
         local_bytes: 0,
@@ -8276,7 +8276,7 @@ fn fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
         fixed_sm120_tf32_bd_resource_disposition(
             comparison,
             "candidate",
-            FixedTile::Tf32M64S2,
+            InferenceTile::Tf32M64S2,
             sealed_snapshot,
         ),
         FixedSm120Tf32BdResourceDisposition::ExpectedPortableRegisterRejection
@@ -8285,7 +8285,7 @@ fn fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
         fixed_sm120_tf32_bd_resource_disposition(
             comparison,
             "candidate",
-            FixedTile::Tf32M64S2,
+            InferenceTile::Tf32M64S2,
             FixedSm120Tf32BdResourceSnapshot {
                 registers: 129,
                 ..sealed_snapshot
@@ -8298,7 +8298,7 @@ fn fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
         fixed_sm120_tf32_bd_resource_disposition(
             comparison,
             "candidate",
-            FixedTile::Tf32M64S2,
+            InferenceTile::Tf32M64S2,
             FixedSm120Tf32BdResourceSnapshot {
                 registers: 128,
                 ..sealed_snapshot
@@ -8310,7 +8310,7 @@ fn fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
         fixed_sm120_tf32_bd_resource_disposition(
             comparison,
             "candidate",
-            FixedTile::Tf32M64S2,
+            InferenceTile::Tf32M64S2,
             FixedSm120Tf32BdResourceSnapshot {
                 local_bytes: 4,
                 ..sealed_snapshot
@@ -8381,17 +8381,17 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
         .expect("TF32 B/D B upload");
         bias.upload_f32(&ctx.stream, &synth(shape.n, FIXED_SM120_TF32_BD_BIAS_SEED))
             .expect("TF32 B/D bias upload");
-        let incumbent_operands = FixedFwdOperands {
+        let incumbent_operands = InferenceFwdOperands {
             c: typed(&incumbent_output, comparison.dtype),
             x: typed(&a, comparison.dtype),
             w: typed(&b, comparison.dtype),
             bias_ptr: None,
         };
-        let candidate_operands = FixedFwdOperands {
+        let candidate_operands = InferenceFwdOperands {
             c: typed(&candidate_output, comparison.dtype),
             ..incumbent_operands
         };
-        let vendor_operands = FixedFwdOperands {
+        let vendor_operands = InferenceFwdOperands {
             c: typed(&vendor_output, comparison.dtype),
             ..incumbent_operands
         };
@@ -8402,7 +8402,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
             ("candidate", comparison.candidate, candidate_operands),
         ] {
             configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::AllowDeterministicTf32V1);
-            if let Err(error) = fixed_forward_with_tile(&ctx, operands, shape, tile) {
+            if let Err(error) = inference_forward_with_tile(&ctx, operands, shape, tile) {
                 fixed_sm120_tf32_bd_reject(
                     comparison,
                     "none",
@@ -8509,16 +8509,16 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
                 sm_count,
                 emitter: &emitter,
             };
-            let incumbent_with_bias = FixedFwdOperands {
+            let incumbent_with_bias = InferenceFwdOperands {
                 bias_ptr,
                 ..incumbent_operands
             };
-            let candidate_with_bias = FixedFwdOperands {
+            let candidate_with_bias = InferenceFwdOperands {
                 bias_ptr,
                 ..candidate_operands
             };
             configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::AllowDeterministicTf32V1);
-            fixed_forward_with_tile(&ctx, incumbent_with_bias, shape, comparison.incumbent)
+            inference_forward_with_tile(&ctx, incumbent_with_bias, shape, comparison.incumbent)
                 .unwrap_or_else(|error| {
                     fixed_sm120_tf32_bd_reject(
                         comparison,
@@ -8554,7 +8554,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
 
             let mut candidate_bits = Vec::new();
             for _ in 0..2 {
-                fixed_forward_with_tile(&ctx, candidate_with_bias, shape, comparison.candidate)
+                inference_forward_with_tile(&ctx, candidate_with_bias, shape, comparison.candidate)
                     .unwrap_or_else(|error| {
                         fixed_sm120_tf32_bd_reject(
                             comparison,
@@ -8612,7 +8612,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
             }
 
             let candidate_run =
-                || fixed_forward_with_tile(&ctx, candidate_with_bias, shape, comparison.candidate);
+                || inference_forward_with_tile(&ctx, candidate_with_bias, shape, comparison.candidate);
             let candidate_graph = unsafe { capture_into_graph(&ctx.stream, candidate_run) }
                 .unwrap_or_else(|error| {
                     fixed_sm120_tf32_bd_reject(
@@ -8671,7 +8671,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
             }
 
             let incumbent_run =
-                || fixed_forward_with_tile(&ctx, incumbent_with_bias, shape, comparison.incumbent);
+                || inference_forward_with_tile(&ctx, incumbent_with_bias, shape, comparison.incumbent);
             let incumbent_graph = unsafe { capture_into_graph(&ctx.stream, incumbent_run) }
                 .unwrap_or_else(|error| {
                     fixed_sm120_tf32_bd_reject(
@@ -8729,7 +8729,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
                 );
             }
 
-            let prefix_shape = FixedShape {
+            let prefix_shape = InferenceShape {
                 m: 1,
                 k: shape.k,
                 n: shape.n,
@@ -8740,13 +8740,13 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
             ] {
                 let prefix_output = DtypedBuf::zeros(&ctx.stream, shape.n, comparison.dtype)
                     .expect("TF32 B/D prefix output allocation");
-                let prefix_operands = FixedFwdOperands {
+                let prefix_operands = InferenceFwdOperands {
                     c: typed(&prefix_output, comparison.dtype),
                     x: typed(&a, comparison.dtype),
                     w: typed(&b, comparison.dtype),
                     bias_ptr,
                 };
-                fixed_forward_with_tile(&ctx, prefix_operands, prefix_shape, tile).unwrap_or_else(
+                inference_forward_with_tile(&ctx, prefix_operands, prefix_shape, tile).unwrap_or_else(
                     |error| {
                         fixed_sm120_tf32_bd_reject(
                             comparison,
@@ -8796,7 +8796,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
 
         configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::AllowDeterministicTf32V1);
         for _ in 0..FIXED_SM120_TF32_BD_WARMUPS {
-            fixed_forward_with_tile(&ctx, incumbent_operands, shape, comparison.incumbent)
+            inference_forward_with_tile(&ctx, incumbent_operands, shape, comparison.incumbent)
                 .expect("TF32 B/D incumbent warmup");
         }
         ctx.stream
@@ -8804,7 +8804,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
             .expect("TF32 B/D incumbent warmup sync");
         configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::AllowDeterministicTf32V1);
         for _ in 0..FIXED_SM120_TF32_BD_WARMUPS {
-            fixed_forward_with_tile(&ctx, candidate_operands, shape, comparison.candidate)
+            inference_forward_with_tile(&ctx, candidate_operands, shape, comparison.candidate)
                 .expect("TF32 B/D candidate warmup");
         }
         ctx.stream
@@ -9050,7 +9050,7 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
         let gap_close_gate = route_summaries
             .iter()
             .all(|summary| summary.ratio_p50 <= comparison.incumbent_gap_close_ratio);
-        let is_m128_candidate = comparison.candidate == FixedTile::Tf32Sm120M128S2;
+        let is_m128_candidate = comparison.candidate == InferenceTile::Tf32Sm120M128S2;
         let promotion_eligible =
             is_m128_candidate && route_order_gate && vendor_order_gate && gap_close_gate;
         let vendor_verdict = if vendor_summaries
@@ -9132,8 +9132,8 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
 #[derive(Clone, Copy)]
 struct FixedAutoVendorCell {
     label: &'static str,
-    shape: FixedShape,
-    expected: FixedTile,
+    shape: InferenceShape,
+    expected: InferenceTile,
 }
 
 #[derive(Clone, Copy)]
@@ -9149,553 +9149,553 @@ struct FixedAutoVendorRow {
 const FIXED_AUTO_VENDOR_HALF_CELLS: &[FixedAutoVendorCell] = &[
     FixedAutoVendorCell {
         label: "hot_a",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "hot_b",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "hot_c",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "hot_d",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "hot_e",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m512_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 512,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1024_k1928_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1024,
             k: 1928,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1024_k1928_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1024,
             k: 1928,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1024_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1024,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1536_k1928_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 1928,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1536_k1928_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 1928,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1536_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m2048_k1928_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 1928,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m2048_k1928_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 1928,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m2048_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m3072_k1928_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 1928,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m3072_k1928_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 1928,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "deep_m3072_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m4621_k1928_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m4621_k1928_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m1536_k1032_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 1032,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2),
     },
     FixedAutoVendorCell {
         label: "deep_m2048_k1032_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 1032,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k384_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 384,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k768_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 768,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k384_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m2048_k384_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m2048_k768_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m3072_k384_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k768_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 768,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k384_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k768_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 768,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k768_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k768_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 768,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m2048_k384_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 384,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m2048_k768_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m3072_k768_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 768,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k384_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 384,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m4621_k384_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m4621_k768_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m3072_k768_n2304",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 3072,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k512_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 512,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "shallow_m1536_k520_n1928",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 1536,
             k: 520,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k512_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 512,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "shallow_m4096_k520_n1536",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4096,
             k: 520,
             n: 1536,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
 ];
 
 const FIXED_AUTO_VENDOR_TF32_CELLS: &[FixedAutoVendorCell] = &[
     FixedAutoVendorCell {
         label: "hot_a",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Tf32Sm120M64S2,
+        expected: InferenceTile::Tf32Sm120M64S2,
     },
     FixedAutoVendorCell {
         label: "hot_b",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Tf32Sm120M64S2,
+        expected: InferenceTile::Tf32Sm120M64S2,
     },
     FixedAutoVendorCell {
         label: "hot_c",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        expected: FixedTile::Tf32Sm120M64S2,
+        expected: InferenceTile::Tf32Sm120M64S2,
     },
     FixedAutoVendorCell {
         label: "hot_d",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Tf32Sm120M64S2,
+        expected: InferenceTile::Tf32Sm120M64S2,
     },
     FixedAutoVendorCell {
         label: "hot_e",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
-        expected: FixedTile::Tf32Sm120M64S2,
+        expected: InferenceTile::Tf32Sm120M64S2,
     },
 ];
 
 const FIXED_AUTO_VENDOR_MIXED_CELLS: &[FixedAutoVendorCell] = &[
     FixedAutoVendorCell {
         label: "hot_a",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     },
     FixedAutoVendorCell {
         label: "hot_b",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S3),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S3),
     },
     FixedAutoVendorCell {
         label: "hot_c",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "hot_d",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
     FixedAutoVendorCell {
         label: "hot_e",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
-        expected: FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2),
+        expected: InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2),
     },
 ];
 
 const FIXED_AUTO_VENDOR_EXACT_CELLS: &[FixedAutoVendorCell] = &[
     FixedAutoVendorCell {
         label: "hot_a",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        expected: FixedTile::F32N128S2,
+        expected: InferenceTile::F32N128S2,
     },
     FixedAutoVendorCell {
         label: "hot_b",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::F32N128S2,
+        expected: InferenceTile::F32N128S2,
     },
     FixedAutoVendorCell {
         label: "hot_c",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        expected: FixedTile::Legacy,
+        expected: InferenceTile::Legacy,
     },
     FixedAutoVendorCell {
         label: "hot_d",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        expected: FixedTile::Legacy,
+        expected: InferenceTile::Legacy,
     },
     FixedAutoVendorCell {
         label: "hot_e",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
         },
-        expected: FixedTile::Legacy,
+        expected: InferenceTile::Legacy,
     },
 ];
 
 fn expected_ada_half_auto_v43(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-) -> Option<FixedTile> {
-    use FixedTile::{
+) -> Option<InferenceTile> {
+    use InferenceTile::{
         Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
     };
 
@@ -9745,11 +9745,11 @@ fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
     let hot_a = FIXED_AUTO_VENDOR_EXACT_CELLS[0].shape;
     assert_eq!(
         expected_ada_half_auto_v43((12, 8), WeightDtype::Bf16, hot_a, false),
-        Some(FixedTile::Tc128Sm89Pipeline)
+        Some(InferenceTile::Tc128Sm89Pipeline)
     );
     assert_eq!(
         expected_ada_half_auto_v43((12, 8), WeightDtype::Bf16, hot_a, true),
-        Some(FixedTile::Tc128Sm89Swizzle)
+        Some(InferenceTile::Tc128Sm89Swizzle)
     );
     for nvrtc in [(12, 7), (13, 1), (13, 3), (14, 0)] {
         assert_eq!(
@@ -9765,7 +9765,7 @@ fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
         expected_ada_half_auto_v43(
             (13, 2),
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: hot_a.m - 1,
                 ..hot_a
             },
@@ -9777,11 +9777,11 @@ fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         assert_eq!(
             expected_ada_half_auto_v43((13, 2), dtype, hot_b, false),
-            Some(FixedTile::Tc128Sm89S3)
+            Some(InferenceTile::Tc128Sm89S3)
         );
         assert_eq!(
             expected_ada_half_auto_v43((13, 2), dtype, hot_b, true),
-            Some(FixedTile::Tc128Sm89Swizzle)
+            Some(InferenceTile::Tc128Sm89Swizzle)
         );
     }
 }
@@ -9791,15 +9791,15 @@ fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
 fn expected_ada_finalist_auto_v45(
     nvrtc: (i32, i32),
     row: &str,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-) -> Option<FixedTile> {
+) -> Option<InferenceTile> {
     match (nvrtc, row, (shape.m, shape.k, shape.n), has_bias) {
         ((12, 8) | (13, 0) | (13, 2), "tf32", (2048, 2304, 768), false) => {
-            Some(FixedTile::Tf32RnaM128N96S3)
+            Some(InferenceTile::Tf32RnaM128N96S3)
         }
-        ((13, 2), "f16", (2048, 768, 2304), false) => Some(FixedTile::TcM64N64Sm89S3),
-        ((13, 2), "f16", (2048, 2304, 768), false) => Some(FixedTile::TcM128N64Sm89S2),
+        ((13, 2), "f16", (2048, 768, 2304), false) => Some(InferenceTile::TcM64N64Sm89S3),
+        ((13, 2), "f16", (2048, 2304, 768), false) => Some(InferenceTile::TcM128N64Sm89S2),
         _ => None,
     }
 }
@@ -9807,9 +9807,9 @@ fn expected_ada_finalist_auto_v45(
 fn expected_ada_half_auto_v45(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-) -> Option<FixedTile> {
+) -> Option<InferenceTile> {
     expected_ada_finalist_auto_v45(nvrtc, dtype.as_str(), shape, has_bias)
         .or_else(|| expected_ada_half_auto_v43(nvrtc, dtype, shape, has_bias))
 }
@@ -9823,10 +9823,10 @@ fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
                 for has_bias in [false, true] {
                     let want = match (nvrtc, row, index, has_bias) {
                         ((12, 8) | (13, 0) | (13, 2), "tf32", 4, false) => {
-                            Some(FixedTile::Tf32RnaM128N96S3)
+                            Some(InferenceTile::Tf32RnaM128N96S3)
                         }
-                        ((13, 2), "f16", 3, false) => Some(FixedTile::TcM64N64Sm89S3),
-                        ((13, 2), "f16", 4, false) => Some(FixedTile::TcM128N64Sm89S2),
+                        ((13, 2), "f16", 3, false) => Some(InferenceTile::TcM64N64Sm89S3),
+                        ((13, 2), "f16", 4, false) => Some(InferenceTile::TcM128N64Sm89S2),
                         _ => None,
                     };
                     assert_eq!(
@@ -9835,15 +9835,15 @@ fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
                     );
                     promotions += usize::from(want.is_some());
                     for shape in [
-                        FixedShape {
+                        InferenceShape {
                             m: cell.shape.m - 1,
                             ..cell.shape
                         },
-                        FixedShape {
+                        InferenceShape {
                             k: cell.shape.k - 1,
                             ..cell.shape
                         },
-                        FixedShape {
+                        InferenceShape {
                             n: cell.shape.n - 1,
                             ..cell.shape
                         },
@@ -9864,8 +9864,8 @@ fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
                 for bias in [false, true] {
                     let old = expected_ada_half_auto_v43(nvrtc, dtype, cell.shape, bias);
                     let want = match (nvrtc, dtype, index, bias) {
-                        ((13, 2), WeightDtype::F16, 3, false) => Some(FixedTile::TcM64N64Sm89S3),
-                        ((13, 2), WeightDtype::F16, 4, false) => Some(FixedTile::TcM128N64Sm89S2),
+                        ((13, 2), WeightDtype::F16, 3, false) => Some(InferenceTile::TcM64N64Sm89S3),
+                        ((13, 2), WeightDtype::F16, 4, false) => Some(InferenceTile::TcM128N64Sm89S2),
                         _ => old,
                     };
                     assert_eq!(
@@ -9886,25 +9886,25 @@ fn fixed_auto_vendor_expected_exact_tile(
     nvrtc_library_known: bool,
     has_bias: bool,
     t256_loaded: bool,
-) -> FixedTile {
+) -> InferenceTile {
     match device_cc {
         (12, 0) if sm_count == 170 && nvrtc_version == (13, 2) && nvrtc_library_known => {
             match ((cell.shape.m, cell.shape.k, cell.shape.n), has_bias) {
-                ((4621, 384, 1928), false) => FixedTile::F32Sm120TmaFmaM64N128,
+                ((4621, 384, 1928), false) => InferenceTile::F32Sm120TmaFmaM64N128,
                 ((4621, 384, 1928), true) if t256_loaded => {
-                    FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+                    InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
                 }
-                ((4621, 384, 1928), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-                ((4621, 768, 2304), false) => FixedTile::F32Sm120TmaFmaM128N64,
-                ((4621, 768, 2304), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-                ((4621, 1928, 384), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-                ((2048, 768, 2304), _) => FixedTile::F32Sm120N64CopyPlan,
-                ((2048, 2304, 768), _) => FixedTile::F32Sm120N64CopyPlan,
+                ((4621, 384, 1928), true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+                ((4621, 768, 2304), false) => InferenceTile::F32Sm120TmaFmaM128N64,
+                ((4621, 768, 2304), true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+                ((4621, 1928, 384), true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+                ((2048, 768, 2304), _) => InferenceTile::F32Sm120N64CopyPlan,
+                ((2048, 2304, 768), _) => InferenceTile::F32Sm120N64CopyPlan,
                 _ => cell.expected,
             }
         }
         (12, 0) => cell.expected,
-        (12, 1) => FixedTile::Legacy,
+        (12, 1) => InferenceTile::Legacy,
         _ => panic!(
             "AUTO/vendor census does not admit CC{}.{}",
             device_cc.0, device_cc.1
@@ -9919,7 +9919,7 @@ fn fixed_auto_vendor_expected_half_tile(
     sm_count: u32,
     nvrtc_version: (i32, i32),
     has_bias: bool,
-) -> FixedTile {
+) -> InferenceTile {
     if device_cc == (12, 0)
         && sm_count == 170
         && nvrtc_version == (13, 2)
@@ -9940,7 +9940,7 @@ fn fixed_auto_vendor_expected_half_tile(
                                 | (4621, 768, 1536)
                         ))));
         if s3 {
-            return FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S3);
+            return InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S3);
         }
     }
     if device_cc == (12, 0)
@@ -9963,7 +9963,7 @@ fn fixed_auto_vendor_expected_half_tile(
                 | (1536, 768, 1536)
         )
     {
-        return FixedTile::Sm120Half(FixedSm120HalfTile::M64N128Bk64S2);
+        return InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N128Bk64S2);
     }
     cell.expected
 }
@@ -9976,18 +9976,18 @@ fn fixed_auto_vendor_expected_tf32_tile(
     has_bias: bool,
     output_aligned: bool,
     nvrtc_library_known: bool,
-) -> FixedTile {
+) -> InferenceTile {
     if device_cc == (12, 0) && sm_count == 170 && nvrtc_version == (13, 2) {
         match (cell.shape.m, cell.shape.k, cell.shape.n, has_bias) {
             (4621, 384, 1928, _) if output_aligned && nvrtc_library_known => {
-                return FixedTile::Tf32Sm120M128S2;
+                return InferenceTile::Tf32Sm120M128S2;
             }
-            (4621, 768, 2304, _) => return FixedTile::Tf32Sm120M128S2,
+            (4621, 768, 2304, _) => return InferenceTile::Tf32Sm120M128S2,
             (2048, 768, 2304, false) | (2048, 768, 2304, true) => {
                 return if output_aligned {
-                    FixedTile::Tf32Sm120M64S2PairStore
+                    InferenceTile::Tf32Sm120M64S2PairStore
                 } else {
-                    FixedTile::Tf32Sm120M64S2ProducerWarp
+                    InferenceTile::Tf32Sm120M64S2ProducerWarp
                 };
             }
             _ => {}
@@ -10001,12 +10001,12 @@ fn fixed_auto_vendor_expected_mixed_tile(
     device_cc: (u32, u32),
     sm_count: u32,
     nvrtc_version: (i32, i32),
-) -> FixedTile {
+) -> InferenceTile {
     if device_cc == (12, 0) && sm_count == 170 && nvrtc_version == (13, 2) {
         return cell.expected;
     }
     if cell.label == "hot_b" {
-        FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2)
+        InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2)
     } else {
         cell.expected
     }
@@ -10020,32 +10020,32 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
     for bias in [false, true] {
         assert_eq!(
             fixed_auto_vendor_expected_exact_tile(hot_d, (12, 0), 170, (13, 2), true, bias, true),
-            FixedTile::F32Sm120N64CopyPlan
+            InferenceTile::F32Sm120N64CopyPlan
         );
         assert_eq!(
             fixed_auto_vendor_expected_exact_tile(hot_d, (12, 0), 169, (13, 2), true, bias, true),
-            FixedTile::Legacy
+            InferenceTile::Legacy
         );
     }
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, false, true),
-        FixedTile::F32Sm120TmaFmaM64N128
+        InferenceTile::F32Sm120TmaFmaM64N128
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, true, true),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, true, false),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, false, true),
-        FixedTile::F32Sm120TmaFmaM128N64
+        InferenceTile::F32Sm120TmaFmaM128N64
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, true, true),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(
@@ -10057,7 +10057,7 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
             true,
             true
         ),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(
@@ -10069,27 +10069,27 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
             false,
             true
         ),
-        FixedTile::Legacy
+        InferenceTile::Legacy
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 169, (13, 2), true, false, true),
-        FixedTile::F32N128S2
+        InferenceTile::F32N128S2
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), false, false, true),
-        FixedTile::F32N128S2
+        InferenceTile::F32N128S2
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 3), true, false, true),
-        FixedTile::F32N128S2
+        InferenceTile::F32N128S2
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 1), 170, (13, 2), true, false, true),
-        FixedTile::Legacy
+        InferenceTile::Legacy
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 1), 170, (13, 2), true, false, true),
-        FixedTile::Legacy
+        InferenceTile::Legacy
     );
 }
 
@@ -10100,9 +10100,9 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
     let hot_d = FIXED_AUTO_VENDOR_TF32_CELLS[3];
     for has_bias in [false, true] {
         for (aligned, known, expected) in [
-            (true, true, FixedTile::Tf32Sm120M128S2),
-            (false, true, FixedTile::Tf32Sm120M64S2),
-            (true, false, FixedTile::Tf32Sm120M64S2),
+            (true, true, InferenceTile::Tf32Sm120M128S2),
+            (false, true, InferenceTile::Tf32Sm120M64S2),
+            (true, false, InferenceTile::Tf32Sm120M64S2),
         ] {
             assert_eq!(
                 fixed_auto_vendor_expected_tf32_tile(
@@ -10127,7 +10127,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                 true,
                 true
             ),
-            FixedTile::Tf32Sm120M128S2
+            InferenceTile::Tf32Sm120M128S2
         );
         assert_eq!(
             fixed_auto_vendor_expected_tf32_tile(
@@ -10139,7 +10139,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                 true,
                 true
             ),
-            FixedTile::Tf32Sm120M64S2PairStore
+            InferenceTile::Tf32Sm120M64S2PairStore
         );
         assert_eq!(
             fixed_auto_vendor_expected_tf32_tile(
@@ -10151,7 +10151,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                 false,
                 true
             ),
-            FixedTile::Tf32Sm120M64S2ProducerWarp
+            InferenceTile::Tf32Sm120M64S2ProducerWarp
         );
         for (device_cc, sm_count, nvrtc_version) in [
             ((12, 0), 169, (13, 2)),
@@ -10170,7 +10170,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                     true,
                     true
                 ),
-                FixedTile::Tf32Sm120M64S2
+                InferenceTile::Tf32Sm120M64S2
             );
             assert_eq!(
                 fixed_auto_vendor_expected_tf32_tile(
@@ -10182,7 +10182,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                     true,
                     true
                 ),
-                FixedTile::Tf32Sm120M64S2
+                InferenceTile::Tf32Sm120M64S2
             );
         }
     }
@@ -10193,7 +10193,7 @@ fn fixed_auto_vendor_mixed_expectation_tracks_the_qualified_compiler_cell() {
     let hot_b = FIXED_AUTO_VENDOR_MIXED_CELLS[1];
     assert_eq!(
         fixed_auto_vendor_expected_mixed_tile(hot_b, (12, 0), 170, (13, 2)),
-        FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S3)
+        InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S3)
     );
     for (device_cc, sm_count, nvrtc_version) in [
         ((12, 0), 169, (13, 2)),
@@ -10203,14 +10203,14 @@ fn fixed_auto_vendor_mixed_expectation_tracks_the_qualified_compiler_cell() {
     ] {
         assert_eq!(
             fixed_auto_vendor_expected_mixed_tile(hot_b, device_cc, sm_count, nvrtc_version,),
-            FixedTile::Sm120Half(FixedSm120HalfTile::M128N128Bk32S2)
+            InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2)
         );
     }
 }
 
 fn configure_fixed_auto_vendor_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(policy);
@@ -10218,7 +10218,7 @@ fn configure_fixed_auto_vendor_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
 
 fn configure_fixed_auto_vendor_vendor(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_batch_invariant(false);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_fast_gemm(true);
     ctx.set_f32_triad_policy(policy);
@@ -10226,10 +10226,10 @@ fn configure_fixed_auto_vendor_vendor(ctx: &GpuCtx, policy: F32TriadPolicy) {
 
 fn launch_fixed_auto_vendor_custom(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
-) -> FixedTile {
-    fixed_forward(
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+) -> InferenceTile {
+    inference_forward(
         ctx,
         operands.c,
         operands.x,
@@ -10240,7 +10240,7 @@ fn launch_fixed_auto_vendor_custom(
     .expect("production Fixed AUTO launch")
 }
 
-fn launch_fixed_auto_vendor_vendor(ctx: &GpuCtx, operands: FixedFwdOperands, shape: FixedShape) {
+fn launch_fixed_auto_vendor_vendor(ctx: &GpuCtx, operands: InferenceFwdOperands, shape: InferenceShape) {
     gpu_gemm_typed_forward_raw(
         ctx,
         operands.c,
@@ -10254,8 +10254,8 @@ fn launch_fixed_auto_vendor_vendor(ctx: &GpuCtx, operands: FixedFwdOperands, sha
 
 fn fixed_auto_vendor_custom_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     policy: F32TriadPolicy,
     iterations: usize,
 ) -> f64 {
@@ -10277,8 +10277,8 @@ fn fixed_auto_vendor_custom_window_us(
 
 fn fixed_auto_vendor_vendor_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     policy: F32TriadPolicy,
     iterations: usize,
 ) -> f64 {
@@ -10334,13 +10334,13 @@ fn run_fixed_auto_vendor_cell(
             .expect("bias upload");
         bias
     });
-    let custom_operands = FixedFwdOperands {
+    let custom_operands = InferenceFwdOperands {
         c: typed(&custom, row.output_dtype),
         x: typed(&a, row.input_dtype),
         w: typed(&b, row.input_dtype),
         bias_ptr: bias.as_ref().map(DtypedBuf::cached_ptr),
     };
-    let vendor_operands = FixedFwdOperands {
+    let vendor_operands = InferenceFwdOperands {
         c: typed(&vendor, row.output_dtype),
         ..custom_operands
     };
@@ -10631,8 +10631,8 @@ fn fixed_production_auto_vs_fast_cublas_hot_and_selector_census() {
 // FAST_TF32 denominator nor a PEDANTIC exact-F32 denominator.
 fn fixed_ada_vendor_launch(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     compute: cudarc::cublas::sys::cublasComputeType_t,
 ) {
     use std::ffi::{c_int, c_void};
@@ -10706,19 +10706,19 @@ fn fixed_ada_event_window_us(ctx: &GpuCtx, iterations: usize, mut launch: impl F
     elapsed
 }
 
-fn fixed_sm120_fma_spike_tile(value: Option<&str>) -> Result<FixedTile, String> {
+fn fixed_sm120_fma_spike_tile(value: Option<&str>) -> Result<InferenceTile, String> {
     Ok(match value {
-        Some("m64n128") => FixedTile::F32Sm120TmaFmaM64N128,
-        Some("m128n64") | None => FixedTile::F32Sm120TmaFmaM128N64,
-        Some("postbias_m64n128") => FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
-        Some("postbias_m128n64") => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        Some("postbias_m128n64_k4") => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
-        Some("postbias_m128n64_t256") => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-        Some("postbias_m128n96") => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-        Some("nobias_m128n64_t256") => FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
-        Some("copyplan") => FixedTile::F32Sm120N64CopyPlan,
-        Some("copyplan_t256") => FixedTile::F32Sm120N64CopyPlanT256,
-        Some("copyplan_m128n64_t256") => FixedTile::F32Sm120M128N64CopyPlanT256,
+        Some("m64n128") => InferenceTile::F32Sm120TmaFmaM64N128,
+        Some("m128n64") | None => InferenceTile::F32Sm120TmaFmaM128N64,
+        Some("postbias_m64n128") => InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
+        Some("postbias_m128n64") => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        Some("postbias_m128n64_k4") => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
+        Some("postbias_m128n64_t256") => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+        Some("postbias_m128n96") => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        Some("nobias_m128n64_t256") => InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
+        Some("copyplan") => InferenceTile::F32Sm120N64CopyPlan,
+        Some("copyplan_t256") => InferenceTile::F32Sm120N64CopyPlanT256,
+        Some("copyplan_m128n64_t256") => InferenceTile::F32Sm120M128N64CopyPlanT256,
         Some(value) => {
             return Err(format!(
                 "MAMBA_FIXED_SM120_FMA_SPIKE_TILE must be m128n64, m64n128, postbias_m128n64, postbias_m128n64_k4, postbias_m128n64_t256, postbias_m64n128, postbias_m128n96, nobias_m128n64_t256, copyplan, copyplan_t256 or copyplan_m128n64_t256, got {value}"
@@ -10752,7 +10752,7 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
@@ -10777,34 +10777,34 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     )
     .expect("exact-TMA spike tile selection");
     let expected_candidate_symbol = match candidate_tile {
-        FixedTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-        FixedTile::F32Sm120M128N64CopyPlanT256 => {
+        InferenceTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+        InferenceTile::F32Sm120M128N64CopyPlanT256 => {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1"
         }
-        FixedTile::F32Sm120N64CopyPlanT256 => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => {
+        InferenceTile::F32Sm120N64CopyPlanT256 => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
+        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4"
         }
-        FixedTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
-        FixedTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 => {
+        InferenceTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        InferenceTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2"
         }
         _ => unreachable!(),
     };
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: dims.0,
         k: dims.1,
         n: dims.2,
@@ -10821,7 +10821,7 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     let legacy = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("Legacy C");
     let mut vendor = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("vendor C");
     let mut vendor_fast = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("FAST vendor C");
-    let candidate_operands = FixedFwdOperands {
+    let candidate_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: candidate.cached_ptr(),
             dtype: WeightDtype::F32,
@@ -10836,28 +10836,28 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         },
         bias_ptr: bias.as_ref().map(GpuBuffer::cached_ptr),
     };
-    let auto_operands = FixedFwdOperands {
+    let auto_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: auto.cached_ptr(),
             dtype: WeightDtype::F32,
         },
         ..candidate_operands
     };
-    let legacy_operands = FixedFwdOperands {
+    let legacy_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: legacy.cached_ptr(),
             dtype: WeightDtype::F32,
         },
         ..candidate_operands
     };
-    let vendor_operands = FixedFwdOperands {
+    let vendor_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: vendor.cached_ptr(),
             dtype: WeightDtype::F32,
         },
         ..candidate_operands
     };
-    let vendor_fast_operands = FixedFwdOperands {
+    let vendor_fast_operands = InferenceFwdOperands {
         c: TypedPtr {
             ptr: vendor_fast.cached_ptr(),
             dtype: WeightDtype::F32,
@@ -10866,11 +10866,11 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     };
 
     let launch_candidate = || {
-        fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate_tile)
+        inference_forward_with_tile(&ctx, candidate_operands, shape, candidate_tile)
             .expect("Fixed exact SM120 TMA-FMA hot-cell forced launch");
     };
     let launch_auto = || {
-        mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::fixed_forward(
+        mamba_rs::mamba_ssm::gpu::gemm_bi_inference::inference_forward(
             &ctx,
             auto_operands.c,
             auto_operands.x,
@@ -10881,7 +10881,7 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         .expect("Fixed exact SM120 hot-cell AUTO launch")
     };
     let expected_auto = match (cell.as_str(), has_bias) {
-        ("a", false) => FixedTile::F32Sm120TmaFmaM64N128,
+        ("a", false) => InferenceTile::F32Sm120TmaFmaM64N128,
         ("a", true)
             if ctx
                 .kernels
@@ -10889,21 +10889,21 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
                 .as_ref()
                 .is_some_and(|kernels| kernels.m128n64_t256.is_some()) =>
         {
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
         }
-        ("a", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        ("b", false) => FixedTile::F32Sm120TmaFmaM128N64,
-        ("b", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        ("c", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-        ("d" | "e", _) => FixedTile::F32Sm120N64CopyPlan,
-        ("c", false) => FixedTile::Legacy,
+        ("a", true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        ("b", false) => InferenceTile::F32Sm120TmaFmaM128N64,
+        ("b", true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        ("c", true) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        ("d" | "e", _) => InferenceTile::F32Sm120N64CopyPlan,
+        ("c", false) => InferenceTile::Legacy,
         _ => unreachable!(),
     };
     let launch_auto_checked = || {
         assert_eq!(launch_auto(), expected_auto);
     };
     let launch_legacy = || {
-        fixed_forward_with_tile(&ctx, legacy_operands, shape, FixedTile::Legacy)
+        inference_forward_with_tile(&ctx, legacy_operands, shape, InferenceTile::Legacy)
             .expect("hot-cell Legacy launch");
     };
     let launch_vendor = || {
@@ -11037,23 +11037,23 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         candidate_tile,
     );
     let expected_auto_symbol = match expected_auto {
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
-        FixedTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 => {
+        InferenceTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        InferenceTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => {
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2"
         }
-        FixedTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-        FixedTile::F32N128S2 => "gemm_bi_f32_f32_n128_s2",
-        FixedTile::Legacy => "gemm_bi_f32_f32_s2",
+        InferenceTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+        InferenceTile::F32N128S2 => "gemm_bi_f32_f32_n128_s2",
+        InferenceTile::Legacy => "gemm_bi_f32_f32_s2",
         _ => unreachable!(),
     };
     assert_eq!(
@@ -11062,12 +11062,12 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     );
     if matches!(
         expected_auto,
-        FixedTile::F32Sm120TmaFmaM128N64
-            | FixedTile::F32Sm120TmaFmaM64N128
-            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
-            | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
-            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        InferenceTile::F32Sm120TmaFmaM128N64
+            | InferenceTile::F32Sm120TmaFmaM64N128
+            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
+            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
     ) {
         assert_sm120_exact_tma_graph_contract(
             &auto_graph,
@@ -11713,7 +11713,7 @@ impl FixedForceBiasContract {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FixedForceSpec {
-    tile: FixedTile,
+    tile: InferenceTile,
     row: &'static str,
     input_dtype: WeightDtype,
     output_dtype: WeightDtype,
@@ -11926,13 +11926,13 @@ fn fixed_explicit_vendor_tolerance_metadata(row: &FixedExplicitVendorRowSpec) ->
 // inventory audit.
 macro_rules! define_fixed_force_half_tile_registry {
     ($($variant:ident),+ $(,)?) => {
-        const FIXED_FORCE_HALF_TILE_UNIVERSE: &[FixedSm120HalfTile] = &[
-            $(FixedSm120HalfTile::$variant),+
+        const FIXED_FORCE_HALF_TILE_UNIVERSE: &[InferenceSm120HalfTile] = &[
+            $(InferenceSm120HalfTile::$variant),+
         ];
 
-        fn fixed_force_half_tile_registry_exhaustive(tile: FixedSm120HalfTile) {
+        fn fixed_force_half_tile_registry_exhaustive(tile: InferenceSm120HalfTile) {
             match tile {
-                $(FixedSm120HalfTile::$variant => {}),+
+                $(InferenceSm120HalfTile::$variant => {}),+
             }
         }
     };
@@ -11948,14 +11948,14 @@ define_fixed_force_half_tile_registry!(
 
 macro_rules! define_fixed_force_plain_tile_registry {
     ($($variant:ident),+ $(,)?) => {
-        const FIXED_FORCE_PLAIN_TILE_UNIVERSE: &[FixedTile] = &[
-            $(FixedTile::$variant),+
+        const FIXED_FORCE_PLAIN_TILE_UNIVERSE: &[InferenceTile] = &[
+            $(InferenceTile::$variant),+
         ];
 
-        fn fixed_force_tile_registry_exhaustive(tile: FixedTile) {
+        fn fixed_force_tile_registry_exhaustive(tile: InferenceTile) {
             match tile {
-                $(FixedTile::$variant => {}),+,
-                FixedTile::Sm120Half(half) => fixed_force_half_tile_registry_exhaustive(half),
+                $(InferenceTile::$variant => {}),+,
+                InferenceTile::Sm120Half(half) => fixed_force_half_tile_registry_exhaustive(half),
             }
         }
     };
@@ -12081,13 +12081,13 @@ define_fixed_force_plain_tile_registry!(
     F32Sm120TmaFmaFixedNoBiasM128N64T256,
 );
 
-fn fixed_force_tile_universe() -> Vec<FixedTile> {
+fn fixed_force_tile_universe() -> Vec<InferenceTile> {
     let mut universe = FIXED_FORCE_PLAIN_TILE_UNIVERSE.to_vec();
     universe.extend(
         FIXED_FORCE_HALF_TILE_UNIVERSE
             .iter()
             .copied()
-            .map(FixedTile::Sm120Half),
+            .map(InferenceTile::Sm120Half),
     );
     for tile in universe.iter().copied() {
         fixed_force_tile_registry_exhaustive(tile);
@@ -12148,185 +12148,185 @@ fn fixed_force_row_dtypes(row: &str) -> Result<(WeightDtype, WeightDtype), Strin
     }
 }
 
-// Keep this match exhaustive: adding a FixedTile without deciding its physical
+// Keep this match exhaustive: adding a InferenceTile without deciding its physical
 // force identity must fail compilation instead of silently shrinking the census.
 fn fixed_force_spec(
     row: &'static str,
     cc: (u32, u32),
-    tile: FixedTile,
+    tile: InferenceTile,
 ) -> Result<FixedForceSpec, String> {
     let (input_dtype, output_dtype) = fixed_force_row_dtypes(row)?;
     let invalid = || format!("{tile:?} is not a physical Fixed force candidate for {row}/CC{cc:?}");
     let expected_symbol = match tile {
-        FixedTile::F32N128S2 if matches!(row, "f32_exact" | "f32_exact_fast") => {
+        InferenceTile::F32N128S2 if matches!(row, "f32_exact" | "f32_exact_fast") => {
             "gemm_bi_f32_f32_n128_s2"
         }
-        FixedTile::F32N128S2 => return Err(invalid()),
-        FixedTile::Tf32M128S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
-        FixedTile::Tf32M128S2 => return Err(invalid()),
-        FixedTile::Tf32M128S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
-        FixedTile::Tf32M128S3 => return Err(invalid()),
-        FixedTile::Tf32M128N128S3 if row == "tf32" && cc == (8, 9) => {
+        InferenceTile::F32N128S2 => return Err(invalid()),
+        InferenceTile::Tf32M128S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+        InferenceTile::Tf32M128S2 => return Err(invalid()),
+        InferenceTile::Tf32M128S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+        InferenceTile::Tf32M128S3 => return Err(invalid()),
+        InferenceTile::Tf32M128N128S3 if row == "tf32" && cc == (8, 9) => {
             "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3"
         }
-        FixedTile::Tf32M128N128S3 => return Err(invalid()),
-        FixedTile::Tf32RnaM128N128S3 if row == "tf32" && cc == (8, 9) => {
+        InferenceTile::Tf32M128N128S3 => return Err(invalid()),
+        InferenceTile::Tf32RnaM128N128S3 if row == "tf32" && cc == (8, 9) => {
             "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
         }
-        FixedTile::Tf32RnaM128N128S3 => return Err(invalid()),
-        FixedTile::Tf32RnaM128N96S3 if row == "tf32" && cc == (8, 9) => {
+        InferenceTile::Tf32RnaM128N128S3 => return Err(invalid()),
+        InferenceTile::Tf32RnaM128N96S3 if row == "tf32" && cc == (8, 9) => {
             "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3"
         }
-        FixedTile::Tf32RnaM128N96S3 => return Err(invalid()),
-        FixedTile::Tf32M64S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
-        FixedTile::Tf32M64S2 => return Err(invalid()),
-        FixedTile::Tf32M64S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
-        FixedTile::Tf32M64S3 => return Err(invalid()),
-        FixedTile::Tf32M16S4 if row == "tf32" => "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
-        FixedTile::Tf32M16S4 => return Err(invalid()),
-        FixedTile::Tf32Sm120M128S2 if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32RnaM128N96S3 => return Err(invalid()),
+        InferenceTile::Tf32M64S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+        InferenceTile::Tf32M64S2 => return Err(invalid()),
+        InferenceTile::Tf32M64S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+        InferenceTile::Tf32M64S3 => return Err(invalid()),
+        InferenceTile::Tf32M16S4 if row == "tf32" => "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+        InferenceTile::Tf32M16S4 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M128S2 if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2"
         }
-        FixedTile::Tf32Sm120M128S2 => return Err(invalid()),
-        FixedTile::Tf32Sm120M128S3 if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M128S2 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M128S3 if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3"
         }
-        FixedTile::Tf32Sm120M128S3 => return Err(invalid()),
-        FixedTile::Tf32Sm120M64N128S2 if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M128S3 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M64N128S2 if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2"
         }
-        FixedTile::Tf32Sm120M64N128S2 => return Err(invalid()),
-        FixedTile::Tf32Sm120M64N128S3 if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M64N128S2 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M64N128S3 if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3"
         }
-        FixedTile::Tf32Sm120M64N128S3 => return Err(invalid()),
-        FixedTile::Tf32Sm120M64S2ProducerWarp if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M64N128S3 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M64S2ProducerWarp if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp"
         }
-        FixedTile::Tf32Sm120M64S2ProducerWarp => return Err(invalid()),
-        FixedTile::Tf32Sm120M64S2 if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M64S2ProducerWarp => return Err(invalid()),
+        InferenceTile::Tf32Sm120M64S2 if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2"
         }
-        FixedTile::Tf32Sm120M64S2 => return Err(invalid()),
-        FixedTile::Tf32Sm120M64S2PairStore if row == "tf32" && cc == (12, 0) => {
+        InferenceTile::Tf32Sm120M64S2 => return Err(invalid()),
+        InferenceTile::Tf32Sm120M64S2PairStore if row == "tf32" && cc == (12, 0) => {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store"
         }
-        FixedTile::Tf32Sm120M64S2PairStore => return Err(invalid()),
-        FixedTile::Sm120Half(half) if cc == (12, 0) => match (half, row) {
-            (FixedSm120HalfTile::M64N64Bk64S2, "bf16") => "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
-            (FixedSm120HalfTile::M64N64Bk64S2, "f16") => "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
-            (FixedSm120HalfTile::M64N64Bk64S2, "bf16_f32") => {
+        InferenceTile::Tf32Sm120M64S2PairStore => return Err(invalid()),
+        InferenceTile::Sm120Half(half) if cc == (12, 0) => match (half, row) {
+            (InferenceSm120HalfTile::M64N64Bk64S2, "bf16") => "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
+            (InferenceSm120HalfTile::M64N64Bk64S2, "f16") => "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
+            (InferenceSm120HalfTile::M64N64Bk64S2, "bf16_f32") => {
                 "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_bf16"
             }
-            (FixedSm120HalfTile::M64N64Bk64S2, "f16_f32") => {
+            (InferenceSm120HalfTile::M64N64Bk64S2, "f16_f32") => {
                 "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_f16"
             }
-            (FixedSm120HalfTile::M64N128Bk64S2, "bf16") => {
+            (InferenceSm120HalfTile::M64N128Bk64S2, "bf16") => {
                 "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16"
             }
-            (FixedSm120HalfTile::M64N128Bk64S2, "f16") => "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16",
-            (FixedSm120HalfTile::M64N128Bk64S2, "bf16_f32") => {
+            (InferenceSm120HalfTile::M64N128Bk64S2, "f16") => "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16",
+            (InferenceSm120HalfTile::M64N128Bk64S2, "bf16_f32") => {
                 "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_bf16"
             }
-            (FixedSm120HalfTile::M64N128Bk64S2, "f16_f32") => {
+            (InferenceSm120HalfTile::M64N128Bk64S2, "f16_f32") => {
                 "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_f16"
             }
-            (FixedSm120HalfTile::M128N64Bk32S3, "bf16") => {
+            (InferenceSm120HalfTile::M128N64Bk32S3, "bf16") => {
                 "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16"
             }
-            (FixedSm120HalfTile::M128N64Bk32S3, "f16") => "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16",
-            (FixedSm120HalfTile::M128N64Bk32S3, "bf16_f32") => {
+            (InferenceSm120HalfTile::M128N64Bk32S3, "f16") => "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16",
+            (InferenceSm120HalfTile::M128N64Bk32S3, "bf16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_bf16"
             }
-            (FixedSm120HalfTile::M128N64Bk32S3, "f16_f32") => {
+            (InferenceSm120HalfTile::M128N64Bk32S3, "f16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_f16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S2, "bf16") => {
+            (InferenceSm120HalfTile::M128N128Bk32S2, "bf16") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S2, "f16") => {
+            (InferenceSm120HalfTile::M128N128Bk32S2, "f16") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S2, "bf16_f32") => {
+            (InferenceSm120HalfTile::M128N128Bk32S2, "bf16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_bf16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S2, "f16_f32") => {
+            (InferenceSm120HalfTile::M128N128Bk32S2, "f16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_f16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S3, "bf16") => {
+            (InferenceSm120HalfTile::M128N128Bk32S3, "bf16") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S3, "f16") => {
+            (InferenceSm120HalfTile::M128N128Bk32S3, "f16") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S3, "bf16_f32") => {
+            (InferenceSm120HalfTile::M128N128Bk32S3, "bf16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_bf16"
             }
-            (FixedSm120HalfTile::M128N128Bk32S3, "f16_f32") => {
+            (InferenceSm120HalfTile::M128N128Bk32S3, "f16_f32") => {
                 "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_f16"
             }
             _ => return Err(invalid()),
         },
-        FixedTile::Sm120Half(_) => return Err(invalid()),
-        FixedTile::Tc128 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
+        InferenceTile::Sm120Half(_) => return Err(invalid()),
+        InferenceTile::Tc128 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
             "bf16" => "gemm_bi_nn_tc128_bf16",
             "f16" => "gemm_bi_nn_tc128_f16",
             "bf16_f32" => "gemm_bi_nn_tc128_f32out_bf16",
             "f16_f32" => "gemm_bi_nn_tc128_f32out_f16",
             _ => unreachable!(),
         },
-        FixedTile::Tc128 => return Err(invalid()),
-        FixedTile::Tc128Sm89Pipeline if cc == (8, 9) && row == "bf16" => {
+        InferenceTile::Tc128 => return Err(invalid()),
+        InferenceTile::Tc128Sm89Pipeline if cc == (8, 9) && row == "bf16" => {
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16"
         }
-        FixedTile::Tc128Sm89Pipeline if cc == (8, 9) && row == "f16" => {
+        InferenceTile::Tc128Sm89Pipeline if cc == (8, 9) && row == "f16" => {
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16"
         }
-        FixedTile::Tc128Sm89Pipeline => return Err(invalid()),
-        FixedTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "bf16" => {
+        InferenceTile::Tc128Sm89Pipeline => return Err(invalid()),
+        InferenceTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "bf16" => {
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16"
         }
-        FixedTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "f16" => {
+        InferenceTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "f16" => {
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16"
         }
-        FixedTile::Tc128Sm89Swizzle => return Err(invalid()),
-        FixedTile::Tc128Sm89S3 if cc == (8, 9) && row == "bf16" => {
+        InferenceTile::Tc128Sm89Swizzle => return Err(invalid()),
+        InferenceTile::Tc128Sm89S3 if cc == (8, 9) && row == "bf16" => {
             "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16"
         }
-        FixedTile::Tc128Sm89S3 if cc == (8, 9) && row == "f16" => {
+        InferenceTile::Tc128Sm89S3 if cc == (8, 9) && row == "f16" => {
             "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16"
         }
-        FixedTile::Tc128Sm89S3 => return Err(invalid()),
-        FixedTile::TcM64N64Sm89S3 if cc == (8, 9) && row == "f16" => {
+        InferenceTile::Tc128Sm89S3 => return Err(invalid()),
+        InferenceTile::TcM64N64Sm89S3 if cc == (8, 9) && row == "f16" => {
             "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16"
         }
-        FixedTile::TcM128N64Sm89S2 if cc == (8, 9) && row == "f16" => {
+        InferenceTile::TcM128N64Sm89S2 if cc == (8, 9) && row == "f16" => {
             "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16"
         }
-        FixedTile::TcM64N64Sm89S3 | FixedTile::TcM128N64Sm89S2 => return Err(invalid()),
-        FixedTile::TcWn64 if row == "bf16" => "gemm_bi_nn_tcwn64_bf16",
-        FixedTile::TcWn64 if row == "f16" => "gemm_bi_nn_tcwn64_f16",
-        FixedTile::TcWn64 => return Err(invalid()),
-        FixedTile::TcW64 if row == "bf16" => "gemm_bi_nn_tcw64_bf16",
-        FixedTile::TcW64 if row == "f16" => "gemm_bi_nn_tcw64_f16",
-        FixedTile::TcW64 => return Err(invalid()),
-        FixedTile::Tc64 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
+        InferenceTile::TcM64N64Sm89S3 | InferenceTile::TcM128N64Sm89S2 => return Err(invalid()),
+        InferenceTile::TcWn64 if row == "bf16" => "gemm_bi_nn_tcwn64_bf16",
+        InferenceTile::TcWn64 if row == "f16" => "gemm_bi_nn_tcwn64_f16",
+        InferenceTile::TcWn64 => return Err(invalid()),
+        InferenceTile::TcW64 if row == "bf16" => "gemm_bi_nn_tcw64_bf16",
+        InferenceTile::TcW64 if row == "f16" => "gemm_bi_nn_tcw64_f16",
+        InferenceTile::TcW64 => return Err(invalid()),
+        InferenceTile::Tc64 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
             "bf16" => "gemm_bi_nn_tc64_bf16",
             "f16" => "gemm_bi_nn_tc64_f16",
             "bf16_f32" => "gemm_bi_nn_tc64_f32out_bf16",
             "f16_f32" => "gemm_bi_nn_tc64_f32out_f16",
             _ => unreachable!(),
         },
-        FixedTile::Tc64 => return Err(invalid()),
-        FixedTile::Tc16 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
+        InferenceTile::Tc64 => return Err(invalid()),
+        InferenceTile::Tc16 if matches!(row, "bf16" | "f16" | "bf16_f32" | "f16_f32") => match row {
             "bf16" => "gemm_bi_nn_tc16_bf16",
             "f16" => "gemm_bi_nn_tc16_f16",
             "bf16_f32" => "gemm_bi_nn_tc16_f32out_bf16",
             "f16_f32" => "gemm_bi_nn_tc16_f32out_f16",
             _ => unreachable!(),
         },
-        FixedTile::Tc16 => return Err(invalid()),
-        FixedTile::Legacy => match row {
+        InferenceTile::Tc16 => return Err(invalid()),
+        InferenceTile::Legacy => match row {
             "bf16" => "gemm_bi_bf16_bf16",
             "f16" => "gemm_bi_f16_f16",
             "bf16_f32" => "gemm_bi_bf16_f32",
@@ -12334,97 +12334,97 @@ fn fixed_force_spec(
             "f32_exact" | "f32_exact_fast" => "gemm_bi_f32_f32_s2",
             _ => return Err(invalid()),
         },
-        FixedTile::Sm90Wgmma | FixedTile::Sm100Tcgen => return Err(invalid()),
-        FixedTile::F32Sm89N64CopyPlan
+        InferenceTile::Sm90Wgmma | InferenceTile::Sm100Tcgen => return Err(invalid()),
+        InferenceTile::F32Sm89N64CopyPlan
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (8, 9) =>
         {
             "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
         }
-        FixedTile::F32Sm89N64CopyPlan => return Err(invalid()),
-        FixedTile::F32Sm120N64CopyPlan
+        InferenceTile::F32Sm89N64CopyPlan => return Err(invalid()),
+        InferenceTile::F32Sm120N64CopyPlan
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
         }
-        FixedTile::F32Sm120N64CopyPlan => return Err(invalid()),
-        FixedTile::F32Sm120N64CopyPlanT256
+        InferenceTile::F32Sm120N64CopyPlan => return Err(invalid()),
+        InferenceTile::F32Sm120N64CopyPlanT256
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1"
         }
-        FixedTile::F32Sm120N64CopyPlanT256 => return Err(invalid()),
-        FixedTile::F32Sm120M128N64CopyPlanT256
+        InferenceTile::F32Sm120N64CopyPlanT256 => return Err(invalid()),
+        InferenceTile::F32Sm120M128N64CopyPlanT256
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1"
         }
-        FixedTile::F32Sm120M128N64CopyPlanT256 => return Err(invalid()),
-        FixedTile::F32Sm120N64Sliced
+        InferenceTile::F32Sm120M128N64CopyPlanT256 => return Err(invalid()),
+        InferenceTile::F32Sm120N64Sliced
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"
         }
-        FixedTile::F32Sm120N64Sliced => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaM128N64
+        InferenceTile::F32Sm120N64Sliced => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaM128N64
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaM128N64 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaM64N128
+        InferenceTile::F32Sm120TmaFmaM128N64 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaM64N128
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaM64N128 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        InferenceTile::F32Sm120TmaFmaM64N128 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
             if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2"
         }
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => return Err(invalid()),
+        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => return Err(invalid()),
     };
     let bias_contract = match tile {
-        FixedTile::F32Sm120TmaFmaM128N64
-        | FixedTile::F32Sm120TmaFmaM64N128
-        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
-        | FixedTile::TcM64N64Sm89S3
-        | FixedTile::TcM128N64Sm89S2 => FixedForceBiasContract::NoBias,
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
-        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => FixedForceBiasContract::WithBias,
+        InferenceTile::F32Sm120TmaFmaM128N64
+        | InferenceTile::F32Sm120TmaFmaM64N128
+        | InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        | InferenceTile::TcM64N64Sm89S3
+        | InferenceTile::TcM128N64Sm89S2 => FixedForceBiasContract::NoBias,
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => FixedForceBiasContract::WithBias,
         _ => FixedForceBiasContract::Either,
     };
     Ok(FixedForceSpec {
@@ -12438,85 +12438,85 @@ fn fixed_force_spec(
     })
 }
 
-fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
+fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<InferenceTile> {
     assert!(matches!(cc, (8, 9) | (12, 0)), "unadmitted comparator CC");
     let mut tiles = match row {
         "bf16" | "f16" => vec![
-            FixedTile::Legacy,
-            FixedTile::Tc16,
-            FixedTile::Tc64,
-            FixedTile::Tc128,
-            FixedTile::TcW64,
-            FixedTile::TcWn64,
+            InferenceTile::Legacy,
+            InferenceTile::Tc16,
+            InferenceTile::Tc64,
+            InferenceTile::Tc128,
+            InferenceTile::TcW64,
+            InferenceTile::TcWn64,
         ],
         "bf16_f32" | "f16_f32" => vec![
-            FixedTile::Legacy,
-            FixedTile::Tc16,
-            FixedTile::Tc64,
-            FixedTile::Tc128,
+            InferenceTile::Legacy,
+            InferenceTile::Tc16,
+            InferenceTile::Tc64,
+            InferenceTile::Tc128,
         ],
         "tf32" => vec![
-            FixedTile::Tf32M128S2,
-            FixedTile::Tf32M128S3,
-            FixedTile::Tf32M64S2,
-            FixedTile::Tf32M64S3,
-            FixedTile::Tf32M16S4,
+            InferenceTile::Tf32M128S2,
+            InferenceTile::Tf32M128S3,
+            InferenceTile::Tf32M64S2,
+            InferenceTile::Tf32M64S3,
+            InferenceTile::Tf32M16S4,
         ],
-        "f32_exact" | "f32_exact_fast" => vec![FixedTile::Legacy, FixedTile::F32N128S2],
+        "f32_exact" | "f32_exact_fast" => vec![InferenceTile::Legacy, InferenceTile::F32N128S2],
         _ => panic!("unsupported explicit vendor row {row:?}"),
     };
     if cc == (12, 0) {
         match row {
             "bf16" | "f16" | "bf16_f32" | "f16_f32" => {
-                tiles.extend(FixedSm120HalfTile::ALL.map(FixedTile::Sm120Half))
+                tiles.extend(InferenceSm120HalfTile::ALL.map(InferenceTile::Sm120Half))
             }
             "tf32" => tiles.extend([
-                FixedTile::Tf32Sm120M128S2,
-                FixedTile::Tf32Sm120M128S3,
-                FixedTile::Tf32Sm120M64N128S2,
-                FixedTile::Tf32Sm120M64N128S3,
-                FixedTile::Tf32Sm120M64S2ProducerWarp,
-                FixedTile::Tf32Sm120M64S2,
-                FixedTile::Tf32Sm120M64S2PairStore,
+                InferenceTile::Tf32Sm120M128S2,
+                InferenceTile::Tf32Sm120M128S3,
+                InferenceTile::Tf32Sm120M64N128S2,
+                InferenceTile::Tf32Sm120M64N128S3,
+                InferenceTile::Tf32Sm120M64S2ProducerWarp,
+                InferenceTile::Tf32Sm120M64S2,
+                InferenceTile::Tf32Sm120M64S2PairStore,
             ]),
             "f32_exact" | "f32_exact_fast" => tiles.extend([
-                FixedTile::F32Sm120N64CopyPlan,
-                FixedTile::F32Sm120N64CopyPlanT256,
-                FixedTile::F32Sm120M128N64CopyPlanT256,
-                FixedTile::F32Sm120N64Sliced,
-                FixedTile::F32Sm120TmaFmaM128N64,
-                FixedTile::F32Sm120TmaFmaM64N128,
-                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-                FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
-                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
-                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-                FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
+                InferenceTile::F32Sm120N64CopyPlan,
+                InferenceTile::F32Sm120N64CopyPlanT256,
+                InferenceTile::F32Sm120M128N64CopyPlanT256,
+                InferenceTile::F32Sm120N64Sliced,
+                InferenceTile::F32Sm120TmaFmaM128N64,
+                InferenceTile::F32Sm120TmaFmaM64N128,
+                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+                InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
+                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
+                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+                InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
             ]),
             _ => {}
         }
     } else if row == "tf32" {
         // The wide symbol is not bound in the committed CC12 module cohort.
-        tiles.insert(2, FixedTile::Tf32M128N128S3);
-        tiles.insert(3, FixedTile::Tf32RnaM128N128S3);
-        tiles.insert(4, FixedTile::Tf32RnaM128N96S3);
+        tiles.insert(2, InferenceTile::Tf32M128N128S3);
+        tiles.insert(3, InferenceTile::Tf32RnaM128N128S3);
+        tiles.insert(4, InferenceTile::Tf32RnaM128N96S3);
     } else if matches!(row, "bf16" | "f16") {
-        tiles.push(FixedTile::Tc128Sm89Pipeline);
-        tiles.push(FixedTile::Tc128Sm89Swizzle);
-        tiles.push(FixedTile::Tc128Sm89S3);
+        tiles.push(InferenceTile::Tc128Sm89Pipeline);
+        tiles.push(InferenceTile::Tc128Sm89Swizzle);
+        tiles.push(InferenceTile::Tc128Sm89S3);
         if row == "f16" {
-            tiles.extend([FixedTile::TcM64N64Sm89S3, FixedTile::TcM128N64Sm89S2]);
+            tiles.extend([InferenceTile::TcM64N64Sm89S3, InferenceTile::TcM128N64Sm89S2]);
         }
     } else if matches!(row, "f32_exact" | "f32_exact_fast") {
-        tiles.push(FixedTile::F32Sm89N64CopyPlan);
+        tiles.push(InferenceTile::F32Sm89N64CopyPlan);
     }
     tiles
 }
 
 fn fixed_explicit_vendor_filter_tiles(
-    inventory: &[FixedTile],
+    inventory: &[InferenceTile],
     requested: Option<&str>,
-) -> Result<Vec<FixedTile>, String> {
+) -> Result<Vec<InferenceTile>, String> {
     let Some(requested) = requested else {
         return Ok(inventory.to_vec());
     };
@@ -12558,7 +12558,7 @@ fn fixed_explicit_vendor_paths(requested: Option<&str>) -> Result<Vec<&'static s
 }
 
 fn fixed_explicit_vendor_pipeline_graph_contract(
-    tile: FixedTile,
+    tile: InferenceTile,
     dtype: WeightDtype,
     node_count: usize,
     symbol: &str,
@@ -12570,11 +12570,11 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
     pointers: [u64; 4],
     expected_pointers: [u64; 4],
     bundle: [u32; 8],
-    shape: FixedShape,
+    shape: InferenceShape,
 ) -> Result<(), String> {
     if matches!(
         tile,
-        FixedTile::Tf32RnaM128N96S3 | FixedTile::TcM64N64Sm89S3 | FixedTile::TcM128N64Sm89S2
+        InferenceTile::Tf32RnaM128N96S3 | InferenceTile::TcM64N64Sm89S3 | InferenceTile::TcM128N64Sm89S2
     ) {
         return fixed_explicit_vendor_finalist_graph_contract(
             tile,
@@ -12598,9 +12598,9 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
         WeightDtype::F32 => return Err("Ada half pipeline cannot have F32 storage".into()),
     };
     let (family, expected_shared) = match tile {
-        FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
-        FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
-        FixedTile::Tc128Sm89S3 => ("s3", 98_304),
+        InferenceTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
+        InferenceTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
+        InferenceTile::Tc128Sm89S3 => ("s3", 98_304),
         _ => return Err(format!("{tile:?} is not an Ada half physical descriptor")),
     };
     let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{suffix}");
@@ -12654,26 +12654,26 @@ fn fixed_explicit_vendor_pair_store_graph_contract(
     Ok(())
 }
 
-fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: FixedTile) -> bool {
+fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: InferenceTile) -> bool {
     paths.contains(&"graph")
         || fixed_explicit_vendor_ada_descriptor(tile)
-        || tile == FixedTile::Tf32RnaM128N128S3
+        || tile == InferenceTile::Tf32RnaM128N128S3
 }
 
-fn fixed_explicit_vendor_ada_descriptor(tile: FixedTile) -> bool {
+fn fixed_explicit_vendor_ada_descriptor(tile: InferenceTile) -> bool {
     matches!(
         tile,
-        FixedTile::Tc128Sm89Pipeline
-            | FixedTile::Tc128Sm89Swizzle
-            | FixedTile::Tc128Sm89S3
-            | FixedTile::Tf32RnaM128N96S3
-            | FixedTile::TcM64N64Sm89S3
-            | FixedTile::TcM128N64Sm89S2
+        InferenceTile::Tc128Sm89Pipeline
+            | InferenceTile::Tc128Sm89Swizzle
+            | InferenceTile::Tc128Sm89S3
+            | InferenceTile::Tf32RnaM128N96S3
+            | InferenceTile::TcM64N64Sm89S3
+            | InferenceTile::TcM128N64Sm89S2
     )
 }
 
 fn fixed_explicit_vendor_finalist_graph_contract(
-    tile: FixedTile,
+    tile: InferenceTile,
     dtype: WeightDtype,
     node_count: usize,
     symbol: &str,
@@ -12685,12 +12685,12 @@ fn fixed_explicit_vendor_finalist_graph_contract(
     pointers: [u64; 4],
     expected_pointers: [u64; 4],
     bundle: [u32; 8],
-    shape: FixedShape,
+    shape: InferenceShape,
 ) -> Result<(), String> {
     let (row, bm, bn, threads, shared, tf32) = match tile {
-        FixedTile::Tf32RnaM128N96S3 => ("tf32", 128usize, 96usize, 256, 86_016, true),
-        FixedTile::TcM64N64Sm89S3 => ("f16", 64, 64, 128, 49_152, false),
-        FixedTile::TcM128N64Sm89S2 => ("f16", 128, 64, 128, 49_152, false),
+        InferenceTile::Tf32RnaM128N96S3 => ("tf32", 128usize, 96usize, 256, 86_016, true),
+        InferenceTile::TcM64N64Sm89S3 => ("f16", 64, 64, 128, 49_152, false),
+        InferenceTile::TcM128N64Sm89S2 => ("f16", 128, 64, 128, 49_152, false),
         _ => return Err(format!("{tile:?} is not an Ada finalist descriptor")),
     };
     let spec = fixed_force_spec(row, (8, 9), tile)?;
@@ -12762,9 +12762,9 @@ fn fixed_explicit_vendor_finalist_graph_contract(
 fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
     for (tile, dtype, shape, grid, block, shared) in [
         (
-            FixedTile::Tf32RnaM128N96S3,
+            InferenceTile::Tf32RnaM128N96S3,
             WeightDtype::F32,
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -12774,9 +12774,9 @@ fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
             86_016,
         ),
         (
-            FixedTile::TcM64N64Sm89S3,
+            InferenceTile::TcM64N64Sm89S3,
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -12786,9 +12786,9 @@ fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
             49_152,
         ),
         (
-            FixedTile::TcM128N64Sm89S2,
+            InferenceTile::TcM128N64Sm89S2,
             WeightDtype::F16,
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -12987,21 +12987,21 @@ fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
 fn fixed_explicit_vendor_rna_wide_eager_needs_identity_graph() {
     assert!(fixed_explicit_vendor_needs_identity_graph(
         &["eager"],
-        FixedTile::Tf32RnaM128N128S3,
+        InferenceTile::Tf32RnaM128N128S3,
     ));
-    for tile in [FixedTile::Tf32RnaM128N128S3, FixedTile::Tf32M64S2] {
+    for tile in [InferenceTile::Tf32RnaM128N128S3, InferenceTile::Tf32M64S2] {
         for paths in [&["graph"][..], &["eager", "graph"][..]] {
             assert!(fixed_explicit_vendor_needs_identity_graph(paths, tile));
         }
     }
     assert!(!fixed_explicit_vendor_needs_identity_graph(
         &["eager"],
-        FixedTile::Tf32M64S2,
+        InferenceTile::Tf32M64S2,
     ));
     for tile in [
-        FixedTile::Tc128Sm89Pipeline,
-        FixedTile::Tc128Sm89Swizzle,
-        FixedTile::Tc128Sm89S3,
+        InferenceTile::Tc128Sm89Pipeline,
+        InferenceTile::Tc128Sm89Swizzle,
+        InferenceTile::Tc128Sm89S3,
     ] {
         assert!(
             fixed_explicit_vendor_needs_identity_graph(&["eager"], tile),
@@ -13173,13 +13173,13 @@ fn fixed_explicit_vendor_poison_output(ctx: &GpuCtx, buffer: &DtypedBuf) {
     );
 }
 
-// Inspect the captured Driver graph, not the returned FixedTile. This runs
+// Inspect the captured Driver graph, not the returned InferenceTile. This runs
 // outside capture and timing; the optional bias symbol proves the vendor
 // graph includes the broadcast as well as at least one GEMM kernel.
 fn fixed_explicit_vendor_graph_inventory(
     graph: &CudaGraph,
     label: &str,
-    ada_descriptor: Option<(FixedTile, WeightDtype, FixedFwdOperands, FixedShape)>,
+    ada_descriptor: Option<(InferenceTile, WeightDtype, InferenceFwdOperands, InferenceShape)>,
     bias_symbol: Option<&str>,
 ) -> String {
     use cudarc::driver::sys;
@@ -13461,84 +13461,84 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
     for row in ["bf16", "f16"] {
         let sm120 = fixed_explicit_vendor_tiles(row, (12, 0));
         assert_eq!(sm120.len(), 11);
-        assert!(sm120.contains(&FixedTile::Legacy));
-        for tile in FixedSm120HalfTile::ALL {
-            assert!(sm120.contains(&FixedTile::Sm120Half(tile)));
+        assert!(sm120.contains(&InferenceTile::Legacy));
+        for tile in InferenceSm120HalfTile::ALL {
+            assert!(sm120.contains(&InferenceTile::Sm120Half(tile)));
         }
-        assert!(!sm120.contains(&FixedTile::Tc128Sm89Pipeline));
-        assert!(!sm120.contains(&FixedTile::Tc128Sm89Swizzle));
-        assert!(!sm120.contains(&FixedTile::Tc128Sm89S3));
+        assert!(!sm120.contains(&InferenceTile::Tc128Sm89Pipeline));
+        assert!(!sm120.contains(&InferenceTile::Tc128Sm89Swizzle));
+        assert!(!sm120.contains(&InferenceTile::Tc128Sm89S3));
         let ada = fixed_explicit_vendor_tiles(row, (8, 9));
         assert_eq!(ada.len(), if row == "f16" { 11 } else { 9 });
-        assert!(ada.contains(&FixedTile::Legacy));
-        assert!(ada.contains(&FixedTile::Tc128Sm89Pipeline));
-        assert!(ada.contains(&FixedTile::Tc128Sm89Swizzle));
-        assert!(ada.contains(&FixedTile::Tc128Sm89S3));
-        for tile in [FixedTile::TcM64N64Sm89S3, FixedTile::TcM128N64Sm89S2] {
+        assert!(ada.contains(&InferenceTile::Legacy));
+        assert!(ada.contains(&InferenceTile::Tc128Sm89Pipeline));
+        assert!(ada.contains(&InferenceTile::Tc128Sm89Swizzle));
+        assert!(ada.contains(&InferenceTile::Tc128Sm89S3));
+        for tile in [InferenceTile::TcM64N64Sm89S3, InferenceTile::TcM128N64Sm89S2] {
             assert_eq!(ada.contains(&tile), row == "f16");
             assert!(!sm120.contains(&tile));
         }
         assert!(
             ada.iter()
-                .all(|tile| !matches!(tile, FixedTile::Sm120Half(_)))
+                .all(|tile| !matches!(tile, InferenceTile::Sm120Half(_)))
         );
     }
     let sm120 = fixed_explicit_vendor_tiles("tf32", (12, 0));
     assert_eq!(sm120.len(), 12);
-    assert!(!sm120.contains(&FixedTile::Tf32M128N128S3));
-    assert!(!sm120.contains(&FixedTile::Tf32RnaM128N128S3));
+    assert!(!sm120.contains(&InferenceTile::Tf32M128N128S3));
+    assert!(!sm120.contains(&InferenceTile::Tf32RnaM128N128S3));
     for tile in [
-        FixedTile::Tf32Sm120M128S2,
-        FixedTile::Tf32Sm120M128S3,
-        FixedTile::Tf32Sm120M64N128S2,
-        FixedTile::Tf32Sm120M64N128S3,
-        FixedTile::Tf32Sm120M64S2ProducerWarp,
-        FixedTile::Tf32Sm120M64S2,
-        FixedTile::Tf32Sm120M64S2PairStore,
+        InferenceTile::Tf32Sm120M128S2,
+        InferenceTile::Tf32Sm120M128S3,
+        InferenceTile::Tf32Sm120M64N128S2,
+        InferenceTile::Tf32Sm120M64N128S3,
+        InferenceTile::Tf32Sm120M64S2ProducerWarp,
+        InferenceTile::Tf32Sm120M64S2,
+        InferenceTile::Tf32Sm120M64S2PairStore,
     ] {
         assert!(sm120.contains(&tile));
     }
     let ada = fixed_explicit_vendor_tiles("tf32", (8, 9));
     assert_eq!(ada.len(), 8);
-    assert!(ada.contains(&FixedTile::Tf32M128N128S3));
-    assert!(ada.contains(&FixedTile::Tf32RnaM128N128S3));
-    assert!(ada.contains(&FixedTile::Tf32RnaM128N96S3));
-    assert!(!sm120.contains(&FixedTile::Tf32RnaM128N96S3));
-    assert!(!ada.contains(&FixedTile::Tc128Sm89Pipeline));
+    assert!(ada.contains(&InferenceTile::Tf32M128N128S3));
+    assert!(ada.contains(&InferenceTile::Tf32RnaM128N128S3));
+    assert!(ada.contains(&InferenceTile::Tf32RnaM128N96S3));
+    assert!(!sm120.contains(&InferenceTile::Tf32RnaM128N96S3));
+    assert!(!ada.contains(&InferenceTile::Tc128Sm89Pipeline));
     assert_eq!(
         fixed_explicit_vendor_tiles("f32_exact", (8, 9)),
         [
-            FixedTile::Legacy,
-            FixedTile::F32N128S2,
-            FixedTile::F32Sm89N64CopyPlan,
+            InferenceTile::Legacy,
+            InferenceTile::F32N128S2,
+            InferenceTile::F32Sm89N64CopyPlan,
         ]
     );
     assert_eq!(
         fixed_explicit_vendor_tiles("f32_exact", (12, 0)),
         [
-            FixedTile::Legacy,
-            FixedTile::F32N128S2,
-            FixedTile::F32Sm120N64CopyPlan,
-            FixedTile::F32Sm120N64CopyPlanT256,
-            FixedTile::F32Sm120M128N64CopyPlanT256,
-            FixedTile::F32Sm120N64Sliced,
-            FixedTile::F32Sm120TmaFmaM128N64,
-            FixedTile::F32Sm120TmaFmaM64N128,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
+            InferenceTile::Legacy,
+            InferenceTile::F32N128S2,
+            InferenceTile::F32Sm120N64CopyPlan,
+            InferenceTile::F32Sm120N64CopyPlanT256,
+            InferenceTile::F32Sm120M128N64CopyPlanT256,
+            InferenceTile::F32Sm120N64Sliced,
+            InferenceTile::F32Sm120TmaFmaM128N64,
+            InferenceTile::F32Sm120TmaFmaM64N128,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
         ]
     );
     for row in ["bf16_f32", "f16_f32"] {
         assert_eq!(fixed_explicit_vendor_tiles(row, (8, 9)).len(), 4);
         let sm120 = fixed_explicit_vendor_tiles(row, (12, 0));
         assert_eq!(sm120.len(), 9);
-        assert!(sm120.contains(&FixedTile::Legacy));
-        for tile in FixedSm120HalfTile::ALL {
-            assert!(sm120.contains(&FixedTile::Sm120Half(tile)));
+        assert!(sm120.contains(&InferenceTile::Legacy));
+        for tile in InferenceSm120HalfTile::ALL {
+            assert!(sm120.contains(&InferenceTile::Sm120Half(tile)));
         }
     }
 }
@@ -13687,7 +13687,7 @@ fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
     let mixed = fixed_force_spec(
         "bf16_f32",
         (12, 0),
-        FixedTile::Sm120Half(FixedSm120HalfTile::M128N64Bk32S3),
+        InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N64Bk32S3),
     )
     .expect("SM120 mixed-output tile must have a force spec");
     assert_eq!(mixed.input_dtype, WeightDtype::Bf16);
@@ -13702,7 +13702,7 @@ fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
     let postbias = fixed_force_spec(
         "f32_exact",
         (12, 0),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4,
     )
     .expect("SM120 post-bias tile must have a force spec");
     assert_eq!(
@@ -13715,7 +13715,7 @@ fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
     let nobias = fixed_force_spec(
         "f32_exact",
         (12, 0),
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
+        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256,
     )
     .expect("SM120 no-bias tile must have a force spec");
     assert!(nobias.bias_contract.allows(false));
@@ -13724,7 +13724,7 @@ fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
 
 #[test]
 fn fixed_force_bias_contract_requires_disallowed_launch_to_fail() {
-    let spec = fixed_force_spec("f32_exact", (12, 0), FixedTile::F32Sm120TmaFmaM128N64)
+    let spec = fixed_force_spec("f32_exact", (12, 0), InferenceTile::F32Sm120TmaFmaM128N64)
         .expect("SM120 exact TMA no-bias spec");
 
     assert_eq!(
@@ -13751,7 +13751,7 @@ fn fixed_force_bias_contract_requires_disallowed_launch_to_fail() {
     let with_bias = fixed_force_spec(
         "f32_exact",
         (12, 0),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
     )
     .expect("SM120 exact TMA post-bias spec");
     assert_eq!(
@@ -13766,7 +13766,7 @@ fn fixed_force_bias_contract_requires_disallowed_launch_to_fail() {
 
 #[test]
 fn fixed_force_disallowed_candidate_is_invoked_exactly_once() {
-    let spec = fixed_force_spec("f32_exact", (12, 0), FixedTile::F32Sm120TmaFmaM128N64)
+    let spec = fixed_force_spec("f32_exact", (12, 0), InferenceTile::F32Sm120TmaFmaM128N64)
         .expect("SM120 exact TMA no-bias spec");
     let launches = std::cell::Cell::new(0);
     let disposition = fixed_force_run_first_launch(&spec, true, || {
@@ -13823,23 +13823,23 @@ fn fixed_force_enum_registry_is_reverse_complete_for_every_row_and_architecture(
     for tile in universe.iter().copied() {
         assert!(
             !unique.contains(&tile),
-            "duplicate FixedTile registry entry {tile:?}"
+            "duplicate InferenceTile registry entry {tile:?}"
         );
         unique.push(tile);
     }
     let registered_halves = universe
         .iter()
         .filter_map(|tile| match tile {
-            FixedTile::Sm120Half(half) => Some(*half),
+            InferenceTile::Sm120Half(half) => Some(*half),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         registered_halves.len(),
-        FixedSm120HalfTile::ALL.len(),
-        "FixedSm120HalfTile::ALL must exactly match the exhaustive force registry"
+        InferenceSm120HalfTile::ALL.len(),
+        "InferenceSm120HalfTile::ALL must exactly match the exhaustive force registry"
     );
-    for half in FixedSm120HalfTile::ALL {
+    for half in InferenceSm120HalfTile::ALL {
         assert!(
             registered_halves.contains(&half),
             "nested SM120 half tile {half:?} escaped the force registry"
@@ -13874,34 +13874,34 @@ fn fixed_force_enum_registry_is_reverse_complete_for_every_row_and_architecture(
 
 #[test]
 fn fixed_force_specs_reject_foreign_arch_and_dtype_pairs() {
-    assert!(fixed_force_spec("bf16", (12, 0), FixedTile::Tc128Sm89Pipeline).is_err());
+    assert!(fixed_force_spec("bf16", (12, 0), InferenceTile::Tc128Sm89Pipeline).is_err());
     assert!(
         fixed_force_spec(
             "bf16_f32",
             (8, 9),
-            FixedTile::Sm120Half(FixedSm120HalfTile::M64N64Bk64S2)
+            InferenceTile::Sm120Half(InferenceSm120HalfTile::M64N64Bk64S2)
         )
         .is_err()
     );
-    assert!(fixed_force_spec("tf32", (12, 0), FixedTile::Tf32M128N128S3).is_err());
-    assert!(fixed_force_spec("bf16", (8, 9), FixedTile::TcW64).is_ok());
-    assert!(fixed_force_spec("bf16_f32", (8, 9), FixedTile::TcW64).is_err());
+    assert!(fixed_force_spec("tf32", (12, 0), InferenceTile::Tf32M128N128S3).is_err());
+    assert!(fixed_force_spec("bf16", (8, 9), InferenceTile::TcW64).is_ok());
+    assert!(fixed_force_spec("bf16_f32", (8, 9), InferenceTile::TcW64).is_err());
 }
 
 #[test]
 fn fixed_explicit_vendor_tile_filter_is_strict_and_row_scoped() {
-    let inventory = [FixedTile::Tc128, FixedTile::Tc128Sm89Pipeline];
+    let inventory = [InferenceTile::Tc128, InferenceTile::Tc128Sm89Pipeline];
     assert_eq!(
         fixed_explicit_vendor_filter_tiles(&inventory, None).unwrap(),
-        [FixedTile::Tc128, FixedTile::Tc128Sm89Pipeline]
+        [InferenceTile::Tc128, InferenceTile::Tc128Sm89Pipeline]
     );
     assert_eq!(
         fixed_explicit_vendor_filter_tiles(&inventory, Some("Tc128Sm89Pipeline")).unwrap(),
-        [FixedTile::Tc128Sm89Pipeline]
+        [InferenceTile::Tc128Sm89Pipeline]
     );
     assert_eq!(
         fixed_explicit_vendor_filter_tiles(&inventory, Some("Tc128Sm89Pipeline,Tc128")).unwrap(),
-        [FixedTile::Tc128Sm89Pipeline, FixedTile::Tc128]
+        [InferenceTile::Tc128Sm89Pipeline, InferenceTile::Tc128]
     );
     for invalid in [
         "",
@@ -13978,7 +13978,7 @@ fn fixed_explicit_vendor_paths_default_to_full_eager_and_graph() {
 
 #[test]
 fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch() {
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 384,
         n: 1928,
@@ -13995,37 +13995,37 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
     };
     for (tile, dtype, symbol, required_shared) in [
         (
-            FixedTile::Tc128Sm89Pipeline,
+            InferenceTile::Tc128Sm89Pipeline,
             WeightDtype::Bf16,
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
             71_680,
         ),
         (
-            FixedTile::Tc128Sm89Pipeline,
+            InferenceTile::Tc128Sm89Pipeline,
             WeightDtype::F16,
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
             71_680,
         ),
         (
-            FixedTile::Tc128Sm89Swizzle,
+            InferenceTile::Tc128Sm89Swizzle,
             WeightDtype::Bf16,
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
             69_632,
         ),
         (
-            FixedTile::Tc128Sm89Swizzle,
+            InferenceTile::Tc128Sm89Swizzle,
             WeightDtype::F16,
             "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
             69_632,
         ),
         (
-            FixedTile::Tc128Sm89S3,
+            InferenceTile::Tc128Sm89S3,
             WeightDtype::Bf16,
             "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
             98_304,
         ),
         (
-            FixedTile::Tc128Sm89S3,
+            InferenceTile::Tc128Sm89S3,
             WeightDtype::F16,
             "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
             98_304,
@@ -14354,17 +14354,17 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                 .expect("explicit vendor bias upload");
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
-                let auto_ops = FixedFwdOperands {
+                let auto_ops = InferenceFwdOperands {
                     c: typed(&auto, row_spec.output_dtype),
                     x: typed(&a, row_spec.input_dtype),
                     w: typed(&b, row_spec.input_dtype),
                     bias_ptr: has_bias.then(|| bias.cached_ptr()),
                 };
-                let vendor_ops = FixedFwdOperands {
+                let vendor_ops = InferenceFwdOperands {
                     c: typed(&vendor, row_spec.output_dtype),
                     ..auto_ops
                 };
-                let reference_ops = FixedFwdOperands {
+                let reference_ops = InferenceFwdOperands {
                     c: typed(&reference, WeightDtype::F32),
                     ..auto_ops
                 };
@@ -14784,21 +14784,21 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                 .expect("rung bias upload");
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
-                let auto_ops = FixedFwdOperands {
+                let auto_ops = InferenceFwdOperands {
                     c: typed(&auto, output_dtype),
                     x: typed(&a, input_dtype),
                     w: typed(&b, input_dtype),
                     bias_ptr: has_bias.then(|| bias.cached_ptr()),
                 };
-                let forced_ops = FixedFwdOperands {
+                let forced_ops = InferenceFwdOperands {
                     c: typed(&forced, output_dtype),
                     ..auto_ops
                 };
-                let vendor_ops = FixedFwdOperands {
+                let vendor_ops = InferenceFwdOperands {
                     c: typed(&vendor, output_dtype),
                     ..auto_ops
                 };
-                let reference_ops = FixedFwdOperands {
+                let reference_ops = InferenceFwdOperands {
                     c: typed(&reference, WeightDtype::F32),
                     ..auto_ops
                 };
@@ -14875,7 +14875,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         (input_dtype, output_dtype)
                     );
                     match fixed_force_run_first_launch(&force_spec, has_bias, || {
-                        fixed_forward_with_tile(&ctx, forced_ops, shape, tile)
+                        inference_forward_with_tile(&ctx, forced_ops, shape, tile)
                     })
                     .unwrap_or_else(|error| panic!("{row}/{} {error}", cell.label))
                     {
@@ -14926,7 +14926,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         &label,
                     );
                     let forced_launch = || {
-                        fixed_forward_with_tile(&ctx, forced_ops, shape, tile)
+                        inference_forward_with_tile(&ctx, forced_ops, shape, tile)
                             .unwrap_or_else(|error| panic!("{label}: {error}"));
                     };
                     // Establish physical identity before timing or numeric-family
@@ -14975,14 +14975,14 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                                 None,
                             )
                         });
-                    let forced_identity_inventory = (tile == FixedTile::Tf32RnaM128N128S3
+                    let forced_identity_inventory = (tile == InferenceTile::Tf32RnaM128N128S3
                         || fixed_explicit_vendor_ada_descriptor(tile))
                     .then(|| {
                         fixed_explicit_vendor_graph_inventory(
                             forced_identity_graph
                                 .as_ref()
                                 .expect("RNA/Ada half always captures an identity graph"),
-                            if tile == FixedTile::Tf32RnaM128N128S3 {
+                            if tile == InferenceTile::Tf32RnaM128N128S3 {
                                 "Tf32RnaM128N128S3"
                             } else {
                                 "forced"
@@ -15055,9 +15055,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         );
                         let forced_inventory = fixed_explicit_vendor_graph_inventory(
                             forced_graph,
-                            if tile == FixedTile::Tf32Sm120M64S2PairStore {
+                            if tile == InferenceTile::Tf32Sm120M64S2PairStore {
                                 "Tf32Sm120M64S2PairStore"
-                            } else if tile == FixedTile::Tf32RnaM128N128S3 {
+                            } else if tile == InferenceTile::Tf32RnaM128N128S3 {
                                 "Tf32RnaM128N128S3"
                             } else {
                                 "forced"
@@ -15455,8 +15455,8 @@ fn fixed_ada_half_forced_direct_pair() {
         digest_hex(&compiler.nvrtc_library_domain),
     );
 
-    let pipeline_tile = FixedTile::Tc128Sm89Pipeline;
-    let swizzle_tile = FixedTile::Tc128Sm89Swizzle;
+    let pipeline_tile = InferenceTile::Tc128Sm89Pipeline;
+    let swizzle_tile = InferenceTile::Tc128Sm89Swizzle;
     let mut records = 0usize;
     for row_index in selected_rows {
         let row_spec = rows[row_index];
@@ -15499,21 +15499,21 @@ fn fixed_ada_half_forced_direct_pair() {
                     has_bias,
                 )
                 .expect("literal revision-45 direct-pair AUTO expectation");
-                let auto_ops = FixedFwdOperands {
+                let auto_ops = InferenceFwdOperands {
                     c: typed(&auto, output_dtype),
                     x: typed(&a, input_dtype),
                     w: typed(&b, input_dtype),
                     bias_ptr: has_bias.then(|| bias.cached_ptr()),
                 };
-                let pipeline_ops = FixedFwdOperands {
+                let pipeline_ops = InferenceFwdOperands {
                     c: typed(&pipeline, output_dtype),
                     ..auto_ops
                 };
-                let swizzle_ops = FixedFwdOperands {
+                let swizzle_ops = InferenceFwdOperands {
                     c: typed(&swizzle, output_dtype),
                     ..auto_ops
                 };
-                let reference_ops = FixedFwdOperands {
+                let reference_ops = InferenceFwdOperands {
                     c: typed(&reference, WeightDtype::F32),
                     ..auto_ops
                 };
@@ -15549,11 +15549,11 @@ fn fixed_ada_half_forced_direct_pair() {
                     );
                 }
                 let pipeline_launch = || {
-                    fixed_forward_with_tile(&ctx, pipeline_ops, shape, pipeline_tile)
+                    inference_forward_with_tile(&ctx, pipeline_ops, shape, pipeline_tile)
                         .unwrap_or_else(|error| panic!("direct-pair pipeline launch: {error}"));
                 };
                 let swizzle_launch = || {
-                    fixed_forward_with_tile(&ctx, swizzle_ops, shape, swizzle_tile)
+                    inference_forward_with_tile(&ctx, swizzle_ops, shape, swizzle_tile)
                         .unwrap_or_else(|error| panic!("direct-pair swizzle launch: {error}"));
                 };
                 pipeline_launch();
@@ -15867,9 +15867,9 @@ fn f32_n128_output_operands(
     b: &DtypedBuf,
     input_offset: usize,
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
-) -> FixedFwdOperands {
+) -> InferenceFwdOperands {
     let element_bytes = WeightDtype::F32.size_bytes() as u64;
-    FixedFwdOperands {
+    InferenceFwdOperands {
         c: TypedPtr {
             ptr: output.cached_ptr() + ((F32_N128_GUARD + output_offset) as u64 * element_bytes),
             dtype: WeightDtype::F32,
@@ -15924,62 +15924,62 @@ fn fixed_f32_n128_matches_legacy_bits() {
     let measured_stack =
         measured_device && compiler.nvrtc_version == (13, 2) && compiler.nvrtc_library_known;
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
     let shapes = [
-        FixedShape { m: 1, k: 0, n: 1 },
-        FixedShape {
+        InferenceShape { m: 1, k: 0, n: 1 },
+        InferenceShape {
             m: 63,
             k: 31,
             n: 127,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 32,
             n: 128,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 33,
             n: 129,
         },
-        FixedShape {
+        InferenceShape {
             m: 63,
             k: 63,
             n: 129,
         },
-        FixedShape {
+        InferenceShape {
             m: 64,
             k: 64,
             n: 128,
         },
-        FixedShape {
+        InferenceShape {
             m: 65,
             k: 65,
             n: 127,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
         },
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -16040,7 +16040,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         input_offset,
                         bias_ptr,
                     );
-                    let auto_ops = FixedFwdOperands {
+                    let auto_ops = InferenceFwdOperands {
                         c: f32_n128_output_operands(
                             &auto,
                             output_offset,
@@ -16052,7 +16052,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         .c,
                         ..oracle_ops
                     };
-                    let legacy_ops = FixedFwdOperands {
+                    let legacy_ops = InferenceFwdOperands {
                         c: f32_n128_output_operands(
                             &legacy,
                             output_offset,
@@ -16064,7 +16064,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         .c,
                         ..oracle_ops
                     };
-                    let candidate_a_ops = FixedFwdOperands {
+                    let candidate_a_ops = InferenceFwdOperands {
                         c: f32_n128_output_operands(
                             &candidate_a,
                             output_offset,
@@ -16076,7 +16076,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         .c,
                         ..oracle_ops
                     };
-                    let candidate_b_ops = FixedFwdOperands {
+                    let candidate_b_ops = InferenceFwdOperands {
                         c: f32_n128_output_operands(
                             &candidate_b,
                             output_offset,
@@ -16089,11 +16089,11 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         ..oracle_ops
                     };
 
-                    fixed_forward_f32_legacy_baseline(&ctx, oracle_ops, shape)
+                    inference_forward_f32_legacy_baseline(&ctx, oracle_ops, shape)
                         .expect("legacy oracle launch");
-                    fixed_forward_with_tile(&ctx, legacy_ops, shape, FixedTile::Legacy)
+                    inference_forward_with_tile(&ctx, legacy_ops, shape, InferenceTile::Legacy)
                         .expect("forced incumbent S2 launch");
-                    let selected = fixed_forward(
+                    let selected = inference_forward(
                         &ctx,
                         auto_ops.c,
                         auto_ops.x,
@@ -16106,7 +16106,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                     let specialized_alignment = input_offset == 0 && output_offset == 0;
                     let expected_auto = match (dims, bias_ptr.is_some()) {
                         ((4621, 384, 1928), false) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120TmaFmaM64N128
+                            InferenceTile::F32Sm120TmaFmaM64N128
                         }
                         ((4621, 384, 1928), true) if measured_stack && specialized_alignment => {
                             if ctx
@@ -16115,30 +16115,30 @@ fn fixed_f32_n128_matches_legacy_bits() {
                                 .as_ref()
                                 .is_some_and(|kernels| kernels.m128n64_t256.is_some())
                             {
-                                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+                                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
                             } else {
-                                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+                                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
                             }
                         }
                         ((4621, 768, 2304), false) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120TmaFmaM128N64
+                            InferenceTile::F32Sm120TmaFmaM128N64
                         }
                         ((4621, 768, 2304), true) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+                            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
                         }
                         ((4621, 1928, 384), true) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+                            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
                         }
                         ((2048, 768, 2304), _) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120N64CopyPlan
+                            InferenceTile::F32Sm120N64CopyPlan
                         }
                         ((2048, 2304, 768), _) if measured_stack && specialized_alignment => {
-                            FixedTile::F32Sm120N64CopyPlan
+                            InferenceTile::F32Sm120N64CopyPlan
                         }
                         ((4621, 384, 1928) | (4621, 768, 2304), _) if measured_device => {
-                            FixedTile::F32N128S2
+                            InferenceTile::F32N128S2
                         }
-                        _ => FixedTile::Legacy,
+                        _ => InferenceTile::Legacy,
                     };
                     assert_eq!(selected, expected_auto, "production exact-F32 AUTO route");
                     if measured_stack
@@ -16148,7 +16148,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
                     {
                         let graph = unsafe {
                             capture_into_graph(&ctx.stream, || {
-                                fixed_forward(
+                                inference_forward(
                                     &ctx, auto_ops.c, auto_ops.x, auto_ops.w, bias_ptr, dims,
                                 )
                                 .map(|_| ())
@@ -16170,9 +16170,9 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         );
                         graph.launch().expect("replay promoted B1/C1 AUTO graph");
                     }
-                    fixed_forward_with_tile(&ctx, candidate_a_ops, shape, FixedTile::F32N128S2)
+                    inference_forward_with_tile(&ctx, candidate_a_ops, shape, InferenceTile::F32N128S2)
                         .expect("first forced N128 launch");
-                    fixed_forward_with_tile(&ctx, candidate_b_ops, shape, FixedTile::F32N128S2)
+                    inference_forward_with_tile(&ctx, candidate_b_ops, shape, InferenceTile::F32N128S2)
                         .expect("second forced N128 launch");
                     ctx.stream.synchronize().expect("N128 bit-gate sync");
 
@@ -16232,7 +16232,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
         }
     }
 
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 65,
         k: 65,
         n: 127,
@@ -16245,7 +16245,7 @@ fn fixed_f32_n128_matches_legacy_bits() {
     let bias = f32_n128_offset_buffer(&ctx, &bias_host, 0, "graph bias");
     let output = f32_n128_guarded_output(&ctx, shape.m * shape.n, 1, -13.0, "graph output");
     let operands = f32_n128_output_operands(&output, 1, &a, &b, 1, Some(bias.cached_ptr()));
-    let run = || fixed_forward_with_tile(&ctx, operands, shape, FixedTile::F32N128S2);
+    let run = || inference_forward_with_tile(&ctx, operands, shape, InferenceTile::F32N128S2);
     run().expect("eager N128 launch");
     ctx.stream.synchronize().expect("eager N128 sync");
     let eager = f32_n128_logical_and_guards(&ctx, &output, shape.m * shape.n, 1, "eager");
@@ -16271,20 +16271,20 @@ fn fixed_f32_n128_matches_legacy_bits() {
     let bias = f32_n128_offset_buffer(&ctx, &bias_host, 0, "prefix bias");
     let small = f32_n128_guarded_output(&ctx, 64 * n, 0, -17.0, "prefix C64");
     let large = f32_n128_guarded_output(&ctx, 65 * n, 0, 23.0, "prefix C65");
-    let small_shape = FixedShape { m: 64, k, n };
-    let large_shape = FixedShape { m: 65, k, n };
-    fixed_forward_with_tile(
+    let small_shape = InferenceShape { m: 64, k, n };
+    let large_shape = InferenceShape { m: 65, k, n };
+    inference_forward_with_tile(
         &ctx,
         f32_n128_output_operands(&small, 0, &small_a, &b, 0, Some(bias.cached_ptr())),
         small_shape,
-        FixedTile::F32N128S2,
+        InferenceTile::F32N128S2,
     )
     .expect("M64 prefix launch");
-    fixed_forward_with_tile(
+    inference_forward_with_tile(
         &ctx,
         f32_n128_output_operands(&large, 0, &large_a, &b, 0, Some(bias.cached_ptr())),
         large_shape,
-        FixedTile::F32N128S2,
+        InferenceTile::F32N128S2,
     )
     .expect("M65 prefix launch");
     ctx.stream.synchronize().expect("prefix sync");
@@ -16332,34 +16332,34 @@ fn assert_fixed_f32_n128_resources(ctx: &GpuCtx) {
 
 fn fixed_f32_n128_baseline_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     iterations: usize,
 ) -> f64 {
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
-    fixed_tile_window_us(ctx, operands, shape, FixedTile::Legacy, iterations)
+    fixed_tile_window_us(ctx, operands, shape, InferenceTile::Legacy, iterations)
 }
 
 fn fixed_f32_n128_candidate_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     iterations: usize,
 ) -> f64 {
     ctx.set_batch_invariant(true);
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
-    fixed_tile_window_us(ctx, operands, shape, FixedTile::F32N128S2, iterations)
+    fixed_tile_window_us(ctx, operands, shape, InferenceTile::F32N128S2, iterations)
 }
 
 fn fixed_f32_n128_cublas_window_us(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     iterations: usize,
 ) -> f64 {
     ctx.set_batch_invariant(false);
@@ -16412,7 +16412,7 @@ fn fixed_f32_n128_paired_a_e() {
     let cells = [
         (
             "A",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
@@ -16420,7 +16420,7 @@ fn fixed_f32_n128_paired_a_e() {
         ),
         (
             "B",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
@@ -16428,7 +16428,7 @@ fn fixed_f32_n128_paired_a_e() {
         ),
         (
             "C",
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 384,
@@ -16436,7 +16436,7 @@ fn fixed_f32_n128_paired_a_e() {
         ),
         (
             "D",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
@@ -16444,7 +16444,7 @@ fn fixed_f32_n128_paired_a_e() {
         ),
         (
             "E",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
@@ -16474,24 +16474,24 @@ fn fixed_f32_n128_paired_a_e() {
             .expect("paired candidate output");
         let cublas = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
             .expect("paired cuBLAS output");
-        let baseline_ops = FixedFwdOperands {
+        let baseline_ops = InferenceFwdOperands {
             c: typed(&baseline, WeightDtype::F32),
             x: typed(&a, WeightDtype::F32),
             w: typed(&b, WeightDtype::F32),
             bias_ptr: None,
         };
-        let candidate_ops = FixedFwdOperands {
+        let candidate_ops = InferenceFwdOperands {
             c: typed(&candidate, WeightDtype::F32),
             ..baseline_ops
         };
-        let cublas_ops = FixedFwdOperands {
+        let cublas_ops = InferenceFwdOperands {
             c: typed(&cublas, WeightDtype::F32),
             ..baseline_ops
         };
 
-        fixed_forward_f32_legacy_baseline(&ctx, baseline_ops, shape)
+        inference_forward_f32_legacy_baseline(&ctx, baseline_ops, shape)
             .expect("paired bit oracle launch");
-        fixed_forward_with_tile(&ctx, candidate_ops, shape, FixedTile::F32N128S2)
+        inference_forward_with_tile(&ctx, candidate_ops, shape, InferenceTile::F32N128S2)
             .expect("paired bit candidate launch");
         ctx.stream.synchronize().expect("paired bit-gate sync");
         assert_eq!(
@@ -16501,12 +16501,12 @@ fn fixed_f32_n128_paired_a_e() {
         );
 
         for _ in 0..128 {
-            fixed_forward_with_tile(&ctx, candidate_ops, shape, FixedTile::F32N128S2)
+            inference_forward_with_tile(&ctx, candidate_ops, shape, InferenceTile::F32N128S2)
                 .expect("warm N128 candidate");
         }
         ctx.stream.synchronize().expect("N128 warmup sync");
         for _ in 0..128 {
-            fixed_forward_with_tile(&ctx, baseline_ops, shape, FixedTile::Legacy)
+            inference_forward_with_tile(&ctx, baseline_ops, shape, InferenceTile::Legacy)
                 .expect("warm incumbent S2");
         }
         ctx.stream.synchronize().expect("S2 warmup sync");

@@ -672,7 +672,7 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
         assert!(!ctx.bi_tensor_cores(), "forced route must restore policy");
     }
 
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_batch_invariant(false);
     let trace = record_half_fixture(
         &ctx,
@@ -686,7 +686,7 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     )
     .expect("qualification must normalize its private live policy");
     assert_eq!(trace.launch_count(), 1);
-    assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Fixed);
+    assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Inference);
     assert!(!ctx.batch_invariant());
 }
 

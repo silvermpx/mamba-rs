@@ -21,6 +21,32 @@ use sha2::{Digest as _, Sha256};
 mod fixed_full_mantissa;
 
 const SM89_NT_FINALIST_SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
+const SM89_NN_PORTABLE_M128N128_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+const SM89_NN_JOINT_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
+const SM89_NN_JOINT_DIRECT_N96_SYMBOL: &str =
+    "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
+
+fn sm89_ada_nn_wide_winner(
+    dims: (usize, usize, usize),
+    nvrtc: (i32, i32),
+) -> (ModuleKind, &'static str) {
+    match (dims, nvrtc) {
+        ((2048, 768, 3072), (12, 8) | (13, 0) | (13, 2)) => {
+            (ModuleKind::TriadSm80, SM89_NN_PORTABLE_M128N128_SYMBOL)
+        }
+        ((2048, 1536, 768), (12, 8) | (13, 0) | (13, 2)) => {
+            (ModuleKind::TriadSm89Tf32Joint, SM89_NN_JOINT_N96_SYMBOL)
+        }
+        ((4621, 384, 1928), (12, 8) | (13, 0)) => {
+            (ModuleKind::TriadSm80, SM89_NN_PORTABLE_M128N128_SYMBOL)
+        }
+        ((4621, 384, 1928), (13, 2)) => (
+            ModuleKind::TriadSm89Tf32Joint,
+            SM89_NN_JOINT_DIRECT_N96_SYMBOL,
+        ),
+        _ => panic!("no frozen Ada NN wide winner for {dims:?} on CUDA {nvrtc:?}"),
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Sm120CurrentCohortCase {
@@ -658,6 +684,16 @@ fn tf32_cohort_binds_on_this_board() {
         run_sm120_current_cohort_binding(&ctx);
         return;
     }
+    let ada_nvrtc = if device.compute_capability == (8, 9) && device.multiprocessor_count() == 142 {
+        Some(
+            ctx.kernels
+                .triad_sm89_tf32_joint_compiler_identity()
+                .expect("bound TriadSm89Tf32Joint module")
+                .nvrtc_version,
+        )
+    } else {
+        None
+    };
     let shapes = [
         (2048, 768, 3072),
         (2048, 1536, 768),
@@ -685,6 +721,7 @@ fn tf32_cohort_binds_on_this_board() {
             matches!(
                 node.module_kind,
                 ModuleKind::TriadSm80
+                    | ModuleKind::TriadSm89Tf32Joint
                     | ModuleKind::TriadSm90a
                     | ModuleKind::TriadSm100
                     | ModuleKind::TriadSm120
@@ -695,19 +732,18 @@ fn tf32_cohort_binds_on_this_board() {
             "cc={:?} dims={dims:?} tf32={tf32} served={served}",
             device.compute_capability
         );
-        if device.compute_capability == (8, 9)
-            && device.multiprocessor_count() == 142
-            && matches!(
+        if let Some(nvrtc) = ada_nvrtc.filter(|_| {
+            matches!(
                 dims,
                 (2048, 768, 3072) | (2048, 1536, 768) | (4621, 384, 1928)
             )
-        {
+        }) {
+            let (expected_module, expected_symbol) = sm89_ada_nn_wide_winner(dims, nvrtc);
             assert!(
                 nodes.iter().any(|node| {
-                    node.module_kind == ModuleKind::TriadSm80
-                        && node.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3"
+                    node.module_kind == expected_module && node.symbol == expected_symbol
                 }),
-                "SM89 requalified wide winner did not serve {dims:?}: {served}",
+                "SM89 requalified wide winner {expected_module:?}:{expected_symbol} did not serve {dims:?} on CUDA {nvrtc:?}: {served}",
             );
         }
     }

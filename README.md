@@ -26,19 +26,20 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   of the flag; every path that carries a `GpuCtx` — including the M3
   engine, prefill and inference alike — follows it.
 - **Two batch-invariant families, selectable** — `ctx.set_bi_gemm_family()`
-  / `MAMBA_RS_BI_GEMM_FAMILY=triad|fixed` picks which family serves the
+  / `MAMBA_RS_BI_GEMM_FAMILY=triad|inference` picks which family serves the
   forward while the flag above is on. `Triad` (`kernels/gemm_bi_triad/`,
   default) is the multi-tile dispatcher: it carries all three operand
   layouts, so it is the only family that can serve a backward, and its
-  invariance holds across every M inside one dispatch bucket. `Fixed`
-  (`kernels/gemm_bi_fixed/`) is the forward serving family: a ladder of
+  invariance holds across every M inside one dispatch bucket. `Inference`
+  (`kernels/gemm_bi_inference/`) is the forward serving family: a ladder of
   bit-identical tiles (16-row thin, 64, 128, and a wide 128×256
   fragment-reuse tile) with `SPLIT_K=1` everywhere, batch-invariant BY
   CONSTRUCTION — the K-reduction for `C[i,j]` reads only `A[i,:]` and
   `B[:,j]`, every rung produces the same bits per element, so tile choice
   is pure scheduling and no bucket boundary exists to cross. The family is part of the numeric route
   (`ctx.gemm_route()`) and a flip after a CUDA-graph capture is refused at
-  replay like any tier flip.
+  replay like any tier flip. The legacy environment spelling `fixed` remains
+  accepted as a compatibility alias for `inference`.
 - **Fast typed deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
   / `ctx.set_bi_tensor_cores(true)` on top of the flag above selects the
   fastest qualified typed route: usually mma.sync tensor-core kernels, with
@@ -404,10 +405,10 @@ Enable the batch-invariant path when cross-batch bit-identity matters
 
 ```rust
 ctx.set_batch_invariant(true);                       // deterministic forward
-ctx.set_bi_gemm_family(BiGemmFamily::Fixed);         // or ::Triad (default)
+ctx.set_bi_gemm_family(BiGemmFamily::Inference);     // or ::Triad (default)
 ```
 
-| | `Triad` (`gemm_bi_triad/`) | `Fixed` (`gemm_bi_fixed/`) |
+| | `Triad` (`gemm_bi_triad/`) | `Inference` (`gemm_bi_inference/`) |
 |---|---|---|
 | layouts | NN + TN + NT | NN only |
 | invariance | across M inside one dispatch bucket | by construction, no buckets |
@@ -415,7 +416,7 @@ ctx.set_bi_gemm_family(BiGemmFamily::Fixed);         // or ::Triad (default)
 | dtypes | f32 / bf16 / f16, CUDA cores and Tensor Cores | f32 / bf16 / f16; Tensor Cores for bf16/f16, CUDA-core FMA tile for f32 |
 
 A backward requires `Triad`. For a forward-only serve workload the
-tensor-core ladder makes `Fixed` the fast route: at a vision-classifier
+tensor-core ladder makes `Inference` the fast route: at a vision-classifier
 prefill shape (M = 4621 rows per page, RTX 6000 Ada) the deterministic
 bf16 page runs 10.9 ms end to end — ahead of the 11.8 ms
 non-deterministic cuBLAS f32 baseline and 1.8× the 20.0 ms deterministic

@@ -233,14 +233,14 @@ fn m3_pooled_page_bench_typed_vs_f32() {
             WeightDtype::F32,
             true,
             false,
-            BiGemmFamily::Fixed,
+            BiGemmFamily::Inference,
         ),
         (
             "bf16 fixed (serve route)",
             WeightDtype::Bf16,
             true,
             false,
-            BiGemmFamily::Fixed,
+            BiGemmFamily::Inference,
         ),
         (
             "f32 cuBLAS (non-det ref)",

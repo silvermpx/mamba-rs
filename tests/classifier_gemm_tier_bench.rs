@@ -88,7 +88,7 @@ fn classifier_shapes_cublas_vs_triad_vs_fixed() {
             let (us_cublas_f32, _y_cublas_f32) = timed("cuBLAS-f32", false, BiGemmFamily::Triad);
             let _ = us_cublas_f32;
             let (us_triad, y_triad) = timed("bi:triad", true, BiGemmFamily::Triad);
-            let (us_fixed, y_fixed) = timed("bi:fixed", true, BiGemmFamily::Fixed);
+            let (us_fixed, y_fixed) = timed("bi:fixed", true, BiGemmFamily::Inference);
             ctx.set_batch_invariant(false);
             ctx.set_bi_gemm_family(BiGemmFamily::Triad);
 

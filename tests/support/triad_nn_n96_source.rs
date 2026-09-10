@@ -265,7 +265,7 @@ pub fn validate_focused_pair_diagnostics(source: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
 
     #[test]
     fn triad_nn_n96_transform_is_exact_and_reversible() {

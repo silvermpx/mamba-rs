@@ -29,8 +29,8 @@ void {SYMBOL}(
 mod tests {
     use super::*;
 
-    const N64: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_n64.cu");
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
+    const N64: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_n64.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
 
     #[test]
     fn wrapper_reuses_the_exact_body_with_d768_in_geometry() {

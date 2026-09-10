@@ -184,7 +184,8 @@ Mamba-3 shares the deterministic GEMM layer with Mamba SSM on BOTH
 sides: the trainer forward/backward and the inference prefill all route
 through the context-carrying dispatcher, so the opt-in tiers
 (`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_BI_TENSOR_CORES`) and the family
-selector (`MAMBA_RS_BI_GEMM_FAMILY=triad|fixed`) apply to inference
+selector (`MAMBA_RS_BI_GEMM_FAMILY=triad|inference`; legacy `fixed` remains
+an input alias) applies to inference
 exactly as they do to training, with the same contracts and CUDA-Graph
 guards (`presize_bi_upcast_scratch_for_train_m3`; the capture identity
 is `ctx.gemm_route()`, which carries the family). Measurement tables,

@@ -2214,7 +2214,7 @@ fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String>
     if expected == 0 {
         return Ok(());
     }
-    if super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
+    if super::super::gemm_bi_inference::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
         return Err("Fixed RNA-wide host parameter ABI drifted".into());
     }
     let entry = actual[0];
@@ -2698,7 +2698,7 @@ fn validate_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) -> Result<(), String> 
 
 fn validate_fixed_sm89_half_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
-    if super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
+    if super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
         return Err("Fixed SM89 half host parameter ABI drifted".into());
     }
     if abi.parameter_count() != EXPECTED.len()
@@ -3099,7 +3099,7 @@ fn validate_fixed_sm89_half_swizzle_driver_abi(
     abi: &Tf32DriverAbi,
 ) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
-    if super::super::gemm_bi_fixed::FIXED_SM89_HALF_SWIZZLE_PARAMS_SIZE != 32 {
+    if super::super::gemm_bi_inference::FIXED_SM89_HALF_SWIZZLE_PARAMS_SIZE != 32 {
         return Err("Fixed SM89 half swizzle host parameter ABI drifted".into());
     }
     if abi.parameter_count() != EXPECTED.len()
@@ -3155,7 +3155,7 @@ fn census_fixed_sm89_half_swizzle_driver_abi(
 
 fn validate_fixed_sm89_half_s3_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
-    if super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
+    if super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
         return Err("Fixed SM89 half s3 host parameter ABI drifted".into());
     }
     if abi.parameter_count() != EXPECTED.len()
@@ -3211,7 +3211,7 @@ fn census_fixed_sm89_half_s3_driver_abi(
 
 fn validate_fixed_sm89_rna_wide_driver_abi(abi: &Tf32DriverAbi) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
-    if super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
+    if super::super::gemm_bi_inference::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
         return Err("Fixed SM89 RNA-wide host parameter ABI drifted".into());
     }
     if abi.parameter_count() != EXPECTED.len()
@@ -3334,9 +3334,9 @@ fn validate_fixed_sm89_finalist_driver_abi(
 ) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
     let host_size = if symbol == FIXED_SM89_RNA_N96_SYMBOL {
-        super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE
+        super::super::gemm_bi_inference::FIXED_TF32_WIDE_PARAMS_SIZE
     } else {
-        super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE
+        super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE
     };
     if host_size != 32 {
         return Err(format!(
@@ -5237,7 +5237,7 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     if actual != expected {
         return Err("Fixed TF32 PTX inventory is incomplete or contains foreign entries".into());
     }
-    if super::super::gemm_bi_fixed::FIXED_TF32_PARAMS_SIZE != 24 {
+    if super::super::gemm_bi_inference::FIXED_TF32_PARAMS_SIZE != 24 {
         return Err("Fixed portable TF32 host parameter ABI drifted".into());
     }
     let portable_bundle = ".param .align 4 .b8 ";
@@ -5271,8 +5271,8 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         }
     }
     if owns_sm120 {
-        let map_size = super::super::gemm_bi_fixed::FIXED_TENSOR_MAP_SIZE;
-        let map_alignment = super::super::gemm_bi_fixed::FIXED_TENSOR_MAP_ALIGN;
+        let map_size = super::super::gemm_bi_inference::FIXED_TENSOR_MAP_SIZE;
+        let map_alignment = super::super::gemm_bi_inference::FIXED_TENSOR_MAP_ALIGN;
         let expected_alignment = match nvrtc_version().0 {
             12 => 64,
             13 => 128,
@@ -5283,10 +5283,10 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 "Fixed tensor-map ABI mismatch: size={map_size} align={map_alignment}, expected 128/{expected_alignment}"
             ));
         }
-        if super::super::gemm_bi_fixed::FIXED_SM120_TF32_PARAMS_SIZE != 16 {
+        if super::super::gemm_bi_inference::FIXED_SM120_TF32_PARAMS_SIZE != 16 {
             return Err("Fixed SM120 TF32 host parameter ABI drifted".into());
         }
-        if super::super::gemm_bi_fixed::FIXED_SM120_HALF_PARAMS_SIZE != 40 {
+        if super::super::gemm_bi_inference::FIXED_SM120_HALF_PARAMS_SIZE != 40 {
             return Err("Fixed SM120 half host parameter ABI drifted".into());
         }
         let map = format!(".param .align {expected_alignment} .b8 ");
@@ -7304,6 +7304,9 @@ const TYPED_PRELUDE: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+// The files physically live under `kernels/gemm_bi_inference/`, but their
+// legacy `logical_name` values are compiler-visible `#line` boundaries and
+// remain frozen to preserve source, compile-key, and artifact identities.
 const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TYPED_PRELUDE,
     SourceFragment {
@@ -7353,124 +7356,124 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/common.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/common.cuh"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/common.cuh"),
         allowed_quoted_includes: &["_typed_prelude.cuh"],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/ffma.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/ffma.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/ffma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/tf32.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/tf32.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/tf32.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/tf32_sm120.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_sm120.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/tf32_sm120.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/sm120_tma.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_tma.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm120_tma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/wmma_legacy.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/wmma_legacy.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/wmma_legacy.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/matvec.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/matvec.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/matvec.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/mma16.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/mma16.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/mma16.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/tcw64.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/tcw64.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/tcw64.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/sm90_wgmma.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm90_wgmma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm100_tcgen05.cu"),
         allowed_quoted_includes: &[],
     },
 ];
 
 const FIXED_SM89_HALF_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_pipeline.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_rna_wide.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/tf32_rna_wide.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
     allowed_quoted_includes: &["sm89_half_swizzle_layout.cuh"],
 };
 
 const FIXED_SM89_HALF_S3_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_half_s3.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_s3.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_s3.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_N96_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_rna_n96.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/tf32_rna_n96.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm89_half_n64.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_n64.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_n64.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_n64_copyplan.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_SLICED_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_n64_sliced.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_postbias.cu",
-    source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_postbias.cu"),
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_postbias.cu"),
     allowed_quoted_includes: &[],
 };
 
@@ -14347,6 +14350,41 @@ mod tests {
                 .exists(),
             "obsolete root triad monolith must not return"
         );
+    }
+
+    #[test]
+    fn inference_composed_source_identity_is_frozen() {
+        let cases = [
+            (
+                "base",
+                compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
+                615_645,
+                "fab86c118b49e88eaa566ef1c4322d039641fa11fbfa3c2dde402470b97b1d11",
+            ),
+            (
+                "sm_89",
+                compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
+                723_257,
+                "8ab4752c6f4b766486db09d22ddfc99df93dc1eb0507177f7edf92cc731233f4",
+            ),
+            (
+                "compute_120",
+                compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap(),
+                719_063,
+                "8a9a5186c2a7763fab0027ab03417f6189730eac103e57d4863becd4a8a90a71",
+            ),
+        ];
+
+        for (name, source, expected_len, expected_sha256) in cases {
+            assert_eq!(source.len(), expected_len, "{name} composed source length");
+            assert_eq!(
+                crate::mamba_ssm::gpu::kernel_identity::digest_hex(&super::FramedSha256::bytes(
+                    source.as_bytes()
+                )),
+                expected_sha256,
+                "{name} composed source SHA-256"
+            );
+        }
     }
 
     #[test]

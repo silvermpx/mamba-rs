@@ -278,7 +278,7 @@ fn pooled_graph_refuses_route_drift() {
             "family",
             &|| {
                 r.ctx
-                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Fixed)
+                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Inference)
             },
             &|| {
                 r.ctx

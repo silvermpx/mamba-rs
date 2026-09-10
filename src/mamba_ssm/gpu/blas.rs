@@ -61,7 +61,7 @@ pub fn gpu_gemm_bi_forward_raw(
             ),
             // Fixed-tile, invariant by construction. f32 operands take the
             // CUDA-core FMA instantiation.
-            super::context::BiGemmFamily::Fixed => {
+            super::context::BiGemmFamily::Inference => {
                 let y_ptr = {
                     use cudarc::driver::DevicePtr;
                     let (p, _r) = y.inner().device_ptr(&ctx.stream);
@@ -214,7 +214,7 @@ pub fn gpu_gemm_bi_backward_dx_raw(
                     (batch, n_in, n_out),
                 )
             }
-            super::context::BiGemmFamily::Fixed => super::gemm_bi_triad::gemm_bi_backward_dx(
+            super::context::BiGemmFamily::Inference => super::gemm_bi_triad::gemm_bi_backward_dx(
                 &ctx.stream,
                 &ctx.kernels,
                 dx,
@@ -275,7 +275,7 @@ pub fn gpu_gemm_bi_backward_dw_grad(
                     (batch, n_in, n_out),
                 )
             }
-            super::context::BiGemmFamily::Fixed => super::gemm_bi_triad::gemm_bi_backward_dw(
+            super::context::BiGemmFamily::Inference => super::gemm_bi_triad::gemm_bi_backward_dw(
                 &ctx.stream,
                 &ctx.kernels,
                 dw.ptr(),
@@ -3204,7 +3204,7 @@ struct BiGemmArgs {
 }
 
 // The WMMA GEMM path stays registered in MambaKernels and is reachable
-// through gemm_bi_forward_raw (the Fixed family's entry and the f32
+// through gemm_bi_forward_raw (the Inference family's entry and the f32
 // dispatch arm).
 fn launch_bi_gemm(
     ctx: &GpuCtx,
@@ -3247,8 +3247,8 @@ fn launch_bi_gemm(
     Ok(())
 }
 
-/// Direct entry to the Fixed batch-invariant GEMM ladder
-/// (`kernels/gemm_bi_fixed/`, `gemm_bi_*`). Every rung uses `SPLIT_K=1`
+/// Direct entry to the Inference batch-invariant GEMM ladder
+/// (`kernels/gemm_bi_inference/`, `gemm_bi_*`). Every rung uses `SPLIT_K=1`
 /// and preserves its architecture-specific bit family across scheduling
 /// choices. Forward-only NN, f32/bf16/f16.
 pub fn gemm_bi_forward_raw(
@@ -3259,10 +3259,10 @@ pub fn gemm_bi_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    super::gemm_bi_fixed::fixed_forward(ctx, c, x, w, bias_ptr, dims).map(|_| ())
+    super::gemm_bi_inference::inference_forward(ctx, c, x, w, bias_ptr, dims).map(|_| ())
 }
 
-/// The fixed family's LEGACY tile (64x64x32, strict, no buckets): the
+/// The Inference family's LEGACY tile (64x64x32, strict, no buckets): the
 /// narrow-N fallback of the inference ladder and the whole f32 arm (the
 /// shipped serve route - its bits never move with ladder work).
 pub(crate) fn fixed_legacy_forward(
@@ -3325,7 +3325,7 @@ fn launch_bi_matvec(
     args: BiGemmArgs,
     io_dtype: WeightDtype,
 ) -> Result<(), String> {
-    // Must match kernel constants in kernels/gemm_bi_fixed/:
+    // Must match kernel constants in kernels/gemm_bi_inference/:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
     const BLOCK_N_MV: i32 = 32;
@@ -3410,7 +3410,7 @@ pub fn gpu_gemm_typed_forward_raw(
     // Family selector: the fixed-tile family serves the typed forward
     // whole (its Tensor-Core instantiation covers bf16/f16), so it is
     // tried before the triad's buckets.
-    if ctx.batch_invariant() && ctx.bi_gemm_family() == super::context::BiGemmFamily::Fixed {
+    if ctx.batch_invariant() && ctx.bi_gemm_family() == super::context::BiGemmFamily::Inference {
         return gemm_bi_forward_raw(ctx, c, x, w, bias_ptr, dims);
     }
 

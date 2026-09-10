@@ -34,8 +34,8 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_fixed/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
 
     #[test]
     fn only_output_dispatch_and_export_change() {

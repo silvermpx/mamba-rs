@@ -11,8 +11,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -54,7 +54,7 @@ impl BiasKind {
 struct QualCell {
     id: &'static str,
     shape_name: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     bias: BiasKind,
     priority: bool,
 }
@@ -63,7 +63,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "B_none",
         shape_name: "B",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -74,7 +74,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "B_synthesized_bias",
         shape_name: "B",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -85,7 +85,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "D_none",
         shape_name: "D",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
@@ -96,7 +96,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "D_synthesized_bias",
         shape_name: "D",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
@@ -107,7 +107,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "A_none",
         shape_name: "A",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
@@ -118,7 +118,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "A_synthesized_bias",
         shape_name: "A",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
@@ -129,7 +129,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "C_none",
         shape_name: "C",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
@@ -140,7 +140,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "C_synthesized_bias",
         shape_name: "C",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
@@ -151,7 +151,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "E_none",
         shape_name: "E",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -162,7 +162,7 @@ const CELLS: [QualCell; 10] = [
     QualCell {
         id: "E_synthesized_bias",
         shape_name: "E",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -397,12 +397,12 @@ impl CellBuffers {
         }
     }
 
-    fn operands(&self, cell: QualCell, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, cell: QualCell, arm: Arm) -> InferenceFwdOperands {
         let f32_ptr = |buffer: &DtypedBuf| TypedPtr {
             ptr: buffer.cached_ptr(),
             dtype: WeightDtype::F32,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: f32_ptr(self.output(arm)),
             x: f32_ptr(&self.a),
             w: f32_ptr(&self.b),
@@ -600,7 +600,7 @@ fn synth_values(len: usize, seed: u64) -> Vec<f32> {
 }
 
 fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
-    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     match arm {
@@ -621,16 +621,16 @@ fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
 
 fn launch_arm(
     ctx: &GpuCtx,
-    operands: FixedFwdOperands,
-    shape: FixedShape,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
     arm: Arm,
 ) -> Result<(), String> {
     match arm {
         Arm::Candidate => {
-            fixed_forward_with_tile(ctx, operands, shape, FixedTile::Tf32Sm120M64N128S2)
+            inference_forward_with_tile(ctx, operands, shape, InferenceTile::Tf32Sm120M64N128S2)
         }
         Arm::ProductionAuto => {
-            let selected = fixed_forward(
+            let selected = inference_forward(
                 ctx,
                 operands.c,
                 operands.x,
@@ -638,7 +638,7 @@ fn launch_arm(
                 operands.bias_ptr,
                 (shape.m, shape.k, shape.n),
             )?;
-            if selected != FixedTile::Tf32Sm120M64S2 {
+            if selected != InferenceTile::Tf32Sm120M64S2 {
                 return Err(format!(
                     "production Fixed AUTO selected {selected:?}, expected Tf32Sm120M64S2"
                 ));
@@ -2005,7 +2005,7 @@ mod tests {
         let cell = QualCell {
             id: "cell\"\\\n",
             shape_name: "shape\tname",
-            shape: FixedShape { m: 1, k: 2, n: 3 },
+            shape: InferenceShape { m: 1, k: 2, n: 3 },
             bias: BiasKind::None,
             priority: false,
         };

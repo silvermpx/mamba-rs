@@ -12,8 +12,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -321,13 +321,13 @@ const _: () = {
 #[derive(Clone, Copy)]
 struct Case {
     label: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     bias: bool,
 }
 
 const E0: Case = Case {
     label: "e0",
-    shape: FixedShape {
+    shape: InferenceShape {
         m: 2048,
         k: 2304,
         n: 768,
@@ -344,7 +344,7 @@ const CASES: [Case; 5] = [
     },
     Case {
         label: "tail0",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 36,
             n: 100,
@@ -353,7 +353,7 @@ const CASES: [Case; 5] = [
     },
     Case {
         label: "tail1",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 36,
             n: 100,
@@ -362,7 +362,7 @@ const CASES: [Case; 5] = [
     },
     Case {
         label: "k16_special",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 16,
             n: 100,
@@ -521,12 +521,12 @@ impl Fixture {
         }
     }
 
-    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> InferenceFwdOperands {
         let typed = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(self.output(arm).ptr(&runtime.ctx.stream)),
             x: typed(self.a.ptr(&runtime.ctx.stream)),
             w: typed(self.b.ptr(&runtime.ctx.stream)),
@@ -585,12 +585,12 @@ fn exceptional_values(len: usize, state: u64) -> Vec<f32> {
 
 fn compose_source() -> String {
     let prelude = include_str!("../kernels/_typed_prelude.cuh");
-    let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()
         .join("\n");
-    let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
+    let tf32 = include_str!("../kernels/gemm_bi_inference/tf32.cu");
     [prelude, &common, tf32, N96_CUDA, W4_CUDA].join("\n")
 }
 
@@ -687,7 +687,7 @@ fn new_runtime(width: Width) -> Result<Runtime, String> {
 }
 
 fn configure(runtime: &Runtime, arm: Arm) -> Result<(), String> {
-    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     runtime.ctx.set_bi_tensor_cores(false);
     runtime
         .ctx
@@ -705,7 +705,7 @@ fn configure(runtime: &Runtime, arm: Arm) -> Result<(), String> {
     Ok(())
 }
 
-fn launch_config(shape: FixedShape, width: Width) -> Result<LaunchConfig, String> {
+fn launch_config(shape: InferenceShape, width: Width) -> Result<LaunchConfig, String> {
     let blocks = shape.m.div_ceil(128) * shape.n.div_ceil(width.columns());
     Ok(LaunchConfig {
         grid_dim: (
@@ -725,7 +725,7 @@ fn launch_candidate_raw(
     a: u64,
     b: u64,
     bias: u64,
-    shape: FixedShape,
+    shape: InferenceShape,
     alpha: f32,
     beta: f32,
 ) -> Result<(), String> {
@@ -797,11 +797,11 @@ fn launch(runtime: &Runtime, fixture: &Fixture, case: Case, arm: Arm) -> Result<
             .map(|_| ())
             .map_err(|error| format!("launch committed N96: {error:?}"))
         }
-        Arm::ProductionRna => fixed_forward_with_tile(
+        Arm::ProductionRna => inference_forward_with_tile(
             &runtime.ctx,
             operands,
             case.shape,
-            FixedTile::Tf32RnaM128N128S3,
+            InferenceTile::Tf32RnaM128N128S3,
         ),
         Arm::FastTf32 => gpu_gemm_typed_forward_raw(
             &runtime.ctx,
@@ -949,7 +949,7 @@ fn assert_actual_auto(runtime: &Runtime) -> Result<(), String> {
     fixture.reset(runtime, Arm::ProductionRna)?;
     configure(runtime, Arm::ProductionRna)?;
     let operands = fixture.operands(runtime, E0, Arm::ProductionRna);
-    let selected = fixed_forward(
+    let selected = inference_forward(
         &runtime.ctx,
         operands.c,
         operands.x,
@@ -957,7 +957,7 @@ fn assert_actual_auto(runtime: &Runtime) -> Result<(), String> {
         operands.bias_ptr,
         (E0.shape.m, E0.shape.k, E0.shape.n),
     )?;
-    if selected != FixedTile::Tf32RnaM128N128S3 {
+    if selected != InferenceTile::Tf32RnaM128N128S3 {
         return Err(format!("E AUTO selected {selected:?}"));
     }
     output_bits(runtime, &fixture, Arm::ProductionRna, "actual AUTO")?;
@@ -1017,7 +1017,7 @@ fn check_case(runtime: &Runtime, width: Width, case: Case) -> Result<Vec<u32>, S
 fn check_prefix(runtime: &Runtime, width: Width, expected: &[u32]) -> Result<(), String> {
     let prefix = Case {
         label: "e_prefix_m1",
-        shape: FixedShape { m: 1, ..E0.shape },
+        shape: InferenceShape { m: 1, ..E0.shape },
         bias: false,
     };
     let mut fixture = Fixture::new(runtime, E0)?;
@@ -1037,7 +1037,7 @@ fn check_prefix(runtime: &Runtime, width: Width, expected: &[u32]) -> Result<(),
 }
 
 fn check_zero_reduction(runtime: &Runtime, width: Width) -> Result<(), String> {
-    let shape = FixedShape { m: 3, k: 0, n: 12 };
+    let shape = InferenceShape { m: 3, k: 0, n: 12 };
     let bias_values = finite_full_mantissa_values(shape.n, 0xb1a5_0005);
     let mut output = GuardedF32::new(
         &runtime.ctx.stream,

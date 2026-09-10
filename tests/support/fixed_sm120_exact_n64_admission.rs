@@ -2,9 +2,9 @@
 //! Observed/unlocked telemetry; no Ada qualification source or semantics are changed.
 
 use super::{
-    CStr, CudaGraph, DtypedBuf, F32TriadPolicy, FixedFwdOperands, FixedShape, FixedTile, GpuCtx,
+    CStr, CudaGraph, DtypedBuf, F32TriadPolicy, InferenceFwdOperands, InferenceShape, InferenceTile, GpuCtx,
     GpuDevice, TypedPtr, WeightDtype, capture_into_graph, digest_hex,
-    fixed_forward_f32_legacy_baseline, fixed_forward_with_tile, launch_sm120_exact_auto,
+    inference_forward_f32_legacy_baseline, inference_forward_with_tile, launch_sm120_exact_auto,
     percentile, sm120_exact_event_window_us, sm120_exact_vendor_launch,
 };
 use cudarc::driver::{CudaFunction, sys};
@@ -193,10 +193,10 @@ impl Candidate {
         }
     }
 
-    fn tile(self) -> FixedTile {
+    fn tile(self) -> InferenceTile {
         match self {
-            Self::CopyPlan => FixedTile::F32Sm120N64CopyPlan,
-            Self::Sliced => FixedTile::F32Sm120N64Sliced,
+            Self::CopyPlan => InferenceTile::F32Sm120N64CopyPlan,
+            Self::Sliced => InferenceTile::F32Sm120N64Sliced,
         }
     }
 
@@ -229,12 +229,12 @@ fn exact_n64_candidate_cpu_selection_defaults_and_rejects_unknown_values() {
             "invalid candidate {bad:?}"
         );
     }
-    assert_eq!(Candidate::CopyPlan.tile(), FixedTile::F32Sm120N64CopyPlan);
+    assert_eq!(Candidate::CopyPlan.tile(), InferenceTile::F32Sm120N64CopyPlan);
     assert_eq!(
         Candidate::CopyPlan.symbol(),
         "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
     );
-    assert_eq!(Candidate::Sliced.tile(), FixedTile::F32Sm120N64Sliced);
+    assert_eq!(Candidate::Sliced.tile(), InferenceTile::F32Sm120N64Sliced);
     assert_eq!(
         Candidate::Sliced.symbol(),
         "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"
@@ -243,7 +243,7 @@ fn exact_n64_candidate_cpu_selection_defaults_and_rejects_unknown_values() {
 
 fn candidate_own_admission(
     candidate: Candidate,
-    actual_auto: FixedTile,
+    actual_auto: InferenceTile,
     cell: &str,
     has_bias: bool,
     protocol: &Protocol,
@@ -261,7 +261,7 @@ fn candidate_own_admission(
             && !has_bias
             && matches!(
                 actual_auto,
-                FixedTile::F32Sm120N64CopyPlan | FixedTile::F32Sm120TmaFmaM128N64
+                InferenceTile::F32Sm120N64CopyPlan | InferenceTile::F32Sm120TmaFmaM128N64
             )
             && own_admission(
                 cell,
@@ -298,7 +298,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     let self_noise = [1.02; 4];
     assert!(!candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64Sliced,
+        InferenceTile::F32Sm120N64Sliced,
         "hot_b",
         false,
         &protocol,
@@ -308,7 +308,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     assert!(
         !candidate_own_admission(
             Candidate::Sliced,
-            FixedTile::F32Sm120N64Sliced,
+            InferenceTile::F32Sm120N64Sliced,
             "hot_b",
             false,
             &protocol,
@@ -319,7 +319,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     );
     assert!(candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64CopyPlan,
+        InferenceTile::F32Sm120N64CopyPlan,
         "hot_b",
         false,
         &protocol,
@@ -328,7 +328,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     ));
     assert!(candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120TmaFmaM128N64,
+        InferenceTile::F32Sm120TmaFmaM128N64,
         "hot_b",
         false,
         &protocol,
@@ -337,7 +337,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     ));
     assert!(!candidate_own_admission(
         Candidate::CopyPlan,
-        FixedTile::F32Sm120N64Sliced,
+        InferenceTile::F32Sm120N64Sliced,
         "hot_b",
         false,
         &protocol,
@@ -346,7 +346,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     ));
     assert!(!candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64CopyPlan,
+        InferenceTile::F32Sm120N64CopyPlan,
         "hot_b",
         false,
         &protocol,
@@ -355,7 +355,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     ));
     assert!(candidate_own_admission(
         Candidate::CopyPlan,
-        FixedTile::F32Sm120N64CopyPlan,
+        InferenceTile::F32Sm120N64CopyPlan,
         "hot_e",
         true,
         &protocol,
@@ -365,7 +365,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     for (cell, bias) in [("hot_b", true), ("hot_e", false), ("hot_a", false)] {
         assert!(!candidate_own_admission(
             Candidate::Sliced,
-            FixedTile::F32Sm120N64Sliced,
+            InferenceTile::F32Sm120N64Sliced,
             cell,
             bias,
             &protocol,
@@ -376,7 +376,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     for bad in [vec![0.9; 3], vec![1.0; 4], vec![f64::NAN; 4], vec![0.0; 4]] {
         assert!(!candidate_own_admission(
             Candidate::Sliced,
-            FixedTile::F32Sm120N64Sliced,
+            InferenceTile::F32Sm120N64Sliced,
             "hot_b",
             false,
             &protocol,
@@ -387,7 +387,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     protocol.windows = 21;
     assert!(!candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64Sliced,
+        InferenceTile::F32Sm120N64Sliced,
         "hot_b",
         false,
         &protocol,
@@ -398,7 +398,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     protocol.paths = vec![0];
     assert!(!candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64Sliced,
+        InferenceTile::F32Sm120N64Sliced,
         "hot_b",
         false,
         &protocol,
@@ -409,7 +409,7 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
     protocol.auto_phase = None;
     assert!(!candidate_own_admission(
         Candidate::Sliced,
-        FixedTile::F32Sm120N64Sliced,
+        InferenceTile::F32Sm120N64Sliced,
         "hot_b",
         false,
         &protocol,
@@ -452,33 +452,33 @@ fn admission(cell: &str, windows: usize, paths: &[usize], own_ratios: &[f64]) ->
 // by production or from the selected timing subset.
 fn expected_auto(
     phase: &str,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
     t256_loaded: bool,
-) -> Result<FixedTile, String> {
+) -> Result<InferenceTile, String> {
     let dims = (shape.m, shape.k, shape.n);
     match phase {
         "incumbent" => Ok(if matches!(dims, (4621, 384, 1928) | (4621, 768, 2304)) {
-            FixedTile::F32N128S2
+            InferenceTile::F32N128S2
         } else {
-            FixedTile::Legacy
+            InferenceTile::Legacy
         }),
         "promoted" => Ok(if dims == (4621, 384, 1928) && !has_bias {
-            FixedTile::F32Sm120TmaFmaM64N128
+            InferenceTile::F32Sm120TmaFmaM64N128
         } else if dims == (4621, 384, 1928) && t256_loaded {
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
         } else if dims == (4621, 384, 1928) {
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
         } else if dims == (4621, 768, 2304) && !has_bias {
-            FixedTile::F32Sm120TmaFmaM128N64
+            InferenceTile::F32Sm120TmaFmaM128N64
         } else if dims == (4621, 768, 2304) && has_bias {
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
         } else if dims == (4621, 1928, 384) && has_bias {
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
         } else if matches!(dims, (2048, 2304, 768) | (2048, 768, 2304)) {
-            FixedTile::F32Sm120N64CopyPlan
+            InferenceTile::F32Sm120N64CopyPlan
         } else {
-            FixedTile::Legacy
+            InferenceTile::Legacy
         }),
         other => Err(format!(
             "MAMBA_FIXED_SM120_EXACT_N64_AUTO only accepts incumbent or promoted, got {other:?}"
@@ -487,9 +487,9 @@ fn expected_auto(
 }
 fn auto_phase(
     requested: Option<&str>,
-    shape: FixedShape,
+    shape: InferenceShape,
     has_bias: bool,
-    actual: FixedTile,
+    actual: InferenceTile,
     t256_loaded: bool,
 ) -> Result<(), String> {
     let phase = requested.unwrap_or("incumbent");
@@ -548,74 +548,74 @@ fn exact_n64_admission_cpu_completion_rejects_duplicate_missing_or_foreign_pair(
 fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
     for (shape, expected) in [
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 384,
                 n: 1928,
             },
-            FixedTile::F32N128S2,
+            InferenceTile::F32N128S2,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 768,
                 n: 2304,
             },
-            FixedTile::F32N128S2,
+            InferenceTile::F32N128S2,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4621,
                 k: 1928,
                 n: 384,
             },
-            FixedTile::Legacy,
+            InferenceTile::Legacy,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 768,
                 n: 2304,
             },
-            FixedTile::Legacy,
+            InferenceTile::Legacy,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768,
             },
-            FixedTile::Legacy,
+            InferenceTile::Legacy,
         ),
-        (FixedShape { m: 65, k: 1, n: 65 }, FixedTile::Legacy),
+        (InferenceShape { m: 65, k: 1, n: 65 }, InferenceTile::Legacy),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4620,
                 k: 768,
                 n: 2304,
             },
-            FixedTile::Legacy,
+            InferenceTile::Legacy,
         ),
         (
-            FixedShape {
+            InferenceShape {
                 m: 4622,
                 k: 768,
                 n: 2304,
             },
-            FixedTile::Legacy,
+            InferenceTile::Legacy,
         ),
     ] {
         auto_phase(None, shape, false, expected, true).unwrap();
         auto_phase(Some("incumbent"), shape, false, expected, true).unwrap();
         for wrong in [
-            FixedTile::Legacy,
-            FixedTile::F32N128S2,
-            FixedTile::F32Sm120N64CopyPlan,
-            FixedTile::F32Sm120TmaFmaM128N64,
-            FixedTile::F32Sm120TmaFmaM64N128,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
+            InferenceTile::Legacy,
+            InferenceTile::F32N128S2,
+            InferenceTile::F32Sm120N64CopyPlan,
+            InferenceTile::F32Sm120TmaFmaM128N64,
+            InferenceTile::F32Sm120TmaFmaM64N128,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
         ] {
             if wrong != expected {
                 assert!(auto_phase(None, shape, false, wrong, true).is_err());
@@ -624,14 +624,14 @@ fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
         let promoted = expected_auto("promoted", shape, false, true).unwrap();
         auto_phase(Some("promoted"), shape, false, promoted, true).unwrap();
         for wrong in [
-            FixedTile::Legacy,
-            FixedTile::F32N128S2,
-            FixedTile::F32Sm120N64CopyPlan,
-            FixedTile::F32Sm120TmaFmaM128N64,
-            FixedTile::F32Sm120TmaFmaM64N128,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
+            InferenceTile::Legacy,
+            InferenceTile::F32N128S2,
+            InferenceTile::F32Sm120N64CopyPlan,
+            InferenceTile::F32Sm120TmaFmaM128N64,
+            InferenceTile::F32Sm120TmaFmaM64N128,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
         ] {
             if wrong != promoted {
                 assert!(auto_phase(Some("promoted"), shape, false, wrong, true).is_err());
@@ -1113,10 +1113,10 @@ const ARMS: [&str; 6] = [
 ];
 const PATHS: [&str; 2] = ["eager", "graph"];
 const ORDERS: [&str; 2] = ["ABBA", "BAAB"];
-const CELLS: [(&str, FixedShape); 5] = [
+const CELLS: [(&str, InferenceShape); 5] = [
     (
         "hot_a",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
@@ -1124,7 +1124,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_b",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
@@ -1132,7 +1132,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_c",
-        FixedShape {
+        InferenceShape {
             m: 4621,
             k: 1928,
             n: 384,
@@ -1140,7 +1140,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_d",
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 768,
             n: 2304,
@@ -1148,7 +1148,7 @@ const CELLS: [(&str, FixedShape); 5] = [
     ),
     (
         "hot_e",
-        FixedShape {
+        InferenceShape {
             m: 2048,
             k: 2304,
             n: 768,
@@ -1304,19 +1304,19 @@ impl Guarded {
 
 struct Case {
     candidate: Candidate,
-    shape: FixedShape,
+    shape: InferenceShape,
     corpus: Corpus,
     has_bias: bool,
     a: Guarded,
     b: Guarded,
     bias: Guarded,
     outputs: Vec<Guarded>,
-    auto: Cell<Option<FixedTile>>,
+    auto: Cell<Option<InferenceTile>>,
 }
 impl Case {
     fn new(
         ctx: &GpuCtx,
-        shape: FixedShape,
+        shape: InferenceShape,
         corpus: Corpus,
         has_bias: bool,
         candidate: Candidate,
@@ -1352,8 +1352,8 @@ impl Case {
             auto: Cell::new(None),
         })
     }
-    fn operands(&self, arm: usize) -> FixedFwdOperands {
-        FixedFwdOperands {
+    fn operands(&self, arm: usize) -> InferenceFwdOperands {
+        InferenceFwdOperands {
             c: TypedPtr {
                 ptr: self.outputs[arm].ptr(),
                 dtype: WeightDtype::F32,
@@ -1372,7 +1372,7 @@ impl Case {
     fn launch(&self, ctx: &GpuCtx, arm: usize) -> Result<(), String> {
         let operands = self.operands(arm);
         match arm {
-            0 => fixed_forward_with_tile(ctx, operands, self.shape, self.candidate.tile()),
+            0 => inference_forward_with_tile(ctx, operands, self.shape, self.candidate.tile()),
             1 => {
                 let selected = launch_sm120_exact_auto(ctx, operands, self.shape);
                 if self.auto.get().is_some_and(|previous| previous != selected) {
@@ -1381,8 +1381,8 @@ impl Case {
                 self.auto.set(Some(selected));
                 Ok(())
             }
-            2 => fixed_forward_with_tile(ctx, operands, self.shape, FixedTile::Legacy),
-            4 => fixed_forward_f32_legacy_baseline(ctx, operands, self.shape),
+            2 => inference_forward_with_tile(ctx, operands, self.shape, InferenceTile::Legacy),
+            4 => inference_forward_f32_legacy_baseline(ctx, operands, self.shape),
             3 | 5 => {
                 // Every invocation includes bias broadcast + beta1, or beta0
                 // without bias. Reference has its own separately reset output.
@@ -1571,67 +1571,67 @@ fn kernel_params(
 }
 
 #[cfg(test)]
-fn own_kernel(arm: usize, auto: Option<FixedTile>) -> Result<(&'static str, usize, u32), String> {
+fn own_kernel(arm: usize, auto: Option<InferenceTile>) -> Result<(&'static str, usize, u32), String> {
     own_kernel_for_candidate(arm, auto, Candidate::CopyPlan)
 }
 
 fn own_kernel_for_candidate(
     arm: usize,
-    auto: Option<FixedTile>,
+    auto: Option<InferenceTile>,
     candidate: Candidate,
 ) -> Result<(&'static str, usize, u32), String> {
     match (arm, auto) {
         (0, _) => Ok((candidate.symbol(), 64, 128)),
-        (1, Some(FixedTile::F32Sm120N64CopyPlan)) => Ok((CANDIDATE, 64, 128)),
-        (1, Some(FixedTile::F32Sm120M128N64CopyPlanT256)) => Ok((
+        (1, Some(InferenceTile::F32Sm120N64CopyPlan)) => Ok((CANDIDATE, 64, 128)),
+        (1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)) => Ok((
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
             64,
             256,
         )),
-        (1, Some(FixedTile::F32Sm120N64CopyPlanT256)) => {
+        (1, Some(InferenceTile::F32Sm120N64CopyPlanT256)) => {
             Ok(("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256))
         }
-        (1, Some(FixedTile::F32Sm120N64Sliced)) => {
+        (1, Some(InferenceTile::F32Sm120N64Sliced)) => {
             Ok(("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128))
         }
-        (1, Some(FixedTile::F32Sm120TmaFmaM128N64)) => {
+        (1, Some(InferenceTile::F32Sm120TmaFmaM128N64)) => {
             Ok(("gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2", 64, 128))
         }
-        (1, Some(FixedTile::F32Sm120TmaFmaM64N128)) => {
+        (1, Some(InferenceTile::F32Sm120TmaFmaM64N128)) => {
             Ok(("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128))
         }
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
             64,
             128,
         )),
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
             64,
             128,
         )),
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
             64,
             256,
         )),
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
             64,
             256,
         )),
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
             96,
             256,
         )),
-        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => Ok((
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => Ok((
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
             128,
             128,
         )),
-        (1, Some(FixedTile::F32N128S2)) => Ok((N128, 128, 256)),
-        (1, Some(FixedTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
+        (1, Some(InferenceTile::F32N128S2)) => Ok((N128, 128, 256)),
+        (1, Some(InferenceTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
         (4, _) => Ok((ORACLE, 64, 256)),
         _ => Err("missing or unqualified SM120 own route".into()),
     }
@@ -1640,7 +1640,7 @@ fn own_kernel_for_candidate(
 #[test]
 fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120M128N64CopyPlanT256)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)).unwrap(),
         (
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
             64,
@@ -1648,13 +1648,13 @@ fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
         )
     );
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120N64CopyPlanT256)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120N64CopyPlanT256)).unwrap(),
         ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256)
     );
     assert_eq!(
         expected_auto(
             "promoted",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768
@@ -1663,14 +1663,14 @@ fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
             true
         )
         .unwrap(),
-        FixedTile::F32Sm120N64CopyPlan
+        InferenceTile::F32Sm120N64CopyPlan
     );
 }
 
 #[test]
 fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)).unwrap(),
         (
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
             64,
@@ -1680,7 +1680,7 @@ fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
     assert_eq!(
         expected_auto(
             "promoted",
-            FixedShape {
+            InferenceShape {
                 m: 2048,
                 k: 2304,
                 n: 768
@@ -1689,31 +1689,31 @@ fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
             true
         )
         .unwrap(),
-        FixedTile::F32Sm120N64CopyPlan,
+        InferenceTile::F32Sm120N64CopyPlan,
     );
 }
 
 #[test]
 fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
-    let (symbol, tile_n, threads) = own_kernel(1, Some(FixedTile::F32N128S2)).unwrap();
+    let (symbol, tile_n, threads) = own_kernel(1, Some(InferenceTile::F32N128S2)).unwrap();
     assert_eq!(symbol, "gemm_bi_f32_f32_n128_s2");
     assert_eq!(tile_n, 128);
     assert_eq!(threads, 256);
     assert_eq!(4621usize.div_ceil(64) * 2304usize.div_ceil(tile_n), 1314);
     assert_eq!(
-        own_kernel(2, Some(FixedTile::F32N128S2)).unwrap(),
+        own_kernel(2, Some(InferenceTile::F32N128S2)).unwrap(),
         (LEGACY, 64, 128)
     );
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120N64CopyPlan)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120N64CopyPlan)).unwrap(),
         (CANDIDATE, 64, 128)
     );
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaM64N128)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaM64N128)).unwrap(),
         ("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128)
     );
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)).unwrap(),
         (
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
             64,
@@ -1722,7 +1722,7 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
     );
     assert!(own_kernel(1, None).is_err());
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)).unwrap(),
         (
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
             64,
@@ -1730,7 +1730,7 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
         )
     );
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)).unwrap(),
         (
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
             96,
@@ -1769,7 +1769,7 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
 
 #[test]
 fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallback() {
-    let shape = FixedShape {
+    let shape = InferenceShape {
         m: 4621,
         k: 384,
         n: 1928,
@@ -1777,13 +1777,13 @@ fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallba
     for (loaded, expected, rejected) in [
         (
             true,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
         ),
         (
             false,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
         ),
     ] {
         assert_eq!(
@@ -1809,44 +1809,44 @@ fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallba
 #[test]
 fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
     for (m, k, n, bias, want) in [
-        (2048, 768, 2304, false, FixedTile::F32Sm120N64CopyPlan),
-        (2048, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
-        (4621, 768, 2304, false, FixedTile::F32Sm120TmaFmaM128N64),
+        (2048, 768, 2304, false, InferenceTile::F32Sm120N64CopyPlan),
+        (2048, 768, 2304, true, InferenceTile::F32Sm120N64CopyPlan),
+        (4621, 768, 2304, false, InferenceTile::F32Sm120TmaFmaM128N64),
         (
             4621,
             768,
             2304,
             true,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
         ),
-        (4621, 1928, 384, false, FixedTile::Legacy),
+        (4621, 1928, 384, false, InferenceTile::Legacy),
         (
             4621,
             1928,
             384,
             true,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
         ),
-        (2048, 2304, 768, false, FixedTile::F32Sm120N64CopyPlan),
-        (2048, 2304, 768, true, FixedTile::F32Sm120N64CopyPlan),
-        (4621, 384, 1928, false, FixedTile::F32Sm120TmaFmaM64N128),
+        (2048, 2304, 768, false, InferenceTile::F32Sm120N64CopyPlan),
+        (2048, 2304, 768, true, InferenceTile::F32Sm120N64CopyPlan),
+        (4621, 384, 1928, false, InferenceTile::F32Sm120TmaFmaM64N128),
         (
             4621,
             384,
             1928,
             true,
-            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
         ),
-        (4620, 768, 2304, false, FixedTile::Legacy),
-        (4622, 768, 2304, false, FixedTile::Legacy),
+        (4620, 768, 2304, false, InferenceTile::Legacy),
+        (4622, 768, 2304, false, InferenceTile::Legacy),
     ] {
         assert_eq!(
-            expected_auto("promoted", FixedShape { m, k, n }, bias, true).unwrap(),
+            expected_auto("promoted", InferenceShape { m, k, n }, bias, true).unwrap(),
             want
         );
     }
     assert_eq!(
-        own_kernel(1, Some(FixedTile::F32Sm120N64Sliced)).unwrap(),
+        own_kernel(1, Some(InferenceTile::F32Sm120N64Sliced)).unwrap(),
         ("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128)
     );
     // Explicit candidate stays old copyplan. A different AUTO is not a self comparison.
@@ -1877,11 +1877,11 @@ fn exact_n64_candidate_cpu_graph_candidate_and_auto_are_independent() {
             (symbol, 64, 128)
         );
         assert_eq!(
-            own_kernel_for_candidate(1, Some(FixedTile::F32Sm120N64Sliced), candidate).unwrap(),
+            own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64Sliced), candidate).unwrap(),
             ("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128)
         );
         assert_eq!(
-            own_kernel_for_candidate(1, Some(FixedTile::F32Sm120N64CopyPlan), candidate).unwrap(),
+            own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64CopyPlan), candidate).unwrap(),
             ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1", 64, 128)
         );
         assert_eq!(
@@ -1889,7 +1889,7 @@ fn exact_n64_candidate_cpu_graph_candidate_and_auto_are_independent() {
             ("gemm_bi_f32_f32_s2", 64, 128)
         );
         assert!(own_kernel_for_candidate(1, None, candidate).is_err());
-        assert!(own_kernel_for_candidate(1, Some(FixedTile::Tf32M128S2), candidate).is_err());
+        assert!(own_kernel_for_candidate(1, Some(InferenceTile::Tf32M128S2), candidate).is_err());
     }
 }
 
@@ -2504,7 +2504,7 @@ impl Protocol {
     fn from_env() -> Result<Self, String> {
         let auto_phase = env("MAMBA_FIXED_SM120_EXACT_N64_AUTO")?;
         if let Some(value) = auto_phase.as_deref() {
-            expected_auto(value, FixedShape { m: 1, k: 1, n: 1 }, false, true)?;
+            expected_auto(value, InferenceShape { m: 1, k: 1, n: 1 }, false, true)?;
         }
         Ok(Self {
             diagnostic_fast: false,
@@ -2631,7 +2631,7 @@ fn exact_n64_diagnostic_cpu_never_admits_even_if_windows_are_tampered() {
     for candidate in [Candidate::CopyPlan, Candidate::Sliced] {
         assert!(!candidate_own_admission(
             candidate,
-            FixedTile::F32Sm120N64CopyPlan,
+            InferenceTile::F32Sm120N64CopyPlan,
             "hot_b",
             false,
             &protocol,
@@ -2773,7 +2773,7 @@ fn single_term_preflight(
     for has_bias in [false, true] {
         let mut case = Case::new(
             ctx,
-            FixedShape { m: 65, k: 1, n: 65 },
+            InferenceShape { m: 65, k: 1, n: 65 },
             Corpus::Representable,
             has_bias,
             candidate,
@@ -2792,7 +2792,7 @@ fn single_term_preflight(
                 case.launch(ctx, arm)?;
             }
         }
-        if case.auto.get() != Some(FixedTile::Legacy) {
+        if case.auto.get() != Some(InferenceTile::Legacy) {
             return Err("small single-term AUTO must remain Legacy".into());
         }
         let expected = vec![

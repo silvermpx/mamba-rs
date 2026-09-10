@@ -14,8 +14,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    fixed_forward, fixed_forward_with_tile, FixedFwdOperands, FixedShape, FixedTile,
+use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+    inference_forward, inference_forward_with_tile, InferenceFwdOperands, InferenceShape, InferenceTile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -181,13 +181,13 @@ const _: () = {
 #[derive(Clone, Copy)]
 struct Case {
     label: &'static str,
-    shape: FixedShape,
+    shape: InferenceShape,
     bias: bool,
 }
 
 const E0: Case = Case {
     label: "e0",
-    shape: FixedShape {
+    shape: InferenceShape {
         m: 2048,
         k: 2304,
         n: 768,
@@ -204,7 +204,7 @@ const CORRECTNESS_CASES: [Case; 4] = [
     },
     Case {
         label: "tail0",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 36,
             n: 100,
@@ -213,7 +213,7 @@ const CORRECTNESS_CASES: [Case; 4] = [
     },
     Case {
         label: "tail1",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 36,
             n: 100,
@@ -386,12 +386,12 @@ impl Fixture {
         }
     }
 
-    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> FixedFwdOperands {
+    fn operands(&self, runtime: &Runtime, case: Case, arm: Arm) -> InferenceFwdOperands {
         let typed = |pointer| TypedPtr {
             ptr: pointer,
             dtype: WeightDtype::F32,
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(self.output(arm).ptr(&runtime.ctx.stream)),
             x: typed(self.a.ptr(&runtime.ctx.stream)),
             w: typed(self.b.ptr(&runtime.ctx.stream)),
@@ -435,12 +435,12 @@ fn probe_values(len: usize, mut state: u64) -> Vec<f32> {
 
 fn compose_source() -> String {
     let prelude = include_str!("../kernels/_typed_prelude.cuh");
-    let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+    let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
         .lines()
         .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
         .collect::<Vec<_>>()
         .join("\n");
-    let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
+    let tf32 = include_str!("../kernels/gemm_bi_inference/tf32.cu");
     [prelude, &common, tf32, CUDA_SOURCE].join("\n")
 }
 
@@ -570,7 +570,7 @@ fn validate_resources(runtime: &Runtime) -> Result<(), String> {
 }
 
 fn configure(runtime: &Runtime, arm: Arm) -> Result<(), String> {
-    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    runtime.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     runtime.ctx.set_bi_tensor_cores(false);
     runtime
         .ctx
@@ -591,7 +591,7 @@ fn configure(runtime: &Runtime, arm: Arm) -> Result<(), String> {
     Ok(())
 }
 
-fn candidate_config(shape: FixedShape) -> Result<LaunchConfig, String> {
+fn candidate_config(shape: InferenceShape) -> Result<LaunchConfig, String> {
     let blocks = shape.m.div_ceil(N96_BM) * shape.n.div_ceil(N96_BN);
     Ok(LaunchConfig {
         grid_dim: (
@@ -633,11 +633,11 @@ fn launch(runtime: &Runtime, fixture: &Fixture, case: Case, arm: Arm) -> Result<
                 .map(|_| ())
                 .map_err(|error| format!("launch N96 candidate: {error:?}"))
         }
-        Arm::ProductionRna => fixed_forward_with_tile(
+        Arm::ProductionRna => inference_forward_with_tile(
             &runtime.ctx,
             operands,
             case.shape,
-            FixedTile::Tf32RnaM128N128S3,
+            InferenceTile::Tf32RnaM128N128S3,
         ),
         Arm::FastTf32 => gpu_gemm_typed_forward_raw(
             &runtime.ctx,
@@ -675,7 +675,7 @@ fn output_bits(
 
 fn assert_n96_graph(
     graph: &CudaGraph,
-    shape: FixedShape,
+    shape: InferenceShape,
     expected_symbol: &str,
 ) -> Result<(), String> {
     assert_single_tf32_graph(graph, shape, expected_symbol, N96_BM, N96_BN, N96_SHARED)
@@ -683,7 +683,7 @@ fn assert_n96_graph(
 
 fn assert_single_tf32_graph(
     graph: &CudaGraph,
-    shape: FixedShape,
+    shape: InferenceShape,
     expected_symbol: &str,
     tile_m: usize,
     tile_n: usize,
@@ -821,7 +821,7 @@ fn check_case(runtime: &Runtime, case: Case) -> Result<Vec<u32>, String> {
 fn check_e_prefix(runtime: &Runtime, full: &[u32]) -> Result<(), String> {
     let case = Case {
         label: "e_prefix_m1",
-        shape: FixedShape { m: 1, ..E0.shape },
+        shape: InferenceShape { m: 1, ..E0.shape },
         bias: false,
     };
     let mut fixture = Fixture::new(runtime, E0)?;
@@ -867,7 +867,7 @@ fn assert_actual_auto(runtime: &Runtime, case: Case) -> Result<(), String> {
     fixture.reset(runtime, Arm::ProductionRna)?;
     configure(runtime, Arm::ProductionRna)?;
     let operands = fixture.operands(runtime, case, Arm::ProductionRna);
-    let selected = fixed_forward(
+    let selected = inference_forward(
         &runtime.ctx,
         operands.c,
         operands.x,
@@ -875,7 +875,7 @@ fn assert_actual_auto(runtime: &Runtime, case: Case) -> Result<(), String> {
         operands.bias_ptr,
         (case.shape.m, case.shape.k, case.shape.n),
     )?;
-    if selected != FixedTile::Tf32RnaM128N128S3 {
+    if selected != InferenceTile::Tf32RnaM128N128S3 {
         return Err(format!("E AUTO selected {selected:?}"));
     }
     output_bits(runtime, &fixture, Arm::ProductionRna, "actual AUTO")?;
@@ -1095,7 +1095,7 @@ mod triad_nn_add_half_screen {
     const CURRENT_WIDE_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
     const TARGET: Case = Case {
         label: "triad_nn_d768_out",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 2_048,
             k: 1_536,
             n: 768,
@@ -1104,7 +1104,7 @@ mod triad_nn_add_half_screen {
     };
     const TAIL: Case = Case {
         label: "triad_nn_n96_tail",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 36,
             n: 100,
@@ -1113,7 +1113,7 @@ mod triad_nn_add_half_screen {
     };
     const K0: Case = Case {
         label: "triad_nn_n96_k0",
-        shape: FixedShape {
+        shape: InferenceShape {
             m: 129,
             k: 0,
             n: 100,
@@ -1148,7 +1148,7 @@ mod triad_nn_add_half_screen {
         cell: triad_nn_n96_source::D768_IN_TARGET.cell,
         case: Case {
             label: "triad_nn_d768_in",
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: triad_nn_n96_source::D768_IN_TARGET.shape.0,
                 k: triad_nn_n96_source::D768_IN_TARGET.shape.1,
                 n: triad_nn_n96_source::D768_IN_TARGET.shape.2,
@@ -1164,7 +1164,7 @@ mod triad_nn_add_half_screen {
         cell: triad_nn_n96_source::PRISM_TARGET.cell,
         case: Case {
             label: "triad_nn_prism",
-            shape: FixedShape {
+            shape: InferenceShape {
                 m: triad_nn_n96_source::PRISM_TARGET.shape.0,
                 k: triad_nn_n96_source::PRISM_TARGET.shape.1,
                 n: triad_nn_n96_source::PRISM_TARGET.shape.2,
@@ -1224,7 +1224,7 @@ mod triad_nn_add_half_screen {
         fixture: &Fixture,
         case: Case,
         arm: TriadArm,
-    ) -> FixedFwdOperands {
+    ) -> InferenceFwdOperands {
         let typed = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
@@ -1237,7 +1237,7 @@ mod triad_nn_add_half_screen {
                 fixture.b.ptr(&runtime.ctx.stream),
             )
         };
-        FixedFwdOperands {
+        InferenceFwdOperands {
             c: typed(output(fixture, arm).ptr(&runtime.ctx.stream)),
             x: typed(a),
             w: typed(b),
@@ -1247,13 +1247,13 @@ mod triad_nn_add_half_screen {
 
     fn compose_source() -> Result<String, String> {
         let prelude = include_str!("../kernels/_typed_prelude.cuh");
-        let common = include_str!("../kernels/gemm_bi_fixed/common.cuh")
+        let common = include_str!("../kernels/gemm_bi_inference/common.cuh")
             .lines()
             .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
             .collect::<Vec<_>>()
             .join("\n");
-        let tf32 = include_str!("../kernels/gemm_bi_fixed/tf32.cu");
-        let fixed_n96 = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+        let tf32 = include_str!("../kernels/gemm_bi_inference/tf32.cu");
+        let fixed_n96 = include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu");
         let candidate = triad_nn_n96_source::compose_triad_nn_n96_source(fixed_n96)?;
         Ok([prelude, &common, tf32, &candidate].join("\n"))
     }
@@ -1397,13 +1397,13 @@ mod triad_nn_add_half_screen {
                 runtime.ctx.set_bi_tensor_cores(true);
             }
             TriadArm::CurrentWide => {
-                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
                 runtime.ctx.set_batch_invariant(true);
                 runtime.ctx.set_fast_gemm(false);
                 runtime.ctx.set_bi_tensor_cores(true);
             }
             TriadArm::FastTf32 => {
-                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+                runtime.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
                 runtime.ctx.set_batch_invariant(false);
                 runtime.ctx.set_fast_gemm(true);
                 runtime.ctx.set_bi_tensor_cores(false);
@@ -1451,11 +1451,11 @@ mod triad_nn_add_half_screen {
             }
             TriadArm::CurrentWide => {
                 let operands = operands(runtime, fixture, case, arm);
-                fixed_forward_with_tile(
+                inference_forward_with_tile(
                     &runtime.ctx,
                     operands,
                     case.shape,
-                    FixedTile::Tf32M128N128S3,
+                    InferenceTile::Tf32M128N128S3,
                 )
             }
             TriadArm::ActualAuto => {
