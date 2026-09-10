@@ -1,0 +1,17 @@
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records ... 
+thread 'mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records' (3556697) panicked at src/mamba_ssm/gpu/gemm_bi_triad/launch.rs:16366:9:
+assertion `left == right` failed
+  left: 24
+ right: 16
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 846 filtered out; finished in 0.00s
+

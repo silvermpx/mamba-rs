@@ -1,0 +1,15 @@
+
+running 1 test
+test physical_owner_rejects_private_method_authorities ... 
+thread 'physical_owner_rejects_private_method_authorities' (3566681) panicked at tests/gemm_bi_tf32_contract.rs:8756:9:
+a visible non-authority owner item was rejected: pub(super) const OWNER_HARMLESS_LIMIT: usize = 1;: Err("/root/mamba-model-gemm-final-host.4izdkP/src/mamba_ssm/gpu/blas.rs can bypass the opaque physical recorder")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    physical_owner_rejects_private_method_authorities
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 97 filtered out; finished in 1.38s
+

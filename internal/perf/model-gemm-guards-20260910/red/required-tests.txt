@@ -1,0 +1,2 @@
+mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_capture_requires_successful_public_eager_manifest
+mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::deterministic_inference_half_work_rejects_empty_graph_plan

@@ -1,0 +1,6 @@
+
+running 1 test
+test prepared_physical_enqueue_oracle_rejects_body_and_topology_mutations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.29s
+

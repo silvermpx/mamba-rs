@@ -1,0 +1,18 @@
+
+running 1 test
+test decode_graphs_reject_complete_route_drift ... mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it
+
+thread 'decode_graphs_reject_complete_route_drift' (3524755) panicked at tests/inference_graph_route.rs:217:10:
+M3 mixed capture: "M3 mixed inference graph capture: nonzero deterministic GEMM graph captured no resolved GEMM route"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    decode_graphs_reject_complete_route_drift
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 19.93s
+

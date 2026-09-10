@@ -1,0 +1,6 @@
+
+running 1 test
+test mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::deterministic_inference_half_work_rejects_empty_graph_plan ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 845 filtered out; finished in 4.72s
+

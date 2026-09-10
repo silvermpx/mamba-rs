@@ -1,0 +1,15 @@
+
+running 1 test
+test exact_graph_inventory_wires_decode_and_existing_prefill_training_holders ... 
+thread 'exact_graph_inventory_wires_decode_and_existing_prefill_training_holders' (3444495) panicked at tests/gemm_bi_tf32_contract.rs:41:9:
+Mamba3GpuInferenceMixed is missing Option<CapturedGemmGraphPlan>
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    exact_graph_inventory_wires_decode_and_existing_prefill_training_holders
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.03s
+

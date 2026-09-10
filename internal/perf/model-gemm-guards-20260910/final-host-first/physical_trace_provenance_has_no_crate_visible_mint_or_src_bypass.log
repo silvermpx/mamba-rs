@@ -1,0 +1,15 @@
+
+running 1 test
+test physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass ... 
+thread 'physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass' (3566546) panicked at tests/gemm_bi_tf32_contract.rs:7837:75:
+called `Result::unwrap()` on an `Err` value: "/root/mamba-model-gemm-final-host.4izdkP/src/mamba_ssm/gpu/blas.rs can bypass the opaque physical recorder"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.56s
+

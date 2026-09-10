@@ -1,0 +1,10 @@
+
+running 1 test
+test mamba_ssm::gpu::blas::vendor_gemm_test::vendor_gemm_guard_restores_on_error_unwind_and_rejects_nesting ... 
+thread 'mamba_ssm::gpu::blas::vendor_gemm_test::vendor_gemm_guard_restores_on_error_unwind_and_rejects_nesting' (3444489) panicked at src/mamba_ssm/gpu/blas.rs:101:13:
+exercise vendor guard unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 845 filtered out; finished in 0.00s
+

@@ -1,0 +1,7 @@
+lib host mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records
+lib host mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::half_kernel_identity_uses_exact_dtype_suffix_and_module_owner
+lib gpu mamba_ssm::gpu::blas::matvec_inventory_cuda_tests::triad_native_half_context_inventory_records_all_projection_terminals
+lib gpu mamba_ssm::gpu::inference::model_gemm_manifest_tests::m1_model_manifests_replay_all_paths_without_vendor_gemm
+lib gpu mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_model_manifests_replay_all_paths_without_vendor_gemm
+route gpu decode_graphs_reject_complete_route_drift
+lib gpu mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_captures_native_half_and_exact_typed_fallback

@@ -1,0 +1,18 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-model-gemm-provenance-fix.HRk6GE)
+warning: use of deprecated method `mamba_rs::gpu::context::GpuCtx::set_batch_invariant`: use GpuCtx::set_gemm_mode
+     --> tests/gemm_bi_tf32_contract.rs:14221:9
+      |
+14221 |     ctx.set_batch_invariant(true);
+      |         ^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `mamba_rs::gpu::context::GpuCtx::set_fast_gemm`: use GpuCtx::set_gemm_mode
+     --> tests/gemm_bi_tf32_contract.rs:14223:9
+      |
+14223 |     ctx.set_fast_gemm(false);
+      |         ^^^^^^^^^^^^^
+
+warning: `mamba-rs` (test "gemm_bi_tf32_contract") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 9.71s
+  Executable tests/gemm_bi_tf32_contract.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_tf32_contract-aceb65604857f065)

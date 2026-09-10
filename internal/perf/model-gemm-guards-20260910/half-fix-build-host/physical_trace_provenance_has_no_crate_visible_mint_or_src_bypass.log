@@ -1,0 +1,15 @@
+
+running 1 test
+test physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass ... 
+thread 'physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass' (3555299) panicked at tests/gemm_bi_tf32_contract.rs:7597:75:
+called `Result::unwrap()` on an `Err` value: "/root/mamba-model-gemm-half-fix.xrQlBl/src/mamba_ssm/gpu/kernel_identity.rs has unaudited physical-sensitive references: actual={ObserverConstructor: 1, ObservationResolver: 1}, expected={}"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.09s
+

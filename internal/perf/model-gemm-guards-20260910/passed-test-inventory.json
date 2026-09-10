@@ -1,0 +1,41 @@
+{
+  "source_commit": "96640d627d45cfe68f3c413a2e9bd18eacde8d80",
+  "final_accepted_source_commit": "a651b13395a6403de2852ab4edbe3ff2e606dc68",
+  "review_fix_evidence": "permit-green/; review/task-905-fix1-review.md",
+  "scope": "Distinct passing exact test exits across the documented source-equivalent packets; review is separate.",
+  "host_count": 14,
+  "gpu_count": 15,
+  "host": [
+    "exact_graph_inventory_wires_decode_and_existing_prefill_training_holders",
+    "graph_launch_scanner_rejects_a_bypass_beside_a_guarded_call",
+    "mamba_ssm::gpu::blas::vendor_gemm_test::vendor_gemm_guard_restores_on_error_unwind_and_rejects_nesting",
+    "mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::half_kernel_identity_uses_exact_dtype_suffix_and_module_owner",
+    "mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records",
+    "physical_904_census_keeps_test_authorities_gated_private_and_exact",
+    "physical_observation_oracle_rejects_control_flow_and_raw_launch_mutations",
+    "physical_observation_oracle_rejects_zero_tf32_transitive_mutations",
+    "physical_observation_uses_one_inseparable_enqueue_primitive",
+    "physical_owner_rejects_forwarders_and_visible_function_pointers",
+    "physical_owner_rejects_private_method_authorities",
+    "physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass",
+    "prepared_physical_enqueue_oracle_rejects_body_and_topology_mutations",
+    "struct_scope_parser_distinguishes_exact_type_from_prefix_collision"
+  ],
+  "gpu": [
+    "decode_graphs_reject_complete_route_drift",
+    "inference_decode_graphs_reject_complete_route_drift",
+    "mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_capture_requires_successful_public_eager_manifest",
+    "mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_explicit_vendor_graph_without_custom_plan_replays",
+    "mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan",
+    "mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_model_manifests_replay_all_paths_without_vendor_gemm",
+    "mamba_ssm::gpu::blas::matvec_inventory_cuda_tests::triad_native_half_context_inventory_records_all_projection_terminals",
+    "mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_captures_native_half_and_exact_typed_fallback",
+    "mamba_ssm::gpu::blas::vendor_gemm_test::vendor_gemm_counter_observes_both_modes_and_denies_before_ffi",
+    "mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::deterministic_inference_half_work_rejects_empty_graph_plan",
+    "mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::model_graph_guard_zero_vendor_and_poison_controls",
+    "mamba_ssm::gpu::inference::model_gemm_manifest_tests::m1_failed_steps_clear_permits_and_mixed_graphs_reject_wrong_path",
+    "mamba_ssm::gpu::inference::model_gemm_manifest_tests::m1_model_manifests_replay_all_paths_without_vendor_gemm",
+    "module::gpu_lm3::tied_head_capture_tests::m3_tied_and_untied_heads_all_storage_without_vendor_gemm",
+    "module::gpu_lm::tied_head_capture_tests::m1_tied_and_untied_heads_all_storage_without_vendor_gemm"
+  ]
+}

@@ -1,0 +1,15 @@
+
+running 1 test
+test mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_capture_requires_successful_public_eager_manifest ... 
+thread 'mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_capture_requires_successful_public_eager_manifest' (3421780) panicked at src/mamba3_siso/gpu/inference.rs:69:28:
+capture must reject a missing successful eager manifest: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_capture_requires_successful_public_eager_manifest
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 835 filtered out; finished in 4.71s
+

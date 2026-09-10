@@ -1,0 +1,27 @@
+
+running 1 test
+test mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan ... 
+thread 'mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan' (3511008) panicked at src/mamba_ssm/gpu/buffers.rs:268:9:
+assertion `left == right` failed: upload size mismatch: src=0 gpu=32
+  left: 0
+ right: 32
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan' (3511008) panicked at src/mamba_ssm/gpu/buffers.rs:268:9:
+assertion `left == right` failed: upload size mismatch: src=0 gpu=32
+  left: 0
+ right: 32
+
+thread 'mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan' (3511008) panicked at src/mamba_ssm/gpu/buffers.rs:268:9:
+assertion `left == right` failed: upload size mismatch: src=0 gpu=32
+  left: 0
+ right: 32
+
+thread 'mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan' (3511008) panicked at src/mamba_ssm/gpu/buffers.rs:268:9:
+assertion `left == right` failed: upload size mismatch: src=0 gpu=32
+  left: 0
+ right: 32
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 845 filtered out; finished in 10.44s
+

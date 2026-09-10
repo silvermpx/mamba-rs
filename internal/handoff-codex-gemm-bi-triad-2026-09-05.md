@@ -3233,8 +3233,18 @@ Files: `src/mamba_ssm/gpu/graph_capture.rs`,
 `src/mamba_ssm/gpu/inference.rs`, `src/mamba3_siso/gpu/inference.rs`,
 `src/mamba_ssm/gpu/blas.rs` (test-only FFI tripwire),
 `src/module/gpu_lm.rs` and `src/module/gpu_lm3.rs` (colocated real head tests),
-`tests/inference_graph_route.rs`, plus narrowly scoped existing context/identity
+`tests/inference_graph_route.rs`, the affected owner-map regression in
+`tests/gemm_bi_tf32_contract.rs`, plus narrowly scoped existing context/identity
 test support where an inaccessible mutation needs a private cfg(test) seam.
+Actual runtime RED additionally authorizes the shared native half terminal in
+`src/mamba_ssm/gpu/gemm_bi_triad/launch.rs`: context-aware typed TC launches
+used NoPhysicalObserver and were absent from the context GEMM recorder. Carry
+the existing context through HalfLaunchEnvironment and record actual terminal
+routes when that recorder is active, independently of physical observation.
+Preserve physical allocation digests, ordered projections, no double counting,
+and context-free low-level APIs. Add a direct typed-projection regression in
+the existing blas tests. Root observed both M1/M3 TC-native-half failures before
+this fix; kernel arithmetic and dispatch selection remain unchanged.
 No public testing API, new CUDA body, selector, compiler/qualification changes,
 new mode/default, or duplicate tracing framework.
 
@@ -3268,8 +3278,13 @@ logical route and pointer/scratch checks remain before this shared seam.
   nonzero half GEMM body; the existing F32/Triad-only guard must reject an empty
   plan. Root observes these intended failures before production edits.
 
-- [ ] Replace the F32/Triad-specific empty-plan helper with the shared
-  deterministic guard for all families and storage dtypes. `has_gemm_work`
+- [ ] Replace decode owners' F32/Triad-specific empty-plan checks with the
+  shared deterministic guard for all families and storage dtypes. Keep the
+  existing legacy helper for the five untouched prefill/training callers;
+  do not change their behavior or claim their acceptance in this decode task.
+  Migrate the existing source owner-map test to the new M1/M3 decode paths,
+  preserving its unchanged prefill/training assertions and negative guard
+  parser fixtures. `has_gemm_work`
   reflects actual nonzero batch and optional input projection/layer workload,
   not a fixed true constant or storage-mode label. For validated nonzero model
   dimensions, F32 and M1 legacy mixed have work when
@@ -3361,3 +3376,301 @@ let m3_layer = [
   Fresh5090 execution remains explicitly pending unless its supplied endpoint
   is available. No full performance tournament, new branch, push/publish,
   lint suppression or unrelated source writer during this task.
+
+## Task 906: Public model/trainer GEMM-mode constructors and Rustdoc (2026-09-10)
+
+Execute after Task905 verification/review. This is the existing approved
+three-mode API/default release item, not a new execution framework. The exact
+additive public signatures and forwarding map are normative in
+`internal/release-mode-constructor-signatures-20260910.md`; read it completely.
+Also read `internal/release-mode-constructor-map-20260910.md`. Source anchors
+predate905, so resolve names against its reviewed source instead of line numbers.
+
+Files and responsibilities:
+
+- `src/mamba_ssm/gpu/context.rs`: two private role-aware constructor seams;
+  retain the single `new_with_state_cap_and_config` owned body and parser.
+- `src/mamba_ssm/gpu/inference.rs` and
+  `src/mamba3_siso/gpu/inference.rs`: additive engine/backbone constructors,
+  common precision dispatch, role defaults, M3 context-access parity and Rustdoc.
+- `src/module/gpu_lm.rs`, `src/module/gpu_lm3.rs`: additive LM construction
+  paths and M3 public `ctx`; no new required `Mamba3LmBuild` field.
+- `src/mamba_ssm/gpu/trainer.rs`, `src/mamba3_siso/gpu/trainer.rs`: additive
+  `new_full_with_mode`, forwarding through both existing F32/mixed bodies,
+  and the remaining graph-owner migration below.
+- Both GPU `prefill.rs` and `training_graph.rs`, shared `graph_capture.rs`,
+  and `tests/gemm_bi_tf32_contract.rs`: migrate the confirmed remaining
+  capture/replay owners to905's shared admission/health seam before changing
+  model role defaults; see `internal/release-remaining-graph-owner-map-20260910.md`.
+- New `tests/gemm_model_mode_api.rs`: focused real constructor/env regressions.
+  New `tests/common/hf_synthetic.rs` and adjusted `tests/hf_integration.rs`:
+  extract the existing synthetic checkpoint helper unchanged for reuse. Never
+  include an entire integration test target as another target's helper.
+
+No CUDA/header, selector, kernel admission, arithmetic, dependency, benchmark,
+package-layout, version or broad documentation changes in this task. No new
+branch, public test API, process-global test env mutation or lint allowance.
+
+Produced context interfaces:
+
+```rust
+pub(crate) fn new_from_env_with_state_cap_and_family(
+    device: &GpuDevice, state_cap: usize, default_family: BiGemmFamily,
+) -> Result<Self, String>;
+pub(crate) fn new_with_state_cap_mode_and_family(
+    device: &GpuDevice, state_cap: usize, mode: GemmMode, family: BiGemmFamily,
+) -> Result<Self, String>;
+```
+
+Public overloads use the exact types/argument lists in the signatures spec:
+`new_with_mode` on both F32/mixed engines and both backbones;
+backbone `new_with_dtype_and_mode`; M1 LM's three `from_hf_*_mode` overloads;
+M3 LM `from_weights_with_mode` and `build_with_mode`; both trainer
+`new_full_with_mode`. Existing methods remain available. M3 mixed/backbone/LM
+gain the spec's `pub fn ctx(&self) -> &GpuCtx` accessors; inspection remains
+`ctx().gemm_mode()` with no duplicate stored mode.
+
+- [ ] Tests first: create two exact real CUDA regressions through the EXISTING
+  F32 backbone `new` APIs, using small owned M1/M3 weights and no process GEMM
+  env. Put the M1 case in the integration target; put the M3 case in its
+  colocated inference module tests, because the existing M3 backbone `ctx`
+  accessor is crate-private. Do not widen production visibility to make RED
+  compile. Name them `m1_default_constructor_uses_inference_family` and
+  `m3_default_constructor_uses_inference_family`. Assert before any step:
+
+```rust
+assert_eq!(backbone.ctx().gemm_mode(), GemmMode::Deterministic);
+assert_eq!(backbone.ctx().bi_gemm_family(), BiGemmFamily::Inference);
+```
+
+  Use valid M3 F32 weights/identity projection and the source map's existing
+  fixture patterns. The current constructors return Triad, so root observes
+  the intended family assertion RED before production changes. Root owns
+  Cargo/GPU, immutable snapshots and commits; supply test-only hashes/names.
+
+- [ ] Implement both role seams around the existing complete construction
+  value. The env seam performs exactly
+  `resolve_gemm_env(GemmEnvValues::read(), default_family)` and delegates to
+  `new_with_state_cap_and_config`. The explicit seam constructs:
+
+```rust
+ResolvedGemmEnv {
+    mode, family, tensor_cores: true,
+    f32_policy: F32TriadPolicy::ExactScalarFmaV1,
+    half_policy: HalfTriadPolicy::TiledParityV1,
+}
+```
+
+  Keep `ResolvedGemmEnv` private. Existing generic public `GpuCtx::new*` uses
+  Triad as before. Do not read env then overwrite the enum, mutate process env,
+  temporarily set a different mode, or create a throwaway GPU context.
+
+- [ ] Forward no-mode model/LM constructors through the env seam with default
+  family Inference; trainers default to Triad. Missing env mode is Deterministic.
+  Explicit-mode overloads bypass mode/precision/TC/family parsing and store the
+  role family even in vendor modes. Absent family uses the role default;
+  explicitly empty/whitespace family remains Triad for compatibility. Existing
+  invalid/contradictory env diagnostics remain strict. M3's default constructors
+  becoming env-aware is intentional and must be documented as a change.
+
+- [ ] Keep one real upload/allocation body per existing constructor family.
+  A private `Option<GemmMode>` forwarding choice may select the env versus
+  explicit context before that body. Mixed engines continue to retain their
+  existing F32 engine for real weights/state, not a disposable context. Preserve
+  config validation and state-cap ordering: M1 uses rounded cfg capacity;
+  M3 generic context stays64 while its M3 kernels compile with rounded cfg
+  capacity. Preserve native mixed identity-only projection and M3 F32 trainer's
+  explicit input-projection rejection before precision dispatch.
+
+- [ ] Close the concrete remaining-owner dependency before deploying the role
+  default. Read the complete owner map. There are three prefill captures and
+  six training captures (F32/BF16/F16 on M1/M3), with nine replay sites through
+  six optional-plan wrappers. Use905's shared deterministic admission and
+  validated-launch helper for all nine, preserving existing route/buffer/module
+  checks and Some-plan validation. Carry/store the actual has-GEMM predicate
+  supplied by the owner map, not a dtype flag or an unconditional true. Healthy
+  vendor None and genuine zero-work None remain legal; poisoned contexts never
+  reach a callback. Remove unused duplicate wrappers and the old F32/Triad-only
+  helper once its last caller migrates; no lint allowances.
+
+  Prepare the Inference architecture rung before the two prefill and six
+  trainer eager recorders, only when actual GEMM work is nonzero. Preparation
+  is a no-op for default Triad trainers and preserves an explicit Inference
+  family override. This prevents cold SM90/SM100 probes inside a recorder;
+  it does not change dispatch or introduce a new graph/manifest mechanism.
+  Leave optional saved-permit lifecycle hardening outside this required fix.
+
+  Tests first: extend the existing exact graph-owner source contract to require
+  all nine shared guards and preparation-before-recorder ordering. The current
+  source must fail those assertions before migration. After wiring, run the
+  shared zero/vendor/poison controls plus the nine existing representative
+  prefill/training graph fixtures named in the map, not a new Cartesian matrix.
+  If a local wrapper must remain, exercise that actual wrapper's poisoned None
+  callback rejection. Preserve905 decode evidence; don't rerun unrelated kernels.
+
+- [ ] Add process-isolated env coverage in the constructor integration binary.
+  Parent tests spawn the current executable with one exact child test; each
+  child Command removes all eight GEMM variables before setting its case.
+  Never use `std::env::set_var/remove_var` in the parent test process. Cover:
+  absent env (D+role), explicitly empty family (D+Triad on both model backbones),
+  and conflicting canonical/legacy env. In the conflict lane new explicit
+  Fast/Pedantic overloads succeed with their requested mode and role while an
+  existing env constructor rejects the conflict. Also test invalid mode/family
+  values are ignored only by the explicit lane, not by env construction.
+
+- [ ] Use a bounded runtime matrix that exercises every new public overload
+  at least once and F32/BF16/F16 on both model and trainer precision branches.
+  Full three-mode/default mapping belongs to the shared config host tests;
+  distribute Fast/Pedantic across constructor cases instead of constructing
+  an unnecessary full Cartesian matrix. Assert mode/family before first step.
+  Both LM paths use local synthetic data: extract the existing checkpoint
+  fixture for M1 and use small owned `Mamba3LmBuild` weights for M3, no downloads.
+  Preserve invalid config/state capacity/projection errors in env and explicit
+  lanes. Run the affected existing HF fixture tests after extraction.
+
+- [ ] Add IDE-visible Rustdoc at the public overloads and touched existing
+  constructors/accessors. Explain inputs, defaults, role family, env precedence,
+  return/errors, storage dtype versus GEMM mode and graph restrictions with
+  linked practical examples. Explicit construction ignores GEMM mode/custom
+  precision/TC/family selectors, but `MAMBA_RS_ARCH_RUNG` remains the separate
+  process-wide first-use Inference policy. Do not claim all MAMBA env is ignored.
+  Avoid marketing, fixed-latency claims and framework comparisons. Generic
+  context defaults and the dormant family in vendor mode must be clear.
+
+- [ ] Root runs the coherent constructor/API batch on Ada, focused config and
+  trainer guard tests, CUDA-only/CUDA+HF compilation, affected no-CUDA HF fixture
+  tests, scoped formatting and Rustdoc/doctests. Preserve reviewed905 graph
+  tests as evidence; rerun only concrete affected paths, not a kernel tournament.
+  Freeze sources/receipts, commit and obtain independent spec/quality review.
+  Only then proceed to package/test cleanup, documentation overhaul, benchmarks,
+  version bump and final branch review. No fresh5090 pass is assumed.
+
+## Task 907: Separate release tests, qualification tools and archived experiments
+
+Execute after Task906 verification/review. Read the complete
+`internal/release-test-layout-audit-20260910.md`; its253-target matrix and
+97-support-helper dependency map are the starting disposition, not permission
+to drop assertions. Current source already adds the retained904 route-inventory
+target; retain906's API tests and fixture helpers too. Classify any other delta
+against the dispatch base explicitly. The user requests a useful public test
+set and a recoverable archive, not deletion of measured kernels or evidence.
+
+Files: Cargo.toml target/features/package metadata; tests and shared fixtures;
+new benches/ and tools/qualification/ roots; qual/lanes.toml and its census;
+new internal/experiments/release-0.7.0-archive/ for archived discovery sources;
+only cfg(test) fixture references in sm89_finalist_source.rs; focused
+qualification command documentation and CI target coverage. Leave public
+mode/runtime/CUDA/selector/admission/compiler behavior unchanged. No dependency
+or version bump, broad README/benchmark rewrite, branch, push or publication.
+
+Output boundaries:
+
+- Retained public API/correctness/bit/graph/source-contract tests stay in tests/.
+- Maintained stable timing tools live in benches/ as explicit harness=false
+  targets with a real main entry. Do not silently turn an ignored test into a
+  bench that executes zero work. Keep workload and numeric labels explicit.
+- Reproducible manual qualification lives in tools/qualification/, stays public
+  and packaged, and requires a new non-default `qualification = []` feature.
+- Candidate-only stands and helpers move to the internal archive, outside
+  Cargo's default target graph and the published crate. Preserve useful source
+  in Git. Do not delete raw receipts, alter their old paths, or hide missing
+  production dependencies with gitignore.
+
+- [ ] Tests first: add a small host package/target-layout regression that
+  requires explicit target discovery, a non-default qualification boundary,
+  and package exclusion of internal/agent evidence. Observe the intended RED
+  on the current Cargo layout before changing metadata. Keep checks about
+  actual manifest behavior/policy; root separately verifies the real extracted
+  crate. Do not add a general TOML parser or reentrant Cargo invocation inside
+  the ordinary test process. Extend the existing lane census's narrow declared
+  format or use an equally small maintainable repository-specific helper.
+
+- [ ] Extract the compact-XOR accepted-candidate fixture closure BEFORE moving
+  the stand. Library tests must no longer include an entire integration test
+  file with eleven candidate modules and unrelated tests. Preserve an
+  independently frozen accepted source/composer plus sliced-helper fixture,
+  exact normalized comparison and missing/duplicate-anchor failures. Expected
+  source must not be generated by the production composer under test. Keep
+  production CUDA bytes, symbols, normalization rules and final generated
+  module source identical. Verify both non-CUDA and CUDA library-test paths.
+
+- [ ] Split all eleven S targets as specified in the audit. Keep genuine
+  regression assertions public; move timing/manual resource work to B/Q and
+  losing candidate search to E. Extract the scalar-NT three-toolkit identity
+  receipt assertions into a compact independent fixture test. Retain compile,
+  artifact, source, header and NVRTC-domain distinctions; no packaged source
+  may include the raw internal/perf files. Keep archived raw receipts unchanged.
+
+- [ ] Move R/B/Q/E with their transitive support/common/CUDA fixtures and fix
+  relative include/module paths. Do not move a shared helper based only on
+  its discovery-sounding name. The package must contain every source fixture
+  needed by R/B/Q and library tests. Give archive entries old path, new path,
+  disposition and retained-consumer justification in a compact index.
+  Resolve the two F benchmark targets by their actual workload/metric overlap:
+  merge any useful distinct public metric into a maintained tool, otherwise
+  archive its source and note the equivalent retained coverage. No new timing
+  claims are required for this layout decision.
+
+- [ ] Set autotests=false and autobenches=false; explicitly enumerate retained
+  test and bench paths. For an R target, required-features must follow its
+  actual crate-level feature gate, not erase a useful host arm in a mixed
+  target. Q requires qualification plus its real CUDA/HF/NCCL prerequisites.
+  Make the existing gemm-bi-tf32-qualification binary opt-in through the same
+  qualification feature; retain its name/arguments and update public commands.
+  Retain per-suite invocation names where practical; no duplicate target names.
+
+- [ ] Update qual/lanes.toml and qual_lane_census to cover every explicitly
+  declared test/bench/qualification target and existing qualification binary,
+  not only files immediately under tests/. Require unique existing paths,
+  known lane names, no hidden ignored arms in gate lanes, and no archive target
+  reachable from the published manifest. Add negative fixture cases for
+  duplicate, missing and unclassified entries. Do not treat the92 targets
+  absent from the old lanes file as disposable.
+
+- [ ] Define explicit package boundaries excluding internal/, .superpowers/,
+  AGENTS.md and local fleet configuration. Preserve required source, kernels,
+  regression/qualification/bench fixtures, docs/examples, licenses and the
+  manifest/lockfile. The repository .cargo/config.toml only serializes tests;
+  preserve that test-execution requirement in packaged instructions/commands.
+  Document which material remains public Git history versus crates.io content.
+  Cargo package selection, Git tracking and gitignore are separate mechanisms.
+
+- [ ] Format retained/moved shipping Rust sources and fix actual stale calls
+  or unused items without lint suppression. Preserve tests of intended behavior;
+  do not make a failing test disappear solely to obtain a clean lint result.
+  Keep historical archived sources unmodified except the paths strictly needed
+  by an explicitly retained archive invocation. Update CI/docs commands so
+  default CUDA checks cover shipping targets and a deliberate qualification
+  compile lane covers manual tools, without starting hardware runs in CI.
+
+- [ ] Root verifies a single coherent layout packet: host layout/census and
+  retained smoke tests, non-CUDA library tests, CUDA+HF all-target compilation,
+  one representative qualification target compile and one stable CPU benchmark
+  entrypoint. Generate and extract the actual .crate into a fresh directory;
+  inspect its declared paths and includes, confirm absence of internal/archive
+  material, then run host library/test checks and CUDA library compilation from
+  extracted contents. Keep Rustdoc and whole-shipping fmt/clippy checks honest;
+  record unavailable feature/hardware lanes rather than counting skips.
+
+- [ ] Freeze source/move/fixture inventories, archive the report, commit the
+  verified layout and obtain an independent scoped review. Existing kernel
+  timing/toolkit receipts remain evidence for their exact unchanged source;
+  this is no reason to rerun kernel tournaments. Then proceed to the final
+  benchmark adapter, public documentation/version pass and whole-branch gate.
+
+## Accepted model graph integration checkpoint (2026-09-10)
+
+Task905 is complete through `a651b133` (main integration `96640d62`, base
+`b7397d4f`). The original focused acceptance covers14 host and15 actual Ada
+GPU groups, including48 backbone and24 head cases. Its native-half inventory
+gap was corrected without kernel/selector changes. Independent review's one
+stale-permit finding was reproduced, fixed and verified with all eight M1
+failure combinations plus M3 lifecycle and owner-map controls; scoped review
+accepted it with no new Critical/Important findings. Full evidence and both
+reviews: `internal/perf/model-gemm-guards-20260910/report.md`.
+
+Next is Task906's approved public mode API/Rustdoc and remaining nine-owner
+prefill/training migration, then Task907 test/package cleanup. This is release
+assembly, not new candidate discovery. No new speed result or fresh SM120
+execution is implied. Public docs/version, old-main comparison and final
+release gate still follow; publishing requires the owner's separate approval.

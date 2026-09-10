@@ -174,7 +174,7 @@ Select their actual supported cases and prerequisites before executing them.
   review approved. Evidence: `internal/perf/inference-rename-20260910/`.
 - [ ] Public modes: `Deterministic`, `CublasFast`, `CublasPedantic`; verify
   defaults, setters/builders, captured-policy invalidation and documentation.
-  API preflight found that current default policy is hybrid (F32 TF32 math,
+  The initial API preflight found a hybrid default policy (F32 TF32 math,
   half PEDANTIC), not a clean three-mode default. Several LM-head/M3 projection
   helpers bypass context dispatch and call cuBLAS directly. Close these before
   advertising a model-wide no-cuBLAS Deterministic mode; kernel assembly alone
@@ -204,8 +204,18 @@ Select their actual supported cases and prerequisites before executing them.
   three host guards and the aligned no-op GPU case. Independent review and
   scoped fix review accepted. Evidence:
   `internal/perf/inference-route-inventory-20260910/report.md`.
-  Complete M1/M3 model graph manifests and model-wide no-vendor acceptance
-  remain follow-up work; no model-wide completion claim yet.
+  Complete M1/M3 decode/head manifests and scoped no-vendor acceptance are
+  complete; prefill/training integration remains separate follow-up work.
+  Task905 source is committed at96640d62, with review fix a651b133: focused Ada verification passes
+  15actual GPU groups (48backbone/24head cases) and14host tests. The runtime
+  packet found and fixed missing native-half TC terminal records; all three
+  affected model/route cases then passed. CUDA+HF/CUDA-only compilation and
+  Rustdoc passed; legacy warning cleanup remains. The review fix additionally
+  passes all eight M1 stale-permit cases, the M3 lifecycle test and exact owner
+  contract. Independent review and scoped fix review are accepted.
+  Constructor/API and remaining prefill/training integration
+  are next, not covered by this model-decode completion claim.
+  Evidence: `internal/perf/model-gemm-guards-20260910/report.md`.
   Evidence: `internal/perf/gemm-context-routing-20260910/report.md`.
 - [ ] Document the public API in Rustdoc alongside implementation, not only
   in README: IDE hover/completion must explain each mode, defaults, arguments,
@@ -229,8 +239,12 @@ Select their actual supported cases and prerequisites before executing them.
   `cargo package --list --allow-dirty` preflight includes4438 internal files,
   two tracked SDD reports, and local agent/fleet configuration. Add explicit
   package exclusions for non-shipping evidence/tooling; preserve repository
-  evidence. The381 test/support files require a separate usefulness audit,
-  not indiscriminate deletion.
+  evidence. The read-only usefulness audit now classifies253 prior tracked
+  targets and97 support helpers, with mandatory extraction of independent
+  source fixtures before archiving candidate stands. Current Cargo metadata
+  has254 test targets including the now-retained Inference route inventory.
+  This is an audit, not completed cleanup; new API tests must join the final
+  census. See `internal/release-test-layout-audit-20260910.md`.
 - [ ] Benchmark unchanged monolithic `main` versus final new inference/Triad
   with one immutable harness and identical settings. Use reproducible measured
   deltas in the changelog; do not multiply unrelated discovery ratios.
@@ -254,8 +268,10 @@ Select their actual supported cases and prerequisites before executing them.
 
 ## Current GPU lanes
 
-Both hosts were reachable on 2026-09-10: Ada via `ssh ada`, RTX 5090 via
-`ssh -p 18481 root@61.32.91.194`. Earlier rental endpoints are historical.
+Ada remains available via `ssh ada`. The latest supplied RTX5090 endpoint,
+`ssh -p 18481 root@61.32.91.194`, refused the latest SSH check on2026-09-10.
+Saved5090 qualification remains evidence for its recorded source, not a fresh
+runtime pass for subsequent API changes. Earlier rental endpoints are historical.
 The 5090 CUDA13.2 production snapshot is recorded in
 `internal/perf/sm120-triad-head-5090-20260909/report.md`; it is not a final
 validation of subsequent WIP. Recheck utilization and free VRAM before each run.

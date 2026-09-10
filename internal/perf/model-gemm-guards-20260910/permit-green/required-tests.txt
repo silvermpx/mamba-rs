@@ -1,0 +1,3 @@
+contract host exact_graph_inventory_wires_decode_and_existing_prefill_training_holders
+lib gpu mamba_ssm::gpu::inference::model_gemm_manifest_tests::m1_failed_steps_clear_permits_and_mixed_graphs_reject_wrong_path
+lib gpu mamba3_siso::gpu::inference::model_gemm_manifest_tests::m3_failed_steps_clear_permits_and_failed_capture_keeps_installed_plan
