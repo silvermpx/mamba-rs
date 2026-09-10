@@ -1828,7 +1828,7 @@ pub enum F32TriadSelection {
     ExactSm120Fma(Sm120FmaRoute),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sm120FmaExclusions(u16);
 
 impl Sm120FmaExclusions {
@@ -1851,12 +1851,6 @@ impl Sm120FmaExclusions {
             .iter()
             .position(|spec| spec.op == op && spec.route == key)
             .is_some_and(|index| self.0 & (1_u16 << index) != 0)
-    }
-}
-
-impl Default for Sm120FmaExclusions {
-    fn default() -> Self {
-        Self(0)
     }
 }
 

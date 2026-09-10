@@ -4922,15 +4922,15 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args, observer)?;
         return Ok(InferenceTile::Sm120Half(tile));
     }
-    if homogeneous_half && n_out >= 32 {
-        if let Some(tile) =
+    if homogeneous_half
+        && n_out >= 32
+        && let Some(tile) =
             inference_arch_rung_for_request(operands, shape, loaded_arch_rung(ctx), |tile| {
                 arch_rung_enabled(ctx, tile, O::ENABLED || ctx.gemm_route_recording_active()?)
             })?
-        {
-            launch_ladder(ctx, tile, c.dtype, &args, observer)?;
-            return Ok(tile);
-        }
+    {
+        launch_ladder(ctx, tile, c.dtype, &args, observer)?;
+        return Ok(tile);
     }
     if mixed_half_f32 {
         if fixed_sm120_half_eligible(ctx, &args)

@@ -507,7 +507,8 @@ enum PreparedF32Kind {
         gemm_config: cudarc::driver::LaunchConfig,
         scratch: CUptr,
         scratch_elements: usize,
-        transform: ResolvedInputTransform,
+        // Boxed: this variant is several times larger than the others.
+        transform: Box<ResolvedInputTransform>,
     },
 }
 
@@ -4505,7 +4506,7 @@ fn prepare_sm89_tf32_tn_pre_rna(
             gemm_config,
             scratch,
             scratch_elements,
-            transform,
+            transform: Box::new(transform),
         },
     })
 }
@@ -5725,7 +5726,7 @@ fn prepare_sm89_tf32_tn_pre_rna_graph_sequence<O: PhysicalLaunchObserver>(
             prepared.request.shape.ldb,
             prepared.request.shape.ldc,
         ),
-        *transform,
+        **transform,
         PhysicalConversionArguments::new(
             prepared.operands.a,
             sm89_tf32_tn_source_bytes(prepared.request)?,
@@ -6695,7 +6696,7 @@ unsafe fn enqueue_sm89_tf32_tn_pre_rna<O: PhysicalLaunchObserver>(
                 prepared.request.shape.ldb,
                 prepared.request.shape.ldc,
             ),
-            *transform,
+            **transform,
             PhysicalConversionArguments::new(
                 prepared.operands.a,
                 source_bytes,

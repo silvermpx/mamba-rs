@@ -208,13 +208,18 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
     ),
 ];
 
-/// Exact Ada half-Triad AUTO cohort proven by the frozen discovery ledger.
-pub const SM89_HALF_AUTO_CELLS: &[(
+/// One automatically served Ada half cell: op, dtype, (m, k, n) and the
+/// route the frozen discovery ledger proved for it.
+pub type Sm89HalfAutoCell = (
     ResolvedGemmOp,
     WeightDtype,
     (usize, usize, usize),
     Sm89HalfRoute,
-)] = &[
+);
+
+/// The Ada half cells the automatic selector serves, proven by the
+/// frozen discovery ledger.
+pub const SM89_HALF_AUTO_CELLS: &[Sm89HalfAutoCell] = &[
     (
         ResolvedGemmOp::Nn,
         WeightDtype::F16,

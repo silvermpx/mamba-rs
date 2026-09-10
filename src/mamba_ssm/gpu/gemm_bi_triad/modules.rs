@@ -3287,7 +3287,7 @@ fn census_fixed_sm89_finalist_driver_abi(
         Err(error) => return FixedSm89FinalistDriverAbi::rejected(error),
     };
     let get: GetParamInfo = match driver_proc_address("cuFuncGetParamInfo", 12_040) {
-        Ok(get) => unsafe { std::mem::transmute(get) },
+        Ok(get) => unsafe { std::mem::transmute::<*mut std::ffi::c_void, GetParamInfo>(get) },
         Err(error) => {
             let _ = module.unload();
             return FixedSm89FinalistDriverAbi::rejected(error);
