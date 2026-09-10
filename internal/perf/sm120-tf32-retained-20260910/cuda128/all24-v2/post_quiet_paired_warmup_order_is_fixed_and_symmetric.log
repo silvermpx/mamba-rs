@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda128/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)
+
+running 1 test
+test post_quiet_paired_warmup_order_is_fixed_and_symmetric ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+

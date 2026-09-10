@@ -1,0 +1,41 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda128/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)
+cell_artifact_schema_has_exact_candidate_and_stat_counts: test
+common::evidence::tests::append_open_does_not_block_or_accept_a_fifo: test
+common::evidence::tests::bad_parent_directory_is_an_error: test
+common::evidence::tests::concurrent_threads_append_complete_rows: test
+common::evidence::tests::device_targets_are_rejected: test
+common::evidence::tests::directory_targets_are_rejected: test
+common::evidence::tests::fifo_targets_are_rejected_without_opening: test
+common::evidence::tests::full_device_is_rejected: test
+common::evidence::tests::missing_and_empty_paths_are_inert: test
+common::evidence::tests::non_unicode_paths_are_preserved: test
+common::evidence::tests::opened_handle_must_be_regular: test
+common::evidence::tests::records_append_as_exact_tsv_rows: test
+common::evidence::tests::short_writes_are_errors_and_never_retried: test
+common::evidence::tests::socket_targets_are_rejected: test
+common::gpu_quiet::tests::compute_process_parser_fails_closed: test
+common::gpu_quiet::tests::formats_cuda_uuid_for_exact_nvml_selection: test
+common::gpu_quiet::tests::idle_resident_telemetry_requires_compute_memory_and_free_fields: test
+common::gpu_quiet::tests::live_cuda_ordinal_and_nvml_uuid_are_identical: test
+common::gpu_quiet::tests::parses_one_exact_gpu_telemetry_row: test
+common::gpu_quiet::tests::quiet_sample_rejects_utilization_memory_and_competing_processes: test
+completion_schema_is_stable_and_machine_readable: test
+explicit_candidate_filter_is_fail_closed_and_preserves_admission: test
+paired_percentiles_and_speed_gate_are_fail_closed: test
+post_quiet_paired_warmup_order_is_fixed_and_symmetric: test
+projection_bias_qualification_covers_forward_epilogues_only: test
+qualification_plan_is_exact: test
+runtime_qualification_requires_gpu_quiet_gates: test
+selector_returns_scalar_unless_one_candidate_clears_both_gates: test
+sm120_tf32_projection_bias_selector_qualification: test
+sm120_tf32_projection_selector_qualification: test
+sm120_tf32_selector_qualification: test
+split_candidate_inventory_is_exact_and_operation_scoped: test
+split_candidates_that_exceed_the_fixed_workspace_are_not_timed: test
+split_numeric_gate_accepts_rounding_drift_and_rejects_corruption: test
+stable_selector_uses_the_best_candidate_that_clears_every_cohort: test
+tf32_candidate_mismatch_map: test
+tn_m8192_k128_n128_maps_to_exact_tn_key: test
+
+37 tests, 0 benchmarks
