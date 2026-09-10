@@ -22,6 +22,7 @@ and all($rows[];
  and .scope=="performance_only" and .call_scope=="production_auto"
  and .windows==$windows and .auto_iterations>0 and .vendor_iterations>0
  and .vendor_algorithm=="CUBLAS_GEMM_DEFAULT" and .timing=="cuda_events"
+ and (if $ends[0].full_inventory then .vendor_base_alignment_bytes==256 else true end)
  and .eager_graph_equal and .nvrtc_library_known
  and (.physical_nodes|length)==.physical_launch_count and .physical_launch_count>0
  and (.auto_samples_us|length)==$windows

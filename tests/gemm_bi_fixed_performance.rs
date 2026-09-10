@@ -11734,6 +11734,93 @@ struct FixedExplicitVendorRowSpec {
     vendor_tolerance: f64,
 }
 
+const FIXED_PRODUCTION_AUTO_DEFAULT_WINDOWS: usize = 21;
+
+fn fixed_production_auto_expected_records(
+    rows: usize,
+    cells: usize,
+    biases: usize,
+    paths: usize,
+) -> usize {
+    rows * cells * biases * paths * 2
+}
+
+fn fixed_production_auto_ratio_samples(
+    auto_us: &[f64],
+    vendor_us: &[f64],
+) -> Result<Vec<f64>, String> {
+    if auto_us.len() != vendor_us.len() || auto_us.is_empty() {
+        return Err("production AUTO ratio arms require equal non-empty sample counts".into());
+    }
+    auto_us
+        .iter()
+        .zip(vendor_us)
+        .enumerate()
+        .map(|(index, (&auto, &vendor))| {
+            if !auto.is_finite() || auto <= 0.0 || !vendor.is_finite() || vendor <= 0.0 {
+                return Err(format!(
+                    "production AUTO pair {index} is not positive and finite"
+                ));
+            }
+            let ratio = auto / vendor;
+            if !ratio.is_finite() || ratio <= 0.0 {
+                return Err(format!(
+                    "production AUTO/vendor ratio {index} is not positive and finite"
+                ));
+            }
+            Ok(ratio)
+        })
+        .collect()
+}
+
+fn fixed_production_auto_inventory_has_exact_symbol(inventory: &str, expected: &str) -> bool {
+    inventory.contains(&format!(
+        "\"symbol\":\"{}\"",
+        fixed_sm120_tf32_bd_json_escape(expected)
+    ))
+}
+
+fn fixed_production_auto_format_cuda_uuid(bytes: [std::ffi::c_char; 16]) -> String {
+    let bytes = bytes.map(|byte| byte as u8);
+    format!(
+        concat!(
+            "GPU-{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-",
+            "{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}"
+        ),
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
+fn fixed_production_auto_cuda_uuid(cuda_ordinal: usize) -> Result<String, String> {
+    cudarc::driver::result::init().map_err(|error| format!("initialize CUDA driver: {error}"))?;
+    let ordinal = i32::try_from(cuda_ordinal)
+        .map_err(|_| format!("CUDA ordinal {cuda_ordinal} exceeds i32::MAX"))?;
+    let device = cudarc::driver::result::device::get(ordinal)
+        .map_err(|error| format!("resolve CUDA ordinal {cuda_ordinal}: {error}"))?;
+    let uuid = cudarc::driver::result::device::get_uuid(device)
+        .map_err(|error| format!("query CUDA ordinal {cuda_ordinal} UUID: {error}"))?;
+    Ok(fixed_production_auto_format_cuda_uuid(uuid.bytes))
+}
+
+fn fixed_production_auto_tuning_metadata() -> String {
+    format!("\"tuning_table_revision\":{TUNING_TABLE_REVISION}")
+}
+
 fn fixed_explicit_vendor_row_specs() -> [FixedExplicitVendorRowSpec; 7] {
     use cudarc::cublas::sys::cublasComputeType_t;
 
@@ -13499,6 +13586,83 @@ fn fixed_explicit_vendor_exact_rows_keep_distinct_denominators_and_tolerances() 
 }
 
 #[test]
+fn fixed_production_auto_adapter_inventory_and_record_count_are_exact() {
+    let rows = fixed_explicit_vendor_row_specs();
+    assert_eq!(
+        rows.map(|row| (row.name, row.input_dtype, row.output_dtype)),
+        [
+            ("bf16", WeightDtype::Bf16, WeightDtype::Bf16),
+            ("f16", WeightDtype::F16, WeightDtype::F16),
+            ("bf16_f32", WeightDtype::Bf16, WeightDtype::F32),
+            ("f16_f32", WeightDtype::F16, WeightDtype::F32),
+            ("tf32", WeightDtype::F32, WeightDtype::F32),
+            ("f32_exact", WeightDtype::F32, WeightDtype::F32),
+            ("f32_exact_fast", WeightDtype::F32, WeightDtype::F32),
+        ]
+    );
+    assert_eq!(FIXED_PRODUCTION_AUTO_DEFAULT_WINDOWS, 21);
+    assert_eq!(fixed_production_auto_expected_records(7, 5, 2, 2), 280);
+}
+
+#[test]
+fn fixed_production_auto_ratio_orientation_is_auto_over_vendor() {
+    assert_eq!(
+        fixed_production_auto_ratio_samples(&[4.0, 12.0], &[8.0, 6.0]).unwrap(),
+        [0.5, 2.0]
+    );
+    assert!(fixed_production_auto_ratio_samples(&[1.0], &[1.0, 2.0]).is_err());
+    assert!(fixed_production_auto_ratio_samples(&[1.0], &[0.0]).is_err());
+}
+
+#[test]
+fn fixed_production_auto_graph_symbol_membership_is_exact() {
+    let base = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2";
+    let producer = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp";
+    let pair_store = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store";
+    let inventory =
+        format!("{{\"kernels\":[{{\"symbol\":\"{producer}\"}},{{\"symbol\":\"{pair_store}\"}}]}}");
+    assert!(!fixed_production_auto_inventory_has_exact_symbol(
+        &inventory, base
+    ));
+    assert!(fixed_production_auto_inventory_has_exact_symbol(
+        &inventory, producer
+    ));
+    assert!(fixed_production_auto_inventory_has_exact_symbol(
+        &inventory, pair_store
+    ));
+}
+
+#[test]
+fn fixed_production_auto_cuda_uuid_and_tuning_revision_are_pinned() {
+    let bytes = [
+        0x12,
+        0x34,
+        0x56,
+        0x78,
+        0x9a_u8 as i8,
+        0xbc_u8 as i8,
+        0xde_u8 as i8,
+        0xf0_u8 as i8,
+        0x10,
+        0x20,
+        0x30,
+        0x40,
+        0x50,
+        0x60,
+        0x70,
+        0x80_u8 as i8,
+    ];
+    assert_eq!(
+        fixed_production_auto_format_cuda_uuid(bytes),
+        "GPU-12345678-9abc-def0-1020-304050607080"
+    );
+    assert_eq!(
+        fixed_production_auto_tuning_metadata(),
+        "\"tuning_table_revision\":45"
+    );
+}
+
+#[test]
 fn fixed_explicit_vendor_fast_exact_row_reuses_every_exact_force_spec_once() {
     for cc in [(8, 9), (12, 0)] {
         let pedantic = fixed_explicit_vendor_tiles("f32_exact", cc);
@@ -14042,49 +14206,33 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
     if cfg!(debug_assertions) {
         panic!("explicit vendor comparator requires --release");
     }
-    let rows = [
-        (
-            "bf16",
-            WeightDtype::Bf16,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.01,
-        ),
-        (
-            "f16",
-            WeightDtype::F16,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.0025,
-        ),
-        (
-            "tf32",
-            WeightDtype::F32,
-            F32TriadPolicy::AllowDeterministicTf32V1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
-            0.0025,
-        ),
-        (
-            "f32_exact",
-            WeightDtype::F32,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
-            0.0002,
-        ),
-    ];
-    let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &rows.map(|row| row.0));
-    // Reuse only the five hot dimensions and their labels, never SM120 tile expectations.
+    let rows = fixed_explicit_vendor_row_specs();
+    let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &rows.map(|row| row.name));
     let labels = FIXED_AUTO_VENDOR_EXACT_CELLS
         .iter()
         .map(|cell| cell.label)
         .collect::<Vec<_>>();
     let selected_cells = fixed_ada_filter("MAMBA_FIXED_ADA_CELLS", &labels);
     let biases = fixed_ada_filter("MAMBA_FIXED_ADA_BIAS", &["0", "1"]);
+    let requested_paths = match std::env::var("MAMBA_FIXED_VENDOR_PATHS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_PATHS: {error}"),
+    };
+    let paths = fixed_explicit_vendor_paths(requested_paths.as_deref())
+        .expect("explicit vendor path filter");
+    let requested_tiles = match std::env::var("MAMBA_FIXED_VENDOR_TILES") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_TILES: {error}"),
+    };
+    fixed_ada_direct_pair_reject_vendor_tiles(requested_tiles.as_deref())
+        .expect("AUTO-only comparator forbids forced-tile filters");
     let windows = match std::env::var("MAMBA_FIXED_ADA_WINDOWS") {
         Ok(value) => value
             .parse::<usize>()
             .expect("MAMBA_FIXED_ADA_WINDOWS must be an integer"),
-        Err(std::env::VarError::NotPresent) => 101,
+        Err(std::env::VarError::NotPresent) => FIXED_PRODUCTION_AUTO_DEFAULT_WINDOWS,
         Err(error) => panic!("read MAMBA_FIXED_ADA_WINDOWS: {error}"),
     };
     assert!(
@@ -14101,37 +14249,103 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
     let device = GpuDevice::new(0).expect("explicit vendor CUDA device");
     fixed_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
         .expect("explicit vendor exact-CC admission");
+    assert!(
+        matches!(
+            (device.compute_capability, device.multiprocessor_count()),
+            ((8, 9), 142) | ((12, 0), 170)
+        ),
+        "explicit vendor final evidence supports only CC8.9/142SM or CC12.0/170SM"
+    );
     let ctx = GpuCtx::new(&device).expect("explicit vendor GPU context");
     let compiler = ctx.kernels.compiler_identity();
+    assert_eq!(
+        compiler.nvrtc_version,
+        (13, 2),
+        "final production AUTO evidence is CUDA 13.2 only"
+    );
+    assert!(
+        compiler.nvrtc_library_known,
+        "final production AUTO evidence requires a known NVRTC library"
+    );
+    let fixed_artifact = ctx.kernels.artifact_set_identity().fixed;
+    let device_identity = device.identity();
+    let git_sha = std::env::var("GEMM_BI_FINAL_AUTO_GIT_SHA")
+        .expect("GEMM_BI_FINAL_AUTO_GIT_SHA must bind the final source");
+    assert!(
+        git_sha.len() == 40 && git_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "GEMM_BI_FINAL_AUTO_GIT_SHA must be exactly 40 hexadecimal characters"
+    );
+    let gpu_uuid = fixed_production_auto_cuda_uuid(0)
+        .expect("resolve final production AUTO CUDA ordinal 0 UUID");
+    let cuda_home = std::env::var("CUDA_HOME").expect("CUDA_HOME must identify the final toolkit");
+    let ld_library_path = std::env::var("LD_LIBRARY_PATH")
+        .expect("LD_LIBRARY_PATH must identify loaded CUDA libraries");
     let device_metadata = format!(
-        "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],\"compiler_target\":\"{:?}\"",
+        concat!(
+            "\"git_sha\":\"{}\",\"gpu_uuid\":\"{}\",{},",
+            "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],",
+            "\"compiler_target\":\"{:?}\",\"cuda_home\":\"{}\",",
+            "\"ld_library_path\":\"{}\",\"fixed_source_digest\":\"{}\",",
+            "\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",",
+            "\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",",
+            "\"nvrtc_library_known\":{},\"driver_api_version\":{},",
+            "\"driver_build_sources\":{},\"driver_build_digest\":\"{}\""
+        ),
+        fixed_sm120_tf32_bd_json_escape(&git_sha),
+        fixed_sm120_tf32_bd_json_escape(&gpu_uuid),
+        fixed_production_auto_tuning_metadata(),
         device.compute_capability.0,
         device.compute_capability.1,
         device.multiprocessor_count(),
         compiler.nvrtc_version.0,
         compiler.nvrtc_version.1,
         compiler.target,
+        fixed_sm120_tf32_bd_json_escape(&cuda_home),
+        fixed_sm120_tf32_bd_json_escape(&ld_library_path),
+        digest_hex(&compiler.source_digest),
+        digest_hex(&compiler.invocation_digest),
+        digest_hex(&fixed_artifact.artifact_digest),
+        digest_hex(&compiler.header_manifest_digest),
+        digest_hex(&compiler.nvrtc_library_domain),
+        compiler.nvrtc_library_known,
+        device_identity.driver.api_version,
+        device_identity.driver.build_sources,
+        digest_hex(&device_identity.driver.build_digest),
     );
-    let mut records = 0;
+    let full_inventory = selected_rows.len() == rows.len()
+        && selected_cells.len() == FIXED_AUTO_VENDOR_EXACT_CELLS.len()
+        && biases.len() == 2
+        && paths.len() == 2;
+    let selected_row_count = selected_rows.len();
+    let selected_cell_count = selected_cells.len();
+    let selected_bias_count = biases.len();
+    let selected_path_count = paths.len();
+    let expected_records = fixed_production_auto_expected_records(
+        selected_row_count,
+        selected_cell_count,
+        selected_bias_count,
+        selected_path_count,
+    );
+    let mut records = 0usize;
     for row_index in selected_rows {
-        let (row, dtype, policy, compute, tolerance) = rows[row_index];
-        configure_fixed_auto_vendor_custom(&ctx, policy);
+        let row_spec = rows[row_index];
+        configure_fixed_auto_vendor_custom(&ctx, row_spec.policy);
         for &cell_index in &selected_cells {
             let cell = FIXED_AUTO_VENDOR_EXACT_CELLS[cell_index];
             let shape = cell.shape;
             let elements = shape.m * shape.n;
-            let a =
-                DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("explicit vendor A");
-            let b =
-                DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("explicit vendor B");
+            let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, row_spec.input_dtype)
+                .expect("explicit vendor A");
+            let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, row_spec.input_dtype)
+                .expect("explicit vendor B");
             a.upload_f32(&ctx.stream, &synth(shape.m * shape.k, 0x0ada_a001))
                 .expect("explicit vendor A upload");
             b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0x0ada_b001))
                 .expect("explicit vendor B upload");
-            let custom =
-                DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("explicit vendor custom C");
-            let vendor =
-                DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("explicit vendor vendor C");
+            let auto = DtypedBuf::zeros(&ctx.stream, elements, row_spec.output_dtype)
+                .expect("explicit vendor AUTO C");
+            let vendor = DtypedBuf::zeros(&ctx.stream, elements, row_spec.output_dtype)
+                .expect("explicit vendor vendor C");
             let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32)
                 .expect("explicit vendor reference C");
             let bias = DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32)
@@ -14140,33 +14354,33 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                 .expect("explicit vendor bias upload");
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
-                let custom_ops = FixedFwdOperands {
-                    c: typed(&custom, dtype),
-                    x: typed(&a, dtype),
-                    w: typed(&b, dtype),
+                let auto_ops = FixedFwdOperands {
+                    c: typed(&auto, row_spec.output_dtype),
+                    x: typed(&a, row_spec.input_dtype),
+                    w: typed(&b, row_spec.input_dtype),
                     bias_ptr: has_bias.then(|| bias.cached_ptr()),
                 };
                 let vendor_ops = FixedFwdOperands {
-                    c: typed(&vendor, dtype),
-                    ..custom_ops
+                    c: typed(&vendor, row_spec.output_dtype),
+                    ..auto_ops
                 };
                 let reference_ops = FixedFwdOperands {
                     c: typed(&reference, WeightDtype::F32),
-                    ..custom_ops
+                    ..auto_ops
                 };
-                let selected = launch_fixed_auto_vendor_custom(&ctx, custom_ops, shape);
-                let first = f32_bits(&ctx, &custom, elements);
+                let selected = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
+                let auto_bits = f32_bits(&ctx, &auto, elements);
+                let auto_raw = fixed_explicit_vendor_raw_bytes(&ctx, &auto);
                 assert_eq!(
-                    launch_fixed_auto_vendor_custom(&ctx, custom_ops, shape),
-                    selected
+                    launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
+                    selected,
+                    "production AUTO eager tile changed"
                 );
                 assert_eq!(
-                    f32_bits(&ctx, &custom, elements),
-                    first,
-                    "explicit vendor AUTO repeat bits row={row} cell={} bias={has_bias}",
-                    cell.label
+                    fixed_explicit_vendor_raw_bytes(&ctx, &auto),
+                    auto_raw,
+                    "production AUTO eager repeat bits changed"
                 );
-                fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
                 fixed_ada_vendor_launch(
                     &ctx,
                     reference_ops,
@@ -14174,131 +14388,267 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
                 );
                 let reference_bits = f32_bits(&ctx, &reference, elements);
-                let custom_error = fixed_ada_normalized_error(
-                    &first,
+                let auto_error = fixed_ada_normalized_error(
+                    &auto_bits,
                     &reference_bits,
-                    tolerance,
-                    "explicit vendor AUTO",
+                    row_spec.custom_tolerance,
+                    &format!(
+                        "production AUTO {}/{} bias={has_bias}",
+                        row_spec.name, cell.label
+                    ),
                 );
+                fixed_ada_vendor_launch(&ctx, vendor_ops, shape, row_spec.vendor_compute);
+                let vendor_bits = f32_bits(&ctx, &vendor, elements);
+                let vendor_raw = fixed_explicit_vendor_raw_bytes(&ctx, &vendor);
                 let vendor_error = fixed_ada_normalized_error(
-                    &f32_bits(&ctx, &vendor, elements),
+                    &vendor_bits,
                     &reference_bits,
-                    tolerance,
-                    "explicit vendor vendor",
+                    row_spec.vendor_tolerance,
+                    &format!(
+                        "vendor {} {}/{} bias={has_bias}",
+                        row_spec.vendor_comparator, row_spec.name, cell.label
+                    ),
                 );
-                let custom_launch = || {
+                fixed_ada_vendor_launch(&ctx, vendor_ops, shape, row_spec.vendor_compute);
+                assert_eq!(
+                    fixed_explicit_vendor_raw_bytes(&ctx, &vendor),
+                    vendor_raw,
+                    "explicit vendor eager repeat bits changed"
+                );
+                let auto_launch = || {
                     assert_eq!(
-                        launch_fixed_auto_vendor_custom(&ctx, custom_ops, shape),
+                        launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
                         selected,
-                        "explicit vendor AUTO tile changed during measurement"
+                        "production AUTO tile changed during final measurement"
                     );
                 };
-                let vendor_launch = || fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
+                let vendor_launch =
+                    || fixed_ada_vendor_launch(&ctx, vendor_ops, shape, row_spec.vendor_compute);
                 for _ in 0..128 {
-                    custom_launch();
+                    auto_launch();
                     vendor_launch();
                 }
                 ctx.stream
                     .synchronize()
-                    .expect("explicit vendor paired warmup sync");
-                let custom_iterations = fixed_auto_vendor_iterations(fixed_ada_event_window_us(
-                    &ctx,
-                    16,
-                    custom_launch,
-                ));
-                let vendor_iterations = fixed_auto_vendor_iterations(fixed_ada_event_window_us(
-                    &ctx,
-                    16,
-                    vendor_launch,
-                ));
-                for custom_first in [true, false] {
-                    let mut custom_samples = Vec::with_capacity(windows);
-                    let mut vendor_samples = Vec::with_capacity(windows);
-                    let mut ratios = Vec::with_capacity(windows);
-                    for _ in 0..windows {
-                        let (custom_us, vendor_us) = if custom_first {
-                            (
-                                fixed_ada_event_window_us(&ctx, custom_iterations, custom_launch),
-                                fixed_ada_event_window_us(&ctx, vendor_iterations, vendor_launch),
-                            )
-                        } else {
-                            let vendor_us =
-                                fixed_ada_event_window_us(&ctx, vendor_iterations, vendor_launch);
-                            (
-                                fixed_ada_event_window_us(&ctx, custom_iterations, custom_launch),
-                                vendor_us,
-                            )
-                        };
-                        custom_samples.push(custom_us);
-                        vendor_samples.push(vendor_us);
-                        ratios.push(custom_us / vendor_us);
-                    }
-                    assert_eq!(
-                        f32_bits(&ctx, &custom, elements),
-                        first,
-                        "explicit vendor AUTO post-timing bits row={row} cell={} bias={has_bias}",
-                        cell.label
-                    );
-                    let mut custom_sorted = custom_samples.clone();
-                    let mut vendor_sorted = vendor_samples.clone();
-                    custom_sorted.sort_by(f64::total_cmp);
-                    vendor_sorted.sort_by(f64::total_cmp);
-                    ratios.sort_by(f64::total_cmp);
-                    println!(
-                        concat!(
-                            "{{\"schema\":\"MambaBiFixedExplicitAutoVendorV2\",{},\"row\":\"{}\",",
-                            "\"cell\":\"{}\",",
-                            "\"tuning_table_revision\":{},\"m\":{},\"k\":{},\"n\":{},",
-                            "\"input_dtype\":\"{}\",\"output_dtype\":\"{}\",\"auto_tile\":\"{:?}\",",
-                            "\"op\":\"nn\",\"path\":\"eager\",\"call_scope\":\"production_auto\",",
-                            "\"timing\":\"cuda_events\",\"alpha\":1,\"beta\":0,\"bias\":{},",
-                            "\"vendor_gemm_beta\":{},\"vendor_bias_broadcast_timed\":{},",
-                            "\"vendor_compute\":\"{:?}\",\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
-                            "\"reference_output_dtype\":\"f32\",\"normalized_error_tolerance\":{},",
-                            "\"custom_normalized_error\":{},\"vendor_normalized_error\":{},\"repeat_bits_equal\":true,",
-                            "\"order\":\"{}\",\"windows\":{},\"custom_iterations\":{},\"vendor_iterations\":{},",
-                            "\"custom_p50_us\":{},\"vendor_p50_us\":{},\"custom_over_vendor_p50\":{},",
-                            "\"custom_over_vendor_p95\":{},\"custom_samples_us\":{:?},\"vendor_samples_us\":{:?}}}"
-                        ),
-                        device_metadata,
-                        row,
-                        cell.label,
-                        TUNING_TABLE_REVISION,
-                        shape.m,
-                        shape.k,
-                        shape.n,
-                        dtype.as_str(),
-                        dtype.as_str(),
+                    .expect("production AUTO/vendor eager warmup");
+                let auto_graph = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        auto_launch();
+                        Ok(())
+                    })
+                }
+                .expect("capture complete production AUTO graph");
+                let vendor_graph = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        vendor_launch();
+                        Ok(())
+                    })
+                }
+                .expect("capture complete explicit vendor graph");
+                let auto_inventory = fixed_explicit_vendor_graph_inventory(
+                    &auto_graph,
+                    "AUTO",
+                    fixed_explicit_vendor_ada_descriptor(selected).then_some((
                         selected,
-                        has_bias,
-                        u8::from(has_bias),
-                        has_bias,
-                        compute,
-                        tolerance,
-                        custom_error,
-                        vendor_error,
-                        if custom_first { "ab" } else { "ba" },
-                        windows,
-                        custom_iterations,
-                        vendor_iterations,
-                        percentile(&custom_sorted, 0.5),
-                        percentile(&vendor_sorted, 0.5),
-                        percentile(&ratios, 0.5),
-                        percentile(&ratios, 0.95),
-                        custom_samples,
-                        vendor_samples
+                        row_spec.input_dtype,
+                        auto_ops,
+                        shape,
+                    )),
+                    None,
+                );
+                let expected_auto_symbol =
+                    fixed_force_spec(row_spec.name, device.compute_capability, selected)
+                        .expect("resolve production AUTO physical route")
+                        .expected_symbol;
+                assert!(
+                    fixed_production_auto_inventory_has_exact_symbol(
+                        &auto_inventory,
+                        expected_auto_symbol,
+                    ),
+                    "captured AUTO graph omitted selected symbol {expected_auto_symbol}"
+                );
+                let bias_symbol = has_bias.then_some(match row_spec.output_dtype {
+                    WeightDtype::F32 => "bias_broadcast",
+                    WeightDtype::Bf16 => "bias_broadcast_bf16",
+                    WeightDtype::F16 => "bias_broadcast_f16",
+                });
+                let vendor_inventory = fixed_explicit_vendor_graph_inventory(
+                    &vendor_graph,
+                    "vendor",
+                    None,
+                    bias_symbol,
+                );
+                let graph_inventory =
+                    format!("{{\"auto\":{auto_inventory},\"vendor\":{vendor_inventory}}}");
+                for &path in &paths {
+                    let auto_run = || {
+                        if path == "graph" {
+                            auto_graph.launch().expect("production AUTO graph replay");
+                        } else {
+                            auto_launch();
+                        }
+                    };
+                    let vendor_run = || {
+                        if path == "graph" {
+                            vendor_graph.launch().expect("explicit vendor graph replay");
+                        } else {
+                            vendor_launch();
+                        }
+                    };
+                    if path == "graph" {
+                        for replay in 0..2 {
+                            fixed_explicit_vendor_poison_output(&ctx, &auto);
+                            auto_run();
+                            assert_eq!(
+                                fixed_explicit_vendor_raw_bytes(&ctx, &auto),
+                                auto_raw,
+                                "production AUTO graph replay {replay} changed storage bits"
+                            );
+                            fixed_explicit_vendor_poison_output(&ctx, &vendor);
+                            vendor_run();
+                            assert_eq!(
+                                fixed_explicit_vendor_raw_bytes(&ctx, &vendor),
+                                vendor_raw,
+                                "explicit vendor graph replay {replay} changed storage bits"
+                            );
+                        }
+                    }
+                    for _ in 0..128 {
+                        auto_run();
+                        vendor_run();
+                    }
+                    ctx.stream
+                        .synchronize()
+                        .expect("production AUTO/vendor path warmup");
+                    let auto_iterations =
+                        fixed_auto_vendor_iterations(fixed_ada_event_window_us(&ctx, 16, auto_run));
+                    let vendor_iterations = fixed_auto_vendor_iterations(
+                        fixed_ada_event_window_us(&ctx, 16, vendor_run),
                     );
-                    records += 1;
+                    for auto_first in [true, false] {
+                        let mut auto_samples = Vec::with_capacity(windows);
+                        let mut vendor_samples = Vec::with_capacity(windows);
+                        for _ in 0..windows {
+                            let (auto_us, vendor_us) = if auto_first {
+                                (
+                                    fixed_ada_event_window_us(&ctx, auto_iterations, auto_run),
+                                    fixed_ada_event_window_us(&ctx, vendor_iterations, vendor_run),
+                                )
+                            } else {
+                                let vendor_us =
+                                    fixed_ada_event_window_us(&ctx, vendor_iterations, vendor_run);
+                                (
+                                    fixed_ada_event_window_us(&ctx, auto_iterations, auto_run),
+                                    vendor_us,
+                                )
+                            };
+                            auto_samples.push(auto_us);
+                            vendor_samples.push(vendor_us);
+                        }
+                        let ratios =
+                            fixed_production_auto_ratio_samples(&auto_samples, &vendor_samples)
+                                .expect("valid paired AUTO/vendor samples");
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &auto),
+                            auto_raw,
+                            "production AUTO post-timing bits changed"
+                        );
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &vendor),
+                            vendor_raw,
+                            "explicit vendor post-timing bits changed"
+                        );
+                        let mut auto_sorted = auto_samples.clone();
+                        let mut vendor_sorted = vendor_samples.clone();
+                        let mut ratio_sorted = ratios.clone();
+                        auto_sorted.sort_by(f64::total_cmp);
+                        vendor_sorted.sort_by(f64::total_cmp);
+                        ratio_sorted.sort_by(f64::total_cmp);
+                        println!(
+                            concat!(
+                                "{{\"schema\":\"MambaBiFixedFinalProductionAutoVendorV1\",{},",
+                                "\"scope\":\"performance_only\",\"call_scope\":\"production_auto\",",
+                                "\"row\":\"{}\",\"cell\":\"{}\",\"m\":{},\"k\":{},\"n\":{},",
+                                "\"input_dtype\":\"{}\",\"output_dtype\":\"{}\",\"auto_tile\":\"{:?}\",",
+                                "\"op\":\"nn\",\"path\":\"{}\",\"graphs\":{},",
+                                "\"graph_replay_bits_equal\":{},\"raw_storage_bits_equal\":true,",
+                                "\"eager_repeat_bits_equal\":true,\"vendor_repeat_bits_equal\":true,",
+                                "\"timing\":\"cuda_events\",\"alpha\":1,\"beta\":0,\"bias\":{},",
+                                "\"vendor_gemm_beta\":{},\"vendor_bias_broadcast_timed\":{},",
+                                "{},\"vendor_compute\":\"{:?}\",",
+                                "\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
+                                "\"reference_output_dtype\":\"f32\",\"auto_normalized_error\":{},",
+                                "\"vendor_normalized_error\":{},\"order\":\"{}\",\"windows\":{},",
+                                "\"auto_iterations\":{},\"vendor_iterations\":{},",
+                                "\"auto_p50_us\":{},\"auto_p95_us\":{},",
+                                "\"vendor_p50_us\":{},\"vendor_p95_us\":{},",
+                                "\"auto_over_vendor_p50\":{},\"auto_over_vendor_p95\":{},",
+                                "\"auto_samples_us\":{:?},\"vendor_samples_us\":{:?},",
+                                "\"auto_over_vendor_samples\":{:?}}}"
+                            ),
+                            device_metadata,
+                            row_spec.name,
+                            cell.label,
+                            shape.m,
+                            shape.k,
+                            shape.n,
+                            row_spec.input_dtype.as_str(),
+                            row_spec.output_dtype.as_str(),
+                            selected,
+                            path,
+                            graph_inventory,
+                            path == "graph",
+                            has_bias,
+                            u8::from(has_bias),
+                            has_bias,
+                            fixed_explicit_vendor_tolerance_metadata(&row_spec),
+                            row_spec.vendor_compute,
+                            auto_error,
+                            vendor_error,
+                            if auto_first {
+                                "auto_then_vendor"
+                            } else {
+                                "vendor_then_auto"
+                            },
+                            windows,
+                            auto_iterations,
+                            vendor_iterations,
+                            percentile(&auto_sorted, 0.50),
+                            percentile(&auto_sorted, 0.95),
+                            percentile(&vendor_sorted, 0.50),
+                            percentile(&vendor_sorted, 0.95),
+                            percentile(&ratio_sorted, 0.50),
+                            percentile(&ratio_sorted, 0.95),
+                            auto_samples,
+                            vendor_samples,
+                            ratios,
+                        );
+                        records += 1;
+                    }
                 }
             }
         }
     }
+    assert_eq!(
+        records, expected_records,
+        "production AUTO/vendor record count"
+    );
+    if full_inventory {
+        assert_eq!(records, 280, "full production AUTO/vendor record count");
+    }
     println!(
-        "{{\"schema\":\"MambaBiFixedExplicitAutoVendorCompleteV2\",{},\"records\":{records},\"passed\":true}}",
-        device_metadata
+        "{{\"schema\":\"MambaBiFixedFinalProductionAutoVendorCompletionV1\",{}, {},\"scope\":\"performance_only\",\"full_inventory\":{},\"rows\":{},\"cells\":{},\"biases\":{},\"paths\":{},\"orders\":2,\"windows_per_order\":{},\"records\":{},\"passed\":true}}",
+        device_metadata,
+        fixed_exact_comparator_completion_metadata(),
+        full_inventory,
+        selected_row_count,
+        selected_cell_count,
+        selected_bias_count,
+        selected_path_count,
+        windows,
+        records,
     );
 }
-
 #[test]
 #[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits forced-rung/AUTO/vendor evidence"]
 fn fixed_ada_forced_rungs_paired_precision_cublas() {

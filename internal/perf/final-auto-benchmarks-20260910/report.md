@@ -52,8 +52,54 @@ equality, not an assertion about downloaded output bits.
 
 ## Inference adapter
 
-Work is separate and still under review/runtime verification. Its frozen RED
+Its frozen RED
 `1e655261df26912501becce5729f7be906378a9e52c3b302bdec67130860f9e8`
 failed on Ada/CUDA13.0 with exactly5 expected undefined-symbol errors for the
 new default, count and ratio helpers. Raw output is in `inference-red/`.
 No full280-record Inference matrix is claimed by this packet yet.
+
+The adapter measures seven precision/comparator rows, five hot shapes, both
+bias states, eager and whole-graph execution, and both mirrored orders:
+280 pair records at21 windows per order. Exact F32 has separate Fast-TF32
+and Pedantic comparisons. The TF32 row uses explicit Fast-TF32; the four
+native/mixed half rows use COMPUTE_32F with their actual output types.
+
+The first candidate `ef2b82d2` passed two native tests and a56-record Ada
+smoke covering all seven rows, `hot_d`, both bias states, both paths and
+orders. Static review found three receipt-integrity issues: symbol-prefix
+collisions, UUID discovery not tied to the visible CUDA ordinal, and absent
+tuning revision metadata. Keep `inference-ada-smoke/` as the original
+pre-fix numerical coverage, not a final-approved release table.
+
+Fixed source SHA-256:
+`c92442da094de530e5388960b343f82eec163766c6e5ceafd4043f0d1d17de73`.
+The complete serialized symbol token is now matched exactly, the driver
+provides the visible CUDA ordinal0 UUID, and both timing/completion records
+include tuning revision45. Independent scoped review closed allthree
+findings with no new blocking issue.
+
+Fresh CUDA13.2 / RTX5090 verification in `inference-sm120-smoke-fix1/`:
+
+- compile: pass,11.78s;
+- four focused native tests:4/4 pass;
+- TF32/hot_d/bias0 focused eager/graph smoke: pass,70.83s including startup;
+- four pair records plus completion, three windows per order;
+- full sample/ratio/quantile and metadata replay: true, revision45 and
+  actual GPU UUID pinned, repeat/graph/output-storage checks passed.
+
+The launch in `inference-sm120-aborted-bad-sha/` was stopped during build
+because the command accidentally supplied a placeholder production SHA.
+It contains no completed GPU measurement and is not accepted evidence.
+The replacement uses the real production SHA stated above. Original files
+are retained untouched; no measurement was relabeled after acquisition.
+
+Example strict post-fix replay:
+
+```sh
+jq -Rse --argjson count 4 --argjson windows 3 --arg cc 12.0 \
+  --argjson revision 45 -f verify-inference.jq \
+  inference-sm120-smoke-fix1/inference.log
+```
+
+For the retained pre-fix diagnostic only, pass `--argjson revision null`.
+Full final inference runs on both boards remain separate evidence packets.
