@@ -297,6 +297,23 @@ pub unsafe fn gpu_angle_chunked_fwd(
     Ok(())
 }
 
+/// Picks the kernel for `adt = a_val * dt` over `n` f32 elements: the
+/// 16-byte vectorized twin when the count divides four and every operand
+/// pointer is aligned, else the scalar kernel. Both multiply the same
+/// elements in the same order. Returns the kernel and its launch count.
+pub(super) fn adt_multiply_launch<'k>(
+    m3k: &'k Mamba3Kernels,
+    n: usize,
+    ptrs: &[cudarc::driver::sys::CUdeviceptr],
+) -> (&'k cudarc::driver::CudaFunction, usize) {
+    let w = crate::mamba_ssm::gpu::launch::vec8_width(4);
+    if crate::mamba_ssm::gpu::launch::vec8_ok(n, 4, ptrs) {
+        (&m3k.elementwise_mul_v, n / w)
+    } else {
+        (&m3k.elementwise_mul, n)
+    }
+}
+
 pub fn gpu_forward_mamba3_layer(
     exec: &M3Exec<'_>,
     stream_out: cudarc::driver::sys::CUdeviceptr,
@@ -513,8 +530,17 @@ pub fn gpu_forward_mamba3_layer(
         let b_i = dims.batch as i32;
 
         {
-            let n_total = (bt * nh) as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.elementwise_mul);
+            let (kern, count) = adt_multiply_launch(
+                m3k,
+                bt * nh,
+                &[
+                    scratch.d_alpha.cached_ptr(),
+                    acts.a_val.cached_ptr(),
+                    acts.dt.cached_ptr(),
+                ],
+            );
+            let n_total = count as i32;
+            let mut builder = ctx.stream.launch_builder(kern);
             builder.arg(scratch.d_alpha.inner_mut());
             builder.arg(acts.a_val.inner());
             builder.arg(acts.dt.inner());

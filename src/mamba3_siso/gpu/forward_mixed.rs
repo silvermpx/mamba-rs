@@ -548,8 +548,17 @@ pub fn gpu_forward_mamba3_layer_mixed(
 
         // Kernel 0: adt = a_val · dt → adt_temp_scratch.
         {
-            let n_total = (bt * nh) as i32;
-            let mut bld = ctx.stream.launch_builder(&m3k.elementwise_mul);
+            let (kern, count) = super::forward::adt_multiply_launch(
+                m3k,
+                bt * nh,
+                &[
+                    adt_temp_scratch.cached_ptr(),
+                    acts.a_val.cached_ptr(),
+                    acts.dt.cached_ptr(),
+                ],
+            );
+            let n_total = count as i32;
+            let mut bld = ctx.stream.launch_builder(kern);
             bld.arg(adt_temp_scratch.inner_mut());
             bld.arg(acts.a_val.inner());
             bld.arg(acts.dt.inner());

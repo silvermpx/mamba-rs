@@ -1115,11 +1115,20 @@ pub fn gpu_forward_mamba_target_burnin(
 
         // === F4e: gating [B*T] — y * gate_silu ===
         {
-            let n = (bt * di) as i32;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.elementwise_mul);
-            builder.arg(scratch.gated.inner_mut());
-            builder.arg(scratch.y.inner());
-            builder.arg(scratch.gate_silu.inner());
+            let g = scratch.gated.cached_ptr();
+            let y = scratch.y.cached_ptr();
+            let gs = scratch.gate_silu.cached_ptr();
+            let w = super::launch::vec8_width(4);
+            let (kern, count) = if super::launch::vec8_ok(bt * di, 4, &[g, y, gs]) {
+                (&ctx.kernels.elementwise_mul_v_typed.f32, bt * di / w)
+            } else {
+                (&ctx.kernels.elementwise_mul, bt * di)
+            };
+            let n = count as i32;
+            let mut builder = ctx.stream.launch_builder(kern);
+            builder.arg(&g);
+            builder.arg(&y);
+            builder.arg(&gs);
             builder.arg(&n);
             unsafe { builder.launch(grid_1d(bt * di)) }
                 .map_err(|e| format!("gating target L{layer_idx}: {:?}", e))?;

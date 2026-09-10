@@ -693,13 +693,22 @@ impl Mamba3Prefill {
             }
             // Chunked SSD pipeline (the training forward's F6, tape-free).
             {
-                let n_total = (bt * nh) as i32;
-                let mut b = ctx.stream.launch_builder(&m3k.elementwise_mul);
+                let (kern, count) = super::forward::adt_multiply_launch(
+                    m3k,
+                    bt * nh,
+                    &[
+                        ck.d_alpha.cached_ptr(),
+                        tgt.a_val.cached_ptr(),
+                        tgt.dt.cached_ptr(),
+                    ],
+                );
+                let n_total = count as i32;
+                let mut b = ctx.stream.launch_builder(kern);
                 b.arg(ck.d_alpha.inner_mut());
                 b.arg(tgt.a_val.inner());
                 b.arg(tgt.dt.inner());
                 b.arg(&n_total);
-                unsafe { b.launch(grid_1d(bt * nh)) }
+                unsafe { b.launch(grid_1d(count)) }
                     .map_err(|e| format!("prefill adt L{l}: {e:?}"))?;
             }
             {

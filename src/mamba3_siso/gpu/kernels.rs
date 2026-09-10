@@ -72,6 +72,10 @@ pub struct Mamba3Kernels {
     /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
     /// m3_angle_dt_bwd_seq, and d_scale from rmsnorm_bwd).
     pub reduce_sum_axis0: CudaFunction,
+    /// 16-byte vectorized twin of `elementwise_mul` for f32 operands: the
+    /// same multiply per element, four elements per thread. Launched when
+    /// `vec8_ok` holds for the count and every operand pointer.
+    pub elementwise_mul_v: CudaFunction,
     pub vec_add_inplace: CudaFunction,
     pub elementwise_mul: CudaFunction,
     pub fill_scalar: CudaFunction,
@@ -462,6 +466,7 @@ impl Mamba3Kernels {
             m3_compute_abg: get("m3_compute_abg")?,
             m3_abg_bwd: get("m3_abg_bwd")?,
             silu_gate_fwd: get("silu_gate_fwd")?,
+            elementwise_mul_v: get("elementwise_mul_v_f32")?,
             silu_gate_bwd: get("silu_gate_bwd")?,
             rmsnorm_gated_fwd: get("rmsnorm_gated_forward")?,
             rmsnorm_gated_bwd: get("rmsnorm_gated_backward")?,
