@@ -3476,6 +3476,14 @@ pub fn resolve_tf32_forced(
     }
     .ok_or_else(|| format!("forced TF32 route {route:?} has no qualified module"))?;
     ensure_tf32_binding_contract(binding, module_kind, dynamic_shared_bytes, route)?;
+    if let Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) = route
+        && binding.sm120_fma_exclusions.is_excluded(request.op, exact)
+    {
+        let symbol = tf32_kernel_spec(request.op, route)?.symbol;
+        return Err(format!(
+            "forced exact-F32 route {symbol} is excluded on this toolkit"
+        ));
+    }
     if !sm89_joint_route_matches_request(route, request) {
         return Err(format!(
             "forced TF32 route {route:?} is not qualified for {request:?}"
@@ -3891,7 +3899,22 @@ pub(super) fn sm120_fma_exact_route(
         .map(|cell| cell.route)
         .filter(|_| qualified.device.multiprocessor_count == 170);
     let route = measured
-        .or_else(|| sm120_fma_generic_route(request, qualified.device.multiprocessor_count))?;
+        .filter(|&route| {
+            !qualified
+                .sm120_fma_exclusions
+                .is_excluded(request.op, route)
+        })
+        .or_else(|| {
+            let mut route =
+                sm120_fma_generic_route(request, qualified.device.multiprocessor_count)?;
+            if let Some(measured) = measured {
+                route.splits = measured.splits;
+            }
+            (!qualified
+                .sm120_fma_exclusions
+                .is_excluded(request.op, route))
+            .then_some(route)
+        })?;
     super::launch::sm120_fma_launch_plan(request, route).ok()?;
     Some(route)
 }
@@ -11663,9 +11686,10 @@ mod tf32_tests {
     use crate::mamba_ssm::gpu::context::F32TriadPolicy;
     use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
         F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
-        F32TriadSelection, F32TriadShape, TF32_NT_SPLITK8_S3_SPEC, Tf32PhysicalRoute,
-        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32QualifiedModule,
-        Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile,
+        F32TriadSelection, F32TriadShape, Sm120FmaExclusions, Sm120FmaRoute, Sm120FmaTile,
+        TF32_NT_SPLITK8_S3_SPEC, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
+        Tf32PortableTile, Tf32QualifiedModule, Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route,
+        Tf32Sm120Stages, Tf32Sm120Tile,
     };
     use crate::mamba_ssm::gpu::gemm_bi_triad::{
         Sm90aWarpgroupSchedule, Sm100Schedule, Sm100Stages, Sm100Tile,
@@ -11727,6 +11751,7 @@ mod tf32_tests {
                 optin_shared_bytes,
                 tensor_map_access,
             },
+            sm120_fma_exclusions: Default::default(),
         }
     }
 
@@ -13138,6 +13163,177 @@ mod tf32_tests {
                     | F32TriadSelection::Tf32(super::Tf32PhysicalRoute::Sm120TmaFmaExactV1(_))
             ));
         }
+    }
+
+    fn exact_sm120_availability_with_exclusions(
+        excluded: &[(ResolvedGemmOp, Sm120FmaRoute)],
+        matching_tf32_cohort: bool,
+    ) -> F32TriadAvailability {
+        let identity = sm120_cohort((13, 2)).identity;
+        let mut availability = sm120_availability_for(identity);
+        let specialized = availability.specialized.as_mut().unwrap();
+        specialized.sm120_fma_exclusions =
+            Sm120FmaExclusions::from_routes(excluded).expect("literal exact-F32 routes");
+        if !matching_tf32_cohort {
+            specialized.compiler.source_digest = [0xee; 32];
+        }
+        availability
+    }
+
+    fn nt_d768_out_request_and_operands() -> (F32TriadRequest, F32TriadOperands) {
+        (
+            F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
+            },
+            F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        )
+    }
+
+    #[test]
+    fn sm120_exact_reachability_excluded_measured_route_uses_generic_under_both_policies() {
+        let measured = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let generic = Sm120FmaRoute {
+            tile: Sm120FmaTile::M128N64,
+            kvec: true,
+            splits: 2,
+        };
+        let availability =
+            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)], false);
+        let (request, operands) = nt_d768_out_request_and_operands();
+
+        for policy in [
+            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::AllowDeterministicTf32V1,
+        ] {
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(policy, request, operands, availability)
+                    .unwrap(),
+                F32TriadSelection::ExactSm120Fma(generic),
+                "{policy:?} must skip the excluded measured arm"
+            );
+        }
+    }
+
+    #[test]
+    fn sm120_exact_reachability_excluded_measured_and_generic_routes_use_scalar() {
+        let measured = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let generic = Sm120FmaRoute {
+            tile: Sm120FmaTile::M128N64,
+            kvec: true,
+            splits: 2,
+        };
+        let availability = exact_sm120_availability_with_exclusions(
+            &[
+                (ResolvedGemmOp::Nt, measured),
+                (ResolvedGemmOp::Nt, generic),
+            ],
+            false,
+        );
+        let (request, operands) = nt_d768_out_request_and_operands();
+
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::ExactScalarFmaV1,
+                request,
+                operands,
+                availability,
+            )
+            .unwrap(),
+            F32TriadSelection::ScalarFmaV1,
+        );
+    }
+
+    #[test]
+    fn sm120_exact_reachability_one_exclusion_preserves_unrelated_measured_routes() {
+        let excluded = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let availability =
+            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)], true);
+        for (op, dims, expected) in [
+            (
+                ResolvedGemmOp::Nn,
+                (2_048, 1_536, 768),
+                Sm120FmaRoute {
+                    tile: Sm120FmaTile::M128N64,
+                    kvec: false,
+                    splits: 4,
+                },
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 1_536, 768),
+                Sm120FmaRoute {
+                    tile: Sm120FmaTile::M128N64,
+                    kvec: false,
+                    splits: 2,
+                },
+            ),
+        ] {
+            let request = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, dims),
+            };
+            let operands = F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+            };
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::ExactScalarFmaV1,
+                    request,
+                    operands,
+                    availability,
+                )
+                .unwrap(),
+                F32TriadSelection::ExactSm120Fma(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn sm120_exact_reachability_forced_excluded_route_is_rejected_early() {
+        let exact = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let availability =
+            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)], true);
+        let (request, _) = nt_d768_out_request_and_operands();
+        let error = resolve_tf32_forced(
+            request,
+            availability,
+            Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact),
+        )
+        .expect_err("a forced excluded exact-F32 symbol must fail before preparation");
+        assert!(error.contains("excluded on this toolkit"), "{error}");
+        assert!(
+            error.contains("gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2"),
+            "{error}"
+        );
     }
 
     #[test]

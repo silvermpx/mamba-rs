@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/gemm_bi_tf32_contract.rs (/root/target-sm120-final-sweep-cuda130/release/deps/gemm_bi_tf32_contract-9a42ad1f4ce69474)
+
+running 1 test
+test sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits ... mamba-rs WARNING: 1 TF32 route(s) are excluded on this toolkit and decline to the exact family: gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2 uses 8 bytes of Driver JIT local memory on this toolkit
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 95 filtered out; finished in 49.25s
+

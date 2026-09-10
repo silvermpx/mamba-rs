@@ -1,0 +1,2 @@
+489fef58977d6db393640b1b4367c98b3e1bb4ba1d1c36112b7b00ca42ba214c  tests/gemm_bi_tf32_contract.rs
+6953bed17458fde150322dfc8ea07f509e15c194b1b44f2dc3993850718d6d46  tests/gemm_bi_tf32_selector.rs

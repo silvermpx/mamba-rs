@@ -1829,6 +1829,38 @@ pub enum F32TriadSelection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120FmaExclusions(u16);
+
+impl Sm120FmaExclusions {
+    pub(crate) fn from_routes(routes: &[(ResolvedGemmOp, Sm120FmaRoute)]) -> Result<Self, String> {
+        let mut bits = 0_u16;
+        for &(op, route) in routes {
+            let key = Tf32PhysicalRoute::Sm120TmaFmaExactV1(route.spec_key());
+            let index = SM120_FMA_ROUTE_SPECS
+                .iter()
+                .position(|spec| spec.op == op && spec.route == key)
+                .ok_or_else(|| format!("{op:?} exact-F32 route {route:?} is not inventoried"))?;
+            bits |= 1_u16 << index;
+        }
+        Ok(Self(bits))
+    }
+
+    pub(crate) fn is_excluded(self, op: ResolvedGemmOp, route: Sm120FmaRoute) -> bool {
+        let key = Tf32PhysicalRoute::Sm120TmaFmaExactV1(route.spec_key());
+        SM120_FMA_ROUTE_SPECS
+            .iter()
+            .position(|spec| spec.op == op && spec.route == key)
+            .is_some_and(|index| self.0 & (1_u16 << index) != 0)
+    }
+}
+
+impl Default for Sm120FmaExclusions {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tf32QualifiedModule {
     pub module_kind: ModuleKind,
     pub target: CudaTarget,
@@ -1836,6 +1868,9 @@ pub struct Tf32QualifiedModule {
     pub compiler: CompilerIdentity,
     pub device: DeviceIdentity,
     pub device_caps: DeviceCaps,
+    /// Exact-F32 SM120 symbols rejected by this binding's Driver resource
+    /// gates. An empty set preserves synthetic and non-SM120 bindings.
+    pub sm120_fma_exclusions: Sm120FmaExclusions,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -8318,6 +8353,7 @@ mod tests {
                     optin_shared_bytes: 228_000,
                     tensor_map_access: true,
                 },
+                sm120_fma_exclusions: Default::default(),
             },
         }
     }

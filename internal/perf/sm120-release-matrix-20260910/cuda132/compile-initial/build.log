@@ -1,0 +1,24 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-release-sm120.J6z6IG)
+error[E0004]: non-exhaustive patterns: `mamba_rs::gpu::kernel_identity::ModuleKind::TriadSm89ExactF32D128` not covered
+    --> tests/gemm_bi_performance_matrix.rs:2927:11
+     |
+2927 |     match kind {
+     |           ^^^^ pattern `mamba_rs::gpu::kernel_identity::ModuleKind::TriadSm89ExactF32D128` not covered
+     |
+note: `mamba_rs::gpu::kernel_identity::ModuleKind` defined here
+    --> src/mamba_ssm/gpu/kernel_identity.rs:598:1
+     |
+ 598 | pub enum ModuleKind {
+     | ^^^^^^^^^^^^^^^^^^^
+...
+ 620 |     TriadSm89ExactF32D128 = 12,
+     |     --------------------- not covered
+     = note: the matched value is of type `mamba_rs::gpu::kernel_identity::ModuleKind`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+     |
+2938 ~         ModuleKind::Mamba3Combined => "mamba3_combined",
+2939 ~         mamba_rs::gpu::kernel_identity::ModuleKind::TriadSm89ExactF32D128 => todo!(),
+     |
+
+For more information about this error, try `rustc --explain E0004`.
+error: could not compile `mamba-rs` (test "gemm_bi_performance_matrix") due to 1 previous error

@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda128/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)
+
+running 1 test
+test sm120_tf32_projection_selector_qualification ... GPU quiet gate sm120-projection-selector/pre-context: uuid=GPU-a10ad830-a2cf-054d-e0fa-54add30a2cf8 gpu_util=0% memory_util=0% used=4MiB sm_clock=210MHz temperature=45C pstate=P8; quiet_samples=5
+selector qualification on (12, 0)/170SM
+GPU quiet gate sm120-projection-selector/nn_d768_in_proj/pre-cell: uuid=GPU-a10ad830-a2cf-054d-e0fa-54add30a2cf8 gpu_util=0% memory_util=0% used=510MiB sm_clock=2557MHz temperature=44C pstate=P1; quiet_samples=5

@@ -100,6 +100,22 @@ fn retain_tf32_candidate<T, Binding>(
     }
 }
 
+fn retain_specialized_tf32_candidate<T>(
+    functions: HashMap<&'static str, T>,
+    mut binding: super::contract::Tf32QualifiedModule,
+    exclusions: &[Tf32SymbolExclusion],
+    qualification: Result<Sha256Digest, String>,
+) -> Result<
+    (
+        HashMap<&'static str, T>,
+        Option<super::contract::Tf32QualifiedModule>,
+    ),
+    String,
+> {
+    binding.sm120_fma_exclusions = sm120_fma_exclusions(exclusions);
+    retain_tf32_candidate(functions, binding, qualification)
+}
+
 fn retain_forced_only_functions<T>(
     functions: Result<(HashMap<&'static str, T>, Vec<Tf32SymbolExclusion>), String>,
 ) -> Result<(HashMap<&'static str, T>, Vec<Tf32SymbolExclusion>), String> {
@@ -9032,7 +9048,12 @@ impl GemmBiKernels {
                     binding,
                     &functions,
                 );
-                retain_tf32_candidate(functions, binding, artifact)
+                retain_specialized_tf32_candidate(
+                    functions,
+                    binding,
+                    &specialized.tf32_excluded,
+                    artifact,
+                )
             })
             .transpose();
         let (specialized_tf32_functions, specialized_binding) = match specialized_qualification {
@@ -9965,6 +9986,27 @@ fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, S
     Ok((functions, excluded))
 }
 
+fn sm120_fma_exclusions(exclusions: &[Tf32SymbolExclusion]) -> super::contract::Sm120FmaExclusions {
+    let routes = super::contract::SM120_FMA_ROUTE_SPECS
+        .iter()
+        .filter(|spec| {
+            exclusions
+                .iter()
+                .any(|exclusion| exclusion.symbol == spec.symbol)
+        })
+        .map(|spec| {
+            (
+                spec.op,
+                spec.route
+                    .exact_fma()
+                    .expect("SM120 exact-F32 inventory contains only exact routes"),
+            )
+        })
+        .collect::<Vec<_>>();
+    super::contract::Sm120FmaExclusions::from_routes(&routes)
+        .expect("SM120 exact-F32 exclusions come from the literal inventory")
+}
+
 fn load_tf32_splitk_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, String> {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm80 {
         return Err("portable TF32 split-K requires the TriadSm80 module".into());
@@ -10432,6 +10474,7 @@ fn qualify_tf32_module_binding(
                 .map_err(|_| format!("negative TF32 opt-in shared memory {optin_shared}"))?,
             tensor_map_access,
         },
+        sm120_fma_exclusions: Default::default(),
     };
     Ok(binding)
 }
@@ -10825,8 +10868,8 @@ mod tests {
 
     use crate::mamba_ssm::gpu::kernel_identity::{
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
-        CudaTarget as KernelCudaTarget, ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp,
-        SCHEDULE_REVISION,
+        CudaTarget as KernelCudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, ModuleKind,
+        NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION,
     };
 
     use super::{
@@ -11951,6 +11994,124 @@ mod tests {
         assert!(registers.contains("129 registers"), "{registers}");
         let threads = tf32_symbol_admission("k", 0, 120, 128, 128, 256).unwrap_err();
         assert!(threads.contains("cannot launch 256 threads"), "{threads}");
+    }
+
+    #[test]
+    fn sm120_exact_reachability_loader_masks_only_exact_inventory_symbols() {
+        use super::{Tf32SymbolExclusion, retain_specialized_tf32_candidate};
+        use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
+            F32TriadAvailability, SM120_FMA_ROUTE_SPECS, SM120_TF32_ROUTE_SPECS, Sm120FmaRoute,
+            Sm120FmaTile, Tf32QualifiedModule,
+        };
+
+        let measured = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let excluded_symbol = "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2";
+        let exclusions = [
+            Tf32SymbolExclusion {
+                symbol: excluded_symbol,
+                reason: "test exact exclusion".into(),
+            },
+            Tf32SymbolExclusion {
+                symbol: "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+                reason: "test non-exact exclusion".into(),
+            },
+        ];
+        let target = KernelCudaTarget::new("compute_120").unwrap();
+        let device_target = KernelCudaTarget::new("sm_120").unwrap();
+        let compiler = CompilerIdentity {
+            source_digest: [0x21; 32],
+            invocation_digest: [0x22; 32],
+            header_manifest_digest: [0x23; 32],
+            target,
+            nvrtc_version: (13, 0),
+            nvrtc_library_domain: [0x24; 32],
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        let binding = Tf32QualifiedModule {
+            module_kind: ModuleKind::TriadSm120,
+            target,
+            artifact: ArtifactIdentity {
+                module_kind: ModuleKind::TriadSm120,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: compiler.invocation_digest,
+                artifact_digest: [0x25; 32],
+            },
+            compiler,
+            device: DeviceIdentity {
+                compute_capability: (12, 0),
+                multiprocessor_count: 170,
+                target: device_target,
+                driver: DriverIdentity {
+                    api_version: 13_000,
+                    build_sources: 1,
+                    build_digest: [0x26; 32],
+                },
+            },
+            device_caps: DeviceCaps {
+                compute_capability: (12, 0),
+                nvrtc_version: (13, 0),
+                accepted_target: Some(target),
+                optin_shared_bytes: 104_448,
+                tensor_map_access: true,
+            },
+            sm120_fma_exclusions: Default::default(),
+        };
+        let mut functions = SM120_FMA_ROUTE_SPECS
+            .iter()
+            .filter(|spec| spec.symbol != excluded_symbol)
+            .enumerate()
+            .map(|(index, spec)| (spec.symbol, index as u8))
+            .collect::<HashMap<_, _>>();
+        let tf32_sibling = SM120_TF32_ROUTE_SPECS
+            .iter()
+            .find(|spec| !spec.route.is_exact_fma() && spec.op == ResolvedGemmOp::Nn)
+            .unwrap()
+            .symbol;
+        functions.insert(tf32_sibling, 0xfe);
+        let expected_functions = functions.clone();
+        let (functions, specialized) =
+            retain_specialized_tf32_candidate(functions, binding, &exclusions, Ok([0x27; 32]))
+                .unwrap();
+        let availability = F32TriadAvailability {
+            specialized,
+            ..Default::default()
+        };
+        let retained = availability
+            .specialized
+            .expect("one excluded symbol must not unbind the specialized module");
+
+        assert_eq!(functions, expected_functions);
+        assert!(functions.contains_key(tf32_sibling));
+        assert!(
+            retained
+                .sm120_fma_exclusions
+                .is_excluded(ResolvedGemmOp::Nt, measured)
+        );
+        let mut accepted_exact = 0;
+        for spec in SM120_FMA_ROUTE_SPECS {
+            let route = spec.route.exact_fma().unwrap();
+            if spec.symbol == excluded_symbol {
+                assert!(retained.sm120_fma_exclusions.is_excluded(spec.op, route));
+            } else {
+                accepted_exact += 1;
+                assert!(functions.contains_key(spec.symbol), "{}", spec.symbol);
+                assert!(
+                    !retained.sm120_fma_exclusions.is_excluded(spec.op, route),
+                    "{}",
+                    spec.symbol
+                );
+            }
+        }
+        assert_eq!(accepted_exact, 11);
     }
 
     #[test]

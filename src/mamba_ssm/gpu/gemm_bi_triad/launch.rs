@@ -15444,6 +15444,7 @@ mod prepared_f32_launch_tests {
                     optin_shared_bytes: 99_000,
                     tensor_map_access: false,
                 },
+                sm120_fma_exclusions: Default::default(),
             },
         }
     }

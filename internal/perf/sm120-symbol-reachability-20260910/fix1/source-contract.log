@@ -1,0 +1,19 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-sm120-reachability-fix1.Djr8r8)
+    Finished `release` profile [optimized] target(s) in 49.21s
+     Running tests/gemm_bi_tf32_contract.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_tf32_contract-9a42ad1f4ce69474)
+
+running 1 test
+
+thread 'exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_family' (1262763) panicked at tests/gemm_bi_tf32_contract.rs:41:9:
+forced exact-F32 per-symbol rejection is missing excluded on this toolkit
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_family ... FAILED
+
+failures:
+
+failures:
+    exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_family
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--test gemm_bi_tf32_contract`

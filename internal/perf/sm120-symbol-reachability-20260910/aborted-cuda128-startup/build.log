@@ -1,0 +1,4 @@
+   Compiling cudarc v0.19.9
+   Compiling mamba-rs v0.6.9 (/root/mamba-release-sm120.J6z6IG)
+    Finished `release` profile [optimized] target(s) in 50.96s
+  Executable tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda128/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)

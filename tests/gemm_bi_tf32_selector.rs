@@ -56,6 +56,7 @@ fn sm89_availability() -> F32TriadAvailability {
                 optin_shared_bytes: 99_000,
                 tensor_map_access: false,
             },
+            sm120_fma_exclusions: Default::default(),
         }),
         specialized: None,
         finalist: None,

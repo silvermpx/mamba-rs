@@ -4031,6 +4031,7 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
             "compiler: CompilerIdentity",
             "device: DeviceIdentity",
             "device_caps: DeviceCaps",
+            "sm120_fma_exclusions: Sm120FmaExclusions",
             "pub struct F32TriadAvailability",
             "portable: Option<Tf32QualifiedModule>",
             "specialized: Option<Tf32QualifiedModule>",
@@ -4123,6 +4124,26 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
     assert!(
         !floor.contains("F32TriadSelection::Tf32"),
         "the exact-or-scalar floor must never select a TF32 route"
+    );
+    let sm120_exact = source_mask(braced_scope_after(
+        DISPATCH_SOURCE,
+        "fn sm120_fma_exact_route",
+    ));
+    assert_eq!(
+        sm120_exact.matches("sm120_fma_exclusions").count(),
+        2,
+        "SM120 exact selection must filter measured and generic routes independently"
+    );
+    let forced_scope = braced_scope_after(DISPATCH_SOURCE, "pub fn resolve_tf32_forced");
+    let forced = source_mask(forced_scope);
+    assert_contains_all(
+        &forced,
+        &["Sm120TmaFmaExactV1", "sm120_fma_exclusions"],
+        "forced exact-F32 per-symbol rejection",
+    );
+    assert!(
+        forced_scope.contains("forced exact-F32 route {symbol} is excluded on this toolkit"),
+        "forced exact-F32 rejection must identify the unavailable symbol and toolkit"
     );
     let allow_branch = &resolver[allow..];
     assert!(
@@ -13591,6 +13612,133 @@ fn run_hardware_qualification(cc: (u32, u32), expected_routes: usize) {
         let sanitizer = sanitizer_command(&binary, &sanitizer_arguments, tool);
         checked_output(sanitizer, &format!("compute-sanitizer {tool}"));
     }
+}
+
+fn nt_fixed_split2_sample_bits(
+    a: &[u32],
+    b: &[u32],
+    row: usize,
+    column: usize,
+    reduction: usize,
+) -> u32 {
+    let split_boundary = reduction.div_ceil(16).div_ceil(2) * 16;
+    let mut partials = [0.0_f32; 2];
+    for (split, range) in [
+        0..split_boundary.min(reduction),
+        split_boundary.min(reduction)..reduction,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for index in range {
+            partials[split] = f32::from_bits(a[row * reduction + index]).mul_add(
+                f32::from_bits(b[column * reduction + index]),
+                partials[split],
+            );
+        }
+    }
+    (0.0_f32 + partials[0] + partials[1]).to_bits()
+}
+
+#[test]
+#[ignore = "requires exact CC 12.0/170SM with CUDA 13.0 measured-symbol exclusion"]
+fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> Result<(), String> {
+    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
+        presize_physical_qualification_suite, qualify_physical_launch,
+    };
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+        ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
+    };
+
+    const DIMS: (usize, usize, usize) = (2_048, 1_536, 768);
+    const SALT: u64 = 0x1205_1300;
+    const SYMBOL: &str = "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2_kvec";
+    let device = GpuDevice::new(0)?;
+    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
+        return Err(format!(
+            "fallback probe requires exact CC 12.0/170SM, got {:?}/{}SM",
+            device.compute_capability,
+            device.multiprocessor_count()
+        ));
+    }
+    let ctx = GpuCtx::new(&device)?;
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_fast_gemm(false);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    let specialized = ctx
+        .kernels
+        .f32_triad_availability()
+        .specialized
+        .ok_or_else(|| "fallback probe has no specialized TF32 binding".to_string())?;
+    if specialized.compiler.nvrtc_version != (13, 0) {
+        return Err(format!(
+            "fallback probe requires CUDA 13.0 NVRTC, got {:?}",
+            specialized.compiler.nvrtc_version
+        ));
+    }
+    let request = PhysicalQualificationRequest::contiguous_f32(
+        ResolvedGemmOp::Nt,
+        DIMS,
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+    );
+    presize_physical_qualification_suite(&ctx, &[request])?;
+    let mut launch = qualify_physical_launch(&ctx, request)?;
+    let nodes = launch.evidence().nodes();
+    if nodes.len() != 1 {
+        return Err(format!("fallback probe expected one node, got {nodes:?}"));
+    }
+    let node = nodes[0];
+    if node.symbol != SYMBOL
+        || node.tile != Some((128, 64))
+        || node.launch.grid_dim != (768, 1, 1)
+        || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaFixedSplitFoldV1)
+        || node.ownership != Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFoldV1)
+    {
+        return Err(format!(
+            "fallback probe selected the wrong same-split route: {node:?}"
+        ));
+    }
+
+    launch.seed_f32_operands(&ctx, SALT)?;
+    let (a, b) = launch.f32_operand_bits(&ctx)?;
+    launch.measure_eager_window_ms(&ctx, 1)?;
+    let eager = launch.f32_output_bits(&ctx)?;
+    for (row, column) in [
+        (0, 0),
+        (0, 63),
+        (0, 64),
+        (127, 127),
+        (128, 128),
+        (511, 383),
+        (1_024, 768),
+        (2_047, 1_535),
+    ] {
+        let actual = eager[row * DIMS.1 + column];
+        let expected = nt_fixed_split2_sample_bits(&a, &b, row, column, DIMS.2);
+        if actual != expected {
+            return Err(format!(
+                "fallback fixed-split bits differ at ({row},{column}): actual={actual:#010x} expected={expected:#010x}"
+            ));
+        }
+    }
+
+    launch.seed_f32_operands(&ctx, SALT)?;
+    launch.measure_eager_window_ms(&ctx, 1)?;
+    if launch.f32_output_bits(&ctx)? != eager {
+        return Err("fallback eager repeat changed output bits".into());
+    }
+    launch.seed_f32_operands(&ctx, SALT)?;
+    launch.measure_graph_window_ms(&ctx, 1)?;
+    if launch.f32_output_bits(&ctx)? != eager {
+        return Err("fallback eager and graph output bits differ".into());
+    }
+    launch.validate_red_zones(&ctx)?;
+    Ok(())
 }
 
 #[test]

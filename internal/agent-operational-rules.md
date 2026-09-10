@@ -128,3 +128,15 @@ export LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64:${LD_LIBRARY_PATH:-}
 ```
 
 Use an isolated remote source directory and an isolated `CARGO_TARGET_DIR` for each OLD/NEW qualification build. Disable shared CUDA/kernel caches for evidence-producing qualification runs.
+
+For multi-context qualification, isolate caches instead of disabling all JIT
+caching: set a private per-toolkit `CUDA_CACHE_PATH` and
+`MAMBA_RS_KERNEL_CACHE`, preserve source/compiler/artifact identities, and keep
+`CUDA_CACHE_DISABLE=0`. A fresh cache provides the initial cold compilation;
+subsequent contexts can reuse that same compiled artifact. Use
+`CUDA_CACHE_DISABLE=1` only for an explicitly required cold-JIT check, not for
+every context in a retained-route batch. On2026-09-10, the disabled cache kept
+one selector process CPU-bound rebuilding modules for minutes before timing.
+Do not count a cancelled startup as a kernel failure or a qualification pass.
+NVIDIA documents these controls in the CUDA Programming Guide, environment
+variables appendix: https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html
