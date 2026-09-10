@@ -1,10 +1,8 @@
 #[path = "triad_half_nt_fixed_s3_source.rs"]
-mod parent;
-
-pub const SYMBOL_PREFIX: &str = "gemm_bi_nt_test_fixed_s3_m64n128_";
+pub mod fixed_s3;
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
-    let mut source = parent::candidate_source(swizzle, s3)?;
+    let mut source = fixed_s3::candidate_source(swizzle, s3)?;
     for anchor in [
         "} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
         "} // namespace sm89_test_half_nt_s3",
@@ -478,7 +476,7 @@ mod tests {
 
     #[test]
     fn composed_source_changes_only_the_m64_mapping_around_the_s3_loop() {
-        let parent = parent::candidate_source(SWIZZLE, S3).unwrap();
+        let parent = fixed_s3::candidate_source(SWIZZLE, S3).unwrap();
         let source = candidate_source(SWIZZLE, S3).unwrap();
         assert_eq!(k_loop(&source), k_loop(&parent));
         assert!(source.contains("static_assert(3 * (64 * 64 + 128 * 64) * 2 == kSharedBytes"));

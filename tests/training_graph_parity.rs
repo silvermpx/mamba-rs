@@ -11,6 +11,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
@@ -57,10 +58,9 @@ fn det_input(n: usize, seed: u32) -> Vec<f32> {
 
 fn triad_ctx(device: &GpuDevice) -> GpuCtx {
     let ctx = GpuCtx::new(device).unwrap();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     ctx
 }
@@ -91,10 +91,12 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
     )
     .expect("construct M1 trainer");
 
-    trainer.ctx().set_batch_invariant(true);
+    trainer
+        .ctx()
+        .set_gemm_mode(GemmMode::Deterministic)
+        .unwrap();
     trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
     trainer.ctx().set_bi_tensor_cores(false);
-    trainer.ctx().set_fast_gemm(false);
     trainer
         .ctx()
         .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);

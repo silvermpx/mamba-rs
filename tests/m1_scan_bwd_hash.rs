@@ -6,7 +6,16 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/digest.rs"]
+mod digest;
+#[path = "common/evidence.rs"]
+mod evidence;
+#[path = "common/evidence_digest.rs"]
+mod evidence_digest;
+#[path = "common/hash_outputs.rs"]
+mod hash_outputs;
+#[path = "common/stamp.rs"]
+mod stamp;
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -117,7 +126,7 @@ fn m1_scan_bwd_output_hashes() {
         let mut hv = vec![0f32; b * di * ds];
         h.download(&ctx.stream, &mut hv).unwrap();
         ctx.stream.synchronize().unwrap();
-        eprintln!("HASH fwd_h_final {:016x}", common::bench::fnv1a_f32(&hv));
+        eprintln!("HASH fwd_h_final {:016x}", digest::fnv1a_f32(&hv));
     }
 
     let d_y = upload_typed(&det(bt * di, 17, 0.1));
@@ -207,7 +216,7 @@ fn m1_scan_bwd_output_hashes() {
 
         eprintln!(
             "{}",
-            common::bench::bench_stamp(
+            stamp::bench_stamp(
                 &device,
                 &ctx,
                 "B8 T1300 di768 ds16",
@@ -215,7 +224,7 @@ fn m1_scan_bwd_output_hashes() {
                 if fold { di / SCAN_BWD_DGROUP } else { di }
             )
         );
-        common::bench::hash_outputs(
+        hash_outputs::hash_outputs(
             &ctx,
             &[
                 ("d_D_local", &d_d_local, b * di),
@@ -227,7 +236,7 @@ fn m1_scan_bwd_output_hashes() {
             let mut v = vec![0f32; n];
             buf.download_f32(&ctx.stream, &mut v).unwrap();
             ctx.stream.synchronize().unwrap();
-            eprintln!("HASH {route}:{name} {:016x}", common::bench::fnv1a_f32(&v));
+            eprintln!("HASH {route}:{name} {:016x}", digest::fnv1a_f32(&v));
         }
         let (bname, bbuf, cname, cbuf, rows) = if fold {
             (
@@ -247,7 +256,7 @@ fn m1_scan_bwd_output_hashes() {
             let mut v = vec![0f32; n];
             buf.download_f32(&ctx.stream, &mut v).unwrap();
             ctx.stream.synchronize().unwrap();
-            eprintln!("HASH {route}:{name} {:016x}", common::bench::fnv1a_f32(&v));
+            eprintln!("HASH {route}:{name} {:016x}", digest::fnv1a_f32(&v));
         }
     }
 
@@ -274,7 +283,7 @@ fn m1_scan_bwd_output_hashes() {
         unsafe { bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * ds)) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
-    common::bench::hash_outputs(
+    hash_outputs::hash_outputs(
         &ctx,
         &[
             ("reduce_d_B", &d_b_red, bt * ds),

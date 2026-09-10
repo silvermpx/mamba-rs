@@ -18,7 +18,8 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,

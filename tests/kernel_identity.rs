@@ -8,16 +8,15 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
-    CUBLAS_POLICY_REVISION, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity,
-    DriverIdentity, FramedSha256, GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION,
+    ArtifactIdentity, ArtifactKind, BackendSet, CUBLAS_POLICY_REVISION, CacheEnvelope,
+    CompileKeyMaterial, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity,
+    FramedSha256, GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION,
     NumericContractSet, POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype,
     ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
     ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedNumericContract,
     ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1,
-    Sm80TcPolicyV3, TUNING_TABLE_REVISION, build_artifact_set,
-    build_resolved_gemm_launch_set, canonical_ptx_image, gemm_dispatch_policy_digest,
-    route_backend_contract_sets,
+    Sm80TcPolicyV3, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
+    canonical_ptx_image, gemm_dispatch_policy_digest, route_backend_contract_sets,
 };
 
 fn digest(seed: u8) -> [u8; 32] {
@@ -624,10 +623,7 @@ fn vendor_policy_v2_changes_the_dispatch_identity() {
     let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
         .required(b"sm80-tensor-core-policy", &tensor_core)
         .required(b"scalar-wave-policy", &scalar)
-        .required(
-            b"multiprocessor-count",
-            &multiprocessor_count.to_le_bytes(),
-        )
+        .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
         .finish();
 
     assert_ne!(gemm_dispatch_policy_digest(multiprocessor_count), previous);

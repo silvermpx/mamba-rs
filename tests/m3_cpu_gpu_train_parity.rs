@@ -35,8 +35,10 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -435,10 +437,10 @@ fn run_gpu(
     // adds ~1e-3 relative noise per GEMM which would force tolerances loose
     // enough to mask genuine small implementation bugs. TF32 numerics are
     // covered by the GPU-internal tests; this test isolates the math.
-    ctx.disable_tf32();
+    ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     let m3k = Mamba3Kernels::compile_with_state_cap(
         dev.context(),
-        common::bench::arch0(),
+        arch::arch0(),
         mamba_rs::mamba_ssm::gpu::kernels::state_capacity(scn.cfg.d_state).unwrap(),
     )
     .expect("Mamba3Kernels");

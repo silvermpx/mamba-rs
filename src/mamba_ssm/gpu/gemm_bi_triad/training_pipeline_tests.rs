@@ -709,10 +709,10 @@ mod cuda_qualification {
 
     fn configured_ctx(device: &GpuDevice) -> Result<GpuCtx, String> {
         let ctx = GpuCtx::new(device)?;
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
-        ctx.set_fast_gemm(false);
         ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
         Ok(ctx)
     }

@@ -5676,9 +5676,9 @@ mod tests {
     fn splitk4_deep_reduction_shapes_pass_numeric_and_epilogue_qualification() {
         let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
         let ctx = GpuCtx::new(&device).expect("CUDA context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_fast_gemm(false);
         ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
         for (index, dims) in [(64, 1_536, 384), (64, 833, 384)].into_iter().enumerate() {
             qualify_splitk_numeric_case(
@@ -5723,9 +5723,9 @@ mod tests {
     fn splitk2_nn_m64_k833_n384_m64_k1536_n384_and_tail_shapes_are_bit_exact() {
         let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
         let ctx = GpuCtx::new(&device).expect("CUDA context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_fast_gemm(false);
         ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
         for (index, dims) in [(64, 833, 384), (64, 1_536, 384), (9, 65, 33), (9, 17, 33)]
             .into_iter()

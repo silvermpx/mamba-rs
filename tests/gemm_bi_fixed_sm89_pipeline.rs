@@ -8,7 +8,8 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
@@ -560,7 +561,8 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         n: 131,
     };
     for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-        inference_forward_with_tile(&ctx, good, shape, candidate).expect("odd-stride positive control");
+        inference_forward_with_tile(&ctx, good, shape, candidate)
+            .expect("odd-stride positive control");
     }
     for bad in [
         InferenceFwdOperands {
@@ -644,14 +646,18 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         bias_ptr: None,
     };
     for k in [2_147_483_521, 2_147_483_584] {
-        let error = inference_forward_with_tile(&ctx, good, InferenceShape { m: 1, k, n: 1 }, S3_CANDIDATE)
-            .expect_err("S3 lookahead overflow must reject before issuing any GPU work");
+        let error =
+            inference_forward_with_tile(&ctx, good, InferenceShape { m: 1, k, n: 1 }, S3_CANDIDATE)
+                .expect_err("S3 lookahead overflow must reject before issuing any GPU work");
         assert!(
             error.contains("S3 padded K"),
             "unexpected boundary rejection: {error}"
         );
     }
-    for no_output in [InferenceShape { m: 0, ..shape }, InferenceShape { n: 0, ..shape }] {
+    for no_output in [
+        InferenceShape { m: 0, ..shape },
+        InferenceShape { n: 0, ..shape },
+    ] {
         for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
             inference_forward_with_tile(&ctx, empty, no_output, candidate)
                 .expect("empty output is a no-op");
@@ -1189,9 +1195,10 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                     initial,
                                     "poison upload readback"
                                 );
-                                inference_forward_with_tile(&ctx, view, shape, tile).unwrap_or_else(
-                                    |e| panic!("{tile:?} {dtype:?} M={m} K={k} N={n}: {e}"),
-                                );
+                                inference_forward_with_tile(&ctx, view, shape, tile)
+                                    .unwrap_or_else(|e| {
+                                        panic!("{tile:?} {dtype:?} M={m} K={k} N={n}: {e}")
+                                    });
                                 assert_eq!(
                                     raw_half(&ctx, &output),
                                     expected,
@@ -1199,7 +1206,8 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                 );
                             }
                             for candidate in [CANDIDATE, SWIZZLE_CANDIDATE, S3_CANDIDATE] {
-                                let run = || inference_forward_with_tile(&ctx, view, shape, candidate);
+                                let run =
+                                    || inference_forward_with_tile(&ctx, view, shape, candidate);
                                 for _ in 0..2 {
                                     output
                                         .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))

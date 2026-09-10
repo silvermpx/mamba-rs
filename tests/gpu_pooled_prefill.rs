@@ -7,6 +7,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, PinnedHostBuf};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
@@ -274,13 +275,15 @@ fn pooled_graph_refuses_route_drift() {
     type RouteFlip<'a> = (&'a str, &'a dyn Fn(), &'a dyn Fn());
     let flips: &[RouteFlip<'_>] = &[
         (
-            "batch_invariant",
-            &|| r.ctx.set_batch_invariant(!r.ctx.batch_invariant()),
-            &|| r.ctx.set_batch_invariant(!r.ctx.batch_invariant()),
+            "cublas_pedantic",
+            &|| r.ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap(),
+            &|| r.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap(),
         ),
-        ("fast_gemm", &|| r.ctx.set_fast_gemm(true), &|| {
-            r.ctx.set_fast_gemm(false)
-        }),
+        (
+            "cublas_fast",
+            &|| r.ctx.set_gemm_mode(GemmMode::CublasFast).unwrap(),
+            &|| r.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap(),
+        ),
         (
             "family",
             &|| {
@@ -301,13 +304,12 @@ fn pooled_graph_refuses_route_drift() {
         assert!(err.contains("GEMM flags"), "{name}: {err}");
         restore();
     }
-    // tf32 is part of the route too - and it is one-way on the handle,
-    // so it is the LAST flip (no restore possible).
-    r.ctx.disable_tf32();
+    // A vendor mode left in place must keep refusing the replay.
+    r.ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     let err = graph
         .launch(&r.ctx, &r.input, &pooled)
-        .expect_err("tf32 flip must refuse replay");
-    assert!(err.contains("GEMM flags"), "tf32: {err}");
+        .expect_err("mode flip must refuse replay");
+    assert!(err.contains("GEMM flags"), "gemm_mode: {err}");
 }
 
 /// The buffer pins: replaying against a different pooled buffer must

@@ -695,8 +695,8 @@ pub struct Mamba3GpuInferenceEngine {
     pub weights: GpuMamba3WeightsInf,
     /// Full CUDA execution context (stream + cuBLAS with its Graph-safe
     /// workspace and GEMM route). One context for step, prefill and the
-    /// lm-head GEMMs alike. Flag scope: the handle-level math mode
-    /// (`disable_tf32`) governs every vendor call made through this context;
+    /// lm-head GEMMs alike. The GEMM mode selected on this context governs
+    /// every vendor call made through it;
     /// deterministic mode and its family/policy settings route the engine's
     /// projections and downstream lm-head through the same context-aware
     /// GEMM boundaries as Mamba-1.

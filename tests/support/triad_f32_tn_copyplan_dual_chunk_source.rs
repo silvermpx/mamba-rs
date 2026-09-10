@@ -387,8 +387,10 @@ mod tests {
         let source = compose_fused_source();
         assert_common_dual_chunk_contract(&source, DUAL_FUSED_SYMBOL);
         let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized
-            .contains("const double sum = __dadd_rn((double)acc0[i][j], (double)acc1[i][j]);"));
+        assert!(
+            normalized
+                .contains("const double sum = __dadd_rn((double)acc0[i][j], (double)acc1[i][j]);")
+        );
         assert!(source.contains("__dmul_rn((double)alpha, sum)"));
         assert!(source.contains("__double2float_rn"));
         assert!(source.contains("output[idx] = __fadd_rn(output[idx], update);"));

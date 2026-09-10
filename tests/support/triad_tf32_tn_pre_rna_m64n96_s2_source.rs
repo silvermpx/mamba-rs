@@ -1,76 +1,11 @@
 pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_pre_rna_m64n96_bk32_s2_prism_v1";
 pub const RETAINED_GEMM_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
-pub const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
-pub const BLOCK_THREADS: u32 = 256;
-pub const DYNAMIC_SHARED_BYTES: u32 = 40_960;
-pub const REGISTER_CAP: i32 = 128;
-pub const REQUIRED_ACTIVE_BLOCKS: u32 = 2;
 pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 
 const EXPECTED_PRIMITIVES_FNV64: u64 = 0x0247_c603_860d_c16f;
 const EXPECTED_PARENT_FNV64: u64 = 0x2b23_ece9_5ee3_e546;
 const SECTION_BEGIN: &str = "// BEGIN RETAINED TN_M64N64\n";
 const SECTION_END: &str = "// END RETAINED TN_M64N64";
-
-pub const fn tf32_rna_bits(bits: u32) -> u32 {
-    if bits & 0x7f80_0000 == 0x7f80_0000 {
-        bits
-    } else {
-        bits.wrapping_add(0x1000) & 0xffff_e000
-    }
-}
-
-pub fn padded_stride(rows: usize) -> Result<usize, String> {
-    rows.checked_add(3)
-        .map(|value| value & !3)
-        .ok_or_else(|| "TN transpose padded stride overflows usize".into())
-}
-
-pub fn validate_rna_transposed_words(
-    input: &[u32],
-    rows: usize,
-    columns: usize,
-    stride: usize,
-    output: &[u32],
-) -> Result<(), String> {
-    let input_len = rows
-        .checked_mul(columns)
-        .ok_or("TN RNA transpose input extent overflows usize")?;
-    let output_len = columns
-        .checked_mul(stride)
-        .ok_or("TN RNA transpose output extent overflows usize")?;
-    if input.len() != input_len || output.len() != output_len {
-        return Err(format!(
-            "TN RNA transpose extent changed: input={}/{} output={}/{}",
-            input.len(),
-            input_len,
-            output.len(),
-            output_len
-        ));
-    }
-    if stride < rows || !stride.is_multiple_of(4) {
-        return Err(format!(
-            "invalid TN RNA transpose stride {stride} for {rows} rows"
-        ));
-    }
-    for output_row in 0..columns {
-        for output_column in 0..stride {
-            let index = output_row * stride + output_column;
-            let expected = if output_column < rows {
-                tf32_rna_bits(input[output_column * columns + output_row])
-            } else {
-                0
-            };
-            if output[index] != expected {
-                return Err(format!(
-                    "TN RNA transpose differs at ({output_row},{output_column}): actual={:#010x} expected={expected:#010x}",
-                    output[index]
-                ));
-            }
-        }
-    }
-    Ok(())
-}
 
 pub fn compose_candidate_source(primitives: &str, joint_source: &str) -> Result<String, String> {
     require_digest(primitives, EXPECTED_PRIMITIVES_FNV64, "joint primitives")?;

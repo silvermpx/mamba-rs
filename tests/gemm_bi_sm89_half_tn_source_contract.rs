@@ -1,9 +1,9 @@
-#[path = "support/triad_half_tn_compact_source.rs"]
-mod frozen_compact;
 #[path = "support/triad_half_tn_vec2_epilogue_source.rs"]
 mod frozen_vec2;
 #[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_half_tn_source.rs"]
 mod production;
+
+use frozen_vec2::regpipe::compact as frozen_compact;
 
 const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 

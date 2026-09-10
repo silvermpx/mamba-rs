@@ -158,14 +158,6 @@ fn validate_job_id(job: &str) -> Result<(), DistError> {
 fn rendezvous_paths(r: &Rendezvous) -> (PathBuf, String) {
     match r {
         Rendezvous::File { dir, job_id } => (dir.clone(), job_id.clone()),
-        // Non-exhaustive enum: future variants must be handled here
-        // when they are added.
-        #[allow(
-            unreachable_patterns,
-            reason = "Rendezvous is non_exhaustive for future Tcp/Preset variants; \
-                      today File is the only one"
-        )]
-        _ => unreachable!("unhandled rendezvous variant"),
     }
 }
 
@@ -280,8 +272,7 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
     let barrier_dir = dir.join(&job);
     std::fs::create_dir_all(&barrier_dir)
         .map_err(|e| DistError::Rendezvous(format!("create {}: {e}", barrier_dir.display())))?;
-    #[cfg_attr(not(feature = "nccl"), allow(unused_mut))]
-    let mut ctx = DistContext::process(
+    let ctx = DistContext::process(
         er.rank,
         er.world,
         er.device,
@@ -295,7 +286,7 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
     // exchange the unique id through the job's rendezvous directory, and
     // run the blocking init.
     #[cfg(feature = "nccl")]
-    {
+    let ctx = {
         use super::comm::MambaComm;
         MambaComm::preflight_version()?;
         // The context handle must stay alive for the communicator's whole
@@ -313,8 +304,10 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
             .saturating_sub(join_start.elapsed())
             .max(std::time::Duration::from_secs(1));
         let comm = MambaComm::init_with_deadline(id, er.rank, er.world, cuda_ctx, remaining)?;
+        let mut ctx = ctx;
         ctx.set_comm(comm);
-    }
+        ctx
+    };
     Ok(ctx)
 }
 

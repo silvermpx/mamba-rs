@@ -1,6 +1,6 @@
 //! Batch-invariant SGEMM triad (gemm_bi) — determinism, parity, and speed.
 //!
-//! With `ctx.set_batch_invariant(true)` every f32 training GEMM (NN fwd,
+//! Under `GemmMode::Deterministic` every f32 training GEMM (NN fwd,
 //! TN dW, NT dX) routes through the deterministic warptiling dispatcher in
 //! `gpu/gemm_bi.rs` instead of cuBLAS TF32. Contract under test:
 //!
@@ -19,12 +19,12 @@
 //!    K-reduction association by design — every bucket stays
 //!    deterministic, but the buckets are distinct fixed orders. Strict
 //!    all-M invariance is the INFERENCE matvec_bi kernel's contract.
-//! 4. `bench_gemm_bi_vs_tf32` (#[ignore]) — wall-clock of trainer steps
-//!    with the flag on vs off across small/medium/large shapes.
+//! The trainer-step wall clock lives in benches/gemm_bi_trainer_step_bench.rs.
 
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::weights::MambaWeights;
@@ -103,7 +103,14 @@ fn run_training(
     };
     let mut trainer =
         MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("construct trainer");
-    trainer.ctx().set_batch_invariant(invariant);
+    trainer
+        .ctx()
+        .set_gemm_mode(if invariant {
+            GemmMode::Deterministic
+        } else {
+            GemmMode::CublasFast
+        })
+        .unwrap();
 
     let n = batch * seq_len * input_dim;
     for s in 0..steps {
@@ -214,7 +221,7 @@ fn nn_forward_is_batch_invariant_within_bucket() {
 
     let device = GpuDevice::new(0).expect("gpu");
     let ctx = GpuCtx::new(&device).expect("ctx");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
 
     let (k, n) = (384, 512);
     let row = det(k, 42, 1.0);
@@ -254,87 +261,5 @@ fn nn_forward_is_batch_invariant_within_bucket() {
             b.to_bits(),
             "batch-variance in split-K bucket at col {i}: M=64 {a:?} vs M=256 {b:?}"
         );
-    }
-}
-
-#[test]
-#[ignore] // wall-clock benchmark — run explicitly on a quiet GPU
-fn bench_gemm_bi_vs_tf32() {
-    use std::time::Instant;
-    // (d_model, n_layers, batch, seq_len, label)
-    let shapes = [
-        (128usize, 2usize, 16usize, 64usize, "RL-small d128"),
-        (256, 4, 16, 128, "d256"),
-        (768, 4, 8, 256, "130m-ish d768"),
-        (1536, 2, 4, 256, "770m-ish d1536"),
-    ];
-    for (dm, nl, b, t, label) in shapes {
-        let cfg = MambaConfig {
-            d_model: dm,
-            n_layers: nl,
-            ..cfg()
-        };
-        let input_dim = cfg.d_model;
-        let session = TrainSessionCfg {
-            input_dim,
-            batch: b,
-            seq_len: t,
-            lr: 1e-4,
-            weight_decay: 0.0,
-        };
-        let n = b * t * input_dim;
-        let input = det(n, 1, 1.0);
-        let dtemp = det(n, 2, 0.1);
-
-        let time_mode = |invariant: bool, tc: bool, dtype: WeightDtype| -> f64 {
-            let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
-            if dtype != WeightDtype::F32 {
-                // The mixed-precision pipeline requires an identity input_proj.
-                cpu.input_proj_w.clear();
-                cpu.input_proj_b.clear();
-            }
-            for lw in cpu.layers.iter_mut() {
-                lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
-            }
-            let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
-            tr.ctx().set_batch_invariant(invariant);
-            tr.ctx().set_bi_tensor_cores(tc);
-            for _ in 0..3 {
-                tr.step(&input, &dtemp).expect("warmup");
-            }
-            let iters = 20;
-            let start = Instant::now();
-            for _ in 0..iters {
-                tr.step(&input, &dtemp).expect("step");
-            }
-            start.elapsed().as_secs_f64() / iters as f64
-        };
-
-        for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            // flag-off baseline: cuBLAS TF32 for f32, cuBLAS GemmEx
-            // PEDANTIC (f32 accumulate, no tensor cores) for bf16/f16.
-            let baseline = if dt == WeightDtype::F32 {
-                "cuBLAS-TF32"
-            } else {
-                "cuBLAS-PEDANTIC"
-            };
-            let t_blas = time_mode(false, false, dt);
-            let t_bi = time_mode(true, false, dt);
-            eprintln!(
-                "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | gemm_bi {:.3} ms/step | ratio {:.2}x",
-                t_blas * 1e3,
-                t_bi * 1e3,
-                t_bi / t_blas
-            );
-            if dt != WeightDtype::F32 {
-                let t_tc = time_mode(true, true, dt);
-                eprintln!(
-                    "[{label} {dt:?}] B={b} T={t}: gemm_bi+TC {:.3} ms/step | vs {baseline} {:.2}x | vs scalar bi {:.2}x",
-                    t_tc * 1e3,
-                    t_tc / t_blas,
-                    t_tc / t_bi
-                );
-            }
-        }
     }
 }

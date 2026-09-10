@@ -1,20 +1,13 @@
+// The n96 transpose adapter this candidate derives from; the joint source
+// contract reads it through here so the module has one instance.
 #[path = "triad_tf32_tn_transpose_rna_n96_source.rs"]
-mod parent;
+pub mod parent;
 
 pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_transpose_pre_rna_m64n64_sm89_bk32_s3_wave";
 pub const TRANSPOSE_SYMBOL: &str = parent::CANDIDATE_TRANSPOSE_SYMBOL;
-pub const BLOCK_THREADS: u32 = 256;
-pub const DYNAMIC_SHARED_BYTES: usize = 49_152;
-pub const MAX_REGISTERS: i32 = 128;
-pub const REQUIRED_OCCUPANCY: u32 = 2;
-pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 
 pub fn retained_parent_source(raw_tn_n96: &str) -> Result<String, String> {
     parent::compose_candidate_source(raw_tn_n96)
-}
-
-pub fn retained_parent_fnv64(raw_tn_n96: &str) -> Result<u64, String> {
-    Ok(fnv1a64(retained_parent_source(raw_tn_n96)?.as_bytes()))
 }
 
 pub fn candidate_source(raw_tn_n96: &str) -> Result<String, String> {
@@ -451,10 +444,4 @@ fn require_count(source: &str, needle: &str, expected: usize) -> Result<(), Stri
             "M64N64 source anchor {needle:?}: expected {expected}, observed {actual}"
         ))
     }
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x1000_0000_01b3)
-    })
 }

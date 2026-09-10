@@ -129,7 +129,7 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
     f32.step(&input, &mut output, &mut state, &mut scratch)
         .expect("M1 f32 positive graph replay");
     assert_positive_graph_output(&output, "M1 f32");
-    f32.ctx().set_batch_invariant(false);
+    f32.ctx().set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     assert!(
         f32.step(&input, &mut output, &mut state, &mut scratch)
             .expect_err("M1 f32 route drift")
@@ -162,7 +162,7 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
         .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
         .expect("M1 BF16 positive graph replay");
     assert_positive_graph_output(&output, "M1 BF16");
-    mixed.ctx().set_batch_invariant(false);
+    mixed.ctx().set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     assert!(
         mixed
             .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
@@ -193,7 +193,7 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
     f32.step(&input, &mut output, &mut state, &mut scratch)
         .expect("M3 f32 positive graph replay");
     assert_positive_graph_output(&output, "M3 f32");
-    f32.ctx().set_batch_invariant(false);
+    f32.ctx().set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     assert!(
         f32.step(&input, &mut output, &mut state, &mut scratch)
             .expect_err("M3 f32 route drift")
@@ -226,7 +226,11 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
         .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
         .expect("M3 BF16 positive graph replay");
     assert_positive_graph_output(&output, "M3 BF16");
-    mixed.engine_ref().ctx().set_batch_invariant(false);
+    mixed
+        .engine_ref()
+        .ctx()
+        .set_gemm_mode(GemmMode::CublasPedantic)
+        .unwrap();
     assert!(
         mixed
             .step_mixed_native(&input, &mut output, &mut state, &mut scratch)

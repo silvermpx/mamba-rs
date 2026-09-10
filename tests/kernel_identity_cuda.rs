@@ -1,5 +1,6 @@
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -441,7 +442,7 @@ fn record_half_fixture(
 fn half_trace_context() -> GpuCtx {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     let scratch_requests = [
         PhysicalQualificationRequest::contiguous(
@@ -673,7 +674,7 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     }
 
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_batch_invariant(false);
+    ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     let trace = record_half_fixture(
         &ctx,
         HalfTraceFixture {

@@ -2,10 +2,6 @@ pub const SYMBOL: &str = "gemm_bi_nn_triad_sm89_add_half_tf32_direct_epilogue_ex
 pub const RETAINED_SYMBOL: &str = "gemm_bi_nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3";
 const EXPECTED_RETAINED_FNV64: u64 = 0xe8a2_1385_db2b_b352;
 
-pub const fn n96_grid(m: usize, n: usize) -> usize {
-    m.div_ceil(128) * n.div_ceil(96)
-}
-
 const OLD_EPILOGUE_ENTRY: &str = r#"    __syncthreads();
     float* tile_output = reinterpret_cast<float*>(shared_bytes);"#;
 
@@ -33,22 +29,6 @@ const NEW_EPILOGUE_ENTRY: &str = r#"    __syncthreads();
         return;
     }
     float* tile_output = reinterpret_cast<float*>(shared_bytes);"#;
-
-pub const fn direct_pair_coordinates(
-    warp: usize,
-    m_atom: usize,
-    n_atom: usize,
-    half: usize,
-    lane: usize,
-) -> ((usize, usize), (usize, usize)) {
-    let warp_m = (warp >> 2) * 64;
-    let warp_n = (warp & 3) * 24;
-    let group = lane >> 2;
-    let thread = lane & 3;
-    let row = warp_m + m_atom * 16 + group + half * 8;
-    let column = warp_n + n_atom * 8 + 2 * thread;
-    ((row, column), (row, column + 1))
-}
 
 pub fn compose_candidate_source(retained_source: &str) -> Result<String, String> {
     let observed = fnv64(retained_source.as_bytes());

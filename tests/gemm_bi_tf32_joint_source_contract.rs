@@ -3,6 +3,7 @@ mod finalist;
 #[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_tf32_joint_source.rs"]
 mod joint;
 
+use tn_m64n64::parent as tn_n96;
 #[path = "support/triad_tf32_nn_n96_direct_epilogue_source.rs"]
 mod nn_direct;
 #[path = "support/triad_nn_n96_source.rs"]
@@ -13,8 +14,6 @@ mod nt_a_ldmatrix_n96;
 mod tn_m64n64;
 #[path = "support/triad_tf32_tn_pre_rna_m64n96_s2_source.rs"]
 mod tn_m64n96_s2;
-#[path = "support/triad_tf32_tn_transpose_rna_n96_source.rs"]
-mod tn_n96;
 #[path = "support/triad_tn_transpose_n96_source.rs"]
 mod tn_raw;
 
@@ -307,7 +306,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     padded[padded_len - 8..].copy_from_slice(&bit_len.to_be_bytes());
 
     let mut state = INITIAL;
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0_u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
             *word = u32::from_be_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());

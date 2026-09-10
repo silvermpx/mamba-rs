@@ -1,5 +1,5 @@
 #[path = "triad_half_tn_compact_source.rs"]
-mod compact;
+pub mod compact;
 
 pub const SYMBOL_PREFIX: &str = "gemm_bi_tn_test_tc64_bk64_s2_regpipe_";
 

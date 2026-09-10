@@ -9,7 +9,12 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/digest.rs"]
+mod digest;
+#[path = "common/evidence.rs"]
+mod evidence;
+#[path = "common/evidence_digest.rs"]
+mod evidence_digest;
 
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -71,7 +76,7 @@ fn decode_run_digest() {
         // pair of correlated step changes could cancel; a running FNV
         // state makes cancellation impossible and the per-step lines
         // say WHICH step moved when the chain does.
-        let mut chain = common::digest::Digest::new();
+        let mut chain = digest::Digest::new();
         for step_i in 0..16u32 {
             let input = det(batch * input_dim, 1000 + step_i, 0.1);
             engine
@@ -79,9 +84,9 @@ fn decode_run_digest() {
                 .unwrap();
             eprintln!(
                 "DECODE-DIGEST step={step_i} {:016x}",
-                common::bench::fnv1a_f32(&out)
+                digest::fnv1a_f32(&out)
             );
-            chain.absorb_label("step");
+            chain.absorb_bytes(b"step");
             chain.absorb_f32(&out);
         }
         let chained = chain.finish();
@@ -96,18 +101,18 @@ fn decode_run_digest() {
             .download(&engine.ctx().stream, &mut ssm_v)
             .unwrap();
         engine.ctx().stream.synchronize().unwrap();
-        let h_conv = common::bench::fnv1a_f32(&conv_v);
-        let h_ssm = common::bench::fnv1a_f32(&ssm_v);
+        let h_conv = digest::fnv1a_f32(&conv_v);
+        let h_ssm = digest::fnv1a_f32(&ssm_v);
         eprintln!(
             "DECODE-DIGEST graph={graph} steps=16 d384 L24: out_chain={chained:016x} \
              conv={h_conv:016x} ssm={h_ssm:016x}"
         );
         let arm = if graph { "graph" } else { "eager" };
-        common::evidence::record_digest("decode_digest", arm, "out_chain", chained)
+        evidence_digest::record_digest("decode_digest", arm, "out_chain", chained)
             .expect("acceptance evidence");
-        common::evidence::record_digest("decode_digest", arm, "conv", h_conv)
+        evidence_digest::record_digest("decode_digest", arm, "conv", h_conv)
             .expect("acceptance evidence");
-        common::evidence::record_digest("decode_digest", arm, "ssm", h_ssm)
+        evidence_digest::record_digest("decode_digest", arm, "ssm", h_ssm)
             .expect("acceptance evidence");
     }
 }

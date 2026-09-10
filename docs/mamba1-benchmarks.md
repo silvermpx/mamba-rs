@@ -223,15 +223,15 @@ fast path for serious training batches.)
 
 Reproduce:
 ```
-cargo test --release --features "cuda hf" --test rl_llm_bench \
+cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
     llm_dtype_throughput_all_sizes -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test rl_llm_bench \
+cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
     llm_prefill_vs_decode_all_models -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test rl_llm_bench \
+cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
     llm_long_context_prefill -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test rl_llm_bench \
+cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
     llm_batched_step_throughput -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test bench_bf16_vs_f32 \
+cargo test --release --features "cuda hf qualification" --test bench_bf16_vs_f32 \
     -- --ignored --nocapture
 cargo test --release --features "cuda hf" --test gpu_bf16_parity \
     test_gpu_lm_bf16_matches_f32_all_cached_models -- --ignored --nocapture

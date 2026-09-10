@@ -107,11 +107,13 @@ fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
         host_proof.contains("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"),
         "host layout proof must include the production header directly"
     );
-    let layout =
-        std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"))
-            .expect("production Fixed SM89 half-swizzle layout header");
-    let source = std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89_half_swizzle.cu"))
-        .expect("production Fixed SM89 half-swizzle source");
+    let layout = std::fs::read_to_string(
+        root.join("kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"),
+    )
+    .expect("production Fixed SM89 half-swizzle layout header");
+    let source =
+        std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89_half_swizzle.cu"))
+            .expect("production Fixed SM89 half-swizzle source");
 
     for required in [
         "row * 64 + (k ^ ((row & 7) * 8))",
@@ -176,7 +178,10 @@ fn compose(fragments: &[&str]) -> String {
 
 #[test]
 fn fixed_tf32_source_is_forward_only_and_self_contained() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/kernels/gemm_bi_inference/tf32.cu");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/kernels/gemm_bi_inference/tf32.cu"
+    );
     let source = std::fs::read_to_string(path).expect("standalone Fixed TF32 source");
     assert!(source.contains("gemm_bi_nn_tf32_v1_m128n64_bk32_s2"));
     assert!(source.contains("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"));
@@ -303,7 +308,9 @@ fn fixed_blob_for(arch: &str) -> String {
             "../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu"
         ));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_inference/tf32_rna_wide.cu"));
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_inference/tf32_rna_wide.cu"
+        ));
         source.push('\n');
         source.push_str(include_str!(
             "../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"
@@ -317,7 +324,9 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push('\n');
         source.push_str(include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu"));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_inference/sm89_half_n64.cu"));
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_inference/sm89_half_n64.cu"
+        ));
     }
     if arch == "compute_120" {
         source.push('\n');

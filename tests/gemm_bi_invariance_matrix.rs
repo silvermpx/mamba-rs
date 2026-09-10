@@ -27,8 +27,10 @@
 //!     -- --ignored --nocapture --test-threads=1
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/evidence.rs"]
+mod evidence;
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::{
     TypedPtr, gemm_bi_forward_raw, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
 };
@@ -101,7 +103,7 @@ fn observed_boundaries(launch: &mut LaunchFn<'_>, k: usize, n: usize) -> Vec<usi
 }
 
 fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, observed: &[usize]) {
-    common::evidence::record(
+    evidence::record(
         "gemm_bi_invariance_matrix",
         family,
         &format!("K{k}N{n}"),
@@ -274,7 +276,7 @@ const SHAPES: &[(usize, usize)] = &[
 #[ignore = "needs a CUDA device"]
 fn fixed_f32_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for &(k, n) in SHAPES {
         let fx = Fixture::new(&ctx, k, n);
@@ -311,7 +313,7 @@ fn fixed_f32_is_strictly_invariant() {
 #[ignore = "needs a CUDA device"]
 fn fixed_bf16_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     for &(k, n) in &[(64usize, 64usize), (384, 384), (768, 2304)] {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
@@ -355,7 +357,7 @@ fn fixed_bf16_is_strictly_invariant() {
 #[ignore = "needs a CUDA device"]
 fn triad_f32_boundaries_match_the_declared_table() {
     let (dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     // (K, N) -> the first-m-of-a-new-bucket set, one table per arch.
     const DECLARED: &ArchTables<'static> = &[(
@@ -416,7 +418,7 @@ fn triad_f32_boundaries_match_the_declared_table() {
 #[ignore = "needs a CUDA device"]
 fn typed_route_tc_tier_boundaries_match_the_declared_table() {
     let (_dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     // The C2<->C4 family switch is a TC-tier phenomenon: with the tensor
     // cores ON, M>=128 runs the mma.sync K-slab while M<128 stays on the
@@ -461,7 +463,7 @@ fn typed_route_tc_tier_boundaries_match_the_declared_table() {
 #[ignore = "needs a CUDA device"]
 fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     let (dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     // Declared per (K, N) under the 128-row prefix comparison, one
     // table per arch. Re-record (do not hand-edit) on change.
@@ -511,7 +513,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
 #[ignore = "needs a CUDA device"]
 fn fixed_f32_row_position_invariance() {
     let (_dev, ctx) = ctx_new();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     let (k, n, m) = (384usize, 384usize, 129usize);
     let probe: Vec<f32> = (0..k).map(|i| ((i % 17) as f32 - 8.0) * 0.03).collect();

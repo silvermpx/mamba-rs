@@ -1,5 +1,5 @@
 #[path = "triad_half_tn_regpipe_source.rs"]
-mod regpipe;
+pub mod regpipe;
 
 pub const SYMBOL_PREFIX: &str = "gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_";
 

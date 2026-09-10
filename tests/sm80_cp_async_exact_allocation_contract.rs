@@ -1,4 +1,5 @@
-const HARNESS: &str = include_str!("sm80_cp_async_exact_allocation_sanitizer.rs");
+const HARNESS: &str =
+    include_str!("../tools/qualification/sm80_cp_async_exact_allocation_sanitizer.rs");
 
 #[test]
 fn exact_allocation_sanitizer_inventory_is_frozen() {

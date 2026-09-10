@@ -18,8 +18,12 @@ fn msrv_is_spelled_identically_everywhere() {
         .expect("rust-version in Cargo.toml");
 
     let mut offenders = Vec::new();
+    // The workflows are not part of the published crate; compare the copies
+    // that exist in the tree being tested.
     for rel in [".github/workflows/ci.yml", ".github/workflows/release.yml"] {
-        let text = std::fs::read_to_string(root.join(rel)).expect(rel);
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
         for (i, line) in text.lines().enumerate() {
             let t = line.trim();
             let Some(pin) = t

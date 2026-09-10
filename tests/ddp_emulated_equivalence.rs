@@ -8,6 +8,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::dist::EmulatedWorld;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
@@ -101,7 +102,7 @@ fn run_emulated_ddp_tier(
         .collect();
     if bi_tier {
         for t in &ranks {
-            t.ctx().set_batch_invariant(true);
+            t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         }
     }
 

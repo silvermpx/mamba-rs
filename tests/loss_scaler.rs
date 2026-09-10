@@ -7,7 +7,8 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -20,7 +21,7 @@ use mamba_rs::mamba_ssm::gpu::loss_scaler::{
 fn make_ctx() -> (GpuCtx, MambaKernels) {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kernels = MambaKernels::compile(ctx.stream.context(), common::bench::arch0()).unwrap();
+    let kernels = MambaKernels::compile(ctx.stream.context(), arch::arch0()).unwrap();
     (ctx, kernels)
 }
 

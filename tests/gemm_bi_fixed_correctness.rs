@@ -7,13 +7,15 @@
 //! pass before a benchmark number means anything.
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_bi_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_with_tile,
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
@@ -77,12 +79,12 @@ fn fixed_tile_matches_cpu_across_tails() {
         let w = GpuBuffer::from_cpu(&stream, &w_host).expect("w");
         let mut y = GpuBuffer::zeros(&stream, m * n).expect("y");
 
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
             .expect("fixed forward");
         let got = y.to_cpu(&stream).expect("d2h");
-        ctx.set_batch_invariant(false);
+        ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
 
         let mut worst = 0.0f32;
@@ -233,12 +235,12 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: In
         ],
         "wide graph captured the wrong 32-byte parameter bundle",
     );
-    let (tile_n, shared_bytes) = if symbol == rna_qualification_symbol(InferenceTile::Tf32RnaM128N96S3)
-    {
-        (96, 86_016)
-    } else {
-        (128, 98_304)
-    };
+    let (tile_n, shared_bytes) =
+        if symbol == rna_qualification_symbol(InferenceTile::Tf32RnaM128N96S3) {
+            (96, 86_016)
+        } else {
+            (128, 98_304)
+        };
     let grid = (shape.m as u32)
         .div_ceil(128)
         .checked_mul((shape.n as u32).div_ceil(tile_n))
@@ -843,7 +845,8 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                             "RNA prefix differs from {incumbent:?}; case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional}"
                         );
                     }
-                    let launch = || inference_forward_with_tile(&ctx, view_operands, view_shape, tile);
+                    let launch =
+                        || inference_forward_with_tile(&ctx, view_operands, view_shape, tile);
                     for repeat in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -898,7 +901,8 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                                 assert!(
                                     !matches!(
                                         selected,
-                                        InferenceTile::Tf32RnaM128N96S3 | InferenceTile::Tf32RnaM128N128S3
+                                        InferenceTile::Tf32RnaM128N96S3
+                                            | InferenceTile::Tf32RnaM128N128S3
                                     ),
                                     "unqualified wide AUTO case={case} M={m} C-offset={output_offset}"
                                 );

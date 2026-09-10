@@ -10,39 +10,10 @@ const MAX_PRE_CONTEXT_MEMORY_MIB: u64 = 256;
 const ATTEMPTS: usize = 50;
 const REQUIRED_QUIET_SAMPLES: usize = 5;
 
-pub fn idle_resident_mode_enabled() -> bool {
-    std::env::var("MAMBA_BI_ALLOW_IDLE_RESIDENT_CUDA")
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
-fn parse_idle_resident_telemetry(line: &str) -> Result<(u32, u32, u64), String> {
-    let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
-    if fields.len() != 3 {
-        return Err(format!(
-            "idle-resident telemetry must contain three fields, received {line:?}"
-        ));
-    }
-    let parse_u32 = |index: usize, label: &str| {
-        fields[index]
-            .parse::<u32>()
-            .map_err(|error| format!("parse {label} {:?}: {error}", fields[index]))
-    };
-    let free_memory_mib = fields[2]
-        .parse::<u64>()
-        .map_err(|error| format!("parse free memory {:?}: {error}", fields[2]))?;
-    Ok((
-        parse_u32(0, "GPU utilization")?,
-        parse_u32(1, "memory utilization")?,
-        free_memory_mib,
-    ))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuietGpu {
     cuda_ordinal: usize,
-    uuid: String,
+    pub uuid: String,
 }
 
 struct GpuTelemetry {
@@ -167,55 +138,6 @@ impl QuietGpu {
             cuda_ordinal,
             uuid: format_cuda_uuid(uuid.bytes),
         })
-    }
-
-    pub fn uuid(&self) -> &str {
-        &self.uuid
-    }
-
-    pub fn require_idle_resident(&self, label: &str, min_free_mib: u64) -> Result<String, String> {
-        let mut quiet_samples = 0;
-        let mut last_snapshot = String::new();
-        for _ in 0..ATTEMPTS {
-            let output = Command::new("nvidia-smi")
-                .args([
-                    "-i",
-                    &self.uuid,
-                    "--query-gpu=utilization.gpu,utilization.memory,memory.free",
-                    "--format=csv,noheader,nounits",
-                ])
-                .output()
-                .map_err(|error| format!("run idle-resident GPU preflight: {error}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "idle-resident GPU preflight for {} exited with {}: {}",
-                    self.uuid,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-            last_snapshot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let (gpu_utilization, memory_utilization, free_memory_mib) =
-                parse_idle_resident_telemetry(&last_snapshot)?;
-            if gpu_utilization <= MAX_UTILIZATION_PERCENT
-                && memory_utilization <= MAX_UTILIZATION_PERCENT
-                && free_memory_mib >= min_free_mib
-            {
-                quiet_samples += 1;
-                if quiet_samples == REQUIRED_QUIET_SAMPLES {
-                    eprintln!(
-                        "GPU idle-resident gate {label}: {last_snapshot}; min_free_mib={min_free_mib}; quiet_samples={quiet_samples}"
-                    );
-                    return Ok(last_snapshot);
-                }
-            } else {
-                quiet_samples = 0;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        Err(format!(
-            "{label} did not sustain {REQUIRED_QUIET_SAMPLES} <={MAX_UTILIZATION_PERCENT}% compute/memory samples with at least {min_free_mib} MiB free; last sample: {last_snapshot}"
-        ))
     }
 
     fn telemetry(&self) -> Result<GpuTelemetry, String> {
@@ -384,18 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn idle_resident_telemetry_requires_compute_memory_and_free_fields() {
-        assert_eq!(
-            parse_idle_resident_telemetry("0, 1, 2669").unwrap(),
-            (0, 1, 2669)
-        );
-        assert!(parse_idle_resident_telemetry("0, 1").is_err());
-        assert!(parse_idle_resident_telemetry("busy, 1, 2669").is_err());
-        assert!(parse_idle_resident_telemetry("0, busy, 2669").is_err());
-        assert!(parse_idle_resident_telemetry("0, 1, full").is_err());
-    }
-
-    #[test]
     fn quiet_sample_rejects_utilization_memory_and_competing_processes() {
         let quiet = parse_telemetry("GPU-test, 1, 1, 128, 2400, 48, P0").unwrap();
         assert!(telemetry_is_quiet(&quiet, &[], Some(128)));
@@ -417,6 +327,6 @@ mod tests {
     fn live_cuda_ordinal_and_nvml_uuid_are_identical() {
         let gpu = QuietGpu::for_cuda_ordinal(0).unwrap();
         let telemetry = gpu.telemetry().unwrap();
-        assert_eq!(telemetry.uuid, gpu.uuid());
+        assert_eq!(telemetry.uuid, gpu.uuid);
     }
 }

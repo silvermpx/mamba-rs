@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::sys;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
@@ -60,7 +61,7 @@ fn ada_async_allocations_prepare_capture_and_replay_portable_f32() {
         "Ada regression requires cudarc's async allocation path"
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
 

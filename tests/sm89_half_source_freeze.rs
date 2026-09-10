@@ -1,7 +1,7 @@
-#[path = "support/triad_half_nt_fixed_s3_source.rs"]
-mod bxor;
 #[path = "support/triad_half_nt_m96n128_s3_source.rs"]
 mod m96;
+
+use m96::m64n192::m64n128::fixed_s3 as bxor;
 
 const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89_half.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");

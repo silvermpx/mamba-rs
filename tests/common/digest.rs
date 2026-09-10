@@ -4,11 +4,12 @@
 //! module, because two hash laws under one output prefix produce
 //! incomparable numbers: a value recorded by a word-wise variant can
 //! never be checked against a byte-wise one, and the mismatch looks
-//! exactly like a real regression. Streaming absorption with label
-//! separation replaces XOR-folding of per-part digests - XOR is linear,
-//! so correlated changes can cancel; sequential absorption makes
-//! cancellation impossible by construction and keeps the order of parts
-//! part of the value.
+//! exactly like a real regression. Streaming absorption replaces
+//! XOR-folding of per-part digests - XOR is linear, so correlated changes
+//! can cancel; sequential absorption makes cancellation impossible by
+//! construction and keeps the order of parts part of the value. A
+//! multi-part digest absorbs a label before each part so identical parts
+//! under different roles cannot alias.
 //!
 //! FNV-1a/64 is enough here: the adversary is an accidental code
 //! change, not a forger.
@@ -26,12 +27,6 @@ impl Digest {
             self.0 = self.0.wrapping_mul(0x100000001b3);
         }
         self
-    }
-
-    /// Domain separation for multi-part digests: absorb a label before
-    /// each part so identical parts under different roles cannot alias.
-    pub fn absorb_label(&mut self, label: &str) -> &mut Self {
-        self.absorb_bytes(label.as_bytes())
     }
 
     pub fn absorb_f32(&mut self, values: &[f32]) -> &mut Self {

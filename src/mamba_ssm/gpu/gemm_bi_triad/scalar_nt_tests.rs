@@ -615,7 +615,8 @@ fn sm120_scalar_nt_d768_out_production_route_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (12, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
@@ -814,7 +815,8 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (12, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
@@ -947,7 +949,8 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (12, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
@@ -1079,7 +1082,8 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (12, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
@@ -1209,7 +1213,8 @@ fn ada_scalar_big_nt_runtime_matrix_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (8, 9));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
@@ -1289,7 +1294,8 @@ fn sm80plus_scalar_nt_thin_outputs_are_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert!(device.compute_capability >= (8, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
@@ -1325,7 +1331,8 @@ fn sm80plus_scalar_nt_splitk_matches_its_frozen_f32_tree() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert!(device.compute_capability >= (8, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
@@ -1347,7 +1354,8 @@ fn sm80plus_f32_preparation_rejects_output_resource_aliases() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert!(device.compute_capability >= (8, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     let dims = (128, 128, 128);

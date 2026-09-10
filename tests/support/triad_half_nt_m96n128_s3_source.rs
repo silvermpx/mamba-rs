@@ -1,25 +1,13 @@
 #[path = "triad_half_nt_m64n192_s3_source.rs"]
-mod parent;
+pub mod m64n192;
 
 pub const SYMBOL: &str = "gemm_bi_nt_test_fixed_s3_m96n128_f16";
-pub const RETAINED_SYMBOL: &str = parent::SYMBOL;
+pub const RETAINED_SYMBOL: &str = m64n192::SYMBOL;
 pub const TARGET: (usize, usize, usize) = (2_048, 1_536, 768);
 pub const TARGET_GRID: u32 = 264;
-pub const BLOCK_THREADS: u32 = 384;
-pub const DYNAMIC_SHARED_BYTES: usize = 86_016;
-pub const MAX_REGISTERS: i32 = 168;
-pub const REQUIRED_OCCUPANCY: u32 = 1;
-pub const EXPECTED_HMMA: usize = 64;
-pub const EXPECTED_LDGSTS: usize = 15;
-pub const RETAINED_BLOCK_THREADS: u32 = parent::BLOCK_THREADS;
-pub const RETAINED_DYNAMIC_SHARED_BYTES: usize = parent::DYNAMIC_SHARED_BYTES;
-pub const RETAINED_MAX_REGISTERS: i32 = parent::MAX_REGISTERS;
-pub const RETAINED_REQUIRED_OCCUPANCY: u32 = parent::REQUIRED_OCCUPANCY;
-pub const RETAINED_EXPECTED_HMMA: usize = 64;
-pub const RETAINED_EXPECTED_LDGSTS: usize = 18;
 
 pub fn retained_source(swizzle: &str, s3: &str) -> Result<String, String> {
-    parent::candidate_source(swizzle, s3)
+    m64n192::candidate_source(swizzle, s3)
 }
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
@@ -164,18 +152,6 @@ pub const fn staged_half_elements_per_k_tile_m96n128() -> usize {
 
 pub const fn staged_half_elements_per_k_tile_m64n192() -> usize {
     TARGET.0.div_ceil(64) * TARGET.1.div_ceil(192) * (64 + 192) * 64
-}
-
-pub fn all_strata_pass(strata: &[[f64; 2]]) -> bool {
-    strata.len() == 4
-        && strata.iter().all(|[p50, p95]| {
-            p50.is_finite()
-                && p95.is_finite()
-                && *p50 > 0.0
-                && *p95 > 0.0
-                && *p50 < 0.99
-                && *p95 < 0.99
-        })
 }
 
 fn replace_exact(source: &mut String, before: &str, after: &str) -> Result<(), String> {

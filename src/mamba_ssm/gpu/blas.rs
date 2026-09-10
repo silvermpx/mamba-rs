@@ -2889,7 +2889,8 @@ mod physical_graph_tests {
     fn physical_graph_context() -> GpuCtx {
         let device = GpuDevice::new(0).expect("CUDA device for physical graph test");
         let ctx = GpuCtx::new(&device).expect("GPU context for physical graph test");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx
     }
@@ -3216,7 +3217,8 @@ mod physical_graph_tests {
         let device = GpuDevice::new(0).expect("CUDA device");
         let ctx = GpuCtx::new(&device).expect("GPU context");
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         let checked = checked_tied_lm_dims(dims).unwrap();
         let temporal = DtypedBuf::zeros(&ctx.stream, checked.temporal_elements, dtype).unwrap();

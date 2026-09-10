@@ -10,7 +10,8 @@
 //! needs no GPU: it reads the sources and rejects any multiplication
 //! spelled outside an intrinsic.
 
-mod common;
+#[path = "common/source_scan.rs"]
+mod source_scan;
 
 use std::path::Path;
 
@@ -27,7 +28,7 @@ fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("kernel source");
-        let stripped = common::source_scan::strip_comments_lines(&text);
+        let stripped = source_scan::strip_comments_lines(&text);
         for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
             for var in ["alpha", "beta"] {
                 let mut from = 0;

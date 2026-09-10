@@ -26,6 +26,7 @@
 
 use std::path::PathBuf;
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::lm::MambaLM;
@@ -451,7 +452,7 @@ fn bf16_multi_length_parity() {
         // enable it explicitly (without the flag, cuBLAS heuristics give
         // bf16 cross-batch KL ~1e-3 by design).
         let mut lm1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 1).unwrap();
-        lm1.ctx().set_batch_invariant(true);
+        lm1.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         let toks_b1 = lm1.generate(&p, &params).expect("b=1");
         let ref_logits = lm1.last_logits(0).to_vec();
 
@@ -461,7 +462,7 @@ fn bf16_multi_length_parity() {
         // `max_prompt` → slot 0 decodes extra tokens → last_logits(0)
         // is the N-th decoded logits instead of the 1st.
         let mut lm4 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 4).unwrap();
-        lm4.ctx().set_batch_invariant(true);
+        lm4.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         let filler_a: Vec<u32> = (200..200 + len as u32).collect();
         let filler_b: Vec<u32> = (300..300 + len as u32).collect();
         let prompts4: [&[u32]; 4] = [&p, &filler_a, &filler_b, &p];

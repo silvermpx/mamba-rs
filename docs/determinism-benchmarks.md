@@ -226,21 +226,17 @@ GEMM. With the TC tier on, none of this is on the bf16/f16 hot path.
 ## Reproducing
 
 ```sh
-# training step, all 3 dtypes × {cuBLAS, scalar bi, +TC}:
-cargo test --features cuda --release --test gemm_bi_determinism \
-  bench_gemm_bi_vs_tf32 -- --ignored --nocapture --test-threads=1
+# training step, all 3 dtypes x {cuBLAS, scalar bi, +TC}:
+cargo bench --features cuda --bench gemm_bi_trainer_step_bench
 
 # TC vs scalar at GEMM level (fwd/dW/dX):
-cargo test --features cuda --release --test gemm_bi_tc \
-  bench_tc_vs_scalar_paths -- --ignored --nocapture --test-threads=1
+cargo bench --features cuda --bench gemm_bi_tc_bench -- bench_tc_vs_scalar_paths
 
 # Tile64 vs Tile128 on small/narrow shapes:
-cargo test --features cuda --release --test gemm_bi_tc \
-  bench_tc64_vs_tc128_small_shapes -- --ignored --nocapture --test-threads=1
+cargo bench --features cuda --bench gemm_bi_tc_bench -- bench_tc64_vs_tc128_small_shapes
 
 # typed upcast-fallback tax:
-cargo test --features cuda --release --test gemm_bi_typed_parity \
-  bench_upcast_fallback_tax -- --ignored --nocapture --test-threads=1
+cargo bench --features cuda --bench gemm_bi_typed_fallback_bench
 ```
 
 Contract tests (non-ignored, run in the default suite): bit-identity of

@@ -7,15 +7,21 @@
 //!
 //! BOTH GEMM tiers are covered, because both ship: the cuBLAS tier (crate
 //! default) and the batch-invariant custom-kernel tier with its tensor-core
-//! variant (`set_batch_invariant` + `set_bi_tensor_cores` — what the
+//! variant (`GemmMode::Deterministic` + `set_bi_tensor_cores` — what the
 //! production classifier trainer enables). A tier is only pinned by the
 //! test that actually selects it.
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/digest.rs"]
+mod digest;
+#[path = "common/evidence.rs"]
+mod evidence;
+#[path = "common/evidence_digest.rs"]
+mod evidence_digest;
 
 use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer};
@@ -89,10 +95,16 @@ fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
         MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
             .expect("trainer");
     match tier {
-        GemmTier::Cublas => {}
-        GemmTier::BatchInvariant => trainer.ctx().set_batch_invariant(true),
+        GemmTier::Cublas => trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap(),
+        GemmTier::BatchInvariant => trainer
+            .ctx()
+            .set_gemm_mode(GemmMode::Deterministic)
+            .unwrap(),
         GemmTier::BatchInvariantTc => {
-            trainer.ctx().set_batch_invariant(true);
+            trainer
+                .ctx()
+                .set_gemm_mode(GemmMode::Deterministic)
+                .unwrap();
             trainer.ctx().set_bi_tensor_cores(true);
         }
     }
@@ -165,7 +177,7 @@ fn gemm_tiers_are_distinct_numeric_routes() {
 #[test]
 #[ignore]
 fn print_run_digests() {
-    use common::bench::fnv1a_f32;
+    use digest::fnv1a_f32;
     for tier in [
         GemmTier::Cublas,
         GemmTier::BatchInvariant,
@@ -174,7 +186,7 @@ fn print_run_digests() {
         let w = run_once(4, tier);
         let h = fnv1a_f32(&w);
         println!("DIGEST {tier:?}: {h:016x} ({} weights)", w.len());
-        common::evidence::record_digest(
+        evidence_digest::record_digest(
             "parallel_run_determinism",
             "run_digests",
             &format!("{tier:?}"),
@@ -203,7 +215,7 @@ fn multichunk_run_to_run_bit_identical_bi() {
 #[test]
 #[ignore = "digest printer for cross-build A/B"]
 fn print_run_digests_multichunk() {
-    use common::bench::fnv1a_f32;
+    use digest::fnv1a_f32;
     for (label, t) in [("T1300(2ch)", 1300usize), ("T2100(3ch)", 2100)] {
         for tier in [
             GemmTier::Cublas,
@@ -213,7 +225,7 @@ fn print_run_digests_multichunk() {
             let w = run_once_at(3, tier, t);
             let h = fnv1a_f32(&w);
             println!("DIGEST-MC {label} {tier:?}: {h:016x} ({} weights)", w.len());
-            common::evidence::record_digest(
+            evidence_digest::record_digest(
                 "parallel_run_determinism",
                 "run_digests_multichunk",
                 &format!("{label}.{tier:?}"),

@@ -1,4 +1,3 @@
-pub const SYMBOL_PREFIX: &str = "gemm_bi_nt_test_fixed_s3_bxor_";
 const LAYOUT: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {

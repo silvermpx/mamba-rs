@@ -497,30 +497,69 @@ fn compose_from_parts(preambles: [&str; 5], helper: &str, source: &str) -> Resul
         .join("\n"))
 }
 
+// The frozen accepted candidate and its A-only ldmatrix adapter are release
+// fixtures under tests/support; the regression below composes them and
+// compares the result with the production body.
+#[cfg(test)]
+#[path = "../../../../tests/support/triad_tf32_nt_compact_a_ldmatrix_source.rs"]
+mod frozen_a_ldmatrix_adapter;
+#[cfg(test)]
+#[path = "../../../../tests/support/triad_tf32_nt_compact_eight_warp_s2_source.rs"]
+mod frozen_compact_parent;
+
+#[cfg(test)]
+fn reverse_sm80_transformation_for_test(source: &str) -> Result<String, String> {
+    let mut restored = source.to_owned();
+    replace_exact(
+        &mut restored,
+        SLICED_BRANCH,
+        WIDE_BRANCH,
+        "stage-sliced runtime gate",
+    )?;
+    replace_exact(
+        &mut restored,
+        &format!("{SLICED_HELPERS}{ASYNC_MAINLOOP_MARKER}"),
+        ASYNC_MAINLOOP_MARKER,
+        "stage-sliced helper insertion",
+    )?;
+    for transformation in TRANSFORMATIONS.into_iter().rev() {
+        replace_exact(
+            &mut restored,
+            transformation.to,
+            transformation.from,
+            transformation.label,
+        )?;
+    }
+    Ok(restored)
+}
+
+#[cfg(test)]
+fn source_parts_for_test() -> [&'static str; 5] {
+    PREAMBLES
+}
+
+#[cfg(test)]
+fn compose_from_parts_for_test(
+    preambles: [&str; 5],
+    helper: &str,
+    source: &str,
+) -> Result<String, String> {
+    compose_from_parts(preambles, helper, source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "cuda"))]
     const TEST_HELPER_NAME: &str = "gemm_bi_nt_test_compact_xor_k";
-    #[cfg(not(feature = "cuda"))]
     const FROZEN_HELPER: &str = include_str!("../../../../tests/gemm_bi_tf32_nt_compact_xor.cu");
     const FROZEN_SLICED_ADAPTER: &str =
         include_str!("../../../../tests/support/triad_tf32_nt_compact_a_ldmatrix_sliced_source.rs");
 
-    #[cfg(not(feature = "cuda"))]
-    mod frozen_candidate {
-        include!("../../../../tests/gemm_bi_tf32_nt_compact_xor.rs");
-
-        pub(super) fn compact_a_ldmatrix_source() -> Result<String, String> {
-            let compact = compact_eight_warp_s2_candidate_source()?;
-            triad_tf32_nt_compact_a_ldmatrix_source::candidate_source(&compact)
-        }
-    }
-
-    #[cfg(not(feature = "cuda"))]
     fn normalized_frozen_candidate() -> String {
-        let mut source = frozen_candidate::compact_a_ldmatrix_source()
+        let compact = super::frozen_compact_parent::candidate_source()
+            .expect("compose the frozen compact eight-warp parent");
+        let mut source = super::frozen_a_ldmatrix_adapter::candidate_source(&compact)
             .expect("compose frozen compact A-only ldmatrix candidate")
             .replacen(FROZEN_HELPER, COMPACT_HELPER, 1)
             .replace(TEST_HELPER_NAME, "gemm_bi_nt_compact8_xor_k")
@@ -592,7 +631,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "cuda"))]
     fn production_body_matches_frozen_candidate_after_allowed_normalization() {
         let production = finalist_body_from(COMPACT_HELPER, SM80_SOURCE).unwrap();
         assert_eq!(production, normalized_frozen_candidate());
@@ -687,44 +725,4 @@ mod tests {
             "            }"
         )));
     }
-}
-
-#[cfg(test)]
-fn reverse_sm80_transformation_for_test(source: &str) -> Result<String, String> {
-    let mut restored = source.to_owned();
-    replace_exact(
-        &mut restored,
-        SLICED_BRANCH,
-        WIDE_BRANCH,
-        "stage-sliced runtime gate",
-    )?;
-    replace_exact(
-        &mut restored,
-        &format!("{SLICED_HELPERS}{ASYNC_MAINLOOP_MARKER}"),
-        ASYNC_MAINLOOP_MARKER,
-        "stage-sliced helper insertion",
-    )?;
-    for transformation in TRANSFORMATIONS.into_iter().rev() {
-        replace_exact(
-            &mut restored,
-            transformation.to,
-            transformation.from,
-            transformation.label,
-        )?;
-    }
-    Ok(restored)
-}
-
-#[cfg(test)]
-fn source_parts_for_test() -> [&'static str; 5] {
-    PREAMBLES
-}
-
-#[cfg(test)]
-fn compose_from_parts_for_test(
-    preambles: [&str; 5],
-    helper: &str,
-    source: &str,
-) -> Result<String, String> {
-    compose_from_parts(preambles, helper, source)
 }

@@ -1239,10 +1239,10 @@ fn scalar_big_nn_tn_runtime_matrix_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert!(device.compute_capability >= (8, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+        .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
     let mut forced_outputs = HashMap::new();

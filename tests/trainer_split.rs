@@ -14,6 +14,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
@@ -370,7 +371,7 @@ fn accumulation_two_micro_equals_one_big_batch() {
     let mut big =
         MambaTrainer::new_full(0, &w, cfg, session(2, seq_len, input_dim), WeightDtype::F32)
             .expect("big trainer");
-    big.ctx().set_batch_invariant(true);
+    big.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let big_in: Vec<f32> = s1_in.iter().chain(s2_in.iter()).copied().collect();
     let big_dt: Vec<f32> = s1_dt.iter().chain(s2_dt.iter()).copied().collect();
     let mut big_out = vec![0.0f32; 2 * n_out1];
@@ -383,7 +384,7 @@ fn accumulation_two_micro_equals_one_big_batch() {
     let mut micro =
         MambaTrainer::new_full(0, &w, cfg, session(1, seq_len, input_dim), WeightDtype::F32)
             .expect("micro trainer");
-    micro.ctx().set_batch_invariant(true);
+    micro.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let mut out = vec![0.0f32; n_out1];
     micro.forward(&s1_in, &mut out).expect("micro fwd 1");
     micro
@@ -449,7 +450,7 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
 
     trainer.forward(&input, &mut output).expect("split forward");
-    trainer.ctx().set_fast_gemm(true);
+    trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap();
     let error = trainer
         .backward_step(&d_temporal, BackwardOpts::default())
         .expect_err("route drift must reject saved activations");
@@ -970,7 +971,7 @@ fn bf16_input_proj_graph_capture_with_large_patch_dim() {
         WeightDtype::Bf16,
     )
     .expect("trainer");
-    t.ctx().set_batch_invariant(true);
+    t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
     t.step(&input, &d_temporal).expect("warmup");
@@ -1011,7 +1012,7 @@ fn bf16_input_proj_eager_bi_large_forward_only() {
         WeightDtype::Bf16,
     )
     .expect("trainer");
-    t.ctx().set_batch_invariant(true);
+    t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
     let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
     t.forward(&input, &mut out).expect("BI forward only");
@@ -1028,7 +1029,7 @@ fn eager_bi_probe(cfg: MambaConfig, input_dim: usize) {
         WeightDtype::Bf16,
     )
     .expect("trainer");
-    t.ctx().set_batch_invariant(true);
+    t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
     t.step(&input, &d_temporal).expect("eager BI step");

@@ -5,14 +5,15 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaGraph, DeviceRepr, LaunchConfig, PushKernelArg, sys};
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward, inference_forward_f32_legacy_baseline,
-    inference_forward_with_tile,
+    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    inference_forward_f32_legacy_baseline, inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
@@ -388,7 +389,9 @@ fn launch(
         return match arm {
             Arm::OldOracle => inference_forward_f32_legacy_baseline(ctx, operands, shape),
             Arm::Legacy => inference_forward_with_tile(ctx, operands, shape, InferenceTile::Legacy),
-            Arm::N128 => inference_forward_with_tile(ctx, operands, shape, InferenceTile::F32N128S2),
+            Arm::N128 => {
+                inference_forward_with_tile(ctx, operands, shape, InferenceTile::F32N128S2)
+            }
             Arm::Candidate => inference_forward_with_tile(ctx, operands, shape, CANDIDATE),
         };
     }
@@ -1102,7 +1105,10 @@ fn fixed_sm89_exact_n64_rejects_unsafe_inputs_and_empty_is_noop() {
         w: f32ptr(0),
         bias_ptr: None,
     };
-    for empty in [InferenceShape { m: 0, ..shape }, InferenceShape { n: 0, ..shape }] {
+    for empty in [
+        InferenceShape { m: 0, ..shape },
+        InferenceShape { n: 0, ..shape },
+    ] {
         inference_forward_with_tile(&ctx, null, empty, CANDIDATE)
             .expect("empty output must not launch");
     }
@@ -1229,10 +1235,9 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
         (12, 8) | (13, 0) | (13, 2)
     ));
     assert!(compiler.nvrtc_library_known);
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     // The eight exact rows were independently admitted by 101-window production
     // pairs. This test is the full-hot *raw* batch/view gate, not a replacement

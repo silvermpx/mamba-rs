@@ -96,13 +96,6 @@ pub enum BracketOrder {
 }
 
 impl BracketOrder {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Abba => "ABBA",
-            Self::Baab => "BAAB",
-        }
-    }
-
     pub const fn candidate_slots(self) -> [bool; 4] {
         match self {
             Self::Abba => [false, true, true, false],
@@ -200,65 +193,6 @@ pub fn expected_nn_auto_grid(
         1,
         1,
     ))
-}
-
-pub fn validate_public_auto_harness(source: &str) -> Result<(), String> {
-    let public_auto = "TriadArm::ActualAuto => {\n                let auto_a";
-    let public_entrypoint = "gpu_gemm_bi_forward_raw(";
-    let typed_entrypoint = "TriadArm::ActualAuto => gpu_gemm_typed_forward_raw(";
-    let qualified_identity = "report_actual_auto_identity(runtime, target.case)?";
-    let graph_contract = "assert_auto_graph(&auto_graph, auto_identity)?";
-    let new_entries = [
-        "triad_nn_d768_in_add_half_n96_fast_gap_once7",
-        "triad_nn_prism_add_half_n96_fast_gap_once7",
-    ];
-    if source.matches(public_auto).count() != 1
-        || source.matches(public_entrypoint).count() != 1
-        || source.contains(typed_entrypoint)
-        || source.matches(qualified_identity).count() != 1
-        || source.matches(graph_contract).count() != 3
-        || new_entries.iter().any(|entry| !source.contains(entry))
-    {
-        return Err("Triad NN N96 public AUTO entrypoint or graph contract changed".into());
-    }
-    Ok(())
-}
-
-pub fn validate_focused_pair_diagnostics(source: &str) -> Result<(), String> {
-    let start = source
-        .find("    fn check_pair(")
-        .ok_or_else(|| "missing focused check_pair".to_owned())?;
-    let end = source[start..]
-        .find("    fn words_sha(")
-        .map(|offset| start + offset)
-        .ok_or_else(|| "missing focused check_pair terminator".to_owned())?;
-    let body = &source[start..end];
-    let rejection = body
-        .find("ExactBitScope::ForcedAddHalfFamily")
-        .ok_or_else(|| "missing focused add-half-family exact-bit scope".to_owned())?;
-    for required in [
-        "report_pairwise_bits(\"candidate/current\"",
-        "report_pairwise_bits(\"candidate/actual_auto\"",
-        "report_pairwise_bits(\"current/actual_auto\"",
-        "report_actual_auto_identity(runtime, case)?",
-    ] {
-        let position = body
-            .find(required)
-            .ok_or_else(|| format!("missing focused diagnostic {required}"))?;
-        if position >= rejection {
-            return Err(format!(
-                "focused diagnostic {required} occurs after exact-bit rejection"
-            ));
-        }
-    }
-    if source
-        .matches("ExactBitScope::TimedPublicAutoTarget")
-        .count()
-        != 2
-    {
-        return Err("timed target triplet exact-bit scope changed".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -406,19 +340,5 @@ mod tests {
         assert!(logical_alignment_guard_elements(0, 4).is_err());
         assert!(logical_alignment_guard_elements(256, 0).is_err());
         assert!(logical_alignment_guard_elements(255, 4).is_err());
-    }
-
-    #[test]
-    fn harness_uses_public_triad_auto_and_qualified_graph_identity() {
-        let harness = include_str!("../gemm_bi_fixed_tf32_n96_discovery.rs");
-        validate_public_auto_harness(harness).unwrap();
-        let wrong = harness.replacen("gpu_gemm_bi_forward_raw(", "gpu_gemm_typed_forward_raw(", 1);
-        assert!(validate_public_auto_harness(&wrong).is_err());
-    }
-
-    #[test]
-    fn focused_tail_failure_reports_all_pairs_and_public_identity_before_rejection() {
-        let harness = include_str!("../gemm_bi_fixed_tf32_n96_discovery.rs");
-        validate_focused_pair_diagnostics(harness).unwrap();
     }
 }

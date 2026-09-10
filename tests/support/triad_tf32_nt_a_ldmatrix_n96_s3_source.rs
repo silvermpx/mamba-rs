@@ -1,9 +1,4 @@
 pub const SYMBOL: &str = "gemm_bi_nt_test_a_ldmatrix_n96_s3_sm89_v1";
-pub const RETAINED_SYMBOL: &str = "gemm_bi_nt_test_scalar_a_n96_s3_sm89_v1";
-pub const BLOCK_THREADS: u32 = 256;
-pub const DYNAMIC_SHARED_BYTES: u32 = 86_016;
-pub const TARGET_D768_IN: (usize, usize, usize) = (2_048, 768, 3_072);
-pub const TARGET_PRISM: (usize, usize, usize) = (4_621, 384, 1_928);
 
 const SM80_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
 
@@ -11,28 +6,11 @@ pub fn candidate_source() -> String {
     compose(SYMBOL, A_LDMATRIX_LOAD)
 }
 
-pub fn retained_source() -> String {
-    compose(RETAINED_SYMBOL, SCALAR_A_LOAD)
-}
-
 fn compose(symbol: &str, a_load: &str) -> String {
     format!("{SM80_SOURCE}\n{N96_BODY}")
         .replace("NT_N96_SYMBOL", symbol)
         .replace("NT_N96_A_LOAD", a_load)
 }
-
-const SCALAR_A_LOAD: &str = r#"#pragma unroll
-        for (int m_atom = 0; m_atom < 4; ++m_atom) {
-            int row = warp_m + m_atom * 16 + group;
-            a_fragments[m_atom][0] = gemm_bi_tf32_rna(
-                nt_n96_a_slot(storage, stage, row, k8 + thread));
-            a_fragments[m_atom][1] = gemm_bi_tf32_rna(
-                nt_n96_a_slot(storage, stage, row + 8, k8 + thread));
-            a_fragments[m_atom][2] = gemm_bi_tf32_rna(
-                nt_n96_a_slot(storage, stage, row, k8 + thread + 4));
-            a_fragments[m_atom][3] = gemm_bi_tf32_rna(
-                nt_n96_a_slot(storage, stage, row + 8, k8 + thread + 4));
-        }"#;
 
 const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
         for (int m_atom = 0; m_atom < 4; ++m_atom) {

@@ -6638,7 +6638,8 @@ mod cache_and_header_tests {
     fn graph_test_context() -> GpuCtx {
         let device = GpuDevice::new(0).expect("CUDA device for graph-plan test");
         let ctx = GpuCtx::new(&device).expect("GPU context for graph-plan test");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
         ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);

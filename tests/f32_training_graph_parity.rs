@@ -8,9 +8,11 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m1_specs, step_m1_capturable,
 };
@@ -54,10 +56,9 @@ fn cfg() -> MambaConfig {
 
 fn triad_ctx(device: &GpuDevice) -> GpuCtx {
     let ctx = GpuCtx::new(device).unwrap();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     ctx
 }
@@ -317,7 +318,7 @@ fn m1_f32_training_graph_matches_eager() {
     assert!(max_norm_f < 1e-5);
     assert!(max_in_proj < 1e-5);
 
-    ctx.set_fast_gemm(true);
+    ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
     let error = graph
         .replay(
             &ctx,
@@ -367,7 +368,7 @@ fn m3_f32_training_graph_matches_eager() {
     };
     let dev = GpuDevice::new(0).unwrap();
     let ctx = triad_ctx(&dev);
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
     let dm = cfg.d_model;

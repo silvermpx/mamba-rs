@@ -10,7 +10,8 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -105,7 +106,7 @@ fn download_f32(ctx: &GpuCtx, buf: &GpuBuffer, n: usize) -> Vec<f32> {
 }
 
 fn make_m3k(ctx: &GpuCtx) -> Mamba3Kernels {
-    Mamba3Kernels::compile(ctx.stream.context(), common::bench::arch0()).unwrap()
+    Mamba3Kernels::compile(ctx.stream.context(), arch::arch0()).unwrap()
 }
 
 fn tolerances(dtype: WeightDtype) -> (f32, f32) {

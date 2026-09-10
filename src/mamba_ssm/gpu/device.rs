@@ -242,10 +242,7 @@ impl GpuDevice {
             .map_err(|e| format!("cuBLAS init failed: {:?}", e))?;
 
         unsafe {
-            let status = cudarc::cublas::sys::cublasSetMathMode(
-                *blas.handle(),
-                mode.cublas_math(),
-            );
+            let status = cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), mode.cublas_math());
             if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
                 return Err(format!(
                     "cublasSetMathMode for GEMM mode {} failed: {status:?}",

@@ -1,5 +1,6 @@
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
@@ -90,10 +91,12 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f
     )
     .expect("construct Mamba3 trainer");
 
-    trainer.ctx().set_batch_invariant(true);
+    trainer
+        .ctx()
+        .set_gemm_mode(GemmMode::Deterministic)
+        .unwrap();
     trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
     trainer.ctx().set_bi_tensor_cores(false);
-    trainer.ctx().set_fast_gemm(false);
     trainer
         .ctx()
         .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
@@ -146,7 +149,10 @@ fn assert_graph_replay_deterministic(dtype: WeightDtype) {
 
 fn assert_route_change_rejected(dtype: WeightDtype, expected_message: &str) {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(dtype);
-    trainer.ctx().set_batch_invariant(false);
+    trainer
+        .ctx()
+        .set_gemm_mode(GemmMode::CublasPedantic)
+        .unwrap();
 
     let message = trainer
         .step(&input, &d_temporal)
@@ -225,10 +231,12 @@ fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
     .expect("construct cold f16 trainer");
 
     assert_eq!(trainer.ctx().half_staging_ptr(), 0);
-    trainer.ctx().set_batch_invariant(true);
+    trainer
+        .ctx()
+        .set_gemm_mode(GemmMode::Deterministic)
+        .unwrap();
     trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
     trainer.ctx().set_bi_tensor_cores(false);
-    trainer.ctx().set_fast_gemm(false);
     trainer
         .ctx()
         .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);

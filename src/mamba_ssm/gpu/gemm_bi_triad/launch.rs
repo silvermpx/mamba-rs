@@ -13940,7 +13940,8 @@ mod prepared_f32_launch_tests {
     fn managed_f32_cache_hit_skips_allocation_identity_queries() {
         let device = GpuDevice::new(0).expect("open CUDA device");
         let ctx = GpuCtx::new(&device).expect("create GPU context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
         let dims = (8, 8, 8);
@@ -13971,7 +13972,8 @@ mod prepared_f32_launch_tests {
         let device = GpuDevice::new(0).expect("open CUDA device");
         assert_eq!(device.compute_capability, (8, 9), "Ada alignment gate");
         let ctx = GpuCtx::new(&device).expect("create GPU context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_f32_triad_policy(policy);
         let dims = (1024, 16, 128);
@@ -14050,7 +14052,8 @@ mod prepared_f32_launch_tests {
         let device = GpuDevice::new(0).expect("open CUDA device");
         assert_eq!(device.compute_capability, (8, 9), "Ada route gate");
         let ctx = GpuCtx::new(&device).expect("create GPU context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
         let dims = (49, 65, 129);
@@ -14154,7 +14157,8 @@ mod prepared_f32_launch_tests {
         let device = GpuDevice::new(0).expect("open CUDA device");
         assert_eq!(device.compute_capability, (8, 9), "Ada alignment gate");
         let ctx = GpuCtx::new(&device).expect("create GPU context");
-        ctx.set_batch_invariant(true);
+        ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
+            .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
         let dims = (1024, 16, 128);

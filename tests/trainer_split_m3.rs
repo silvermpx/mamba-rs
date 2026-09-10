@@ -9,6 +9,7 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::{BackwardOpts, Mamba3Trainer, TrainSessionCfg};
@@ -237,7 +238,7 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
 
     trainer.forward(&input, &mut output).expect("split forward");
-    trainer.ctx().set_fast_gemm(true);
+    trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap();
     let error = trainer
         .backward_step(&d_temporal, BackwardOpts::default())
         .expect_err("route drift must reject saved activations");

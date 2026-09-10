@@ -1,5 +1,6 @@
-//! The inference serve gate: absolute bit hashes + the headline ms/page
-//! at the production serve shape (single vision-classifier page). A
+//! The inference serve gate: absolute bit hashes at the production serve
+//! shape (single vision-classifier page); the headline ms/page instrument
+//! is tools/qualification/prefill_serve_headline.rs. A
 //! RELATIVE prefill test (prefill vs training forward) is not enough —
 //! a shared-kernel regression moved both sides and stayed green; these
 //! hashes are absolute, recorded once per good build.
@@ -8,9 +9,19 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/digest.rs"]
+mod digest;
+#[path = "common/evidence.rs"]
+mod evidence;
+#[path = "common/evidence_digest.rs"]
+mod evidence_digest;
+#[path = "common/hash_outputs.rs"]
+mod hash_outputs;
+#[path = "common/stamp.rs"]
+mod stamp;
 
 use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -18,7 +29,7 @@ use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
 use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
 use mamba_rs::mamba_ssm::gpu::prefill::{
-    PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
+    PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
@@ -113,22 +124,19 @@ fn rig(state_cap: usize) -> Rig {
 fn set_tier(ctx: &GpuCtx, tier: &str) {
     match tier {
         "cublas+tf32" => {
-            ctx.set_batch_invariant(false);
+            ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
             ctx.set_bi_tensor_cores(false);
-            ctx.set_fast_gemm(false);
         }
         "cublas" => {
-            ctx.set_batch_invariant(false);
+            ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
             ctx.set_bi_tensor_cores(false);
-            ctx.set_fast_gemm(false);
-            ctx.disable_tf32();
         }
         "bi" => {
-            ctx.set_batch_invariant(true);
+            ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
             ctx.set_bi_tensor_cores(false);
         }
         "bi+tc" => {
-            ctx.set_batch_invariant(true);
+            ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
             ctx.set_bi_tensor_cores(true);
         }
         other => panic!("unknown tier {other}"),
@@ -196,7 +204,7 @@ fn prefill_serve_output_hashes() {
                 // pooled was produced on r2's context/stream — hash it there.
                 eprintln!(
                     "{}",
-                    common::bench::bench_stamp(
+                    stamp::bench_stamp(
                         &r.device,
                         &r.ctx,
                         &format!("serve B1 T{SERVE_T} d384 L24 warm_state={warm_state}"),
@@ -204,7 +212,7 @@ fn prefill_serve_output_hashes() {
                         0
                     )
                 );
-                common::bench::hash_outputs(
+                hash_outputs::hash_outputs(
                     &r.ctx,
                     &[
                         ("full_temporal", &full, SERVE_T * dm),
@@ -221,122 +229,8 @@ fn prefill_serve_output_hashes() {
                         ),
                     ],
                 );
-                common::bench::hash_outputs(&r2.ctx, &[("pooled_sum", &pooled, dm)]);
+                hash_outputs::hash_outputs(&r2.ctx, &[("pooled_sum", &pooled, dm)]);
             }
         }
     }
-}
-
-/// I-5b: the headline serve numbers on the pinned serve tier —
-/// full-temporal eager (the eval/calibrate lane), pooled eager, and the
-/// production pooled graph. ms/page and pages/s.
-#[test]
-#[ignore = "serve headline bench"]
-fn prefill_serve_headline() {
-    let mut r = rig(16);
-    set_tier(&r.ctx, "cublas+tf32");
-    let dm = r.dims.d_model;
-
-    let mut last = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
-    let mut full = GpuBuffer::zeros(&r.ctx.stream, SERVE_T * dm).unwrap();
-    let mut host_full = vec![0f32; SERVE_T * dm];
-    let full_eager_ms = {
-        let ctx = &r.ctx;
-        let state = &mut r.state;
-        let scratch = &mut r.scratch;
-        let input = &r.input;
-        let weights = &r.weights;
-        let a_neg = &r.a_neg;
-        let mut run = || {
-            state.reset(&ctx.stream).unwrap();
-            gpu_forward_inference_prefill_from_raw(
-                ctx,
-                PrefillOutputs {
-                    last_temporal: &mut last,
-                    full_temporal: Some(&mut full),
-                },
-                PrefillRawInputs {
-                    input_flat: input,
-                    weights,
-                    a_neg_all: a_neg,
-                },
-                state,
-                scratch,
-            )
-            .unwrap();
-            full.download(&ctx.stream, &mut host_full).unwrap();
-        };
-        common::bench::timed(ctx, 50, &mut run)
-    };
-
-    let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
-    let mut host_pooled = vec![0f32; dm];
-    let pooled_eager_ms = {
-        let ctx = &r.ctx;
-        let state = &mut r.state;
-        let scratch = &mut r.scratch;
-        let input = &r.input;
-        let weights = &r.weights;
-        let a_neg = &r.a_neg;
-        let mut run = || {
-            state.reset(&ctx.stream).unwrap();
-            gpu_forward_inference_prefill_pooled_sum_from_raw(
-                ctx,
-                &mut pooled,
-                PrefillRawInputs {
-                    input_flat: input,
-                    weights,
-                    a_neg_all: a_neg,
-                },
-                state,
-                scratch,
-            )
-            .unwrap();
-            pooled.download(&ctx.stream, &mut host_pooled).unwrap();
-        };
-        common::bench::timed(ctx, 50, &mut run)
-    };
-
-    // The benchmark keeps every captured allocation alive through the graph.
-    let graph = unsafe {
-        PrefillPooledGraph::capture(
-            &r.ctx,
-            &mut pooled,
-            PrefillRawInputs {
-                input_flat: &r.input,
-                weights: &r.weights,
-                a_neg_all: &r.a_neg,
-            },
-            &mut r.state,
-            &mut r.scratch,
-        )
-    }
-    .unwrap();
-    let pooled_graph_ms = {
-        let ctx = &r.ctx;
-        let mut run = || {
-            graph.launch(ctx, &r.input, &pooled).unwrap();
-            pooled.download(&ctx.stream, &mut host_pooled).unwrap();
-        };
-        common::bench::timed(ctx, 50, &mut run)
-    };
-
-    eprintln!(
-        "{}",
-        common::bench::bench_stamp(
-            &r.device,
-            &r.ctx,
-            &format!("serve B1 T{SERVE_T} d384 L24"),
-            "serve_headline",
-            0
-        )
-    );
-    eprintln!(
-        "serve headline: full_eager={full_eager_ms:.3} ms/page ({:.1} pages/s)  \
-         pooled_eager={pooled_eager_ms:.3} ms/page ({:.1} pages/s)  \
-         pooled_graph={pooled_graph_ms:.3} ms/page ({:.1} pages/s)",
-        1e3 / full_eager_ms,
-        1e3 / pooled_eager_ms,
-        1e3 / pooled_graph_ms
-    );
 }

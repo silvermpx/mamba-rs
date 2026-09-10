@@ -4,7 +4,8 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -101,7 +102,7 @@ fn run_f32(
 ) -> Vec<f32> {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
     let w = GpuMamba3Weights::from_cpu(&ctx.stream, cpu, cfg, dims.mamba_input_dim).unwrap();
 
     let bt = dims.bt();
@@ -163,7 +164,7 @@ fn run_mixed(
 ) -> Vec<f32> {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
 
     // Mixed path needs identity input_proj — clone + clear.
     let mut cpu_m = cpu.clone();
@@ -247,7 +248,7 @@ fn run_f32_post_normf(
 ) -> Vec<f32> {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
     // F32 forward has no identity-proj branch; use eye(d_model) + zero bias
     // so `temporal = mamba_input @ I = mamba_input` matches mixed's D2D copy.
     let mut cpu_m = cpu.clone();

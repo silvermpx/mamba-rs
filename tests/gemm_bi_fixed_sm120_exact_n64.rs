@@ -389,7 +389,9 @@ fn launch(
         return match arm {
             Arm::OldOracle => inference_forward_f32_legacy_baseline(ctx, operands, shape),
             Arm::Legacy => inference_forward_with_tile(ctx, operands, shape, InferenceTile::Legacy),
-            Arm::N128 => inference_forward_with_tile(ctx, operands, shape, InferenceTile::F32N128S2),
+            Arm::N128 => {
+                inference_forward_with_tile(ctx, operands, shape, InferenceTile::F32N128S2)
+            }
             Arm::Candidate => inference_forward_with_tile(ctx, operands, shape, CANDIDATE),
         };
     }
@@ -1112,7 +1114,10 @@ fn fixed_sm120_exact_n64_rejects_unsafe_inputs_and_empty_is_noop() {
         w: f32ptr(0),
         bias_ptr: None,
     };
-    for empty in [InferenceShape { m: 0, ..shape }, InferenceShape { n: 0, ..shape }] {
+    for empty in [
+        InferenceShape { m: 0, ..shape },
+        InferenceShape { n: 0, ..shape },
+    ] {
         inference_forward_with_tile(&ctx, null, empty, CANDIDATE)
             .expect("empty output must not launch");
     }

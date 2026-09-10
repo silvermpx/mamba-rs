@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 #[path = "support/triad_f32_tn_direct_d768_out_bk16_source.rs"]
 mod frozen_d768_out;
 #[path = "support/triad_f32_tn_copyplan_dual_chunk_source.rs"]
@@ -53,6 +55,28 @@ fn production_units_are_normalized_body_identical_to_frozen_winners() {
             production::PRISM_RAW_SYMBOL,
         )),
     );
+}
+
+/// The route enum, the kernel spec table and the sealed source name the same
+/// three kernels: every route resolves to a spec keyed by its own symbol,
+/// the source exports exactly those symbols, and no other symbol has a spec.
+#[test]
+fn routes_specs_and_exports_name_the_same_three_kernels() {
+    let source = production::compose_source().expect("compose sealed production source");
+    let exports = production::export_inventory(&source).expect("sealed export inventory");
+    let routes = [
+        production::Sm89ExactF32TnRoute::D768InDualChunkFused,
+        production::Sm89ExactF32TnRoute::D768OutDirectBk16,
+        production::Sm89ExactF32TnRoute::PrismDirectBk16,
+    ];
+    for route in routes {
+        let symbol = route.symbol();
+        let spec = production::kernel_spec(symbol).expect("every route symbol has a kernel spec");
+        assert_eq!(spec.symbol, symbol);
+        assert!(exports.contains(&symbol), "{symbol} must be exported");
+    }
+    assert_eq!(exports.len(), routes.len());
+    assert!(production::kernel_spec("gemm_bi_tn_sm89_f32_unknown_v1").is_none());
 }
 
 #[test]

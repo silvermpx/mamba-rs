@@ -12,6 +12,24 @@ repository = "https://github.com/silvermpx/mamba-rs"
 keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
 categories = ["science", "mathematics"]
 readme = "README.md"
+# Test and bench targets are declared explicitly below: a file dropped into
+# tests/ or benches/ does not become a target until it takes a lane in
+# qual/lanes.toml (tests/qual_lane_census.rs checks that the manifest, the
+# lane table and the files agree).
+autotests = false
+autobenches = false
+# The published crate carries the library, kernels, examples, the declared
+# regression tests with their fixtures, the benchmarks and the qualification
+# tools. Measurement receipts, agent notes and local fleet configuration stay
+# in the repository only.
+exclude = [
+    "internal/",
+    ".superpowers/",
+    ".flotilla.toml",
+    ".idea/",
+    "AGENTS.md",
+    "task-14-staged-tdd.md",
+]
 
 # docs.rs builds have no CUDA toolkit. An explicit cudarc version
 # feature skips its nvcc probe and uses pregenerated bindings, so the
@@ -31,7 +49,7 @@ required-features = ["cli"]
 [[bin]]
 name = "gemm-bi-tf32-qualification"
 path = "src/bin/gemm_bi_tf32_qualification.rs"
-required-features = ["cuda"]
+required-features = ["qualification", "cuda"]
 
 [features]
 default = []
@@ -47,6 +65,11 @@ accelerate = []
 gemm-blas = ["gemm"]
 hf = ["dep:half", "dep:bytemuck", "dep:serde", "dep:serde_json"]
 cli = ["hf", "dep:clap", "dep:tokenizers", "dep:hf-hub"]
+# Manual qualification instruments under tools/qualification (hardware,
+# toolkit, NVRTC/SASS and admission-timing censuses) and the TF32
+# qualification binary. Off by default: they are run by hand on a chosen
+# board, never by CI.
+qualification = []
 
 [dependencies]
 pulp = "0.22"
@@ -126,3 +149,839 @@ features = [
     "fallback-dynamic-loading",
     "cuda-version-from-build-system",
 ]
+
+# ---- declared targets (see qual/lanes.toml) ----
+
+[[test]]
+name = "a9_fused_softplus_repro"
+path = "tests/a9_fused_softplus_repro.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "acceptance_evidence"
+path = "tests/acceptance_evidence.rs"
+
+[[test]]
+name = "adamw_parity"
+path = "tests/adamw_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "arch_compile_gates"
+path = "tests/arch_compile_gates.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "backward_mixed_parity"
+path = "tests/backward_mixed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "backward_mixed_smoke"
+path = "tests/backward_mixed_smoke.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "coverage_gaps"
+path = "tests/coverage_gaps.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "cpu_gpu_train_parity"
+path = "tests/cpu_gpu_train_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "ddp_emulated_equivalence"
+path = "tests/ddp_emulated_equivalence.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "ddp_fixed_order_reducer"
+path = "tests/ddp_fixed_order_reducer.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "ddp_nccl_two_ranks"
+path = "tests/ddp_nccl_two_ranks.rs"
+required-features = ["cuda", "nccl"]
+
+[[test]]
+name = "ddp_reduction_tree"
+path = "tests/ddp_reduction_tree.rs"
+
+[[test]]
+name = "decode_digest"
+path = "tests/decode_digest.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "determinism_source_gates"
+path = "tests/determinism_source_gates.rs"
+
+[[test]]
+name = "extreme_edge_coverage"
+path = "tests/extreme_edge_coverage.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "f32_training_graph_parity"
+path = "tests/f32_training_graph_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "fixed_epilogue_pins"
+path = "tests/fixed_epilogue_pins.rs"
+
+[[test]]
+name = "gemm_bi_async_allocation"
+path = "tests/gemm_bi_async_allocation.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_determinism"
+path = "tests/gemm_bi_determinism.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_bridge"
+path = "tests/gemm_bi_fixed_bridge.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_correctness"
+path = "tests/gemm_bi_fixed_correctness.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_sm120_exact_n64"
+path = "tests/gemm_bi_fixed_sm120_exact_n64.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_sm120_sliced"
+path = "tests/gemm_bi_fixed_sm120_sliced.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_sm89_exact_n64"
+path = "tests/gemm_bi_fixed_sm89_exact_n64.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_sm89_pipeline"
+path = "tests/gemm_bi_fixed_sm89_pipeline.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_invariance_matrix"
+path = "tests/gemm_bi_invariance_matrix.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_scalar_nt_copyplan_siblings_receipts"
+path = "tests/gemm_bi_scalar_nt_copyplan_siblings_receipts.rs"
+
+[[test]]
+name = "gemm_bi_sm100_contract"
+path = "tests/gemm_bi_sm100_contract.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_sm120_contract"
+path = "tests/gemm_bi_sm120_contract.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_d128_source_contract"
+path = "tests/gemm_bi_sm89_exact_f32_d128_source_contract.rs"
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_source_contract"
+path = "tests/gemm_bi_sm89_exact_f32_source_contract.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_half_tn_source_contract"
+path = "tests/gemm_bi_sm89_half_tn_source_contract.rs"
+
+[[test]]
+name = "gemm_bi_sm90_contract"
+path = "tests/gemm_bi_sm90_contract.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_tc"
+path = "tests/gemm_bi_tc.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_contract"
+path = "tests/gemm_bi_tf32_contract.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_joint_source_contract"
+path = "tests/gemm_bi_tf32_joint_source_contract.rs"
+
+[[test]]
+name = "gemm_bi_tf32_selector"
+path = "tests/gemm_bi_tf32_selector.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_bi_typed_parity"
+path = "tests/gemm_bi_typed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_context_routing"
+path = "tests/gemm_context_routing.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_inference_route_inventory"
+path = "tests/gemm_inference_route_inventory.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_mode_api"
+path = "tests/gemm_mode_api.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_mode_live"
+path = "tests/gemm_mode_live.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_model_mode_api"
+path = "tests/gemm_model_mode_api.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gemm_tied_f32_output"
+path = "tests/gemm_tied_f32_output.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gpu_batch_test"
+path = "tests/gpu_batch_test.rs"
+required-features = ["hf", "cuda"]
+
+[[test]]
+name = "gpu_bf16_parity"
+path = "tests/gpu_bf16_parity.rs"
+required-features = ["hf", "cuda"]
+
+[[test]]
+name = "gpu_inference_prefill_parity"
+path = "tests/gpu_inference_prefill_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gpu_lm_bf16_test"
+path = "tests/gpu_lm_bf16_test.rs"
+required-features = ["hf", "cuda"]
+
+[[test]]
+name = "gpu_lm_test"
+path = "tests/gpu_lm_test.rs"
+required-features = ["hf", "cuda"]
+
+[[test]]
+name = "gpu_mamba3_lm_test"
+path = "tests/gpu_mamba3_lm_test.rs"
+required-features = ["cuda", "hf"]
+
+[[test]]
+name = "gpu_pooled_prefill"
+path = "tests/gpu_pooled_prefill.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "grad_clip"
+path = "tests/grad_clip.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "grad_oracle"
+path = "tests/grad_oracle.rs"
+
+[[test]]
+name = "grad_region_clip"
+path = "tests/grad_region_clip.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "graph_capture_panic"
+path = "tests/graph_capture_panic.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "hf_batch_parity"
+path = "tests/hf_batch_parity.rs"
+required-features = ["cuda", "hf"]
+
+[[test]]
+name = "hf_full_cycle"
+path = "tests/hf_full_cycle.rs"
+required-features = ["cuda", "hf"]
+
+[[test]]
+name = "hf_integration"
+path = "tests/hf_integration.rs"
+required-features = ["hf"]
+
+[[test]]
+name = "hf_training_convergence"
+path = "tests/hf_training_convergence.rs"
+required-features = ["cuda", "hf"]
+
+[[test]]
+name = "hf_training_smoke"
+path = "tests/hf_training_smoke.rs"
+required-features = ["cuda", "hf"]
+
+[[test]]
+name = "inference_f16_smoke"
+path = "tests/inference_f16_smoke.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "inference_graph_route"
+path = "tests/inference_graph_route.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "kernel_identity"
+path = "tests/kernel_identity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "kernel_identity_cuda"
+path = "tests/kernel_identity_cuda.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "large_d_state"
+path = "tests/large_d_state.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "loss_scaler"
+path = "tests/loss_scaler.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m1_parallel_bwd_parity"
+path = "tests/m1_parallel_bwd_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m1_parallel_scan_typed_parity"
+path = "tests/m1_parallel_scan_typed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m1_scan_bwd_hash"
+path = "tests/m1_scan_bwd_hash.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m1_test_correctness"
+path = "tests/m1_test_correctness.rs"
+
+[[test]]
+name = "m3_backward_mixed_parity"
+path = "tests/m3_backward_mixed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_bf16_parity"
+path = "tests/m3_bf16_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_chunked_fwd_unit_parity"
+path = "tests/m3_chunked_fwd_unit_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_cpu_gpu_train_parity"
+path = "tests/m3_cpu_gpu_train_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_final_grads_unit_parity"
+path = "tests/m3_final_grads_unit_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_forward_mixed_parity"
+path = "tests/m3_forward_mixed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_gpu_prefill_parity"
+path = "tests/m3_gpu_prefill_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_kernel_identity_cuda"
+path = "tests/m3_kernel_identity_cuda.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_mixed_train_smoke"
+path = "tests/m3_mixed_train_smoke.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_prefill_full_parity"
+path = "tests/m3_prefill_full_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_prefill_typed_parity"
+path = "tests/m3_prefill_typed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_test_correctness"
+path = "tests/m3_test_correctness.rs"
+
+[[test]]
+name = "m3_training_graph_parity"
+path = "tests/m3_training_graph_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_training_graph_safety"
+path = "tests/m3_training_graph_safety.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_typed_bwd_unit_parity"
+path = "tests/m3_typed_bwd_unit_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "mixed_prefill_parity"
+path = "tests/mixed_prefill_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "msrv_single_source"
+path = "tests/msrv_single_source.rs"
+
+[[test]]
+name = "optimizer_resume_bitwise"
+path = "tests/optimizer_resume_bitwise.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "parallel_run_determinism"
+path = "tests/parallel_run_determinism.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "prefill"
+path = "tests/prefill.rs"
+
+[[test]]
+name = "prefill_m3"
+path = "tests/prefill_m3.rs"
+
+[[test]]
+name = "prefill_serve_bench"
+path = "tests/prefill_serve_bench.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "qual_lane_census"
+path = "tests/qual_lane_census.rs"
+
+[[test]]
+name = "rmsnorm_bf16_768"
+path = "tests/rmsnorm_bf16_768.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "scan_mode_boundary"
+path = "tests/scan_mode_boundary.rs"
+
+[[test]]
+name = "sm120_tf32_pipeline_source_gate"
+path = "tests/sm120_tf32_pipeline_source_gate.rs"
+
+[[test]]
+name = "sm120_tf32_stack_source_gate"
+path = "tests/sm120_tf32_stack_source_gate.rs"
+
+[[test]]
+name = "sm80_cp_async_exact_allocation_contract"
+path = "tests/sm80_cp_async_exact_allocation_contract.rs"
+
+[[test]]
+name = "sm80_tf32_cp_async_source_gate"
+path = "tests/sm80_tf32_cp_async_source_gate.rs"
+
+[[test]]
+name = "sm80_typed_cp_async_source_gate"
+path = "tests/sm80_typed_cp_async_source_gate.rs"
+
+[[test]]
+name = "sm89_half_source_freeze"
+path = "tests/sm89_half_source_freeze.rs"
+
+[[test]]
+name = "stability_stress"
+path = "tests/stability_stress.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "state_cap_invariance"
+path = "tests/state_cap_invariance.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "trainer_smoke"
+path = "tests/trainer_smoke.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "trainer_split"
+path = "tests/trainer_split.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "trainer_split_m3"
+path = "tests/trainer_split_m3.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "training_graph_parity"
+path = "tests/training_graph_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "typed_bwd_parity"
+path = "tests/typed_bwd_parity.rs"
+required-features = ["cuda"]
+
+[[bench]]
+name = "classifier_gemm_tier_bench"
+path = "benches/classifier_gemm_tier_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "epilogue_bench"
+path = "benches/epilogue_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "gemm_bi_tc_bench"
+path = "benches/gemm_bi_tc_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "gemm_bi_trainer_step_bench"
+path = "benches/gemm_bi_trainer_step_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "gemm_bi_typed_fallback_bench"
+path = "benches/gemm_bi_typed_fallback_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "m1_cpu_benchmark"
+path = "benches/m1_cpu_benchmark.rs"
+harness = false
+
+[[bench]]
+name = "m1_gpu_benchmark"
+path = "benches/m1_gpu_benchmark.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "m1_state_capacity_bench"
+path = "benches/m1_state_capacity_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "m3_cpu_benchmark"
+path = "benches/m3_cpu_benchmark.rs"
+harness = false
+
+[[bench]]
+name = "m3_gpu_benchmark"
+path = "benches/m3_gpu_benchmark.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "m3_kernels_isolated_bench"
+path = "benches/m3_kernels_isolated_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "m3_scan_micro_bench"
+path = "benches/m3_scan_micro_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "prefill_classifier_bench"
+path = "benches/prefill_classifier_bench.rs"
+harness = false
+
+[[bench]]
+name = "prefill_m1_vs_m3_bench"
+path = "benches/prefill_m1_vs_m3_bench.rs"
+harness = false
+
+[[bench]]
+name = "thin_rung_decode_bench"
+path = "benches/thin_rung_decode_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[test]]
+name = "bench_bf16_vs_f32"
+path = "tools/qualification/bench_bf16_vs_f32.rs"
+required-features = ["qualification", "hf", "cuda"]
+
+[[test]]
+name = "cublas_compute_probe"
+path = "tools/qualification/cublas_compute_probe.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "device_facts"
+path = "tools/qualification/device_facts.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_contract_census"
+path = "tools/qualification/gemm_bi_contract_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_half_m64n128_qualification"
+path = "tools/qualification/gemm_bi_fixed_half_m64n128_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_performance"
+path = "tools/qualification/gemm_bi_fixed_performance.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_sm120_performance"
+path = "tools/qualification/gemm_bi_fixed_sm120_performance.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_fixed_tf32_m64n128_qualification"
+path = "tools/qualification/gemm_bi_fixed_tf32_m64n128_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_half_remaining_qualification_contract"
+path = "tools/qualification/gemm_bi_half_remaining_qualification_contract.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_performance_matrix"
+path = "tools/qualification/gemm_bi_performance_matrix.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_scalar_nn_m64n64_qualification"
+path = "tools/qualification/gemm_bi_scalar_nn_m64n64_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_scalar_nt_slim_qualification"
+path = "tools/qualification/gemm_bi_scalar_nt_slim_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_sm100_triad_census"
+path = "tools/qualification/gemm_bi_sm100_triad_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm120_tf32_selector_qualification"
+path = "tools/qualification/gemm_bi_sm120_tf32_selector_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm120_tf32_vendor"
+path = "tools/qualification/gemm_bi_sm120_tf32_vendor.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_sm120_triad_census"
+path = "tools/qualification/gemm_bi_sm120_triad_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_d128_module_qualification"
+path = "tools/qualification/gemm_bi_sm89_exact_f32_d128_module_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_d128_selector_qualification"
+path = "tools/qualification/gemm_bi_sm89_exact_f32_d128_selector_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_module_qualification"
+path = "tools/qualification/gemm_bi_sm89_exact_f32_module_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_exact_f32_tn_selector_qualification"
+path = "tools/qualification/gemm_bi_sm89_exact_f32_tn_selector_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_sm89_half_selector_qualification"
+path = "tools/qualification/gemm_bi_sm89_half_selector_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_tf32_joint_module_qualification"
+path = "tools/qualification/gemm_bi_sm89_tf32_joint_module_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_sm89_tf32_joint_selector_qualification"
+path = "tools/qualification/gemm_bi_sm89_tf32_joint_selector_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_sm90a_triad_census"
+path = "tools/qualification/gemm_bi_sm90a_triad_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_cohort_binding"
+path = "tools/qualification/gemm_bi_tf32_cohort_binding.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_tf32_hardware_qualification"
+path = "tools/qualification/gemm_bi_tf32_hardware_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_joint_cohort_binding"
+path = "tools/qualification/gemm_bi_tf32_joint_cohort_binding.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_tf32_m16n16_qualification"
+path = "tools/qualification/gemm_bi_tf32_m16n16_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_nt_cublas"
+path = "tools/qualification/gemm_bi_tf32_nt_cublas.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_bi_tf32_selector_qualification"
+path = "tools/qualification/gemm_bi_tf32_selector_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_tf32_splitk4_qualification"
+path = "tools/qualification/gemm_bi_tf32_splitk4_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_bi_tn_splitm_cp_async_qualification"
+path = "tools/qualification/gemm_bi_tn_splitm_cp_async_qualification.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "gemm_denominator_probe"
+path = "tools/qualification/gemm_denominator_probe.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gemm_ladder_sweep"
+path = "tools/qualification/gemm_ladder_sweep.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "gpu_lm_profile"
+path = "tools/qualification/gpu_lm_profile.rs"
+required-features = ["qualification", "hf", "cuda"]
+
+[[test]]
+name = "m3_prefill_bench"
+path = "tools/qualification/m3_prefill_bench.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "memory_footprint"
+path = "tools/qualification/memory_footprint.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "prefill_serve_headline"
+path = "tools/qualification/prefill_serve_headline.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "rl_llm_bench"
+path = "tools/qualification/rl_llm_bench.rs"
+required-features = ["qualification"]
+
+[[test]]
+name = "scan_mode_bench"
+path = "tools/qualification/scan_mode_bench.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "sm100_tcgen05_census"
+path = "tools/qualification/sm100_tcgen05_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "sm80_cp_async_exact_allocation_sanitizer"
+path = "tools/qualification/sm80_cp_async_exact_allocation_sanitizer.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "sm90_wgmma_census"
+path = "tools/qualification/sm90_wgmma_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "tcw64_census"
+path = "tools/qualification/tcw64_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "tn_tc64_streamk_timing_census"
+path = "tools/qualification/tn_tc64_streamk_timing_census.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
+name = "trainer_benchmarks"
+path = "tools/qualification/trainer_benchmarks.rs"
+required-features = ["qualification", "cuda"]

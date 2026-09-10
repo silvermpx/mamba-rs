@@ -1,14 +1,10 @@
 #[path = "triad_half_nt_m64n128_s3_source.rs"]
-mod parent;
+pub mod m64n128;
 
 pub const SYMBOL: &str = "gemm_bi_nt_test_fixed_s3_m64n192_f16";
-pub const BLOCK_THREADS: u32 = 384;
-pub const DYNAMIC_SHARED_BYTES: usize = 98_304;
-pub const MAX_REGISTERS: i32 = 168;
-pub const REQUIRED_OCCUPANCY: u32 = 1;
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
-    let mut source = parent::candidate_source(swizzle, s3)?;
+    let mut source = m64n128::candidate_source(swizzle, s3)?;
     for (anchor, expected) in [
         ("namespace sm89_test_half_nt_m64n128_s3", 2),
         ("sm89_test_half_nt_m64n128_s3::kernel<TYPE>", 1),
@@ -120,16 +116,6 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
         return Err("M64N192 candidate retained an M64N128 identifier".into());
     }
     Ok(source)
-}
-
-pub fn measured_s3_source(swizzle: &str, s3: &str) -> Result<String, String> {
-    parent::candidate_source(swizzle, s3)
-}
-
-pub fn all_strata_pass(strata: &[[f64; 2]]) -> bool {
-    strata
-        .iter()
-        .all(|quantiles| quantiles[0] < 0.99 && quantiles[1] < 0.99)
 }
 
 const M64N192_STAGE_SCALAR: &str = r#"template <typename T>

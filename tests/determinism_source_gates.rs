@@ -1,7 +1,8 @@
 //! Host-side source gates for the determinism laws that nothing else
 //! enforces mechanically. No GPU, no cuda feature - CI runs these.
 
-mod common;
+#[path = "common/source_scan.rs"]
+mod source_scan;
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,7 @@ fn kernels_contain_no_numeric_atomics() {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("kernel source");
-            let stripped = common::source_scan::strip_comments_lines(&text);
+            let stripped = source_scan::strip_comments_lines(&text);
             for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
                 let hit = ["atomicAdd", "atomicCAS", "atomicExch", "atomicMin", "atomicMax"]
                     .iter()
@@ -114,7 +115,7 @@ fn tn_narrow_release_surface_excludes_measurement_only_routes() {
     let mut offenders = Vec::new();
     for (relative, tokens) in forbidden {
         let text = std::fs::read_to_string(root().join(relative)).expect("production source");
-        let stripped = common::source_scan::strip_comments_lines(&text);
+        let stripped = source_scan::strip_comments_lines(&text);
         for (line_index, line) in stripped.iter().enumerate() {
             for token in tokens {
                 if line.contains(token) {
@@ -148,7 +149,7 @@ fn option_builders_contain_no_fast_math() {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("source");
-            let stripped = common::source_scan::strip_comments_lines(&text);
+            let stripped = source_scan::strip_comments_lines(&text);
             for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
                 if [
                     "--use_fast_math",
@@ -176,9 +177,11 @@ fn option_builders_contain_no_fast_math() {
     );
 }
 
-/// Every `cargo test --test <name>` command quoted in the public docs
-/// must name a suite that exists: a whole release once shipped with
-/// every repro command stale after a rename.
+/// Every `cargo test --test <name>` and `cargo bench --bench <name>`
+/// command quoted in the public docs must name a target that exists (a
+/// test under tests/, a qualification tool under tools/qualification/, a
+/// bench under benches/): a whole release once shipped with every repro
+/// command stale after a rename.
 #[test]
 fn doc_commands_name_real_suites() {
     let mut offenders = Vec::new();
@@ -202,22 +205,31 @@ fn doc_commands_name_real_suites() {
             continue;
         };
         for (i, line) in text.lines().enumerate() {
-            let mut rest = line;
-            while let Some(pos) = rest.find("--test ") {
-                rest = &rest[pos + "--test ".len()..];
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                if name.is_empty() {
-                    continue;
-                }
-                if !root().join(format!("tests/{name}.rs")).exists() {
-                    offenders.push(format!(
-                        "{}:{}: --test {name} (no tests/{name}.rs)",
-                        path.strip_prefix(root()).unwrap().display(),
-                        i + 1,
-                    ));
+            for (flag, homes) in [
+                ("--test ", &["tests", "tools/qualification"][..]),
+                ("--bench ", &["benches"][..]),
+            ] {
+                let mut rest = line;
+                while let Some(pos) = rest.find(flag) {
+                    rest = &rest[pos + flag.len()..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    if !homes
+                        .iter()
+                        .any(|home| root().join(format!("{home}/{name}.rs")).exists())
+                    {
+                        offenders.push(format!(
+                            "{}:{}: {flag}{name} (no {name}.rs under {})",
+                            path.strip_prefix(root()).unwrap().display(),
+                            i + 1,
+                            homes.join(" or "),
+                        ));
+                    }
                 }
             }
         }

@@ -170,11 +170,11 @@ Linear scaling to B=64; larger batches approach memory-bandwidth limits.
 
 Reproduce:
 ```
-cargo test --release --test m3_gpu_benchmark -- --ignored --nocapture
-cargo test --release --test m3_cpu_benchmark -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test bench_bf16_vs_f32 \
+cargo bench --features cuda --bench m3_gpu_benchmark
+cargo bench --bench m3_cpu_benchmark
+cargo test --release --features "cuda hf qualification" --test bench_bf16_vs_f32 \
     bench_m3_bf16_vs_f32_synthetic -- --ignored --nocapture
-cargo test --release --features "cuda hf" --test rl_llm_bench \
+cargo test --release --features "cuda hf qualification" --test rl_llm_bench \
     rl_ -- --ignored --nocapture
 ```
 

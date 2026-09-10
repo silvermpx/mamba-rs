@@ -4,7 +4,8 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -89,7 +90,7 @@ fn download_typed(ctx: &GpuCtx, buf: &DtypedBuf) -> Vec<f32> {
 fn make_ctx() -> (GpuCtx, MambaKernels) {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kernels = MambaKernels::compile(ctx.stream.context(), common::bench::arch0()).unwrap();
+    let kernels = MambaKernels::compile(ctx.stream.context(), arch::arch0()).unwrap();
     (ctx, kernels)
 }
 

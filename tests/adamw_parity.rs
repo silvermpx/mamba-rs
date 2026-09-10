@@ -11,7 +11,8 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWParamPtrs, GpuAdamW};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -91,7 +92,7 @@ fn assert_close(label: &str, a: &[f32], b: &[f32], tol: f32) {
 fn adamw_single_tensor_step1_matches_cpu() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kern = MambaKernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let kern = MambaKernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let n = 2048;
     let mut p = det_rand(n, 0xA1);
@@ -155,7 +156,7 @@ fn adamw_single_tensor_step1_matches_cpu() {
 fn adamw_multi_step_accumulates_correctly() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kern = MambaKernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let kern = MambaKernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let n = 1024;
     let mut p = det_rand(n, 0xB1);
@@ -212,7 +213,7 @@ fn adamw_zero_weight_decay_matches_adam() {
     // With wd=0 AdamW collapses to Adam — verify that path still matches.
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kern = MambaKernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let kern = MambaKernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let n = 256;
     let mut p = det_rand(n, 0xD1);
@@ -274,7 +275,7 @@ fn adamw_m1_backbone_walks_all_tensors() {
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kern = MambaKernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let kern = MambaKernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -410,7 +411,7 @@ fn adamw_m3_backbone_walks_all_tensors() {
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let cfg = Mamba3Config {
         d_model: 32,
@@ -538,7 +539,7 @@ fn adamw_zero_grad_is_pure_decay() {
     // g=0 → m,v stay 0 → m_hat=0, v_hat=0 → update is just `p *= (1-lr·wd)`.
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let kern = MambaKernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let kern = MambaKernels::compile(dev.context(), arch::arch0()).unwrap();
 
     let n = 64;
     let p = det_rand(n, 0xE1);

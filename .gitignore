@@ -1,5 +1,8 @@
 ### Local-only notes and scratch work (never commit) ###
-internal/
+/internal/*
+!/internal/experiments/
+/internal/experiments/*
+!/internal/experiments/release-0.7.0-archive/
 
 ### IntelliJ IDEA ###
 out/
@@ -40,5 +43,4 @@ out/
 docs/plans/
 docs/superpowers/
 CLAUDE.md
-/internal/
 reference/

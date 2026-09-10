@@ -7,8 +7,10 @@
 
 #![cfg(feature = "cuda")]
 
-mod common;
+#[path = "common/arch.rs"]
+mod arch;
 
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m3_specs_mixed, step_multi,
 };
@@ -50,10 +52,9 @@ fn cfg_m3() -> Mamba3Config {
 
 fn triad_ctx(device: &GpuDevice) -> GpuCtx {
     let ctx = GpuCtx::new(device).unwrap();
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
     ctx
 }
@@ -301,7 +302,7 @@ fn prepare_graph_gemm_manifest(
 fn m3_training_graph_bf16_one_step_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = triad_ctx(&dev);
-    let mut m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let mut m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
 
@@ -373,8 +374,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
         .expect_err("replay must reject a different GpuCtx");
     assert!(error.contains("GpuCtx differs from capture"));
     let replacement_m3 =
-        Mamba3Kernels::compile_with_state_cap(dev.context(), common::bench::arch0(), m3k.state_cap)
-            .unwrap();
+        Mamba3Kernels::compile_with_state_cap(dev.context(), arch::arch0(), m3k.state_cap).unwrap();
     let captured_m3 = std::mem::replace(&mut m3k, replacement_m3);
     drop(captured_m3);
     // Capture only records — must replay to execute.
@@ -418,7 +418,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
 fn m3_training_graph_bf16_multi_replay_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = triad_ctx(&dev);
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), arch::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
     let n_steps = 5;

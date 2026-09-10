@@ -21,6 +21,7 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -359,7 +360,7 @@ fn typed_pooled_batch_invariance_on_the_serve_route() {
     let w = Mamba3Weights::init(&cfg, input_dim, 0xFACE);
     let device = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&device).expect("ctx");
-    ctx.set_batch_invariant(true);
+    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_tensor_cores(true);
     let arch = GpuDevice::nvrtc_arch(device.compute_capability);
     let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");
