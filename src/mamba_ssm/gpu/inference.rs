@@ -130,6 +130,132 @@ mod model_gemm_manifest_tests {
         assert!(f32.eager_gemm_manifest.get().is_none());
         drop(f32);
 
+        for path in [MixedGraphPath::Legacy, MixedGraphPath::Native] {
+            for gpu_only in [false, true] {
+                for invalid_upload in [false, true] {
+                    eprintln!(
+                        "installed-opposite graph: attempted={path:?} gpu_only={gpu_only} invalid_upload={invalid_upload}"
+                    );
+                    let mut engine = GpuMambaInferenceMixed::new(
+                        &device,
+                        &weights,
+                        cfg,
+                        cfg.d_model,
+                        1,
+                        WeightDtype::Bf16,
+                    )
+                    .unwrap();
+                    configure(&engine.engine.ctx, BiGemmFamily::Inference, true);
+                    let mut state = engine.alloc_state().unwrap();
+                    let mut legacy = engine.alloc_scratch().unwrap();
+                    let mut native = engine.alloc_mixed_scratch().unwrap();
+                    engine
+                        .step(&input, &mut output, &mut state, &mut legacy)
+                        .unwrap();
+                    engine
+                        .step_mixed_native(&input, &mut output, &mut state, &mut native)
+                        .unwrap();
+                    let installed_path = if path == MixedGraphPath::Legacy {
+                        unsafe { engine.capture_graph_mixed_native(&mut state, &mut native) }
+                            .unwrap();
+                        assert!(engine.eager_legacy_gemm_manifest.get().is_some());
+                        MixedGraphPath::Native
+                    } else {
+                        unsafe { engine.capture_graph(&mut state, &mut legacy) }.unwrap();
+                        assert!(engine.eager_mixed_native_gemm_manifest.get().is_some());
+                        MixedGraphPath::Legacy
+                    };
+                    let installed_routes = engine
+                        .captured_gemm_plan
+                        .as_ref()
+                        .unwrap()
+                        .routes()
+                        .to_vec();
+                    let installed_scratch = (
+                        engine.captured_state_ptr,
+                        engine.captured_scratch_ptr,
+                        engine.captured_half_staging_ptr,
+                        engine.captured_bi_upcast_ptrs,
+                    );
+                    let attempted_input = if invalid_upload {
+                        &[][..]
+                    } else {
+                        input.as_slice()
+                    };
+                    let failed =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            match (path, gpu_only) {
+                                (MixedGraphPath::Legacy, false) => engine.step(
+                                    attempted_input,
+                                    &mut output,
+                                    &mut state,
+                                    &mut legacy,
+                                ),
+                                (MixedGraphPath::Legacy, true) => {
+                                    engine.step_gpu_only(attempted_input, &mut state, &mut legacy)
+                                }
+                                (MixedGraphPath::Native, false) => engine.step_mixed_native(
+                                    attempted_input,
+                                    &mut output,
+                                    &mut state,
+                                    &mut native,
+                                ),
+                                (MixedGraphPath::Native, true) => engine
+                                    .step_gpu_only_mixed_native(
+                                        attempted_input,
+                                        &mut state,
+                                        &mut native,
+                                    ),
+                            }
+                        }));
+                    if invalid_upload {
+                        assert!(failed.is_err(), "invalid upload must fail before replay");
+                    } else {
+                        assert!(failed.unwrap().unwrap_err().contains("captured path"));
+                    }
+                    let recapture = if path == MixedGraphPath::Legacy {
+                        assert!(
+                            engine.eager_legacy_gemm_manifest.get().is_none(),
+                            "failed legacy attempt retained its eager permit with native graph installed"
+                        );
+                        unsafe { engine.capture_graph(&mut state, &mut legacy) }
+                    } else {
+                        assert!(
+                            engine.eager_mixed_native_gemm_manifest.get().is_none(),
+                            "failed native attempt retained its eager permit with legacy graph installed"
+                        );
+                        unsafe { engine.capture_graph_mixed_native(&mut state, &mut native) }
+                    };
+                    assert!(recapture.unwrap_err().contains("eager"));
+                    assert!(engine.has_graph());
+                    assert_eq!(engine.captured_path, Some(installed_path));
+                    assert_eq!(
+                        engine.captured_gemm_plan.as_ref().unwrap().routes(),
+                        installed_routes
+                    );
+                    assert_eq!(
+                        (
+                            engine.captured_state_ptr,
+                            engine.captured_scratch_ptr,
+                            engine.captured_half_staging_ptr,
+                            engine.captured_bi_upcast_ptrs
+                        ),
+                        installed_scratch
+                    );
+                    if installed_path == MixedGraphPath::Native {
+                        engine
+                            .step_gpu_only_mixed_native(&input, &mut state, &mut native)
+                            .unwrap();
+                    } else {
+                        engine
+                            .step_gpu_only(&input, &mut state, &mut legacy)
+                            .unwrap();
+                    }
+                    engine.engine.ctx.stream.synchronize().unwrap();
+                }
+            }
+        }
+
         let mut engine =
             GpuMambaInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
                 .unwrap();
@@ -187,19 +313,9 @@ mod model_gemm_manifest_tests {
         engine
             .step_mixed_native(&input, &mut output, &mut state, &mut native)
             .unwrap();
+        // Positive control: both paths were prepared successfully and no step
+        // attempt intervenes between capturing one and recapturing the other.
         unsafe { engine.capture_graph_mixed_native(&mut state, &mut native) }.unwrap();
-        assert!(
-            engine
-                .step(&input, &mut output, &mut state, &mut legacy)
-                .unwrap_err()
-                .contains("captured path")
-        );
-        assert!(
-            engine
-                .step_gpu_only(&input, &mut state, &mut legacy)
-                .unwrap_err()
-                .contains("captured path")
-        );
         // Recapture the other prepared path into the same slot; the association
         // and plan must change together, not retain the native plan.
         unsafe { engine.capture_graph(&mut state, &mut legacy) }.unwrap();
@@ -873,9 +989,7 @@ impl GpuMambaInference {
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
         // H2D: upload raw input (outside graph)
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // Run GPU kernel pipeline (graph replay or individual launches)
@@ -921,9 +1035,7 @@ impl GpuMambaInference {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
@@ -1476,9 +1588,7 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_legacy_gemm_manifest.set(None);
-        }
+        self.eager_legacy_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             self.ensure_graph_path(MixedGraphPath::Legacy)?;
@@ -1516,9 +1626,7 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_legacy_gemm_manifest.set(None);
-        }
+        self.eager_legacy_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             self.ensure_graph_path(MixedGraphPath::Legacy)?;
@@ -1936,9 +2044,7 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_mixed_native_gemm_manifest.set(None);
-        }
+        self.eager_mixed_native_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             self.ensure_graph_path(MixedGraphPath::Native)?;
@@ -1979,9 +2085,7 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_mixed_native_gemm_manifest.set(None);
-        }
+        self.eager_mixed_native_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             self.ensure_graph_path(MixedGraphPath::Native)?;

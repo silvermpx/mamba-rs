@@ -1301,9 +1301,7 @@ impl Mamba3GpuInferenceEngine {
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
         // H2D: upload input (outside graph)
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // GPU kernel pipeline (graph replay or individual launches)
@@ -1353,9 +1351,7 @@ impl Mamba3GpuInferenceEngine {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
@@ -1964,9 +1960,7 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
@@ -2005,9 +1999,7 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        if self.graph.is_none() {
-            self.eager_gemm_manifest.set(None);
-        }
+        self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
