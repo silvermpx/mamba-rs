@@ -285,18 +285,37 @@ Select their actual supported cases and prerequisites before executing them.
   the runs finish; the `gemm_bi_fixed_*` targets are renamed
   `gemm_bi_inference_*`.
 - [x] Bump Cargo/manifests/lockfile and changelog consistently to 0.7.0.
-- [ ] Re-verify that every Inference and Triad kernel is wired: module
-  assembly, selector coverage and per-cell reachability on Ada, as a separate
-  pass before the release gate. Known open item for that pass: three
-  ignored library qualification tests
-  (`qualification::tests::{a_and_b_offsets_match_eager_and_graph_with_nonzero_operands_in_both_orders,
-  g2_half_forced_rectangular_prepares_the_exact_graph,
-  output_offset_eager_and_graph_preserve_the_leading_red_zone}`) fail on Ada
-  at `c65c1c85` and after the documentation batch alike with "native half
-  production branch unexpectedly recorded F32 routes"; they are outside the
-  lane table and were not caught by the release gate. The four
-  `sm120_scalar_nt_*` library tests are RTX 5090 only and fail on Ada by
-  design.
+- [x] Re-verify that every Inference and Triad kernel is wired (run on Ada
+  after the documentation batch). Green: `coverage_gaps`, `gemm_bi_tf32_selector`,
+  `gemm_inference_route_inventory`, `gemm_context_routing`,
+  `gemm_bi_contract_census`, the SM89 TF32 joint selector. Fixed on the way:
+  the sm_89 compile gate's expected TF32 export set, the invariance matrix's
+  scalar-tier arm (tensor cores are on by default since 0.7.0), and the half
+  qualification harness, which since `96640d62` saw the native half branch
+  record its route and refused it as "unexpectedly recorded F32 routes" (the
+  three ignored library tests and `gemm_bi_sm89_half_selector_qualification`
+  failed on that alone). The exact-f32 selector tools need
+  `MAMBA_SM89_EXACT_F32_EXPECT_AUTO=1` / `MAMBA_SM89_EXACT_F32_D128_EXPECT_AUTO=1`
+  for their post-admission arms (the pre-admission arms describe the state
+  before admission and are historical); the TF32 selector qualification needs
+  a fresh `MAMBA_RS_TF32_SELECTOR_JSONL`. A symbol inventory (every kernel in
+  `kernels/` against every name a loader asks for) found 19 handles nothing
+  launched and 41 kernels behind them; deleted, except the vectorized
+  elementwise multiply and softplus copy twins, which are now wired at their
+  f32 sites. The four `sm120_scalar_nt_*` library tests are RTX 5090 only and
+  fail on Ada by design.
+- [ ] `cargo clippy --features cuda,hf,qualification -- -D warnings` had nine
+  pre-existing lints in the GEMM tree; the release gate never ran clippy
+  with the CUDA feature. Five are fixed (collapsible `if`, derivable
+  `Default`, transmute annotations, a type alias, a boxed enum variant).
+  Four remain, all argument counts above seven in functions the
+  seven-argument contract test does not cover but forbids `allow` for:
+  `fixed_select_sm89_half_auto_tile` (8) and `fixed_pick_tf32` (10) in
+  `gemm_bi_inference.rs`, `QualifiedTriadModules::load` (15) in
+  `modules.rs`, the `spec` const fn (12) in `sm89_half_source.rs`. Fix by
+  grouping arguments into structs, or accept the gap for 0.7.0.
+- [ ] `gpu_forward_mamba_target_burnin` and `gpu_forward_mamba3_target_burnin`
+  (the target-network forwards RL consumers call) have no test in the tree.
 - [ ] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms,
   the dispatchers) for math and performance against `reference/mamba` and the
   knowledge base, then re-measure the training and inference steps and update
