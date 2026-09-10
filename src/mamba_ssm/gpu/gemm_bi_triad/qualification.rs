@@ -38,7 +38,7 @@ use crate::mamba_ssm::gpu::{
         record_half_physical_trace, record_prepared_f32_physical_trace,
     },
     buffers::{DtypedBuf, GpuBuffer, GradSlice},
-    context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy},
+    context::{BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy},
     dtype::WeightDtype,
     graph_capture::{
         CapturedPhysicalGraph, capture_into_graph_with_gemm_plan,
@@ -100,6 +100,12 @@ impl ActiveQualificationToken {
             active.remove(&self.context_token);
         }
         self.active = false;
+    }
+}
+
+impl Drop for ActiveQualificationToken {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -315,13 +321,11 @@ struct PhysicalQualificationPolicy {
 
 struct PhysicalQualificationPolicyLease<'a> {
     ctx: &'a GpuCtx,
-    original_batch_invariant: bool,
+    original_mode: GemmMode,
     original_family: BiGemmFamily,
     original_tensor_cores: bool,
-    original_fast_gemm: bool,
     original_f32_policy: F32TriadPolicy,
     original_half_policy: HalfTriadPolicy,
-    frozen_cublas_tf32: bool,
     qualified_route: GemmRouteIdentity,
     active: ActiveQualificationToken,
 }
@@ -331,8 +335,8 @@ impl PhysicalQualificationPolicyLease<'_> {
         if !std::ptr::eq(self.ctx, ctx) {
             return Err("physical qualification policy lease belongs to another context".into());
         }
-        if ctx.tf32() != self.frozen_cublas_tf32 {
-            return Err("cuBLAS TF32 state changed during physical qualification".into());
+        if ctx.gemm_mode() != GemmMode::Deterministic {
+            return Err("GEMM mode changed during physical qualification".into());
         }
         self.qualified_route
             .ensure_current(ctx.gemm_route(), "physical qualification policy lease")
@@ -341,12 +345,13 @@ impl PhysicalQualificationPolicyLease<'_> {
 
 impl Drop for PhysicalQualificationPolicyLease<'_> {
     fn drop(&mut self) {
+        self.ctx
+            .set_gemm_mode(self.original_mode)
+            .unwrap_or_else(|error| panic!("restore physical qualification GEMM mode: {error}"));
         self.ctx.set_half_triad_policy(self.original_half_policy);
         self.ctx.set_f32_triad_policy(self.original_f32_policy);
-        self.ctx.set_fast_gemm(self.original_fast_gemm);
         self.ctx.set_bi_tensor_cores(self.original_tensor_cores);
         self.ctx.set_bi_gemm_family(self.original_family);
-        self.ctx.set_batch_invariant(self.original_batch_invariant);
         self.active.release();
     }
 }
@@ -356,28 +361,29 @@ fn begin_physical_qualification_policy(
     policy: PhysicalQualificationPolicy,
 ) -> Result<PhysicalQualificationPolicyLease<'_>, String> {
     let active = ActiveQualificationToken::acquire(ctx)?;
-    let original_batch_invariant = ctx.batch_invariant();
+    let original_mode = ctx.gemm_mode();
     let original_family = ctx.bi_gemm_family();
     let original_tensor_cores = ctx.bi_tensor_cores();
-    let original_fast_gemm = ctx.fast_gemm();
     let original_f32_policy = ctx.f32_triad_policy();
     let original_half_policy = ctx.half_triad_policy();
-    let frozen_cublas_tf32 = ctx.tf32();
-    ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_fast_gemm(false);
     ctx.set_bi_tensor_cores(policy.bi_tensor_cores);
     ctx.set_f32_triad_policy(policy.f32_triad_policy);
     ctx.set_half_triad_policy(policy.half_triad_policy);
+    if let Err(error) = ctx.set_gemm_mode(GemmMode::Deterministic) {
+        ctx.set_half_triad_policy(original_half_policy);
+        ctx.set_f32_triad_policy(original_f32_policy);
+        ctx.set_bi_tensor_cores(original_tensor_cores);
+        ctx.set_bi_gemm_family(original_family);
+        return Err(error);
+    }
     Ok(PhysicalQualificationPolicyLease {
         ctx,
-        original_batch_invariant,
+        original_mode,
         original_family,
         original_tensor_cores,
-        original_fast_gemm,
         original_f32_policy,
         original_half_policy,
-        frozen_cublas_tf32,
         qualified_route: ctx.gemm_route(),
         active,
     })
@@ -5133,23 +5139,25 @@ fn driver_abi_proof(ctx: &GpuCtx, specs: &[&Tf32KernelSpec]) -> Result<String, S
 }
 
 trait QualificationPolicyContext {
-    fn batch_invariant(&self) -> bool;
-    fn set_batch_invariant(&self, value: bool);
+    fn gemm_mode(&self) -> GemmMode;
+    fn set_gemm_mode(&self, mode: GemmMode) -> Result<(), String>;
     fn bi_gemm_family(&self) -> BiGemmFamily;
     fn set_bi_gemm_family(&self, family: BiGemmFamily);
     fn bi_tensor_cores(&self) -> bool;
     fn set_bi_tensor_cores(&self, value: bool);
     fn f32_triad_policy(&self) -> F32TriadPolicy;
     fn set_f32_triad_policy(&self, policy: F32TriadPolicy);
+    fn half_triad_policy(&self) -> HalfTriadPolicy;
+    fn set_half_triad_policy(&self, policy: HalfTriadPolicy);
 }
 
 impl QualificationPolicyContext for GpuCtx {
-    fn batch_invariant(&self) -> bool {
-        GpuCtx::batch_invariant(self)
+    fn gemm_mode(&self) -> GemmMode {
+        GpuCtx::gemm_mode(self)
     }
 
-    fn set_batch_invariant(&self, value: bool) {
-        GpuCtx::set_batch_invariant(self, value);
+    fn set_gemm_mode(&self, mode: GemmMode) -> Result<(), String> {
+        GpuCtx::set_gemm_mode(self, mode)
     }
 
     fn bi_gemm_family(&self) -> BiGemmFamily {
@@ -5175,39 +5183,63 @@ impl QualificationPolicyContext for GpuCtx {
     fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
         GpuCtx::set_f32_triad_policy(self, policy);
     }
+
+    fn half_triad_policy(&self) -> HalfTriadPolicy {
+        GpuCtx::half_triad_policy(self)
+    }
+
+    fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
+        GpuCtx::set_half_triad_policy(self, policy);
+    }
 }
 
 struct QualificationPolicyGuard<'a, C: QualificationPolicyContext> {
     context: &'a C,
-    batch_invariant: bool,
+    mode: GemmMode,
     family: BiGemmFamily,
     tensor_cores: bool,
     f32_policy: F32TriadPolicy,
+    half_policy: HalfTriadPolicy,
 }
 
 impl<'a, C: QualificationPolicyContext> QualificationPolicyGuard<'a, C> {
-    fn enter(context: &'a C) -> Self {
-        let guard = Self {
-            context,
-            batch_invariant: context.batch_invariant(),
-            family: context.bi_gemm_family(),
-            tensor_cores: context.bi_tensor_cores(),
-            f32_policy: context.f32_triad_policy(),
-        };
-        context.set_batch_invariant(true);
+    fn enter(context: &'a C) -> Result<Self, String> {
+        let mode = context.gemm_mode();
+        let family = context.bi_gemm_family();
+        let tensor_cores = context.bi_tensor_cores();
+        let f32_policy = context.f32_triad_policy();
+        let half_policy = context.half_triad_policy();
         context.set_bi_gemm_family(BiGemmFamily::Triad);
         context.set_bi_tensor_cores(false);
         context.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-        guard
+        context.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        if let Err(error) = context.set_gemm_mode(GemmMode::Deterministic) {
+            context.set_half_triad_policy(half_policy);
+            context.set_f32_triad_policy(f32_policy);
+            context.set_bi_tensor_cores(tensor_cores);
+            context.set_bi_gemm_family(family);
+            return Err(error);
+        }
+        Ok(Self {
+            context,
+            mode,
+            family,
+            tensor_cores,
+            f32_policy,
+            half_policy,
+        })
     }
 }
 
 impl<C: QualificationPolicyContext> Drop for QualificationPolicyGuard<'_, C> {
     fn drop(&mut self) {
+        self.context
+            .set_gemm_mode(self.mode)
+            .unwrap_or_else(|error| panic!("restore qualification GEMM mode: {error}"));
+        self.context.set_half_triad_policy(self.half_policy);
         self.context.set_f32_triad_policy(self.f32_policy);
         self.context.set_bi_tensor_cores(self.tensor_cores);
         self.context.set_bi_gemm_family(self.family);
-        self.context.set_batch_invariant(self.batch_invariant);
     }
 }
 
@@ -5243,7 +5275,7 @@ pub fn run_tf32_qualification(
         ));
     }
 
-    let _policy_guard = QualificationPolicyGuard::enter(ctx);
+    let _policy_guard = QualificationPolicyGuard::enter(ctx)?;
 
     let mut evidence = Vec::with_capacity(specs.len());
     for (index, spec) in specs.iter().copied().enumerate() {
@@ -5719,10 +5751,13 @@ mod tests {
     }
 
     struct FakePolicyContext {
-        batch_invariant: Cell<bool>,
+        mode: Cell<GemmMode>,
+        mode_error: Cell<Option<&'static str>>,
+        mode_change_calls: Cell<usize>,
         family: Cell<BiGemmFamily>,
         tensor_cores: Cell<bool>,
         f32_policy: Cell<F32TriadPolicy>,
+        half_policy: Cell<HalfTriadPolicy>,
     }
 
     fn synthetic_route_with_resources(
@@ -5773,12 +5808,17 @@ mod tests {
     }
 
     impl QualificationPolicyContext for FakePolicyContext {
-        fn batch_invariant(&self) -> bool {
-            self.batch_invariant.get()
+        fn gemm_mode(&self) -> GemmMode {
+            self.mode.get()
         }
 
-        fn set_batch_invariant(&self, value: bool) {
-            self.batch_invariant.set(value);
+        fn set_gemm_mode(&self, mode: GemmMode) -> Result<(), String> {
+            self.mode_change_calls.set(self.mode_change_calls.get() + 1);
+            if let Some(error) = self.mode_error.take() {
+                return Err(error.into());
+            }
+            self.mode.set(mode);
+            Ok(())
         }
 
         fn bi_gemm_family(&self) -> BiGemmFamily {
@@ -5804,34 +5844,78 @@ mod tests {
         fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
             self.f32_policy.set(policy);
         }
+
+        fn half_triad_policy(&self) -> HalfTriadPolicy {
+            self.half_policy.get()
+        }
+
+        fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
+            self.half_policy.set(policy);
+        }
     }
 
     fn fail_with_qualification_policy(context: &FakePolicyContext) -> Result<(), String> {
-        let _guard = QualificationPolicyGuard::enter(context);
-        assert!(context.batch_invariant());
+        let _guard = QualificationPolicyGuard::enter(context)?;
+        assert_eq!(context.gemm_mode(), GemmMode::Deterministic);
         assert_eq!(context.bi_gemm_family(), BiGemmFamily::Triad);
         assert!(!context.bi_tensor_cores());
         assert_eq!(
             context.f32_triad_policy(),
             F32TriadPolicy::AllowDeterministicTf32V1
         );
+        assert_eq!(context.half_triad_policy(), HalfTriadPolicy::TiledParityV1);
         Err("injected qualification failure".into())
     }
 
     #[test]
     fn qualification_policy_guard_restores_every_setting_after_error() {
         let context = FakePolicyContext {
-            batch_invariant: Cell::new(false),
+            mode: Cell::new(GemmMode::CublasFast),
+            mode_error: Cell::new(None),
+            mode_change_calls: Cell::new(0),
             family: Cell::new(BiGemmFamily::Inference),
             tensor_cores: Cell::new(true),
             f32_policy: Cell::new(F32TriadPolicy::ExactScalarFmaV1),
+            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrderV1),
         };
 
         assert!(fail_with_qualification_policy(&context).is_err());
-        assert!(!context.batch_invariant());
+        assert_eq!(context.gemm_mode(), GemmMode::CublasFast);
         assert_eq!(context.bi_gemm_family(), BiGemmFamily::Inference);
         assert!(context.bi_tensor_cores());
         assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(
+            context.half_triad_policy(),
+            HalfTriadPolicy::AllowStreamKFixedOrderV1
+        );
+    }
+
+    #[test]
+    fn qualification_policy_guard_preserves_mode_setup_error() {
+        let context = FakePolicyContext {
+            mode: Cell::new(GemmMode::CublasFast),
+            mode_error: Cell::new(Some("injected mode transition failure")),
+            mode_change_calls: Cell::new(0),
+            family: Cell::new(BiGemmFamily::Inference),
+            tensor_cores: Cell::new(true),
+            f32_policy: Cell::new(F32TriadPolicy::ExactScalarFmaV1),
+            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrderV1),
+        };
+
+        let error = match QualificationPolicyGuard::enter(&context) {
+            Ok(_) => panic!("injected mode transition unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "injected mode transition failure");
+        assert_eq!(context.mode_change_calls.get(), 1);
+        assert_eq!(context.gemm_mode(), GemmMode::CublasFast);
+        assert_eq!(context.bi_gemm_family(), BiGemmFamily::Inference);
+        assert!(context.bi_tensor_cores());
+        assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(
+            context.half_triad_policy(),
+            HalfTriadPolicy::AllowStreamKFixedOrderV1
+        );
     }
 
     #[test]
@@ -6534,7 +6618,8 @@ mod tests {
         let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
         assert_eq!(device.compute_capability, (8, 9), "wide smoke requires Ada");
         let ctx = GpuCtx::new(&device).expect("CUDA context");
-        let _policy_guard = QualificationPolicyGuard::enter(&ctx);
+        let _policy_guard =
+            QualificationPolicyGuard::enter(&ctx).expect("enter TF32 qualification policy");
         let spec = tf32_qualification_route_specs(device.compute_capability)
             .expect("Ada qualification inventory")
             .into_iter()
@@ -6664,7 +6749,8 @@ mod tests {
         assert_eq!(device.compute_capability, (8, 9));
         assert_eq!(device.multiprocessor_count(), 142);
         let ctx = GpuCtx::new(&device).expect("CUDA context");
-        let _policy_guard = QualificationPolicyGuard::enter(&ctx);
+        let _policy_guard =
+            QualificationPolicyGuard::enter(&ctx).expect("enter TF32 qualification policy");
         let spec = &super::super::contract::SM89_FINALIST_TF32_ROUTE_SPECS[0];
         let binding = ctx
             .kernels
@@ -8131,10 +8217,9 @@ mod tests {
                     // Set every normalized field opposite to the requested
                     // lease. Even when the physical tile is unchanged, drift
                     // in explicit numeric permission must reject before work.
-                    ctx.set_batch_invariant(false);
+                    ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
                     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
                     ctx.set_bi_tensor_cores(false);
-                    ctx.set_fast_gemm(true);
                     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
                     ctx.set_half_triad_policy(original_half);
                     let original = ctx.gemm_route();
@@ -8158,7 +8243,8 @@ mod tests {
                         assert!(!ctx.fast_gemm());
                         assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
                         assert_eq!(ctx.half_triad_policy(), requested_half);
-                        assert_eq!(ctx.tf32(), frozen_tf32);
+                        assert_eq!(ctx.gemm_mode(), GemmMode::Deterministic);
+                        assert!(!ctx.tf32());
                         g2_check_seeded_tn_eager_graph(&ctx, &mut qualified)?;
                         let symbol = if dtype == WeightDtype::Bf16 {
                             "gemm_bi_tn_tc64_bf16"

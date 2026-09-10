@@ -228,7 +228,7 @@ impl GpuDevice {
     }
 
     /// Create a cuBLAS handle bound to the given compute stream.
-    /// Enables TF32 Tensor Core math for ~8x SGEMM throughput on A100/GH200.
+    /// Configures handle math for the requested context GEMM mode.
     /// Pre-allocates 32 MiB workspace for CUDA Graph compatibility.
     ///
     /// The handle MUST be bound to the same stream used for CUDA Graph capture,
@@ -236,21 +236,21 @@ impl GpuDevice {
     pub fn create_cublas(
         &self,
         compute_stream: &Arc<cudarc::driver::CudaStream>,
+        mode: super::GemmMode,
     ) -> Result<(cudarc::cublas::CudaBlas, cudarc::driver::CudaSlice<u8>), String> {
         let blas = cudarc::cublas::CudaBlas::new(compute_stream.clone())
             .map_err(|e| format!("cuBLAS init failed: {:?}", e))?;
 
-        // Enable TF32 Tensor Cores for all SGEMM operations. Per-op
-        // compute type for bf16/f16 paths is CUBLAS_COMPUTE_32F_PEDANTIC
-        // so TF32 math mode doesn't actually apply to typed GEMMs —
-        // this is purely an f32-SGEMM perf flag.
         unsafe {
             let status = cudarc::cublas::sys::cublasSetMathMode(
                 *blas.handle(),
-                cudarc::cublas::sys::cublasMath_t::CUBLAS_TF32_TENSOR_OP_MATH,
+                mode.cublas_math(),
             );
             if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                return Err("cublasSetMathMode TF32 failed".into());
+                return Err(format!(
+                    "cublasSetMathMode for GEMM mode {} failed: {status:?}",
+                    mode.as_str()
+                ));
             }
         }
 

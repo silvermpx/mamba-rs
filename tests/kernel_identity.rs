@@ -9,14 +9,15 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
-    CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, FramedSha256,
-    GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION, NumericContractSet,
-    POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype, ResolvedGemmLaunchSet,
-    ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
-    ResolvedInstructionShape, ResolvedNumericContract, ResolvedOperandConversion,
-    ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1, Sm80TcPolicyV3,
-    TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set, canonical_ptx_image,
-    gemm_dispatch_policy_digest, route_backend_contract_sets,
+    CUBLAS_POLICY_REVISION, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity,
+    DriverIdentity, FramedSha256, GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION,
+    NumericContractSet, POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype,
+    ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
+    ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedNumericContract,
+    ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1,
+    Sm80TcPolicyV3, TUNING_TABLE_REVISION, build_artifact_set,
+    build_resolved_gemm_launch_set, canonical_ptx_image, gemm_dispatch_policy_digest,
+    route_backend_contract_sets,
 };
 
 fn digest(seed: u8) -> [u8; 32] {
@@ -203,7 +204,10 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
     let (backends, contracts) =
         route_backend_contract_sets(policy(false, false, BiGemmFamily::Triad));
     assert_eq!(backends, BackendSet::CUBLAS);
-    assert_eq!(contracts, NumericContractSet::CUBLAS_POLICY_V1);
+    assert_eq!(contracts, NumericContractSet::CUBLAS_POLICY_V2);
+    assert_ne!(contracts, NumericContractSet::CUBLAS_POLICY_V1);
+    assert_eq!(CUBLAS_POLICY_REVISION, 2);
+    assert_eq!(POLICY_REVISION, 6);
 
     for tc in [false, true] {
         let (backends, contracts) =
@@ -317,7 +321,7 @@ fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
     cublas.batch_invariant = false;
     assert_eq!(
         route_backend_contract_sets(cublas).1,
-        NumericContractSet::CUBLAS_POLICY_V1
+        NumericContractSet::CUBLAS_POLICY_V2
     );
 }
 
@@ -610,6 +614,23 @@ fn scalar_wave_policy_v1_digest_covers_every_wave_and_device_field() {
         gemm_dispatch_policy_digest(142),
         Sm80TcPolicyV3::current().digest(142)
     );
+}
+
+#[test]
+fn vendor_policy_v2_changes_the_dispatch_identity() {
+    let multiprocessor_count = 142;
+    let tensor_core = Sm80TcPolicyV3::current().digest(multiprocessor_count);
+    let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
+    let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
+        .required(b"sm80-tensor-core-policy", &tensor_core)
+        .required(b"scalar-wave-policy", &scalar)
+        .required(
+            b"multiprocessor-count",
+            &multiprocessor_count.to_le_bytes(),
+        )
+        .finish();
+
+    assert_ne!(gemm_dispatch_policy_digest(multiprocessor_count), previous);
 }
 
 fn route() -> GemmRouteIdentity {

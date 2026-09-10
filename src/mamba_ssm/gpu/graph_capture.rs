@@ -103,6 +103,7 @@ pub(crate) unsafe fn capture_into_graph_with_gemm_plan<F>(
 where
     F: FnOnce() -> Result<(), String>,
 {
+    ctx.ensure_gemm_usable()?;
     manifest.validate_capture_request(ctx.gemm_route(), route_capacity)?;
     let recording = ctx.begin_gemm_route_recording(route_capacity)?;
     let graph = unsafe { capture_into_graph(&ctx.stream, body) }?;

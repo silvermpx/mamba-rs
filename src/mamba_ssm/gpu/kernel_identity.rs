@@ -54,7 +54,8 @@ pub(crate) fn deterministic_nvrtc_options(
     options
 }
 
-pub const POLICY_REVISION: u16 = 5;
+pub const POLICY_REVISION: u16 = 6;
+pub const CUBLAS_POLICY_REVISION: u16 = 2;
 
 /// SHA-256 framing with explicit tags, presence, and byte lengths.
 pub struct FramedSha256(Sha256);
@@ -2783,7 +2784,11 @@ impl ScalarWavePolicyV1 {
 pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
     let tensor_core = Sm80TcPolicyV3::current().digest(multiprocessor_count);
     let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
-    FramedSha256::new(b"gemm-dispatch-policy.v4")
+    FramedSha256::new(b"gemm-dispatch-policy.v5")
+        .required(
+            b"vendor-policy-revision",
+            &CUBLAS_POLICY_REVISION.to_le_bytes(),
+        )
         .required(b"sm80-tensor-core-policy", &tensor_core)
         .required(b"scalar-wave-policy", &scalar)
         .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
@@ -2833,6 +2838,8 @@ impl NumericContractSet {
     /// The stream-K half routes: a persistent grid whose per-CTA partials
     /// fold in a fixed order, distinct from the tiled `mma.sync` reduction.
     pub const TRIAD_MMA_SYNC_STREAM_K_V1: Self = Self(1 << 8);
+    /// Context-aware cuBLAS policy with distinct Fast and Pedantic contracts.
+    pub const CUBLAS_POLICY_V2: Self = Self(1 << 9);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2845,7 +2852,7 @@ impl NumericContractSet {
 
 pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericContractSet) {
     if !policy.batch_invariant {
-        return (BackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V1);
+        return (BackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V2);
     }
     let (backends, contracts) = match (policy.bi_gemm_family, policy.bi_tensor_cores) {
         (BiGemmFamily::Triad, false) => (
@@ -4364,6 +4371,7 @@ impl PhysicalReplayProvenance {
     }
 
     fn validate(&self, ctx: &GpuCtx, label: &str) -> Result<(), String> {
+        ctx.ensure_gemm_usable()?;
         self.binding
             .ensure_current(PhysicalGraphBinding::from_context(ctx), label)?;
         if !Rc::ptr_eq(&self.resources, &ctx.resource_anchor()) {
@@ -4767,6 +4775,7 @@ impl CapturedGemmGraphPlan {
         label: &str,
         launch: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        ctx.ensure_gemm_usable()?;
         self.context.ensure_current(ctx.gemm_route(), label)?;
         let mut live_launch_set = ResolvedGemmLaunchSetBuilder::new(self.routes().len())?;
         for route in self.routes() {

@@ -20,6 +20,7 @@ pub(crate) mod diagnostics;
 pub mod dtype;
 pub mod forward;
 pub mod forward_mixed;
+mod gemm_mode;
 pub mod gemm_bi_inference;
 pub mod gemm_bi_triad;
 pub mod grad_clip;
@@ -36,3 +37,4 @@ pub mod weights;
 pub mod weights_mixed_train;
 
 pub use dtype::WeightDtype;
+pub use gemm_mode::GemmMode;

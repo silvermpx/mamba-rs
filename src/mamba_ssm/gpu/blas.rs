@@ -22,18 +22,16 @@ use super::launch::grid_1d;
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
-/// Effective cuBLAS compute type for a typed GEMM: the PEDANTIC default,
-/// or the opt-in non-PEDANTIC tensor-core mode (`ctx.set_fast_gemm` /
-/// MAMBA_RS_FAST_GEMM). Separate numeric contract - see GpuCtx::fast_gemm.
+/// Effective cuBLAS compute type for a context-aware typed GEMM.
+///
+/// Fast uses ordinary f32 compute and Pedantic uses pedantic f32 compute for
+/// every input dtype. Deterministic is rejected at this vendor boundary.
 fn effective_compute(
     ctx: &GpuCtx,
-    dtype: super::dtype::WeightDtype,
-) -> cudarc::cublas::sys::cublasComputeType_t {
-    if ctx.fast_gemm() {
-        dtype.compute_type_fast()
-    } else {
-        dtype.compute_type()
-    }
+    _dtype: super::dtype::WeightDtype,
+) -> Result<cudarc::cublas::sys::cublasComputeType_t, String> {
+    ctx.ensure_vendor_gemm("context-aware GemmEx")?
+        .vendor_compute()
 }
 
 pub fn gpu_gemm_bi_forward_raw(
@@ -44,6 +42,7 @@ pub fn gpu_gemm_bi_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let (batch, n_in, n_out) = dims;
 
     // Opt-in deterministic path, family-selected (`set_bi_gemm_family`).
@@ -93,6 +92,7 @@ pub fn gpu_gemm_bi_forward_raw(
         };
     }
 
+    ctx.ensure_vendor_gemm("gpu_gemm_bi_forward_raw")?;
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;
@@ -148,6 +148,8 @@ pub fn gpu_gemm_bi_forward_ptr(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    ctx.ensure_vendor_gemm("gpu_gemm_bi_forward_ptr")?;
     let (batch, n_in, n_out) = dims;
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
@@ -203,6 +205,7 @@ pub fn gpu_gemm_bi_backward_dx_raw(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     if ctx.batch_invariant() {
         return match ctx.bi_gemm_family() {
             super::context::BiGemmFamily::Triad => {
@@ -224,6 +227,7 @@ pub fn gpu_gemm_bi_backward_dx_raw(
             ),
         };
     }
+    ctx.ensure_vendor_gemm("gpu_gemm_bi_backward_dx_raw")?;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
 
@@ -264,6 +268,7 @@ pub fn gpu_gemm_bi_backward_dw_grad(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     if ctx.batch_invariant() {
         return match ctx.bi_gemm_family() {
             super::context::BiGemmFamily::Triad => {
@@ -285,6 +290,7 @@ pub fn gpu_gemm_bi_backward_dw_grad(
             ),
         };
     }
+    ctx.ensure_vendor_gemm("gpu_gemm_bi_backward_dw_grad")?;
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
 
@@ -323,10 +329,9 @@ pub fn gpu_gemm_bi_backward_dw_grad(
 /// - A = dY (typed, OP_N), `lda=n_out`
 /// - B = X  (typed, OP_T), `ldb=n_in`
 /// - C = dW (f32 master, accumulator), `ldc=n_out`
-/// - alpha=1.0, beta=1.0 (f32 scalars; PEDANTIC requires host f32, not f64)
-/// - compute = `CUBLAS_COMPUTE_32F_PEDANTIC` (true f32 accumulate; we
-///   intentionally diverge from PyTorch's TF32 default — see commit 61325b3
-///   for the 1.4b regression that motivated PEDANTIC).
+/// - alpha=1.0, beta=1.0 (f32 host scalars)
+/// - vendor compute follows [`super::GemmMode`]: ordinary f32 compute in
+///   `CublasFast` and pedantic f32 compute in `CublasPedantic`.
 ///
 /// `dy.dtype` and `x.dtype` MUST match (cuBLAS GemmEx requires same A/B
 /// element type). Output buffer `dw` is always f32 (master grad).
@@ -339,6 +344,7 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     debug_assert_eq!(
         dy.dtype, x_saved.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
@@ -376,7 +382,7 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
             dw.ptr() as *mut c_void,
             cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
             n_out as c_int,
-            effective_compute(ctx, dy.dtype),
+            effective_compute(ctx, dy.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
         .map_err(|e| format!("cuBLAS gemm_ex backward dW typed failed: {e:?}"))?;
@@ -386,7 +392,7 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
 
 /// Typed dX backward GEMM. Typed twin of
 /// [`gpu_gemm_bi_backward_dx_raw`]: `dX[B,K] = dY[B,N] @ W^T[N,K]` with
-/// bf16/f16 A,B,C and f32 master accumulate (no TC, PEDANTIC).
+/// bf16/f16 A,B,C and f32 accumulation.
 ///
 /// Layout mirrors the f32 twin exactly (OP_T on W, OP_N on dY,
 /// m=n_in, n=batch, k=n_out, lda=n_out, ldb=n_out, ldc=n_in,
@@ -394,9 +400,9 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
 ///
 /// `dy.dtype`, `w.dtype`, and `dx.dtype` MUST match (cuBLAS GemmEx
 /// requires homogeneous A/B/C dtype for this compute mode). Pass all
-/// three via `TypedPtr`. Compute type: `CUBLAS_COMPUTE_32F_PEDANTIC`
-/// (true f32 accumulate, same reasoning as the dW twin — see commit
-/// 61325b3 for the 1.4b regression that motivates disabling TF32).
+/// three via `TypedPtr`. Vendor compute follows [`super::GemmMode`]: ordinary
+/// f32 compute in `CublasFast` and pedantic f32 compute in
+/// `CublasPedantic`.
 pub fn gpu_gemm_ex_backward_dx_typed(
     ctx: &GpuCtx,
     dx: TypedPtr,
@@ -406,13 +412,14 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     debug_assert_eq!(
         dy.dtype, w.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
     );
     debug_assert_eq!(
         dx.dtype, dy.dtype,
-        "typed dX GEMM: dx.dtype must match dy/w for PEDANTIC path"
+        "typed dX GEMM: dx.dtype must match dy/w"
     );
     // Hard assert - same determinism rationale as the dW twin above.
     assert!(
@@ -444,7 +451,7 @@ pub fn gpu_gemm_ex_backward_dx_typed(
             dx.ptr as *mut c_void,
             dx.dtype.cuda_data_type(),
             n_in as c_int,
-            effective_compute(ctx, dy.dtype),
+            effective_compute(ctx, dy.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
         .map_err(|e| format!("cuBLAS gemm_ex backward dX typed failed: {e:?}"))?;
@@ -621,6 +628,7 @@ pub fn gemm_bi_forward_typed(
     bias_ptr: cudarc::driver::sys::CUdeviceptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let mut observer = NoPhysicalObserver;
     gemm_bi_forward_typed_in(ctx, y, x, w, bias_ptr, dims, &mut observer).map(drop)
 }
@@ -790,6 +798,7 @@ pub fn gemm_bi_backward_dw_typed(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let mut observer = NoPhysicalObserver;
     gemm_bi_backward_dw_typed_in(ctx, dw_ptr, dy, x_saved, dims, &mut observer).map(drop)
 }
@@ -943,6 +952,7 @@ pub fn gemm_bi_backward_dx_typed(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let mut observer = NoPhysicalObserver;
     gemm_bi_backward_dx_typed_in(ctx, dx, dy, w, dims, &mut observer).map(drop)
 }
@@ -2211,6 +2221,7 @@ pub fn gpu_gemm_bi_backward_grad_raw(
     w_ptr: cudarc::driver::sys::CUdeviceptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let (dw, db) = grads;
     let (batch, n_in, n_out) = dims;
     gpu_gemm_bi_backward_dw_grad(ctx, dw, dy, x_saved, batch, n_in, n_out)?;
@@ -2247,6 +2258,7 @@ pub fn gpu_gemm_forward_dispatch(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     match w_dtype {
         WeightDtype::F32 => gpu_gemm_bi_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
         WeightDtype::F16 | WeightDtype::Bf16 => {
@@ -2305,6 +2317,7 @@ pub fn gpu_gemm_bi_tied_lm_head_raw(
     d_model: usize,
     vocab_padded: usize,
 ) -> Result<(), String> {
+    ctx.ensure_vendor_gemm("gpu_gemm_bi_tied_lm_head_raw")?;
     gpu_gemm_bi_tied_lm_head_blas(
         &ctx.blas,
         logits_ptr,
@@ -2355,6 +2368,37 @@ pub fn gpu_gemm_bi_tied_lm_head_blas(
 #[cfg(test)]
 mod physical_graph_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn context_aware_vendor_compute_maps_all_dtypes() {
+        use super::super::context::GemmMode;
+        use super::super::device::GpuDevice;
+        use cudarc::cublas::sys::cublasComputeType_t;
+
+        let device = GpuDevice::new(0).expect("CUDA device");
+        let ctx = GpuCtx::new(&device).expect("GPU context");
+        for dtype in [WeightDtype::F32, WeightDtype::F16, WeightDtype::Bf16] {
+            assert!(effective_compute(&ctx, dtype).is_err(), "{dtype:?}");
+        }
+        ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
+        for dtype in [WeightDtype::F32, WeightDtype::F16, WeightDtype::Bf16] {
+            assert_eq!(
+                effective_compute(&ctx, dtype).unwrap(),
+                cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                "{dtype:?}"
+            );
+        }
+        ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
+        for dtype in [WeightDtype::F32, WeightDtype::F16, WeightDtype::Bf16] {
+            assert_eq!(
+                effective_compute(&ctx, dtype).unwrap(),
+                cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
+                "{dtype:?}"
+            );
+        }
+    }
+
     #[test]
     fn f32_physical_ranges_omit_unread_zero_reduction_operands() {
         use super::super::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
@@ -3031,7 +3075,16 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     dtype: WeightDtype,
     dims: TiedLmDims,
 ) -> Result<(), String> {
-    gpu_gemm_ex_tied_lm_head_blas(&ctx.blas, logits_ptr, temporal_ptr, embed_ptr, dtype, dims)
+    let compute = effective_compute(ctx, dtype)?;
+    gpu_gemm_ex_tied_lm_head_with_compute(
+        &ctx.blas,
+        logits_ptr,
+        temporal_ptr,
+        embed_ptr,
+        dtype,
+        dims,
+        compute,
+    )
 }
 
 /// No-context twin of `gpu_gemm_ex_tied_lm_head_raw` — blas-only variant.
@@ -3042,6 +3095,26 @@ pub fn gpu_gemm_ex_tied_lm_head_blas(
     embed_ptr: cudarc::driver::sys::CUdeviceptr,
     dtype: WeightDtype,
     dims: TiedLmDims,
+) -> Result<(), String> {
+    gpu_gemm_ex_tied_lm_head_with_compute(
+        blas,
+        logits_ptr,
+        temporal_ptr,
+        embed_ptr,
+        dtype,
+        dims,
+        dtype.compute_type(),
+    )
+}
+
+fn gpu_gemm_ex_tied_lm_head_with_compute(
+    blas: &cudarc::cublas::CudaBlas,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    temporal_ptr: cudarc::driver::sys::CUdeviceptr,
+    embed_ptr: cudarc::driver::sys::CUdeviceptr,
+    dtype: WeightDtype,
+    dims: TiedLmDims,
+    compute: cudarc::cublas::sys::cublasComputeType_t,
 ) -> Result<(), String> {
     let TiedLmDims {
         batch,
@@ -3069,7 +3142,7 @@ pub fn gpu_gemm_ex_tied_lm_head_blas(
             logits_ptr as *mut c_void,
             cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
             vocab_padded as c_int,
-            dtype.compute_type(), // blas-only twin: no ctx, stays PEDANTIC (fast_gemm covers ctx paths)
+            compute,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
         .map_err(|e| format!("cuBLAS tied gemm_ex failed: {e:?}"))?;
@@ -3079,8 +3152,9 @@ pub fn gpu_gemm_ex_tied_lm_head_blas(
 
 /// Mixed-precision GEMM forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
-/// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.
-/// Compute type is f32 (CUBLAS_COMPUTE_32F) — f32 accumulation regardless of input dtype.
+/// Inputs X and W may be f32, f16, or bf16. Output Y is always f32. Vendor
+/// compute follows [`super::GemmMode`]: ordinary f32 compute in `CublasFast`
+/// and pedantic f32 compute in `CublasPedantic`.
 ///
 /// For `WeightDtype::F32`, this is mathematically identical to `gpu_gemm_bi_forward_raw`
 /// (callers should prefer sgemm path for f32 to avoid gemmEx overhead).
@@ -3098,6 +3172,7 @@ pub fn gpu_gemm_ex_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     gpu_gemm_typed_forward_raw(
         ctx,
         TypedPtr {
@@ -3114,8 +3189,8 @@ pub fn gpu_gemm_ex_forward_raw(
 /// Fully typed GEMM forward: `C[B,N] = A[B,K] @ W[K,N] + bias[N]`.
 ///
 /// All three operand dtypes are independent (`a.dtype`, `w.dtype`, `c.dtype`).
-/// Compute type is f32 (CUBLAS_COMPUTE_32F) regardless of I/O dtypes —
-/// tensor-core accumulation stays f32 for numerical stability.
+/// This helper has no [`GpuCtx`], so it uses the dtype's fixed cuBLAS compute
+/// type rather than a context-selected [`super::GemmMode`].
 ///
 /// Bias (if provided) is always stored f32 (Mamba convention) and is
 /// broadcast into C via the typed `bias_broadcast_<c.dtype>` kernel,
@@ -3155,7 +3230,7 @@ pub fn gpu_gemm_typed_raw_no_bias(
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
             n_out as c_int,
-            w.dtype.compute_type(), // blas-only twin: no ctx, stays PEDANTIC (fast_gemm covers ctx paths)
+            w.dtype.compute_type(), // No context is available to select a GemmMode.
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
         .map_err(|e| format!("cuBLAS gemm_ex typed (no-bias) failed: {e:?}"))?;
@@ -3259,6 +3334,7 @@ pub fn gemm_bi_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     super::gemm_bi_inference::inference_forward(ctx, c, x, w, bias_ptr, dims).map(|_| ())
 }
 
@@ -3366,6 +3442,7 @@ pub fn gpu_gemm_typed_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
     let (batch, n_in, n_out) = dims;
 
     // Dispatch:
@@ -3384,9 +3461,9 @@ pub fn gpu_gemm_typed_forward_raw(
 
     // The matvec kernel handles any M ≥ 1 via a 2D grid (CTA per
     // (m_row, col_chunk)) and gives strict cross-batch bit-identity.
-    // Opt-in only — default is cuBLAS gemv for maximum throughput.
-    // Enable via `ctx.set_batch_invariant(true)` or the
-    // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
+    // Selected by `GemmMode::Deterministic`; the environment default is also
+    // deterministic. The deprecated batch-invariant environment variable is
+    // accepted only as a legacy adapter.
     // Typed gemm_bi, homogeneous bf16/f16 operand triples only.
     // Routing:
     //   - TC tier ON, N >= 32: the forward tile ladder
@@ -3445,9 +3522,8 @@ pub fn gpu_gemm_typed_forward_raw(
     }
 
     if ctx.batch_invariant() {
-        // No deterministic kernel covers this operand triple; falling
-        // through would silently run non-PEDANTIC cuBLAS in the build
-        // that claims determinism.
+        // No deterministic kernel covers this operand triple. Do not cross
+        // the vendor boundary while deterministic mode is selected.
         return Err(format!(
             "batch-invariant GEMM: no deterministic kernel for operand dtypes \
              a={:?} b={:?} c={:?} at m={batch} - mixed a/b dtypes have no \
@@ -3496,9 +3572,8 @@ pub fn gpu_gemm_typed_forward_raw(
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
             n_out as c_int,
-            // Compute type derives from W dtype (f32 for F32 weights, f32 for
-            // bf16/f16 — all our paths use CUBLAS_COMPUTE_32F accumulate).
-            effective_compute(ctx, w.dtype),
+            // Compute type follows the context's vendor mode for every dtype.
+            effective_compute(ctx, w.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
         .map_err(|e| format!("cuBLAS gemm_ex typed failed: {e:?}"))?;
