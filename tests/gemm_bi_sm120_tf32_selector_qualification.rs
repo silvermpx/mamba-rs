@@ -30,12 +30,13 @@ const DISCOVERY_WINDOWS: usize = 21;
 const FINAL_WINDOWS: usize = 101;
 const TARGET_WINDOW_MS: f64 = 5.0;
 const WARMUP_LAUNCHES: usize = 128;
+const POST_QUIET_PAIRED_WARMUP_WINDOWS: usize = 4;
 const CALIBRATION_PROBE_LAUNCHES: usize = 16;
 const MAX_WINDOW_LAUNCHES: usize = 1_000_000;
 const MIN_MEDIAN_SPEEDUP: f64 = 1.01;
 const MIN_P05_SPEEDUP: f64 = 1.0;
 const CORPUS_SALT: u64 = 0x1205_32a1;
-const SCHEMA: &str = "MambaBiSm120Tf32SelectorQualificationV1";
+const SCHEMA: &str = "MambaBiSm120Tf32SelectorQualificationV2";
 const FIXED_SPLITK_SCRATCH_ELEMENTS: usize = 1 << 23;
 const DISPATCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs");
 const TEST_SOURCE: &str = include_str!("gemm_bi_sm120_tf32_selector_qualification.rs");
@@ -203,7 +204,7 @@ const CELLS: [Cell; 18] = [
     },
 ];
 
-const PROJECTION_CELLS: [Cell; 45] = [
+const PROJECTION_CELLS: [Cell; 46] = [
     Cell {
         id: "nn_d768_in_proj",
         op: ResolvedGemmOp::Nn,
@@ -394,6 +395,14 @@ const PROJECTION_CELLS: [Cell; 45] = [
         id: "tn_split_candidate",
         op: ResolvedGemmOp::Tn,
         dims: (128, 8192, 128),
+        alpha: 1.0,
+        beta: 1.0,
+        bias: false,
+    },
+    Cell {
+        id: "tn_m8192_k128_n128",
+        op: ResolvedGemmOp::Tn,
+        dims: (8192, 128, 128),
         alpha: 1.0,
         beta: 1.0,
         bias: false,
@@ -769,6 +778,25 @@ fn paired_samples(
         OrderSamples { pairs: ab },
         OrderSamples { pairs: ba },
     ))
+}
+
+fn paired_warmup(
+    candidate: &mut QualifiedPhysicalLaunch<'_>,
+    candidate_ctx: &GpuCtx,
+    scalar: &mut QualifiedPhysicalLaunch<'_>,
+    scalar_ctx: &GpuCtx,
+    path: Path,
+    iterations: usize,
+) -> Result<(), String> {
+    candidate.seed_f32_operands(candidate_ctx, CORPUS_SALT)?;
+    scalar.seed_f32_operands(scalar_ctx, CORPUS_SALT)?;
+    for _ in 0..POST_QUIET_PAIRED_WARMUP_WINDOWS {
+        measure(candidate, candidate_ctx, path, iterations)?;
+        measure(scalar, scalar_ctx, path, iterations)?;
+        measure(scalar, scalar_ctx, path, iterations)?;
+        measure(candidate, candidate_ctx, path, iterations)?;
+    }
+    Ok(())
 }
 
 fn percentile(values: &[f64], fraction: f64) -> Result<f64, String> {
@@ -1725,6 +1753,8 @@ fn completion_record(
             "\"cell_records\":{},\"cell_records_sha256\":\"{}\",",
             "\"discovery_windows_per_order\":{},\"final_windows_per_order\":{},",
             "\"target_window_ms\":{},\"warmup_launches_per_arm\":{},",
+            "\"post_quiet_paired_warmup_windows\":{},",
+            "\"post_quiet_paired_warmup_order\":\"candidate-scalar-scalar-candidate\",",
             "\"device_cc\":[{},{}],\"multiprocessor_count\":{},",
             "\"device_target\":\"{}\",\"nvrtc_target\":\"{}\",",
             "\"driver_api_version\":{},\"driver_build_digest\":\"{}\",",
@@ -1737,6 +1767,7 @@ fn completion_record(
         FINAL_WINDOWS,
         TARGET_WINDOW_MS,
         WARMUP_LAUNCHES,
+        POST_QUIET_PAIRED_WARMUP_WINDOWS,
         identity.compute_capability.0,
         identity.compute_capability.1,
         identity.multiprocessor_count,
@@ -1871,6 +1902,14 @@ fn run_cell(
             let scalar_iterations = calibrate(&mut scalar_gate, &scalar_ctx, path)?;
             let window_iterations = candidate_iterations.max(scalar_iterations);
             let timed_preflight = quiet.require_cohort(&format!("{label}/{path_name}/timed"))?;
+            paired_warmup(
+                &mut candidate,
+                &candidate_ctx,
+                &mut scalar_gate,
+                &scalar_ctx,
+                path,
+                window_iterations,
+            )?;
             let discovery_samples = paired_samples(
                 &mut candidate,
                 &candidate_ctx,
@@ -2254,6 +2293,19 @@ fn qualification_plan_is_exact() {
 }
 
 #[test]
+fn tn_m8192_k128_n128_maps_to_exact_tn_key() {
+    let cell = PROJECTION_CELLS
+        .iter()
+        .find(|cell| cell.id == "tn_m8192_k128_n128")
+        .unwrap();
+    assert_eq!(cell.op, ResolvedGemmOp::Tn);
+    assert_eq!(cell.dims, (8192, 128, 128));
+    let (m, k, n) = cell.dims;
+    assert_eq!((k, n, m), (128, 128, 8192));
+    assert!(!cell.bias);
+}
+
+#[test]
 fn paired_percentiles_and_speed_gate_are_fail_closed() {
     let values = (1..=202).map(|value| value as f64).collect::<Vec<_>>();
     assert_eq!(percentile(&values, 0.05).unwrap(), 11.0);
@@ -2299,6 +2351,7 @@ fn runtime_qualification_requires_gpu_quiet_gates() {
     for required in [
         "const TARGET_WINDOW_MS: f64 = 5.0;",
         "WARMUP_LAUNCHES",
+        "const POST_QUIET_PAIRED_WARMUP_WINDOWS: usize = 4;",
         "calibrate",
         "ms * 1000.0 / iterations as f64",
         "check_numeric_accuracy",
@@ -2309,6 +2362,50 @@ fn runtime_qualification_requires_gpu_quiet_gates() {
             "selector qualification lost suite contract {required}"
         );
     }
+    let timed_preflight = implementation
+        .find("let timed_preflight = quiet.require_cohort")
+        .expect("timed quiet preflight");
+    let paired_warmup = implementation[timed_preflight..]
+        .find("paired_warmup(")
+        .map(|offset| timed_preflight + offset)
+        .expect("post-quiet paired warmup");
+    let discovery_samples = implementation[paired_warmup..]
+        .find("let discovery_samples = paired_samples")
+        .map(|offset| paired_warmup + offset)
+        .expect("recorded discovery samples");
+    assert!(timed_preflight < paired_warmup);
+    assert!(paired_warmup < discovery_samples);
+}
+
+#[test]
+fn post_quiet_paired_warmup_order_is_fixed_and_symmetric() {
+    assert_eq!(POST_QUIET_PAIRED_WARMUP_WINDOWS, 4);
+    let start = TEST_SOURCE
+        .find("fn paired_warmup(")
+        .expect("paired warmup helper");
+    let tail = &TEST_SOURCE[start..];
+    let end = tail
+        .find("\nfn percentile(")
+        .expect("function following paired warmup");
+    let helper = &tail[..end];
+    let first_candidate = helper
+        .find("measure(candidate, candidate_ctx, path, iterations)?;")
+        .expect("first candidate warmup");
+    let first_scalar = helper[first_candidate + 1..]
+        .find("measure(scalar, scalar_ctx, path, iterations)?;")
+        .map(|offset| first_candidate + 1 + offset)
+        .expect("first scalar warmup");
+    let second_scalar = helper[first_scalar + 1..]
+        .find("measure(scalar, scalar_ctx, path, iterations)?;")
+        .map(|offset| first_scalar + 1 + offset)
+        .expect("second scalar warmup");
+    let second_candidate = helper[first_scalar + 1..]
+        .find("measure(candidate, candidate_ctx, path, iterations)?;")
+        .map(|offset| first_scalar + 1 + offset)
+        .expect("second candidate warmup");
+    assert!(first_candidate < first_scalar);
+    assert!(first_scalar < second_scalar);
+    assert!(second_scalar < second_candidate);
 }
 
 #[test]
@@ -2414,15 +2511,18 @@ fn split_candidates_that_exceed_the_fixed_workspace_are_not_timed() {
 #[test]
 fn completion_schema_is_stable_and_machine_readable() {
     let record = format!(
-        "{{\"schema\":\"{SCHEMA}\",\"cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"passed\":true}}",
+        "{{\"schema\":\"{SCHEMA}\",\"cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"post_quiet_paired_warmup_windows\":{POST_QUIET_PAIRED_WARMUP_WINDOWS},\"post_quiet_paired_warmup_order\":\"candidate-scalar-scalar-candidate\",\"passed\":true}}",
         CELLS.len()
     );
     assert_eq!(
         record,
         concat!(
-            "{\"schema\":\"MambaBiSm120Tf32SelectorQualificationV1\",",
+            "{\"schema\":\"MambaBiSm120Tf32SelectorQualificationV2\",",
             "\"cells\":18,\"discovery_windows_per_order\":21,",
-            "\"final_windows_per_order\":101,\"passed\":true}"
+            "\"final_windows_per_order\":101,",
+            "\"post_quiet_paired_warmup_windows\":4,",
+            "\"post_quiet_paired_warmup_order\":\"candidate-scalar-scalar-candidate\",",
+            "\"passed\":true}"
         )
     );
 }

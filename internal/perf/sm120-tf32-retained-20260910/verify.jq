@@ -28,9 +28,14 @@ def actual_winner:
 and ($rows|map(.cell_id)|unique|length)==$count
 and ($ends|length)>0 and ($ends|map(.cell_records)|add)==$count
 and all($ends[];.passed and .discovery_windows_per_order==21 and .final_windows_per_order==101
- and .device_cc==[12,0] and .multiprocessor_count==170)
+ and .device_cc==[12,0] and .multiprocessor_count==170
+ and (if .schema=="MambaBiSm120Tf32SelectorQualificationV2" then
+  .post_quiet_paired_warmup_windows==4
+  and .post_quiet_paired_warmup_order=="candidate-scalar-scalar-candidate"
+ else .schema=="MambaBiSm120Tf32SelectorQualificationV1" end))
 and all($rows[];
- .qualified and .epilogue=={alpha:1,beta:(if .op=="tn" then 1 else 0 end),bias:false}
+ (.schema=="MambaBiSm120Tf32SelectorQualificationV1" or .schema=="MambaBiSm120Tf32SelectorQualificationV2")
+ and .qualified and .epilogue=={alpha:1,beta:(if .op=="tn" then 1 else 0 end),bias:false}
  and .specialized_identity==$rows[0].specialized_identity
  and .portable_identity==$rows[0].portable_identity
  and .specialized_identity.source_digest=="9d47ef89d9e4e301713649e3abcb473a36fa906fb3a10fbd489a20f5cc7176af"
