@@ -35,7 +35,7 @@ use crate::mamba_ssm::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1231,7 +1231,7 @@ impl Mamba3Prefill {
                 b.arg(tgt.temporal_work.inner());
                 b.arg(&rows);
                 b.arg(&cols);
-                unsafe { b.launch(grid_1d(dm)) }
+                unsafe { b.launch(grid_colsum(dm)) }
                     .map_err(|e| format!("m3 prefill pooled colsum: {e:?}"))?;
             } else {
                 // Segmented: each sample sums over its OWN seq_len rows,

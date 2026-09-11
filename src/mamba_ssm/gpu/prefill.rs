@@ -31,7 +31,7 @@ use super::graph_capture::{
 };
 use super::inference::GpuInferenceState;
 use super::kernel_identity::CapturedGemmGraphPlan;
-use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
+use super::launch::{grid_1d, grid_colsum, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
@@ -314,7 +314,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
     builder.arg(&dy_ptr);
     builder.arg(&b_i);
     builder.arg(&n_i);
-    unsafe { builder.launch(grid_1d(dims.d_model)) }
+    unsafe { builder.launch(grid_colsum(dims.d_model)) }
         .map_err(|e| format!("prefill_pooled_sum colsum: {e:?}"))?;
     Ok(())
 }

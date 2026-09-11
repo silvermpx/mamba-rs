@@ -67,43 +67,64 @@ extern "C" __global__ void bias_broadcast(
     y[idx] = bias[j];
 }
 
-// Column sum over the rows, one thread per column. The adds stay one
-// serial chain in ascending row order (the sum's bits depend on it); the
-// loads are issued eight at a time so the chain no longer waits on each
-// load in turn. On the narrow columns (a few dozen threads walking ten
-// thousand rows) that wait was the whole kernel.
-extern "C" __global__ void colsum_accumulate(
+// Column sum over the rows. Each column's sum is one serial chain of adds
+// in ascending row order held by one owning thread, so the bits are those
+// of the plain per-column walk; what changed is how the rows reach it. A
+// block covers COLSUM_COLS columns with COLSUM_THREADS threads that stage
+// a tile of COLSUM_ROWS rows through shared memory, four rows per thread
+// with the next tile's loads in flight while the owners add the current
+// one. The walk no longer waits on one load at a time, and a launch of a
+// few hundred columns fills a hundred blocks instead of three.
+#define COLSUM_COLS 8
+#define COLSUM_THREADS 256
+#define COLSUM_ROWS 128
+extern "C" __global__ __launch_bounds__(COLSUM_THREADS)
+void colsum_accumulate(
     float* db, const float* dy,
     int batch, int n_out
 ) {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= n_out) return;
-    const float* col = dy + j;
-    long long stride = n_out;
+    constexpr int TROWS = COLSUM_THREADS / COLSUM_COLS;   // rows a tile step covers
+    constexpr int PER_THREAD = COLSUM_ROWS / TROWS;       // rows per thread per tile
+    __shared__ float tile[2][COLSUM_ROWS][COLSUM_COLS];
+    const int tc = threadIdx.x % COLSUM_COLS;
+    const int tr = threadIdx.x / COLSUM_COLS;
+    const int j = blockIdx.x * COLSUM_COLS + tc;
+    const bool live = j < n_out;
+    const int n_tiles = (batch + COLSUM_ROWS - 1) / COLSUM_ROWS;
     float sum = 0.0f;
-    int b = 0;
-    for (; b + 8 <= batch; b += 8) {
-        float s0 = col[(long long)(b + 0) * stride];
-        float s1 = col[(long long)(b + 1) * stride];
-        float s2 = col[(long long)(b + 2) * stride];
-        float s3 = col[(long long)(b + 3) * stride];
-        float s4 = col[(long long)(b + 4) * stride];
-        float s5 = col[(long long)(b + 5) * stride];
-        float s6 = col[(long long)(b + 6) * stride];
-        float s7 = col[(long long)(b + 7) * stride];
-        sum += s0;
-        sum += s1;
-        sum += s2;
-        sum += s3;
-        sum += s4;
-        sum += s5;
-        sum += s6;
-        sum += s7;
+    _Pragma("unroll")
+    for (int q = 0; q < PER_THREAD; q++) {
+        int r = tr + q * TROWS;
+        tile[0][r][tc] = (live && r < batch)
+            ? dy[(long long)r * n_out + j] : 0.0f;
     }
-    for (; b < batch; b++) {
-        sum += col[(long long)b * stride];
+    __syncthreads();
+    for (int k = 0; k < n_tiles; k++) {
+        const int buf = k & 1;
+        // The next tile's rows are requested before this tile's adds and
+        // stored after them, into the buffer the adds do not read.
+        float next[PER_THREAD];
+        _Pragma("unroll")
+        for (int q = 0; q < PER_THREAD; q++) {
+            int r = (k + 1) * COLSUM_ROWS + tr + q * TROWS;
+            next[q] = (k + 1 < n_tiles && live && r < batch)
+                ? dy[(long long)r * n_out + j] : 0.0f;
+        }
+        if (tr == 0) {
+            const int rows = min(COLSUM_ROWS, batch - k * COLSUM_ROWS);
+            _Pragma("unroll 16")
+            for (int r = 0; r < rows; r++) {
+                sum += tile[buf][r][tc];
+            }
+        }
+        _Pragma("unroll")
+        for (int q = 0; q < PER_THREAD; q++) {
+            int r = tr + q * TROWS;
+            tile[buf ^ 1][r][tc] = next[q];
+        }
+        __syncthreads();
     }
-    db[j] += sum;
+    if (tr == 0 && live) db[j] += sum;
 }
 
 // Segmented column sum: out[s][j] = sum_t src[s][t][j].

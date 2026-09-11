@@ -78,6 +78,18 @@ pub fn grid_reduce(total_elements: usize) -> LaunchConfig {
     grid_1d(total_elements)
 }
 
+/// Launch config for `colsum_accumulate`: one block of COLSUM_THREADS per
+/// COLSUM_COLS columns (mirrors the defines in elementwise.cu).
+pub fn grid_colsum(n_out: usize) -> LaunchConfig {
+    const COLSUM_COLS: usize = 8;
+    const COLSUM_THREADS: u32 = 256;
+    LaunchConfig {
+        grid_dim: (n_out.div_ceil(COLSUM_COLS) as u32, 1, 1),
+        block_dim: (COLSUM_THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// Launch config for the deterministic column tree-reduce used by the
 /// batch-invariant SGEMM bias/colsum path.
 ///

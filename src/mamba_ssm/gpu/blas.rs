@@ -20,7 +20,7 @@ use super::kernel_identity::{
     enqueue_with_physical_observation, finish_recording_physical_observer,
     resolve_physical_launch_observation,
 };
-use super::launch::grid_1d;
+use super::launch::{grid_1d, grid_colsum};
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
@@ -2367,7 +2367,7 @@ pub fn gpu_gemm_bi_backward_grad_raw(
         builder.arg(&dy_ptr);
         builder.arg(&b_i);
         builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(n_out)) }
+        unsafe { builder.launch(grid_colsum(n_out)) }
             .map_err(|e| format!("colsum_accumulate_grad_raw: {:?}", e))?;
     }
 

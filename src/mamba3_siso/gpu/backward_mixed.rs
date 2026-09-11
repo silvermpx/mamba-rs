@@ -28,7 +28,7 @@ use crate::mamba_ssm::gpu::blas::{
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
 };
@@ -339,7 +339,7 @@ fn gpu_backward_mamba3_layer_mixed(
             builder.arg(sc.d_norm_gate_w.inner());
             builder.arg(&bt_i);
             builder.arg(&n_i);
-            unsafe { builder.launch(grid_1d(di)) }
+            unsafe { builder.launch(grid_colsum(di)) }
                 .map_err(|e| format!("colsum d_norm_gate_w mixed: {:?}", e))?;
         }
     } else {
@@ -597,7 +597,7 @@ fn gpu_backward_mamba3_layer_mixed(
         cb.arg(sc.d_c_pre_rope.inner());
         cb.arg(&bt_i);
         cb.arg(&nhds_i);
-        unsafe { cb.launch(grid_1d(nh * ds)) }
+        unsafe { cb.launch(grid_colsum(nh * ds)) }
             .map_err(|e| format!("colsum d_c_bias mixed: {:?}", e))?;
     }
     {
@@ -608,7 +608,7 @@ fn gpu_backward_mamba3_layer_mixed(
         cb.arg(sc.d_b_pre_rope.inner());
         cb.arg(&bt_i);
         cb.arg(&nhds_i);
-        unsafe { cb.launch(grid_1d(nh * ds)) }
+        unsafe { cb.launch(grid_colsum(nh * ds)) }
             .map_err(|e| format!("colsum d_b_bias mixed: {:?}", e))?;
     }
 
@@ -745,7 +745,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_dd_dt.inner());
         builder.arg(&bt_i);
         builder.arg(&nh_i);
-        unsafe { builder.launch(grid_1d(nh)) }
+        unsafe { builder.launch(grid_colsum(nh)) }
             .map_err(|e| format!("colsum d_dt_bias mixed: {:?}", e))?;
     }
 
@@ -835,7 +835,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_b_norm_w.inner());
         builder.arg(&rows);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(ds)) }
+        unsafe { builder.launch(grid_colsum(ds)) }
             .map_err(|e| format!("colsum d_b_norm_w mixed: {:?}", e))?;
     }
 
@@ -871,7 +871,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_c_norm_w.inner());
         builder.arg(&rows);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(ds)) }
+        unsafe { builder.launch(grid_colsum(ds)) }
             .map_err(|e| format!("colsum d_c_norm_w mixed: {:?}", e))?;
     }
 

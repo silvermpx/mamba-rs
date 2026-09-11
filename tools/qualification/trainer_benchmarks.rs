@@ -875,6 +875,60 @@ fn bench_scan_kernels_isolated() {
     );
 }
 
+/// The column-sum family in isolation at the production row count: the
+/// bias/parameter column sums over B*T rows at the widths the M3 backward
+/// launches them (16, 384, 768 columns) and the Rule-B axis-0 reducer.
+#[test]
+#[ignore]
+fn bench_colsum_kernels_isolated() {
+    use cudarc::driver::PushKernelArg;
+    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba_ssm::gpu::launch::{grid_col_tree_reduce, grid_colsum};
+
+    let bt = 8usize * 1300;
+    let device = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
+    let k = &ctx.kernels;
+    let mut lines = Vec::new();
+    for n_out in [16usize, 384, 768] {
+        let src = GpuBuffer::zeros(&ctx.stream, bt * n_out).unwrap();
+        let dst = GpuBuffer::zeros(&ctx.stream, n_out).unwrap();
+        ctx.stream.synchronize().unwrap();
+        let bt_i = bt as i32;
+        let n_i = n_out as i32;
+        let colsum = |ctx: &GpuCtx| {
+            let mut bld = ctx.stream.launch_builder(&k.colsum_accumulate);
+            let d = dst.cached_ptr();
+            let s = src.cached_ptr();
+            bld.arg(&d);
+            bld.arg(&s);
+            bld.arg(&bt_i);
+            bld.arg(&n_i);
+            unsafe { bld.launch(grid_colsum(n_out)) }.unwrap();
+        };
+        let accumulate: i32 = 1;
+        let axis0 = |ctx: &GpuCtx| {
+            let mut bld = ctx.stream.launch_builder(&k.reduce_sum_axis0);
+            let d = dst.cached_ptr();
+            let s = src.cached_ptr();
+            bld.arg(&d);
+            bld.arg(&s);
+            bld.arg(&bt_i);
+            bld.arg(&n_i);
+            bld.arg(&accumulate);
+            unsafe { bld.launch(grid_col_tree_reduce(n_out)) }.unwrap();
+        };
+        let colsum_ms = timed::timed(&ctx, 20, || colsum(&ctx));
+        let axis0_ms = timed::timed(&ctx, 20, || axis0(&ctx));
+        lines.push(format!(
+            "n_out={n_out}: colsum_accumulate={colsum_ms:.4} reduce_sum_axis0={axis0_ms:.4}"
+        ));
+    }
+    println!("colsum isolated (rows {bt}): {}", lines.join(" | "));
+}
+
 /// The rest of the backward's suspects, isolated at the
 /// production shape (one layer each).
 #[test]
