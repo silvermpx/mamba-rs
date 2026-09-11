@@ -705,7 +705,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let y = layer_acts.y.cached_ptr();
             let gp = layer_acts.proj.cached_ptr();
             let w = super::launch::vec8_width(dt.size_bytes());
-            let vec = di % w == 0 && super::launch::vec8_ok(bt * di, dt.size_bytes(), &[g, y, gp]);
+            let vec = di.is_multiple_of(w)
+                && super::launch::vec8_ok(bt * di, dt.size_bytes(), &[g, y, gp]);
             let (kern, count) = if vec {
                 (k.gate_mul_silu_v_typed.get(dt), bt * di / w)
             } else {
