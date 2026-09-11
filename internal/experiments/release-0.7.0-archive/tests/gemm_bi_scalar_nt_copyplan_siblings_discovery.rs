@@ -388,11 +388,11 @@ mod frozen_receipt_regression {
 }
 
 #[cfg(feature = "cuda")]
-#[path = "common/gpu_quiet.rs"]
-mod gpu_quiet;
-#[cfg(feature = "cuda")]
 #[path = "support/fixed_full_mantissa.rs"]
 mod full_mantissa;
+#[cfg(feature = "cuda")]
+#[path = "common/gpu_quiet.rs"]
+mod gpu_quiet;
 
 #[cfg(feature = "cuda")]
 mod cuda_suite {
@@ -718,7 +718,29 @@ mod cuda_suite {
         unsafe { capture_into_graph(&ctx.stream, || launch(ctx, fixed, f, arm)) }
     }
 
+    /// False only while the pre-admission qualification runs: until the
+    /// cohort is populated the AUTO arm is the prior tiled kernel, not the
+    /// transpose-plus-copy-plan pipeline the admitted route must show.
+    static AUTO_ADMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
     fn graph_identity(graph: &CudaGraph, f: &Fixture, arm: Arm) -> Result<(), String> {
+        graph_identity_with(
+            graph,
+            f,
+            arm,
+            AUTO_ADMITTED.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Before admission the AUTO arm is still the prior tiled kernel, so only
+    /// the candidate's own graph is held to the exact transpose-plus-copy-plan
+    /// pipeline; after admission AUTO must be that pipeline too.
+    fn graph_identity_with(
+        graph: &CudaGraph,
+        f: &Fixture,
+        arm: Arm,
+        admitted: bool,
+    ) -> Result<(), String> {
         unsafe {
             let mut count = 0;
             if sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count)
@@ -742,7 +764,7 @@ mod cuda_suite {
             }
             let mut identities = Vec::new();
             let exact_pipeline =
-                arm == Arm::Candidate || (arm == Arm::Auto && CELLS.contains(&f.cell));
+                arm == Arm::Candidate || (arm == Arm::Auto && admitted && CELLS.contains(&f.cell));
             let mut pipeline_nodes = Vec::new();
             for node in nodes {
                 let mut ty = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
@@ -1446,6 +1468,7 @@ mod cuda_suite {
         if cfg!(debug_assertions) {
             return Err("pre-admission qualification requires --release".into());
         }
+        AUTO_ADMITTED.store(false, std::sync::atomic::Ordering::Relaxed);
         let quiet = gpu_quiet::QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("nt-copyplan-siblings-pre-admission/pre")?;
         let device = GpuDevice::new(0)?;

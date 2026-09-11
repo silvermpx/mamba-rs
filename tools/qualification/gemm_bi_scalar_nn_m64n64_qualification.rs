@@ -61,6 +61,17 @@ fn ada_copyplan_screen_cells() -> Vec<AdaShortScreenCell> {
         .collect()
 }
 
+/// The deep cell the Triad family also hands to the copy plan: a 4096-row
+/// product with a 3072-long reduction, screened on its own after the three
+/// retained cells.
+fn ada_copyplan_deep_cells() -> Vec<AdaShortScreenCell> {
+    vec![AdaShortScreenCell {
+        id: "large_deep",
+        dims: (4_096, 3_072, 1_536),
+        symbol: FIXED_COPYPLAN_SYMBOL,
+    }]
+}
+
 fn ada_candidate_shared(symbol: &str) -> Result<(usize, usize), String> {
     match symbol {
         PRODUCTION_SYMBOL => Ok((0, 17_408)),
@@ -381,9 +392,10 @@ mod cuda_qualification {
 
     use super::{
         AdaShortScreenCell, FIXED_COPYPLAN_SYMBOL, GENERIC_SYMBOL, LiveCopyPlanStage,
-        PRODUCTION_SYMBOL, ada_candidate_shared, ada_copyplan_screen_cells,
-        ada_live_toolkit_supported, ada_short_screen_cells, ada_short_screen_retains,
-        compose_cuda_source, copyplan_epilogue_supported, fixed_full_mantissa,
+        PRODUCTION_SYMBOL, ada_candidate_shared, ada_copyplan_deep_cells,
+        ada_copyplan_screen_cells, ada_live_toolkit_supported, ada_short_screen_cells,
+        ada_short_screen_retains, compose_cuda_source, copyplan_epilogue_supported,
+        fixed_full_mantissa,
     };
 
     const GUARD_ELEMENTS: usize = 32;
@@ -1951,16 +1963,31 @@ mod cuda_qualification {
     #[test]
     #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Fixed/AUTO/Fast comparison"]
     fn ada_live_fixed_copyplan_vs_auto_and_fast_three_cell_once7() -> Result<(), String> {
-        run_live_copyplan_comparison(LiveCopyPlanStage::Discovery)
+        run_live_copyplan_comparison(LiveCopyPlanStage::Discovery, &ada_copyplan_screen_cells())
+    }
+
+    #[test]
+    #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Fixed/AUTO/Fast comparison on the deep cell"]
+    fn ada_live_fixed_copyplan_vs_auto_and_fast_large_deep_once7() -> Result<(), String> {
+        run_live_copyplan_comparison(LiveCopyPlanStage::Discovery, &ada_copyplan_deep_cells())
     }
 
     #[test]
     #[ignore = "requires integrated Ada CopyPlan AUTO on CUDA12.8/13.0/13.2; actual AUTO/generic/Fast once21"]
     fn ada_integrated_copyplan_auto_three_cell_once21() -> Result<(), String> {
-        run_live_copyplan_comparison(LiveCopyPlanStage::Integrated)
+        run_live_copyplan_comparison(LiveCopyPlanStage::Integrated, &ada_copyplan_screen_cells())
     }
 
-    fn run_live_copyplan_comparison(stage: LiveCopyPlanStage) -> Result<(), String> {
+    #[test]
+    #[ignore = "requires integrated Ada CopyPlan AUTO on CUDA12.8/13.0/13.2; actual AUTO/generic/Fast once21 on the deep cell"]
+    fn ada_integrated_copyplan_auto_large_deep_once21() -> Result<(), String> {
+        run_live_copyplan_comparison(LiveCopyPlanStage::Integrated, &ada_copyplan_deep_cells())
+    }
+
+    fn run_live_copyplan_comparison(
+        stage: LiveCopyPlanStage,
+        cells: &[AdaShortScreenCell],
+    ) -> Result<(), String> {
         use cudarc::cublas::sys as blas;
         use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
             PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
@@ -2029,18 +2056,24 @@ mod cuda_qualification {
                 "live Fixed artifact mismatch: {compiler:?} {artifact:?}"
             ));
         }
+        // Deterministic mode leaves the context handle in pedantic math for
+        // the product's own protection; the deterministic route never crosses
+        // cuBLAS, so the handle mode is free for the vendor comparator, which
+        // is a Fast arm and must run in default math.
         let mut math = blas::cublasMath_t::CUBLAS_DEFAULT_MATH;
         let mut pointer = blas::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
         unsafe {
-            if blas::cublasGetMathMode(*ctx.blas.handle(), &mut math)
+            if blas::cublasSetMathMode(*ctx.blas.handle(), math)
                 != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                || blas::cublasGetMathMode(*ctx.blas.handle(), &mut math)
+                    != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
                 || blas::cublasGetPointerMode_v2(*ctx.blas.handle(), &mut pointer)
                     != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
             {
-                return Err("query live Fast handle modes failed".into());
+                return Err("set/query live Fast handle modes failed".into());
             }
         }
-        if math == blas::cublasMath_t::CUBLAS_PEDANTIC_MATH
+        if math != blas::cublasMath_t::CUBLAS_DEFAULT_MATH
             || pointer != blas::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST
         {
             return Err(format!(
@@ -2070,7 +2103,7 @@ mod cuda_qualification {
             )?;
         }
         quiet.require_cohort("live-copyplan-auto-fast/timed")?;
-        for cell in ada_copyplan_screen_cells() {
+        for cell in cells.iter().copied() {
             let case = Case {
                 id: cell.id,
                 dims: cell.dims,

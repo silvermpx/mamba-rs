@@ -6519,28 +6519,30 @@ impl FixedCopyPlanQualificationIdentity {
 }
 
 const FIXED_COPYPLAN_SOURCE_DIGEST: [u8; 32] = [
-    138, 180, 117, 44, 111, 75, 118, 100, 134, 219, 9, 210, 45, 223, 201, 157, 249, 61, 193, 235,
-    5, 7, 23, 127, 126, 223, 146, 204, 115, 18, 51, 244,
+    212, 2, 182, 3, 173, 77, 27, 130, 60, 249, 195, 214, 50, 186, 82, 35, 3, 223, 115, 222, 65,
+    105, 18, 146, 133, 179, 136, 88, 112, 253, 219, 189,
 ];
 
 /// Exact live Fixed bindings measured with the three retained cells. The raw
-/// records are under `internal/perf/ada-scalar-nn-live-fixed-screen-20260908/
-/// evidence/{cuda128/once7,cuda130/once7,repair1/once7-cuda132}/test.log`.
+/// records are under `internal/perf/ada-fixed-copyplan-requal-20260911/
+/// once7-cuda{128,130,132}.log`. The Fixed module is composed from the Mamba
+/// kernels too, so any change to those sources moves this identity and the
+/// copy plan stays off until the discovery run is repeated.
 const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &[
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            32, 77, 9, 30, 22, 161, 165, 101, 87, 89, 129, 8, 255, 2, 63, 98, 86, 135, 134, 83,
-            101, 160, 247, 120, 221, 189, 136, 145, 188, 44, 241, 226,
+            32, 216, 101, 217, 14, 134, 177, 94, 27, 101, 123, 212, 165, 71, 238, 175, 157, 180,
+            30, 154, 231, 134, 134, 91, 70, 117, 123, 250, 210, 53, 79, 94,
         ],
         artifact_digest: [
-            86, 224, 182, 36, 161, 8, 64, 215, 136, 160, 136, 29, 92, 84, 77, 196, 130, 128, 8, 82,
-            58, 12, 53, 77, 17, 183, 207, 153, 220, 227, 86, 196,
+            28, 135, 152, 223, 33, 157, 133, 5, 193, 83, 21, 219, 198, 10, 182, 37, 176, 190, 81,
+            68, 148, 74, 195, 126, 9, 235, 104, 114, 60, 186, 85, 52,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            241, 78, 18, 144, 40, 231, 99, 194, 47, 184, 123, 148, 74, 200, 185, 15, 38, 61, 71,
-            64, 96, 253, 93, 173, 112, 170, 225, 113, 55, 243, 150, 98,
+            218, 6, 25, 145, 59, 92, 139, 215, 203, 1, 121, 128, 232, 2, 95, 62, 80, 199, 29, 232,
+            185, 2, 171, 53, 23, 103, 234, 193, 34, 187, 230, 238,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6550,17 +6552,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            45, 10, 102, 235, 138, 244, 97, 137, 24, 155, 70, 193, 253, 37, 210, 232, 133, 105,
-            255, 130, 100, 66, 7, 54, 35, 159, 194, 212, 140, 221, 68, 76,
+            161, 121, 226, 216, 103, 249, 216, 126, 53, 78, 99, 3, 188, 188, 196, 206, 96, 230,
+            188, 46, 134, 31, 122, 103, 66, 164, 200, 121, 35, 28, 196, 78,
         ],
         artifact_digest: [
-            191, 80, 175, 132, 90, 170, 136, 223, 19, 76, 58, 160, 116, 65, 194, 236, 88, 72, 66,
-            209, 34, 94, 75, 185, 145, 66, 44, 148, 253, 81, 12, 172,
+            238, 149, 192, 75, 11, 29, 68, 235, 129, 65, 140, 194, 75, 202, 87, 2, 18, 4, 29, 248,
+            247, 247, 26, 2, 193, 164, 66, 8, 224, 93, 21, 69,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            218, 132, 133, 168, 193, 166, 58, 16, 16, 132, 51, 202, 204, 220, 86, 29, 124, 184, 98,
-            49, 143, 210, 204, 118, 60, 75, 184, 194, 160, 117, 177, 189,
+            228, 164, 136, 223, 50, 69, 204, 70, 85, 140, 171, 182, 155, 147, 60, 6, 154, 22, 188,
+            150, 3, 144, 24, 39, 118, 133, 252, 209, 223, 25, 116, 244,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6570,17 +6572,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            228, 247, 101, 21, 228, 65, 173, 194, 136, 98, 119, 80, 0, 252, 226, 24, 226, 210, 204,
-            166, 27, 71, 206, 72, 78, 21, 235, 17, 68, 196, 15, 179,
+            212, 250, 3, 219, 119, 227, 139, 162, 112, 153, 1, 226, 130, 126, 159, 14, 138, 159,
+            195, 52, 220, 127, 182, 139, 181, 236, 210, 149, 131, 63, 165, 71,
         ],
         artifact_digest: [
-            139, 139, 16, 199, 20, 80, 117, 212, 242, 240, 158, 239, 216, 226, 9, 10, 240, 246,
-            123, 70, 98, 180, 231, 125, 151, 184, 7, 211, 46, 22, 171, 7,
+            191, 176, 211, 75, 25, 108, 110, 143, 74, 245, 207, 49, 22, 243, 206, 100, 198, 50, 12,
+            89, 227, 64, 5, 115, 156, 224, 233, 238, 169, 48, 43, 39,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            238, 202, 247, 134, 250, 216, 78, 82, 165, 253, 218, 48, 125, 18, 11, 233, 97, 105, 61,
-            114, 24, 10, 228, 38, 197, 98, 101, 191, 141, 99, 171, 210,
+            97, 240, 218, 196, 99, 181, 124, 141, 222, 122, 58, 113, 205, 140, 177, 49, 106, 190,
+            224, 182, 252, 197, 235, 134, 90, 58, 239, 12, 252, 238, 42, 56,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -14366,6 +14368,70 @@ mod tf32_tests {
             assert_ne!(
                 cohort.identity.source_digest, live,
                 "a retired SM120 TF32 cohort matches the live source; it belongs in the live table"
+            );
+        }
+    }
+
+    /// The Fixed module is composed from the Mamba kernels and the portable
+    /// module carries the stream-K kernel; an edit to any of those sources
+    /// moves the module identity these Ada cohorts pin, and the routes they
+    /// admit fall back without any test noticing. Hold every Ada cohort to
+    /// the source this tree composes so such an edit fails here first.
+    #[test]
+    fn every_ada_cohort_matches_the_source_this_tree_composes() {
+        let live = |kind| {
+            super::super::modules::module_source_digest(kind, "sm_89")
+                .unwrap_or_else(|error| panic!("compose {kind:?} for sm_89: {error}"))
+        };
+        assert_eq!(
+            FIXED_COPYPLAN_SOURCE_DIGEST,
+            live(ModuleKind::Fixed),
+            "the Fixed copy-plan cohorts pin a Fixed source this tree no longer composes"
+        );
+        assert!(
+            FIXED_COPYPLAN_EVIDENCE_COHORTS
+                .iter()
+                .all(|cohort| cohort.source_digest == FIXED_COPYPLAN_SOURCE_DIGEST)
+        );
+        let tf32 = [
+            (
+                "portable",
+                ModuleKind::TriadSm80,
+                SM89_TF32_EVIDENCE_COHORTS,
+            ),
+            (
+                "joint",
+                ModuleKind::TriadSm89Tf32Joint,
+                SM89_JOINT_TF32_EVIDENCE_COHORTS,
+            ),
+            (
+                "finalist",
+                ModuleKind::TriadSm89Finalist,
+                SM89_FINALIST_TF32_EVIDENCE_COHORTS,
+            ),
+        ];
+        for (name, kind, cohorts) in tf32 {
+            let digest = live(kind);
+            for cohort in cohorts {
+                assert_eq!(cohort.identity.module_kind, kind, "{name} cohort module");
+                assert_eq!(
+                    cohort.identity.source_digest, digest,
+                    "an Ada {name} TF32 cohort pins a source this tree no longer composes"
+                );
+            }
+        }
+        let exact = live(ModuleKind::TriadSm89ExactF32);
+        for cohort in SM89_EXACT_F32_EVIDENCE_COHORTS {
+            assert_eq!(
+                cohort.source_digest, exact,
+                "an Ada exact-f32 cohort is stale"
+            );
+        }
+        let d128 = live(ModuleKind::TriadSm89ExactF32D128);
+        for cohort in SM89_EXACT_F32_D128_EVIDENCE_COHORTS {
+            assert_eq!(
+                cohort.source_digest, d128,
+                "an Ada exact-f32 d128 cohort is stale"
             );
         }
     }
