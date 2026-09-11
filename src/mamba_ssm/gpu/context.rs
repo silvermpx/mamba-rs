@@ -1088,7 +1088,11 @@ impl GpuCtx {
         if mode == self.gemm_mode.get() {
             return Ok(());
         }
-        validate_custom_policy(self.bi_tensor_cores.get(), self.half_triad_policy.get())?;
+        // A stored stream-K permission is dormant while tensor cores are
+        // off: the half tier then runs its scalar policy and never reaches
+        // the stream-K routes, so the mode change has nothing to refuse. The
+        // pair is still refused when it is requested from the environment or
+        // the explicit configuration.
         if self
             .gemm_route_recorder
             .try_borrow()
@@ -1871,9 +1875,10 @@ impl GpuCtx {
 
     /// Select the numeric policy used by deterministic half-precision Triad GEMMs.
     ///
-    /// [`HalfTriadPolicy::TiledParityV1`] is the default. Stream-K must be
-    /// selected explicitly and requires tensor-core permission when a mode
-    /// transition or environment configuration is validated.
+    /// [`HalfTriadPolicy::AllowStreamKFixedOrderV1`] is the default. The
+    /// stream-K routes live in the tensor-core tier, so the permission is
+    /// dormant while tensor cores are off; requesting the pair from the
+    /// environment or the explicit configuration is refused.
     pub fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
