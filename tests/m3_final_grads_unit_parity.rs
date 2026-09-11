@@ -707,7 +707,9 @@ fn m3_dqkv_output_hash() {
     let dd = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let legacy_floats = 2 * CCS * CDS + 2 * CCS * CHD + 4 * CCS + 2 * CHD * CDS;
+    // The four time-major tiles carry one float of padding per row, the
+    // same sizing the production launchers use.
+    let legacy_floats = 2 * CCS * (CDS + 1) + 2 * CCS * (CHD + 1) + 4 * CCS + 2 * CHD * CDS;
     let mats_floats = legacy_floats + CCS * (CCS - 1) * 3 / 2 + 2 * CCS;
     let cap_floats = 99 * 1024 / 4;
     let (per_head_floats, use_mats_i): (usize, i32) = if mats_floats <= cap_floats {
