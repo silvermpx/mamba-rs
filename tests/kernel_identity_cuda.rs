@@ -169,7 +169,9 @@ const FIXED_TF32_ENTRIES_SM89: &[&str] = &[
 #[cfg(target_os = "linux")]
 fn expected_fixed_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
     let sm120 = matches!(target, "compute_120" | "compute_121");
-    let sm89 = target == "compute_89";
+    // Ada compiles to the real sm_89 target; the virtual name covers a
+    // caller that asks for the portable set by architecture.
+    let sm89 = matches!(target, "sm_89" | "compute_89");
     FIXED_TF32_ENTRIES_PORTABLE
         .iter()
         .chain(FIXED_TF32_ENTRIES_SM89.iter().filter(|_| sm89))
@@ -237,7 +239,11 @@ fn expected_cuda_module_fixtures_are_unique() {
         FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM120.len()
     );
     assert_eq!(
-        expected_fixed_tf32_entries("compute_89").len(),
+        expected_fixed_tf32_entries("sm_89").len(),
+        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM89.len()
+    );
+    assert_eq!(
+        expected_fixed_tf32_entries("compute_80").len(),
         FIXED_TF32_ENTRIES_PORTABLE.len()
     );
     let specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
