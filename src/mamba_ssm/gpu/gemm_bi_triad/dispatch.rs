@@ -1179,20 +1179,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (12, 8),
         [
-            117, 119, 228, 119, 174, 191, 178, 127, 76, 172, 146, 59, 24, 57, 168, 93, 176, 163,
-            182, 174, 22, 123, 134, 152, 43, 116, 143, 145, 30, 168, 165, 58,
+            70, 210, 220, 253, 104, 133, 243, 145, 16, 17, 106, 146, 210, 46, 170, 197, 228, 194,
+            137, 187, 175, 77, 136, 236, 18, 150, 132, 131, 248, 249, 135, 108,
         ],
         [
-            71, 199, 110, 2, 89, 1, 173, 133, 67, 13, 93, 193, 133, 52, 143, 79, 183, 221, 52, 196,
-            63, 165, 79, 67, 57, 197, 71, 138, 211, 38, 195, 168,
+            116, 114, 189, 194, 159, 218, 46, 158, 170, 140, 125, 246, 88, 45, 129, 55, 240, 211,
+            120, 169, 58, 76, 19, 187, 183, 208, 77, 157, 248, 119, 103, 105,
         ],
         [
-            61, 250, 244, 130, 197, 184, 209, 53, 38, 205, 114, 162, 141, 59, 33, 65, 189, 4, 182,
-            62, 91, 213, 30, 223, 236, 169, 129, 87, 189, 42, 80, 192,
+            79, 180, 27, 9, 171, 82, 154, 201, 229, 162, 60, 122, 216, 122, 147, 178, 98, 83, 74,
+            122, 185, 63, 21, 89, 154, 123, 158, 16, 66, 177, 74, 126,
         ],
         [
-            101, 251, 166, 181, 57, 138, 204, 184, 81, 78, 159, 189, 89, 56, 91, 219, 233, 72, 26,
-            195, 59, 209, 146, 54, 240, 239, 10, 123, 53, 106, 196, 222,
+            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
+            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
         ],
         [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -1205,20 +1205,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (13, 0),
         [
-            235, 225, 189, 98, 4, 144, 44, 101, 241, 178, 221, 167, 176, 52, 193, 208, 198, 16,
-            246, 64, 16, 34, 29, 56, 118, 124, 122, 61, 181, 37, 135, 138,
+            179, 233, 26, 201, 181, 25, 105, 103, 11, 99, 23, 177, 85, 225, 132, 78, 209, 116, 19,
+            24, 223, 221, 130, 242, 156, 79, 255, 193, 57, 121, 196, 197,
         ],
         [
-            132, 90, 175, 130, 187, 81, 165, 75, 40, 14, 23, 67, 208, 237, 139, 41, 16, 144, 206,
-            6, 80, 147, 1, 23, 217, 165, 128, 8, 133, 229, 80, 46,
+            67, 104, 233, 131, 251, 114, 24, 94, 41, 18, 253, 186, 84, 31, 34, 49, 219, 132, 241,
+            204, 150, 84, 13, 247, 222, 97, 148, 128, 13, 246, 252, 87,
         ],
         [
-            61, 250, 244, 130, 197, 184, 209, 53, 38, 205, 114, 162, 141, 59, 33, 65, 189, 4, 182,
-            62, 91, 213, 30, 223, 236, 169, 129, 87, 189, 42, 80, 192,
+            79, 180, 27, 9, 171, 82, 154, 201, 229, 162, 60, 122, 216, 122, 147, 178, 98, 83, 74,
+            122, 185, 63, 21, 89, 154, 123, 158, 16, 66, 177, 74, 126,
         ],
         [
-            101, 251, 166, 181, 57, 138, 204, 184, 81, 78, 159, 189, 89, 56, 91, 219, 233, 72, 26,
-            195, 59, 209, 146, 54, 240, 239, 10, 123, 53, 106, 196, 222,
+            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
+            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
         ],
         [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -1231,20 +1231,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (13, 2),
         [
-            238, 80, 148, 67, 72, 168, 210, 147, 140, 244, 68, 171, 43, 206, 163, 109, 246, 4, 129,
-            236, 36, 111, 247, 194, 77, 197, 136, 165, 246, 134, 135, 215,
+            105, 222, 46, 40, 169, 159, 156, 60, 12, 157, 166, 200, 158, 126, 2, 157, 178, 182, 65,
+            244, 37, 111, 40, 167, 77, 81, 245, 140, 255, 159, 207, 156,
         ],
         [
-            165, 168, 10, 10, 243, 2, 109, 15, 92, 18, 130, 255, 5, 104, 217, 68, 5, 201, 59, 31,
-            190, 208, 53, 212, 96, 243, 11, 26, 226, 225, 157, 145,
+            91, 43, 31, 41, 240, 151, 148, 146, 40, 10, 110, 33, 224, 151, 245, 140, 170, 250, 152,
+            111, 49, 45, 157, 251, 250, 181, 246, 194, 158, 88, 167, 231,
         ],
         [
-            61, 250, 244, 130, 197, 184, 209, 53, 38, 205, 114, 162, 141, 59, 33, 65, 189, 4, 182,
-            62, 91, 213, 30, 223, 236, 169, 129, 87, 189, 42, 80, 192,
+            79, 180, 27, 9, 171, 82, 154, 201, 229, 162, 60, 122, 216, 122, 147, 178, 98, 83, 74,
+            122, 185, 63, 21, 89, 154, 123, 158, 16, 66, 177, 74, 126,
         ],
         [
-            101, 251, 166, 181, 57, 138, 204, 184, 81, 78, 159, 189, 89, 56, 91, 219, 233, 72, 26,
-            195, 59, 209, 146, 54, 240, 239, 10, 123, 53, 106, 196, 222,
+            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
+            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
         ],
         [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -1491,7 +1491,7 @@ const fn sm89_tf32_route_cell(
 }
 
 use super::contract::Tf32PortableStages::{S2, S3, S4};
-use super::contract::Tf32PortableTile::{M16N32, M64N64, M128N64, M128N128};
+use super::contract::Tf32PortableTile::{M16N32, M32N32, M64N64, M128N64, M128N128};
 use crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::{Nn, Nt, Tn};
 use Tf32AutoOperandGate::{
     RequestContractSafe, RequiresNoBiasAndVectorAlignmentEvidence, RequiresNoBiasEvidence,
@@ -1607,23 +1607,23 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     ),
     sm89_tf32_cell(Tn, 49, 129, 65, M16N32, S4, RequestContractSafe),
     sm89_tf32_cell(Tn, 65, 129, 49, M16N32, S4, RequestContractSafe),
-    sm89_tf32_cell(
+    sm89_tf32_route_cell(
         Tn,
-        128,
-        512,
-        1024,
-        M16N32,
-        S4,
+        (128, 512, 1024),
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(super::contract::Tf32PortableRoute {
+            tile: M32N32,
+            stages: S4,
+        }),
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_cell(Tn, 131, 100, 129, M16N32, S4, RequestContractSafe),
-    sm89_tf32_cell(
+    sm89_tf32_route_cell(
         Tn,
-        256,
-        128,
-        1024,
-        M16N32,
-        S4,
+        (256, 128, 1024),
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(super::contract::Tf32PortableRoute {
+            tile: M32N32,
+            stages: S3,
+        }),
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_cell(
@@ -3068,13 +3068,13 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
-/// CUDA 12.8 and 13.0 share the same exact-cell winner map. Four rows move to
-/// the joint Ada module; NN Prism retains the measured portable winner.
+/// CUDA 12.8 and 13.0 share the same exact-cell winner map. Eight rows move
+/// to the joint Ada module; NN Prism retains the measured portable winner.
 const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (768, 3072, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -3104,6 +3104,30 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
         Tf32PhysicalRoute::Sm89NnN96V1,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
+    sm89_tf32_route_cell(
+        Tn,
+        (3072, 1536, 4096),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (2048, 768, 3072),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (2048, 1536, 768),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4096, 3072, 1536),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
 ];
 
 /// CUDA 13.2 independently qualified the prior five rows and the NT d768-in
@@ -3112,7 +3136,7 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (768, 3072, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -3142,6 +3166,24 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Nt,
         (2048, 768, 3072),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Tn,
+        (3072, 1536, 4096),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4096, 3072, 1536),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (2048, 1536, 768),
         Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
@@ -3667,30 +3709,48 @@ pub fn resolve_tf32_forced(
     Ok(route)
 }
 
+/// The cells a joint route may be forced on: the ones its cohorts admit
+/// and the ones the retile and deep-cell screens measure it on (the deep
+/// 4096-row product and the d768 in_proj retile). Production selection
+/// still comes only from the cohort tables.
 fn sm89_joint_route_matches_request(route: Tf32PhysicalRoute, request: F32TriadRequest) -> bool {
     let shape = request.shape;
     let dims = (shape.m, shape.k, shape.n);
     let contiguous = shape == F32TriadShape::contiguous(request.op, dims);
+    const DEEP: (usize, usize, usize) = (4_096, 3_072, 1_536);
     match route {
         Tf32PhysicalRoute::Sm89TnPreRnaN96V1 => {
             request.op == ResolvedGemmOp::Tn
-                && matches!(dims, (2_048, 768, 3_072) | (2_048, 1_536, 768))
+                && matches!(dims, (2_048, 768, 3_072) | (2_048, 1_536, 768) | DEEP)
                 && contiguous
         }
         Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => {
-            request.op == ResolvedGemmOp::Tn && dims == (4_621, 384, 1_928) && contiguous
+            request.op == ResolvedGemmOp::Tn
+                && matches!(dims, (4_621, 384, 1_928) | DEEP)
+                && contiguous
         }
         Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => {
-            request.op == ResolvedGemmOp::Tn && dims == (4_621, 384, 1_928) && contiguous
+            request.op == ResolvedGemmOp::Tn
+                && matches!(dims, (4_621, 384, 1_928) | (2_048, 768, 3_072) | DEEP)
+                && contiguous
         }
         Tf32PhysicalRoute::Sm89NnDirectN96V1 => {
-            request.op == ResolvedGemmOp::Nn && dims == (4_621, 384, 1_928) && contiguous
+            request.op == ResolvedGemmOp::Nn
+                && matches!(dims, (4_621, 384, 1_928) | DEEP)
+                && contiguous
         }
         Tf32PhysicalRoute::Sm89NnN96V1 => {
-            request.op == ResolvedGemmOp::Nn && dims == (2_048, 1_536, 768) && contiguous
+            request.op == ResolvedGemmOp::Nn
+                && matches!(dims, (2_048, 1_536, 768) | DEEP)
+                && contiguous
         }
         Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => {
-            request.op == ResolvedGemmOp::Nt && dims == (2_048, 768, 3_072) && contiguous
+            request.op == ResolvedGemmOp::Nt
+                && matches!(
+                    dims,
+                    (2_048, 768, 3_072) | (2_048, 1_536, 768) | (4_621, 384, 1_928) | DEEP
+                )
+                && contiguous
         }
         _ => true,
     }
@@ -6953,6 +7013,11 @@ const NT_PRISM_VECTOR_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadSha
 
 const NT_PRISM_TRANSPOSE_ELEMENTS: usize = 740_352;
 
+// The deep 4096-row product's transposed input: the largest exact-route
+// transpose, which sized the scratch before the TF32 weight gradient of the
+// same shape needed more.
+const NT_LARGE_DEEP_TRANSPOSE_ELEMENTS: usize = 4_718_592;
+
 const NT_D128_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
     m: 1024,
     k: 256,
@@ -7011,8 +7076,7 @@ fn qualified_nt_d768_out_transpose_m64n64_request(request: F32TriadRequest) -> b
 fn qualified_nt_large_deep_transpose_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && request.shape == NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL
-        && request.shape.k.checked_mul(request.shape.n)
-            == Some(super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS)
+        && request.shape.k.checked_mul(request.shape.n) == Some(NT_LARGE_DEEP_TRANSPOSE_ELEMENTS)
 }
 
 fn qualified_nt_prism_vector_request(request: F32TriadRequest) -> bool {
@@ -9293,7 +9357,7 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_large_deep_transpose_m64n64_selector_is_an_exact_capacity_cell() {
+    fn nt_large_deep_transpose_m64n64_selector_is_an_exact_extent_cell() {
         let facts = tn_admission_facts();
         let operands = nn_qualified_operands();
         let request = F32TriadRequest {
@@ -9302,7 +9366,11 @@ mod scalar_wave_policy_tests {
         };
         assert_eq!(
             request.shape.k.checked_mul(request.shape.n),
-            Some(super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS)
+            Some(super::NT_LARGE_DEEP_TRANSPOSE_ELEMENTS)
+        );
+        assert!(
+            super::NT_LARGE_DEEP_TRANSPOSE_ELEMENTS
+                <= super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
         );
         assert_eq!(
             scalar_launch_plan(facts, request, operands).unwrap(),
@@ -12034,7 +12102,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
                 Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
-                5,
+                9,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
                 Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N128,
@@ -12044,7 +12112,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
                 Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
-                5,
+                9,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
                 Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N128,
@@ -12054,7 +12122,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
                 None,
-                6,
+                9,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
                 Tf32PhysicalRoute::Sm89NnDirectN96V1,
             ),
@@ -12096,17 +12164,16 @@ mod tf32_tests {
 
     #[test]
     fn sm89_joint_auto_selects_each_toolkit_specific_winner() {
-        let requests = [
-            (ResolvedGemmOp::Tn, (768, 3072, 2048)),
-            (ResolvedGemmOp::Tn, (1536, 768, 2048)),
-            (ResolvedGemmOp::Tn, (384, 1928, 4621)),
-            (ResolvedGemmOp::Nn, (4621, 1928, 384)),
-            (ResolvedGemmOp::Nn, (2048, 768, 1536)),
-            (ResolvedGemmOp::Nt, (2048, 768, 3072)),
-        ];
         for cohort in SM89_JOINT_TF32_EVIDENCE_COHORTS {
             let availability = sm89_joint_availability(cohort.identity, cohort.portable);
-            for ((op, (rows, columns, reduction)), cell) in requests.into_iter().zip(cohort.cells) {
+            assert!(cohort.cells.len() >= 6);
+            for cell in cohort.cells {
+                let (op, rows, columns, reduction) = (
+                    cell.op,
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                );
                 let request = normalized_request(op, rows, columns, reduction);
                 assert_eq!(
                     resolve_f32_triad_auto_with_operands(
@@ -15679,7 +15746,7 @@ mod tf32_tests {
             RequiresNoBiasEvidence as Bias, RequiresVectorAlignmentEvidence as Align,
         };
         use Tf32PortableStages::{S2, S3, S4};
-        use Tf32PortableTile::{M16N32, M64N64, M128N64, M128N128};
+        use Tf32PortableTile::{M16N32, M32N32, M64N64, M128N64, M128N128};
 
         let expected = [
             (
@@ -15863,8 +15930,8 @@ mod tf32_tests {
                 128,
                 512,
                 1024,
-                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
-                    tile: M16N32,
+                Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                    tile: M32N32,
                     stages: S4,
                 }),
                 Align,
@@ -15885,9 +15952,9 @@ mod tf32_tests {
                 256,
                 128,
                 1024,
-                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
-                    tile: M16N32,
-                    stages: S4,
+                Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                    tile: M32N32,
+                    stages: S3,
                 }),
                 Align,
             ),

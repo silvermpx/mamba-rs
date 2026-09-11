@@ -94,7 +94,10 @@ pub const SCALAR_TN_M16N16_STATIC_SHARED_BYTES: usize = 0;
 pub const SCALAR_TN_M16N16_REGISTER_CAP: i32 = 112;
 pub const SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS: u32 = 8;
 pub const SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS: usize = 1 << 22;
-pub const SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS: usize = 4_718_592;
+// Sized for the deepest transposed operand a qualified route stages: the
+// 4096-row product's 4096 x 3072 weight-gradient input. The buffer is
+// allocated on first use, so contexts that never transpose pay nothing.
+pub const SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS: usize = 12_582_912;
 pub const SCALAR_NT_D768_TRANSPOSE_THREADS: u32 = 512;
 pub const SCALAR_NT_D768_TRANSPOSE_STATIC_SHARED_BYTES: usize = 4_224;
 pub const SCALAR_NT_D768_TRANSPOSE_DYNAMIC_SHARED_BYTES: usize = 0;

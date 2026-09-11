@@ -15019,7 +15019,7 @@ mod prepared_f32_launch_tests {
         );
         assert_eq!(
             crate::mamba_ssm::gpu::gemm_bi_triad::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS,
-            4_718_592
+            12_582_912
         );
     }
 
@@ -15396,11 +15396,13 @@ mod prepared_f32_launch_tests {
                 ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified,
             )
             .unwrap(),
-            Some(crate::mamba_ssm::gpu::gemm_bi_triad::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS)
+            Some(4_718_592)
         );
+        // Three times the reduction overflows the scratch, which the TF32
+        // weight gradient of the same shape sized.
         let oversized = F32TriadRequest {
             shape: F32TriadShape {
-                k: large_deep.shape.k + 1,
+                k: large_deep.shape.k * 3,
                 ..large_deep.shape
             },
             ..large_deep
