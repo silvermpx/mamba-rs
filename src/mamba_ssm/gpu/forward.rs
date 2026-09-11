@@ -27,14 +27,16 @@ use std::sync::Arc;
 
 /// Sequence length threshold for switching from sequential SSM to parallel prefix scan.
 ///
-/// For T <= 256, the sequential kernel (one thread per (b,d) pair, looping over T) is
-/// faster due to lower overhead and better register utilization. For T > 256, the
-/// parallel prefix scan kernel provides O(T / 128) depth per thread, giving significant
-/// speedups on long sequences (e.g., 3-4x at T=1024, 6-8x at T=2048).
+/// The sequential kernel (one thread per (b,d) pair, looping over T) wins only on
+/// the shortest sequences; the parallel prefix scan kernel walks O(T / 128) steps per
+/// thread and, with its chunked backward, is the faster training route from T=128 on.
+/// Measured on RTX 6000 Ada, whole training step with graph replay: at T=64 (d128,
+/// B16) sequential 1.89 ms against parallel 2.04; at T=128 (d256, B16) 7.62 against
+/// 7.58; at T=256 (d768, B8) 18.8 against 13.6 in bf16 and 30.6 against 24.6 in f32;
+/// at T=256 (d1536, B4) 12.2 against 9.6. The threshold sits at 64.
 ///
 /// The parallel scan launches (batch * d_inner) blocks of 128 threads with shared memory,
 /// vs the sequential kernel which launches ceil(batch * d_inner / 256) blocks of 256 threads.
-/// The crossover point depends on GPU occupancy; 256 is a conservative safe choice.
 pub const PARALLEL_SCAN_THRESHOLD: usize = crate::config::ScanMode::PARALLEL_SCAN_THRESHOLD;
 
 // ---------------------------------------------------------------------------
@@ -565,7 +567,7 @@ pub fn gpu_forward_mamba_layer(
     }
 
     // SSM burnin forward: use parallel prefix scan for long sequences,
-    // sequential kernel for short ones. Threshold: T > 256.
+    // sequential kernel for short ones, at the automatic threshold.
     // Both kernels have identical interfaces and produce identical results.
     // EXCEPTION: sequential kernel silently fails for d_state > 64 (register
     // array limit), so we force the parallel scan path which handles d_state

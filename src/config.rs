@@ -8,8 +8,8 @@ pub enum ScanMode {
     Sequential,
     /// Parallel prefix scan — warp shuffle + shared memory, optimal for long T.
     Parallel,
-    /// Auto-select: Sequential for T <= 256, Parallel for T > 256
-    /// (PARALLEL_SCAN_THRESHOLD, tuned on RTX 6000 Ada).
+    /// Auto-select: Sequential for T <= 64, Parallel for T > 64
+    /// (PARALLEL_SCAN_THRESHOLD, measured on RTX 6000 Ada).
     #[default]
     Auto,
 }
@@ -18,7 +18,7 @@ impl ScanMode {
     /// Auto threshold: sequential at or below, parallel above. Single source
     /// of truth for the GPU dispatch (re-exported as
     /// `mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD`).
-    pub const PARALLEL_SCAN_THRESHOLD: usize = 256;
+    pub const PARALLEL_SCAN_THRESHOLD: usize = 64;
 
     /// Resolve the effective scan choice for a sequence length and state dim.
     ///
