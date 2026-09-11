@@ -315,12 +315,87 @@ Select their actual supported cases and prerequisites before executing them.
   8-argument test helper, index loops, an OR pattern, a late init, a
   `vec!`, items after a test module). Not release-blocking; decide whether
   to clear them or add clippy with the CUDA feature to the gate first.
-- [ ] `gpu_forward_mamba_target_burnin` and `gpu_forward_mamba3_target_burnin`
-  (the target-network forwards RL consumers call) have no test in the tree.
+- [x] `gpu_forward_mamba_target_burnin` and `gpu_forward_mamba3_target_burnin`
+  (the target-network forwards RL consumers call) had no test in the tree;
+  `tests/target_forward_parity.rs` compares both with the CPU forwards on
+  the sequential and the parallel or chunked route.
 - [ ] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms,
   the dispatchers) for math and performance against `reference/mamba` and the
   knowledge base, then re-measure the training and inference steps and update
-  the tables.
+  the tables. Fifteen research reports (`scratchpad/kernel-research/`) rank
+  the candidates; every change below keeps bits under the digest gates.
+  - [x] Committed through `f673ff14`: the M3 chunked lanes without their
+    fills and restore copies, the f32 and typed decode steps on the fused
+    kernels (eight nodes per layer), the narrow column sums issuing eight
+    loads deep, the fused B/C norm on every f32 lane, the vectorized twins
+    wired, the scan row loads through 16-byte lanes.
+  - [ ] Local, awaiting the GPU gate (`/root/gate-pass5.sh`) and a paired
+    A/B against `6bcd2fd5`: state loops bounded by the compiled capacity
+    (M1 sequential and step, M3 step and burn-in); the scan forwards
+    handing their prefix through the warp with no store staging (four
+    barriers per state and chunk instead of six, forward shared memory
+    seven kilobytes to two hundred bytes); the fold backward on five
+    barriers per state instead of nineteen (merged forward-replay and
+    reverse block scan, shuffle hand-offs, hoisted decay-gradient
+    reduction); `m3_dqkv` tiles padded to an odd stride (the sixteen-way
+    bank conflict) and the pair-matrix triangle walked flat; the rmsnorm
+    backward holding x and dy in registers; the captured graph plan
+    validating its routes once per live identity; the device fact sheet
+    covering the forwards, the f32 fold and `m3_dqkv`; the conv backward
+    as one kernel per tile recomputing the pre-activation from the x
+    window (no `post_conv` tape); the in_proj output saved whole and read
+    by halves through a row stride on both training lanes and the target
+    forward (the split kernels, the untiled target conv and the plain
+    elementwise multiply deleted); `mamba3_ssd.cu` renamed
+    `mamba3_siso.cu` (the owner's word: SSM is Mamba-1, SSD Mamba-2, SISO
+    Mamba-3).
+  - [x] Paired measurement `cce73716` against `6bcd2fd5` on Ada
+    (`scratchpad/ab-pass1`, parsers `setA/B/CD/EF.py`): Mamba-1 decode f32
+    5-14 % faster (bf16 unchanged, its decode was already fused), Mamba-1
+    training step unchanged at T=256, Mamba-3 training step 2-4.5 %
+    faster, Mamba-3 prefill and decode unchanged.
+  - [ ] Next, bit-preserving: shed one group's delta/u/dy stage into
+    registers and pin the carveout so the f32 fold backward fits two
+    blocks per SM; two state dimensions per barrier group in the scan
+    forward; adt and dA_cumsum folded into the M3 fused chunk kernel; the
+    two M3 decode fusions now that the decode recorder exists.
+  - [ ] Owner decisions, each a new numeric route: pin the scan's FMA
+    contraction (`__fmaf_rn`) so bit identity no longer rests on the
+    compiler default; the d-group fold of dB/dC on the sequential route;
+    the mixed lane's dt bias rounded to bf16 before softplus (the largest
+    departure from the reference); the `ScanMode::Auto` threshold, which
+    predates three parallel-route speedups; `gather_cols(dt)` into the
+    dt_proj row stride (a GEMM ABI change, better placed in 0.7.x).
+  - [ ] The paired measurement of `6bcd2fd5` against `cce73716` showed the
+    f32 decode outputs of Mamba-1 differing from the second step on while
+    every tolerance check passed: the fused step kernel the pass moved the
+    f32 lane onto was compiled with the other FMA grouping of the state
+    update (`fma(delta_u, B, da*h)` against 0.6.9's `fma(da, h,
+    delta_u*B)`), a choice the compiler makes and no gate compared. The
+    sequential kernels now spell the contraction with the rounding
+    intrinsics in the form each lane's 0.6.9 build used. The bit gates of
+    this tree print digests but compare nothing: from now on every kernel
+    change is accepted only through the bit ledger, the digest-printing
+    suites run on the old and the new tree on the same card
+    (`/root/bit-ledger.sh`, diffed by `bit-ledger-diff.py`), with the
+    Mamba-3 decode recorder `tests/m3_decode_digest.rs` and the forward
+    hashes added to `tests/m1_scan_bwd_hash.rs` closing the two holes the
+    reports named.
+  - [x] The bit ledger of the old tree (`cce73716` plus the recorders)
+    against the check tree with the whole local batch: every recorded
+    digest identical (Mamba-1 decode f32 and bf16, scan forward and
+    backward hashes and tape, conv forward and backward, prefill, Mamba-3
+    `m3_dqkv`/`m3_dqktheta`, the chunked forward trio, Mamba-3 decode f32
+    and bf16, the training digests). The gate on the way found that
+    `c9420a14` had moved the f32 training forward and the target forward
+    onto the fused B/C norm without its row-stride argument (an
+    out-of-bounds read the target parity test caught); fixed before any
+    commit.
+  - [ ] Write down that the SSM and M3 determinism contract is per board:
+    the scan kernels pin no FMA and use `exp2f`, `log1pf`, `tanhf`, whose
+    bits NVIDIA does not promise across architectures; the GEMM contract
+    is unaffected. The DDP reducer compiles with default NVRTC options and
+    should carry the same pinned option set as every other module.
 - [ ] Complete release tests and independent final review, then merge `main`.
 - [ ] Stop before publication until the owner explicitly approves the release.
 
