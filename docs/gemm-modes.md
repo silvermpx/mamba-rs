@@ -207,9 +207,9 @@ pre-sized with the `presize_*` methods on `GpuCtx`.
 
 The deterministic kernels compile for every architecture from SM80 up.
 "Measured" below means the automatic kernel selection on that board was
-timed cell by cell and the winners were frozen with the board, driver and
-toolkit identity. "Portable" means the generic kernels serve and no timing
-claim is made.
+timed cell by cell and the winners were frozen with the board, the toolkit
+and the compiled artifact; the driver build is not part of that identity.
+"Portable" means the generic kernels serve and no timing claim is made.
 
 | GPU | bf16 and f16 | exact f32 | deterministic TF32 |
 |---|---|---|---|

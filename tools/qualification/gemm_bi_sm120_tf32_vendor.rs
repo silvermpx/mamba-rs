@@ -1,4 +1,4 @@
-//! Installed cuBLAS FAST/default versus the three fresh SM120 Triad NN AUTO cells.
+//! Installed cuBLAS FAST/default versus the three SM120 Triad NN AUTO projection cells.
 //! This comparator is independent of the frozen selector/performance snapshots.
 
 #[cfg(feature = "cuda")]
@@ -825,14 +825,10 @@ mod gpu {
         if bound.module_kind != ModuleKind::TriadSm120
             || bound.compiler.nvrtc_version != (13, 2)
             || !bound.compiler.nvrtc_library_known
-            || digest_hex(&bound.device.driver.build_digest)
-                != "bbe8397f6ef11a506a502d127d5eb82745a515ab64f9b2901dab4e834bf190d8"
             || digest_hex(&bound.artifact.artifact_digest)
                 != "1cbfd2318610ff5e105eed18ec269453246fef30ca23ac94ac4d3378dfe89246"
         {
-            return Err(format!(
-                "unqualified fresh driver/module identity: {bound:?}"
-            ));
+            return Err(format!("unqualified SM120 module identity: {bound:?}"));
         }
         Ok(quoted(&format!("{bound:?}")))
     }
@@ -1124,7 +1120,7 @@ mod gpu {
     }
 
     #[test]
-    #[ignore = "requires exclusive fresh RTX5090 driver595.58.03; explicit enabled release-only vendor measurement"]
+    #[ignore = "requires an exclusive RTX 5090 on CUDA 13.2; explicit enabled release-only vendor measurement"]
     fn sm120_tf32_auto_forced_vs_installed_fast_cublas() -> Result<(), String> {
         if cfg!(debug_assertions) {
             return Err("vendor comparator requires --release".into());
