@@ -12098,11 +12098,13 @@ fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
 ) -> Result<(TcTile, HalfNativeBranchSeal), String> {
     let checked_dims = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    let compute_capability = environment
-        .stream
-        .context()
-        .compute_capability()
-        .map_err(|error| format!("query CUDA compute capability: {error:?}"))?;
+    // The board's compute capability was taken once when the kernels were
+    // bound; asking the driver again on every call cost two round trips.
+    let (major, minor) = environment.kernels.triad_scalar_compute_capability();
+    let compute_capability = (
+        i32::try_from(major).map_err(|error| format!("compute capability major: {error}"))?,
+        i32::try_from(minor).map_err(|error| format!("compute capability minor: {error}"))?,
+    );
     // Tile geometry keys on (K_out, N). Tail admission also keeps the
     // reduction length in its frozen performance key.
     let tile = tc_pick_tile_backward_for_device(
@@ -12268,11 +12270,13 @@ fn gemm_bi_backward_dx_tc_in<O: PhysicalLaunchObserver>(
 ) -> Result<(TcTile, HalfNativeBranchSeal), String> {
     let checked_dims = GemmDims::nt(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    let compute_capability = environment
-        .stream
-        .context()
-        .compute_capability()
-        .map_err(|error| format!("query CUDA compute capability: {error:?}"))?;
+    // The board's compute capability was taken once when the kernels were
+    // bound; asking the driver again on every call cost two round trips.
+    let (major, minor) = environment.kernels.triad_scalar_compute_capability();
+    let compute_capability = (
+        i32::try_from(major).map_err(|error| format!("compute capability major: {error}"))?,
+        i32::try_from(minor).map_err(|error| format!("compute capability minor: {error}"))?,
+    );
     let tile = tc_pick_tile_backward_for_device(
         super::super::kernel_identity::PolicyOp::Dx,
         dims,
