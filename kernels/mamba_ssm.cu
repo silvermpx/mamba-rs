@@ -22,6 +22,9 @@
 // common shapes at minimum register pressure. Past ~128 the compiler
 // spills these arrays to local memory - correct, measurably slower,
 // and accepted: capacity is a first-class knob, not a fallback.
+// The state loops run to this compiled capacity so the state arrays index
+// statically and stay in registers; each loop leaves at the model's
+// d_state, so a capacity wider than the state costs nothing per step.
 #ifndef MAMBA_RS_STATE_CAP
 #define MAMBA_RS_STATE_CAP 64
 #endif
@@ -76,7 +79,7 @@ extern "C" __global__ void ssm_step_forward(
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
@@ -87,7 +90,7 @@ extern "C" __global__ void ssm_step_forward(
     float y_d = D[d] * u_d;
 
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         // Opt B: exp2f instead of expf
         float da = exp2f(delta_d * a_local[n] * LOG2E);
         h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,
@@ -97,7 +100,7 @@ extern "C" __global__ void ssm_step_forward(
 
     // Opt A: write back h once
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
         h[h_base + n] = h_local[n];
 
     y[idx] = y_d;
@@ -138,7 +141,7 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float a_local[MAMBA_RS_STATE_CAP];                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                              \
     _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
     }                                                                      \
@@ -150,7 +153,7 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float delta_u_d = delta_d * u_d;                                       \
     float y_d = D[d] * u_d;                                                \
     _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
         float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
         float B_n = to_f(xdbl[xdbl_base + b_offset + n]);                  \
         float C_n = to_f(xdbl[xdbl_base + c_offset + n]);                  \
@@ -158,7 +161,7 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
         y_d = __fmaf_rn(h_local[n], C_n, y_d);                             \
     }                                                                      \
     _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)          \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else          \
         h[h_base + n] = h_local[n];                                        \
     /* The gate's SiLU as the split kernel spelled it, then its store. */  \
     float g = to_f(proj_gate[b * gate_stride + d_inner + d]);              \
@@ -201,14 +204,14 @@ extern "C" __global__ void ssm_burnin_forward(
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
 
     // Save initial h state at time index 0
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         int hs_idx = (b * (T + 1) + 0) * d_inner * d_state + d * d_state + n;
         h_saved[hs_idx] = h_local[n];
     }
@@ -226,7 +229,7 @@ extern "C" __global__ void ssm_burnin_forward(
         float y_d = D[d] * u_d;
 
         #pragma unroll
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
 
@@ -242,7 +245,7 @@ extern "C" __global__ void ssm_burnin_forward(
 
         // Save h AFTER step t = h_saved at time index t+1
         #pragma unroll
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
             int hs_idx = (b * (T + 1) + (t + 1)) * d_inner * d_state + d * d_state + n;
             h_saved[hs_idx] = h_local[n];
         }
@@ -250,7 +253,7 @@ extern "C" __global__ void ssm_burnin_forward(
 
     // Opt A: write back final h once
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
         h[h_base + n] = h_local[n];
 }
 
@@ -283,7 +286,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
@@ -298,7 +301,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
         float y_d = D[d] * u_d;
 
         #pragma unroll
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
             h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,
@@ -317,7 +320,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
 
     // Opt A: write back final h once
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
         h[h_base + n] = h_local[n];
 }
 
@@ -344,7 +347,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
     float a_local[MAMBA_RS_STATE_CAP];                                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
     }                                                                      \
@@ -356,7 +359,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
         float delta_u_d = delta_d * u_d;                                   \
         float y_d = D[d] * u_d;                                            \
         _Pragma("unroll")                                                  \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {    \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {    \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                \
             h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d, \
                                                 to_f(B[bt_ds + n]));       \
@@ -374,7 +377,7 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
         y_out[bt_di] = ty;                                                 \
     }                                                                      \
     _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)          \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else          \
         h[h_base + n] = h_local[n];                                        \
 }
 
@@ -402,12 +405,12 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     float a_local[MAMBA_RS_STATE_CAP];                                                      \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                               \
     _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
         h_local[n] = h[h_base + n];                                         \
         a_local[n] = a_neg[d * d_state + n];                                \
     }                                                                       \
     _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
         int hs_idx = (b * (T_len + 1) + 0) * d_inner * d_state              \
                      + d * d_state + n;                                     \
         h_saved[hs_idx] = h_local[n];                                       \
@@ -425,7 +428,7 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
         float delta_u_d = delta_d * u_d;                                    \
         float y_d = D[d] * u_d;                                             \
         _Pragma("unroll")                                                   \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {     \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {     \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                 \
             h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,  \
                                                 to_f(B[bt_ds + n]));        \
@@ -433,14 +436,14 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
         }                                                                   \
         y_out[bt_di] = FROM_F(y_d);                                         \
         _Pragma("unroll")                                                   \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {     \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {     \
             int hs_idx = (b * (T_len + 1) + (t + 1)) * d_inner * d_state    \
                          + d * d_state + n;                                 \
             h_saved[hs_idx] = h_local[n];                                   \
         }                                                                   \
     }                                                                       \
     _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)           \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else           \
         h[h_base + n] = h_local[n];                                         \
 }
 
@@ -491,7 +494,7 @@ extern "C" __global__ void ssm_backward_local(
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
         a_local[n] = a_neg[d * d_state + n];
 
     // d_h carries gradient backward through time
@@ -504,7 +507,7 @@ extern "C" __global__ void ssm_backward_local(
     // h_curr(t) == h_prev(t+1) — carrying it halves h_saved reads.
     float h_carry[MAMBA_RS_STATE_CAP];
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         d_h[n] = 0.0f;
         d_a_acc[n] = 0.0f;
         h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state + (d * d_state + n)];
@@ -528,7 +531,7 @@ extern "C" __global__ void ssm_backward_local(
         float d_delta_val = 0.0f;
 
         #pragma unroll
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
             // h_curr = state AFTER step t (carried register: at t=T-1 it
             // was seeded from h_saved[T]; afterwards it is last round's
             // h_prev — identical value, one global load saved).
@@ -572,7 +575,7 @@ extern "C" __global__ void ssm_backward_local(
     // One store per element replaces T global RMWs; full-domain write,
     // so the per-layer zeroing of d_a_log_local is gone with it.
     #pragma unroll
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
         d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];
 
     d_D_local[b * d_inner + d] = local_d_D;
@@ -626,7 +629,7 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     float d_a_acc[MAMBA_RS_STATE_CAP];                                                          \
     float h_carry[MAMBA_RS_STATE_CAP];                                                          \
     _Pragma("unroll")                                                           \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {             \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {             \
         a_local[n] = a_neg[d * d_state + n];                                    \
         d_h[n] = 0.0f;                                                          \
         d_a_acc[n] = 0.0f;                                                      \
@@ -646,7 +649,7 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
         float d_delta_val = 0.0f;                                               \
                                                                                 \
         _Pragma("unroll")                                                       \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
             int h_prev_idx = (b * (T + 1) + t)       * d_inner * d_state        \
                              + (d * d_state + n);                               \
             float h_curr = h_carry[n];                                          \
@@ -674,7 +677,7 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     }                                                                           \
                                                                                 \
     _Pragma("unroll")                                                           \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)               \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else               \
         d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];            \
                                                                                 \
     d_D_local[b * d_inner + d] = local_d_D;                                     \
