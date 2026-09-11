@@ -177,8 +177,14 @@ fn check_dqkv(dtype: WeightDtype) {
     // warp-parallel decay-gradient section).
     // Includes the strict-upper-triangle pair matrices plus the
     // decay triangle and the two per-step exp lanes.
-    let smem_floats =
-        CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1) * 3 / 2 + CS * 2;
+    // The four time-major tiles carry one float of padding per row, the
+    // same sizing the production launchers use.
+    let smem_floats = CS * (DS + 1) * 2
+        + CS * (HD + 1) * 2
+        + CS * 4
+        + HD * DS * 2
+        + CS * (CS - 1) * 3 / 2
+        + CS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let use_mats_i: i32 = 1;
     // t-split contract: one head per block, blockDim.y = t-split lanes;
