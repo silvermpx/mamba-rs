@@ -499,7 +499,7 @@ Select their actual supported cases and prerequisites before executing them.
     deterministic Triad routes (one near-zero out_proj gradient element,
     Adam's g/(|g|+eps) amplifies a rounding difference); it now compares
     the gradients and holds the weights to a hundredth of the learning rate.
-  - [ ] The suite runner's thirty-minute slot is too short for
+  - [x] The suite runner's thirty-minute slot is too short for Done on Ada: arch_compile_gates outside the slot 60/60 (31 minutes); the compile gates run NVRTC on the host for every target, so the result does not depend on the board. On the 5090 the rerun was cut short when the rented box expired after the matrix and the two test reruns had completed; its suite run had passed 50 of the 60 gates inside the slot.
     `arch_compile_gates` on both boards; it is re-run without the slot.
     Remaining: ada second gate on the final commit plus the reruns, 5090
     matrix with the full SHA plus the reruns, then the 5090 tables.
