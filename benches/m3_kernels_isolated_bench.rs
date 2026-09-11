@@ -86,7 +86,8 @@ fn m3_kernels_isolated_bench() {
     ctx.stream.synchronize().unwrap();
 
     // Production tier ladder (mirrors backward.rs).
-    let legacy_floats = 2 * CCS * CDS + 2 * CCS * CHD + 4 * CCS + 2 * CHD * CDS;
+    // The operand tile rows are padded by one float, as the launchers do.
+    let legacy_floats = 2 * CCS * (CDS + 1) + 2 * CCS * (CHD + 1) + 4 * CCS + 2 * CHD * CDS;
     let mats_floats = legacy_floats + CCS * (CCS - 1) * 3 / 2 + 2 * CCS;
     let cap_floats = 99 * 1024 / 4;
     let (per_head_floats, use_mats_i): (usize, i32) = if mats_floats <= cap_floats {

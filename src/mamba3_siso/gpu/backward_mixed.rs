@@ -405,10 +405,12 @@ fn gpu_backward_mamba3_layer_mixed(
     // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
     // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
     {
-        // Two chunk-by-state operand tiles, V/dO tiles, two per-step
-        // lanes, the da/qk lanes, and TWO head-state tiles (true
-        // states + d_state staging for the warp-parallel dADT).
-        let legacy_floats = 2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds;
+        // Two chunk-by-state operand tiles and the V/dO tiles, each row
+        // padded by one float so a warp reading consecutive rows spreads
+        // over the banks; two per-step lanes, the da/qk lanes, and TWO
+        // head-state tiles (true states + d_state staging for the
+        // warp-parallel dADT). The kernel lays its tiles out the same way.
+        let legacy_floats = 2 * cs_u * (ds + 1) + 2 * cs_u * (hd + 1) + 4 * cs_u + 2 * hd * ds;
         let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
         // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
         // One head per block: pair matrices when the tile

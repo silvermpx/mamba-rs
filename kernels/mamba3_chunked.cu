@@ -1271,13 +1271,19 @@ extern "C" __global__ void m3_dqkv(
     // the whole dynamic allocation is this head's slice.
     extern __shared__ float smem_all[];
     float* smem = smem_all;
-    // q_sm[CS][ds], k_sm[CS][ds], v_sm[CS][hd], do_sm[CS][hd]
+    // q_sm[CS][dsp], k_sm[CS][dsp], v_sm[CS][hdp], do_sm[CS][hdp]
     // da_cs_sm[CS], qk_dot_sm[CS], ssm_sm[hd][ds] (loaded cooperatively)
+    // The four time-major tiles carry one float of padding per row: the
+    // pair-matrix build reads consecutive rows across a warp, and an even
+    // stride lands them on the same two banks. An odd stride only moves
+    // where a value lives, never what it is.
+    const int dsp = ds + 1;
+    const int hdp = hd + 1;
     float* q_sm    = smem;
-    float* k_sm    = q_sm + CS * ds;
-    float* v_sm    = k_sm + CS * ds;
-    float* do_sm   = v_sm + CS * hd;
-    float* da_cs_sm = do_sm + CS * hd;
+    float* k_sm    = q_sm + CS * dsp;
+    float* v_sm    = k_sm + CS * dsp;
+    float* do_sm   = v_sm + CS * hdp;
+    float* da_cs_sm = do_sm + CS * hdp;
     float* qk_sm   = da_cs_sm + CS;
     float* ssm_sm  = qk_sm + CS; // [hd][ds] for SSM_States tile
     // Extra staging for the warp-parallel dADT section: the true
@@ -1319,11 +1325,11 @@ extern "C" __global__ void m3_dqkv(
         for (int t = ty; t < CS; t += TS) {
             if (t < chunk_len) {
                 int gt = chunk_start + t;
-                v_sm[t * hd + p] = V_in[(b * T + gt) * d_inner + h * hd + p];
-                do_sm[t * hd + p] = dO[(b * T + gt) * d_inner + h * hd + p];
+                v_sm[t * hdp + p] = V_in[(b * T + gt) * d_inner + h * hd + p];
+                do_sm[t * hdp + p] = dO[(b * T + gt) * d_inner + h * hd + p];
             } else {
-                v_sm[t * hd + p] = 0.0f;
-                do_sm[t * hd + p] = 0.0f;
+                v_sm[t * hdp + p] = 0.0f;
+                do_sm[t * hdp + p] = 0.0f;
             }
         }
         // Q and K: each thread loads ALL ds entries for indices n stride hd.
@@ -1334,11 +1340,11 @@ extern "C" __global__ void m3_dqkv(
             for (int t = ty; t < CS; t += TS) {
                 if (t < chunk_len) {
                     int gt = chunk_start + t;
-                    q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
-                    k_sm[t * ds + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
+                    q_sm[t * dsp + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
+                    k_sm[t * dsp + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
                 } else {
-                    q_sm[t * ds + n] = 0.0f;
-                    k_sm[t * ds + n] = 0.0f;
+                    q_sm[t * dsp + n] = 0.0f;
+                    k_sm[t * dsp + n] = 0.0f;
                 }
             }
         }
@@ -1364,25 +1370,33 @@ extern "C" __global__ void m3_dqkv(
 
         // Each (a,b) element is computed by exactly one thread with the
         // same ascending-index dot the inline consumers used, so every
-        // reader sees a bit-identical value.
+        // reader sees a bit-identical value. The lanes walk the packed
+        // triangle flat, every lane taking every nlanes-th slot: a walk
+        // by row left most lanes idle on the short rows. A slot's (aa,
+        // bb) is recovered incrementally from the row lengths.
         if (use_pair_mats) {
             float cs_sum_pre =
                 DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
-            for (int aa = 0; aa < CS - 1; aa++) {
-                for (int bb = aa + 1 + lane; bb < CS; bb += nlanes) {
-                    int idx = M3_TRI(aa, bb, CS);
-                    float kq_acc = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        kq_acc += k_sm[aa * ds + n] * q_sm[bb * ds + n];
-                    kq_mat[idx] = kq_acc;
-                    float vdo_acc = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo_acc += v_sm[aa * hd + pp] * do_sm[bb * hd + pp];
-                    vdo_mat[idx] = vdo_acc;
-                    /* consumer-exact expression */
-                    decay_mat[idx] =
-                        exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);
+            int row = 0;
+            int row_start = 0;
+            for (int idx = lane; idx < tri_n; idx += nlanes) {
+                while (row_start + (CS - 1 - row) <= idx) {
+                    row_start += CS - 1 - row;
+                    row++;
                 }
+                int aa = row;
+                int bb = idx - row_start + aa + 1;
+                float kq_acc = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    kq_acc += k_sm[aa * dsp + n] * q_sm[bb * dsp + n];
+                kq_mat[idx] = kq_acc;
+                float vdo_acc = 0.0f;
+                for (int pp = 0; pp < hd; pp++)
+                    vdo_acc += v_sm[aa * hdp + pp] * do_sm[bb * hdp + pp];
+                vdo_mat[idx] = vdo_acc;
+                /* consumer-exact expression */
+                decay_mat[idx] =
+                    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);
             }
             for (int tt = lane; tt < CS; tt += nlanes) {
                 exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);
@@ -1413,26 +1427,26 @@ extern "C" __global__ void m3_dqkv(
                 } else {
                     kq = 0.0f;
                     for (int n = 0; n < ds; n++)
-                        kq += k_sm[t * ds + n] * q_sm[s * ds + n];
+                        kq += k_sm[t * dsp + n] * q_sm[s * dsp + n];
                 }
                 float decay = use_pair_mats
                     ? decay_mat[M3_TRI(t, s, CS)]
                     : exp2f((da_cs_sm[s] - dA_t) * LOG2E);
-                dv_intra += kq * decay * do_sm[s * hd + p];
+                dv_intra += kq * decay * do_sm[s * hdp + p];
             }
             // Inter: K[t] @ d_state^T[p] * exp_rev
             float dv_inter = 0.0f;
             for (int n = 0; n < ds; n++)
-                dv_inter += k_sm[t * ds + n] * d_state[n];
+                dv_inter += k_sm[t * dsp + n] * d_state[n];
             dv_inter *= exp_rev_t;
             // Skip: dO * (D + qk_dot)
-            float dv_skip = do_sm[t * hd + p] * (D_val + qk_sm[t]);
+            float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]);
 
             dV[(b * T + gt) * d_inner + h * hd + p] = dv_intra + dv_inter + dv_skip;
 
             // --- dQK_dot[t,h] and dD ---
             // dQK_dot = sum_p(dO[t,p] * V[t,p])
-            float dqk_val = do_sm[t * hd + p] * v_sm[t * hd + p];
+            float dqk_val = do_sm[t * hdp + p] * v_sm[t * hdp + p];
             // Warp reduce
             for (int off = hd / 2; off > 0; off >>= 1)
                 dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);
@@ -1485,12 +1499,12 @@ extern "C" __global__ void m3_dqkv(
                     } else {
                         vdo = 0.0f;
                         for (int pp = 0; pp < hd; pp++)
-                            vdo += v_sm[t * hd + pp] * do_sm[s * hd + pp];
+                            vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp];
                     }
                     float decay = use_pair_mats
                         ? decay_mat[M3_TRI(t, s, CS)]
                         : exp2f((da_cs_sm[s] - dA_t) * LOG2E);
-                    dk_intra += vdo * decay * q_sm[s * ds + n];
+                    dk_intra += vdo * decay * q_sm[s * dsp + n];
                 }
                 // Inter-chunk dK contribution added in second pass below (after d_state → shared memory)
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;
@@ -1510,17 +1524,17 @@ extern "C" __global__ void m3_dqkv(
                     } else {
                         vdo = 0.0f;
                         for (int pp = 0; pp < hd; pp++)
-                            vdo += v_sm[s * hd + pp] * do_sm[t * hd + pp];
+                            vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp];
                     }
                     float decay = use_pair_mats
                         ? decay_mat[M3_TRI(s, t, CS)]
                         : exp2f((dA_t - da_cs_sm[s]) * LOG2E);
-                    dq_intra += vdo * decay * k_sm[s * ds + n];
+                    dq_intra += vdo * decay * k_sm[s * dsp + n];
                 }
                 // Inter: dO[t] @ ssm_states * exp
                 float dq_inter = 0.0f;
                 for (int pp = 0; pp < hd; pp++)
-                    dq_inter += do_sm[t * hd + pp] * ssm_sm[pp * ds + n];
+                    dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];
                 dq_inter *=
                     use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E);
 
@@ -1546,7 +1560,7 @@ extern "C" __global__ void m3_dqkv(
                     ? exp_rev_sm[t]
                     : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);
                 for (int pp = 0; pp < hd; pp++)
-                    dk_inter += v_sm[t * hd + pp] * ssm_sm[pp * ds + n];
+                    dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];
                 dk_inter *= exp_rev_t;
                 int gt = chunk_start + t;
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;
@@ -1579,7 +1593,7 @@ extern "C" __global__ void m3_dqkv(
                 } else {
                     vdo = 0.0f;
                     for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp];
+                        vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp];
                 }
                 float decay = use_pair_mats
                     ? decay_mat[M3_TRI(i, t, CS)]
@@ -1590,7 +1604,7 @@ extern "C" __global__ void m3_dqkv(
                 } else {
                     kq = 0.0f;
                     for (int n = 0; n < ds; n++)
-                        kq += k_sm[i * ds + n] * q_sm[t * ds + n];
+                        kq += k_sm[i * dsp + n] * q_sm[t * dsp + n];
                 }
                 acc += vdo * decay * kq;
             }
@@ -1602,7 +1616,7 @@ extern "C" __global__ void m3_dqkv(
                 } else {
                     vdo = 0.0f;
                     for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp];
+                        vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp];
                 }
                 float decay = use_pair_mats
                     ? decay_mat[M3_TRI(t, j, CS)]
@@ -1613,7 +1627,7 @@ extern "C" __global__ void m3_dqkv(
                 } else {
                     kq = 0.0f;
                     for (int n = 0; n < ds; n++)
-                        kq += k_sm[t * ds + n] * q_sm[j * ds + n];
+                        kq += k_sm[t * dsp + n] * q_sm[j * dsp + n];
                 }
                 acc -= vdo * decay * kq;
             }
@@ -1622,8 +1636,8 @@ extern "C" __global__ void m3_dqkv(
             for (int pp = 0; pp < hd; pp++) {
                 float qs = 0.0f;
                 for (int n = 0; n < ds; n++)
-                    qs += q_sm[t * ds + n] * ssm2_sm[pp * ds + n];
-                qs_do += qs * do_sm[t * hd + pp];
+                    qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n];
+                qs_do += qs * do_sm[t * hdp + pp];
             }
             acc += qs_do
                 * (use_pair_mats ? exp_fwd_sm[t] : exp2f(da_cs_sm[t] * LOG2E));
@@ -1634,8 +1648,8 @@ extern "C" __global__ void m3_dqkv(
             for (int pp = 0; pp < hd; pp++) {
                 float dsk = 0.0f;
                 for (int n = 0; n < ds; n++)
-                    dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];
-                dsk_v += dsk * v_sm[t * hd + pp];
+                    dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n];
+                dsk_v += dsk * v_sm[t * hdp + pp];
             }
             dm_vec_sm[t] = dsk_v
                 * (use_pair_mats ? exp_rev_sm[t]
@@ -2696,11 +2710,14 @@ m3_dqkv_##SUFFIX(                                                             \
     float d_state[MAMBA_RS_STATE_CAP];                                        \
     extern __shared__ float smem_all[];                                       \
     float* smem = smem_all;                                                   \
+    /* Padded row strides, as in the f32 kernel. */                           \
+    const int dsp = ds + 1;                                                   \
+    const int hdp = hd + 1;                                                   \
     float* q_sm    = smem;                                                    \
-    float* k_sm    = q_sm + CS * ds;                                          \
-    float* v_sm    = k_sm + CS * ds;                                          \
-    float* do_sm   = v_sm + CS * hd;                                          \
-    float* da_cs_sm = do_sm + CS * hd;                                        \
+    float* k_sm    = q_sm + CS * dsp;                                         \
+    float* v_sm    = k_sm + CS * dsp;                                         \
+    float* do_sm   = v_sm + CS * hdp;                                         \
+    float* da_cs_sm = do_sm + CS * hdp;                                       \
     float* qk_sm   = da_cs_sm + CS;                                           \
     float* ssm_sm  = qk_sm + CS;                                              \
     float* ssm2_sm   = ssm_sm + hd * ds;                                      \
@@ -2726,13 +2743,13 @@ m3_dqkv_##SUFFIX(                                                             \
         for (int t = ty; t < CS; t += TS) {                                   \
             if (t < chunk_len) {                                              \
                 int gt = chunk_start + t;                                     \
-                v_sm[t * hd + p] =                                            \
+                v_sm[t * hdp + p] =                                           \
                     to_f(V_in[(b * T + gt) * d_inner + h * hd + p]);          \
-                do_sm[t * hd + p] =                                           \
+                do_sm[t * hdp + p] =                                          \
                     to_f(dO[(b * T + gt) * d_inner + h * hd + p]);            \
             } else {                                                          \
-                v_sm[t * hd + p] = 0.0f;                                      \
-                do_sm[t * hd + p] = 0.0f;                                     \
+                v_sm[t * hdp + p] = 0.0f;                                     \
+                do_sm[t * hdp + p] = 0.0f;                                    \
             }                                                                 \
         }                                                                     \
         /* Each thread loads ALL ds entries with stride hd. Old `p < ds`     \
@@ -2742,13 +2759,13 @@ m3_dqkv_##SUFFIX(                                                             \
             for (int t = ty; t < CS; t += TS) {                               \
                 if (t < chunk_len) {                                          \
                     int gt = chunk_start + t;                                 \
-                    q_sm[t * ds + n] = to_f(                                  \
+                    q_sm[t * dsp + n] = to_f(                                 \
                         Q_rot[((b * T + gt) * nh_total + h) * ds + n]);       \
-                    k_sm[t * ds + n] = to_f(                                  \
+                    k_sm[t * dsp + n] = to_f(                                 \
                         K_scaled[((b * T + gt) * nh_total + h) * ds + n]);    \
                 } else {                                                      \
-                    q_sm[t * ds + n] = 0.0f;                                  \
-                    k_sm[t * ds + n] = 0.0f;                                  \
+                    q_sm[t * dsp + n] = 0.0f;                                 \
+                    k_sm[t * dsp + n] = 0.0f;                                 \
                 }                                                             \
             }                                                                 \
         }                                                                     \
@@ -2776,20 +2793,26 @@ m3_dqkv_##SUFFIX(                                                             \
         if (use_pair_mats) {                                                  \
         float cs_sum_pre = DA_CS_SUM[                                         \
             (b * n_chunks + chunk_idx) * nh_total + h];                       \
-        for (int aa = 0; aa < CS - 1; aa++) {                                 \
-            for (int bb = aa + 1 + lane; bb < CS; bb += nlanes) {             \
-                int idx = M3_TRI(aa, bb, CS);                                 \
-                float kq_acc = 0.0f;                                          \
-                for (int n = 0; n < ds; n++)                                  \
-                    kq_acc += k_sm[aa * ds + n] * q_sm[bb * ds + n];          \
-                kq_mat[idx] = kq_acc;                                         \
-                float vdo_acc = 0.0f;                                         \
-                for (int pp = 0; pp < hd; pp++)                               \
-                    vdo_acc += v_sm[aa * hd + pp] * do_sm[bb * hd + pp];      \
-                vdo_mat[idx] = vdo_acc;                                       \
-                decay_mat[idx] =                                              \
-                    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);             \
+        /* Flat walk over the packed triangle, as in the f32 kernel. */      \
+        int row = 0;                                                          \
+        int row_start = 0;                                                    \
+        for (int idx = lane; idx < tri_n; idx += nlanes) {                    \
+            while (row_start + (CS - 1 - row) <= idx) {                       \
+                row_start += CS - 1 - row;                                    \
+                row++;                                                        \
             }                                                                 \
+            int aa = row;                                                     \
+            int bb = idx - row_start + aa + 1;                                \
+            float kq_acc = 0.0f;                                              \
+            for (int n = 0; n < ds; n++)                                      \
+                kq_acc += k_sm[aa * dsp + n] * q_sm[bb * dsp + n];            \
+            kq_mat[idx] = kq_acc;                                             \
+            float vdo_acc = 0.0f;                                             \
+            for (int pp = 0; pp < hd; pp++)                                   \
+                vdo_acc += v_sm[aa * hdp + pp] * do_sm[bb * hdp + pp];        \
+            vdo_mat[idx] = vdo_acc;                                           \
+            decay_mat[idx] =                                                  \
+                exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);                 \
         }                                                                     \
         for (int tt = lane; tt < CS; tt += nlanes) {                          \
             exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);                     \
@@ -2811,20 +2834,20 @@ m3_dqkv_##SUFFIX(                                                             \
                 float kq;                                                     \
                     if (use_pair_mats) { kq = kq_mat[M3_TRI(t, s, CS)]; }     \
                     else { kq = 0.0f; for (int n = 0; n < ds; n++)            \
-                    kq += k_sm[t * ds + n] * q_sm[s * ds + n]; }              \
+                    kq += k_sm[t * dsp + n] * q_sm[s * dsp + n]; }            \
                 float decay = use_pair_mats                                   \
                     ? decay_mat[M3_TRI(t, s, CS)]                             \
                     : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                    \
-                dv_intra += kq * decay * do_sm[s * hd + p];                   \
+                dv_intra += kq * decay * do_sm[s * hdp + p];                  \
             }                                                                 \
             float dv_inter = 0.0f;                                            \
             for (int n = 0; n < ds; n++)                                      \
-                dv_inter += k_sm[t * ds + n] * d_state[n];                    \
+                dv_inter += k_sm[t * dsp + n] * d_state[n];                   \
             dv_inter *= exp_rev_t;                                            \
-            float dv_skip = do_sm[t * hd + p] * (D_val + qk_sm[t]);           \
+            float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]);          \
             dV[(b * T + gt) * d_inner + h * hd + p] =                         \
                 dv_intra + dv_inter + dv_skip;                                \
-            float dqk_val = do_sm[t * hd + p] * v_sm[t * hd + p];             \
+            float dqk_val = do_sm[t * hdp + p] * v_sm[t * hdp + p];           \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
                 dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);    \
             if (p == 0) {                                                     \
@@ -2849,11 +2872,11 @@ m3_dqkv_##SUFFIX(                                                             \
                     float vdo;                                                \
                         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(t, s, CS)]; }\
                         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++)    \
-                        vdo += v_sm[t * hd + pp] * do_sm[s * hd + pp]; }      \
+                        vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp]; }    \
                     float decay = use_pair_mats                               \
                         ? decay_mat[M3_TRI(t, s, CS)]                         \
                         : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                \
-                    dk_intra += vdo * decay * q_sm[s * ds + n];               \
+                    dk_intra += vdo * decay * q_sm[s * dsp + n];              \
                 }                                                             \
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;    \
                 float dq_intra = 0.0f;                                        \
@@ -2861,15 +2884,15 @@ m3_dqkv_##SUFFIX(                                                             \
                     float vdo;                                                \
                         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(s, t, CS)]; }\
                         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++)    \
-                        vdo += v_sm[s * hd + pp] * do_sm[t * hd + pp]; }      \
+                        vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp]; }    \
                     float decay = use_pair_mats                               \
                         ? decay_mat[M3_TRI(s, t, CS)]                         \
                         : exp2f((dA_t - da_cs_sm[s]) * LOG2E);                \
-                    dq_intra += vdo * decay * k_sm[s * ds + n];               \
+                    dq_intra += vdo * decay * k_sm[s * dsp + n];              \
                 }                                                             \
                 float dq_inter = 0.0f;                                        \
                 for (int pp = 0; pp < hd; pp++)                               \
-                    dq_inter += do_sm[t * hd + pp] * ssm_sm[pp * ds + n];     \
+                    dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];    \
                 dq_inter *=                                                   \
                     use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E);      \
                 dQ_mid[((b * T + gt) * nh_total + h) * ds + n] =              \
@@ -2889,7 +2912,7 @@ m3_dqkv_##SUFFIX(                                                             \
                     ? exp_rev_sm[t]                                           \
                     : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);         \
                 for (int pp = 0; pp < hd; pp++)                               \
-                    dk_inter += v_sm[t * hd + pp] * ssm_sm[pp * ds + n];      \
+                    dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];     \
                 dk_inter *= exp_rev_t;                                        \
                 int gt = chunk_start + t;                                     \
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;   \
@@ -2907,36 +2930,36 @@ m3_dqkv_##SUFFIX(                                                             \
                 float vdo;                                                    \
                     if (use_pair_mats) { vdo = vdo_mat[M3_TRI(i, t, CS)]; }   \
                     else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++)        \
-                    vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp]; }          \
+                    vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp]; }        \
                 float decay = use_pair_mats                                   \
                     ? decay_mat[M3_TRI(i, t, CS)]                             \
                     : exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);             \
                 float kq;                                                     \
                     if (use_pair_mats) { kq = kq_mat[M3_TRI(i, t, CS)]; }     \
                     else { kq = 0.0f; for (int n = 0; n < ds; n++)            \
-                    kq += k_sm[i * ds + n] * q_sm[t * ds + n]; }              \
+                    kq += k_sm[i * dsp + n] * q_sm[t * dsp + n]; }            \
                 acc += vdo * decay * kq;                                      \
             }                                                                 \
             for (int j = t + 1; j < chunk_len; j++) {                         \
                 float vdo;                                                    \
                     if (use_pair_mats) { vdo = vdo_mat[M3_TRI(t, j, CS)]; }   \
                     else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++)        \
-                    vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp]; }          \
+                    vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp]; }        \
                 float decay = use_pair_mats                                   \
                     ? decay_mat[M3_TRI(t, j, CS)]                             \
                     : exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);             \
                 float kq;                                                     \
                     if (use_pair_mats) { kq = kq_mat[M3_TRI(t, j, CS)]; }     \
                     else { kq = 0.0f; for (int n = 0; n < ds; n++)            \
-                    kq += k_sm[t * ds + n] * q_sm[j * ds + n]; }              \
+                    kq += k_sm[t * dsp + n] * q_sm[j * dsp + n]; }            \
                 acc -= vdo * decay * kq;                                      \
             }                                                                 \
             float qs_do = 0.0f;                                               \
             for (int pp = 0; pp < hd; pp++) {                                 \
                 float qs = 0.0f;                                              \
                 for (int n = 0; n < ds; n++)                                  \
-                    qs += q_sm[t * ds + n] * ssm2_sm[pp * ds + n];            \
-                qs_do += qs * do_sm[t * hd + pp];                             \
+                    qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n];           \
+                qs_do += qs * do_sm[t * hdp + pp];                            \
             }                                                                 \
             acc += qs_do                                                      \
                 * (use_pair_mats ? exp_fwd_sm[t]                              \
@@ -2946,8 +2969,8 @@ m3_dqkv_##SUFFIX(                                                             \
             for (int pp = 0; pp < hd; pp++) {                                 \
                 float dsk = 0.0f;                                             \
                 for (int n = 0; n < ds; n++)                                  \
-                    dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];            \
-                dsk_v += dsk * v_sm[t * hd + pp];                             \
+                    dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n];           \
+                dsk_v += dsk * v_sm[t * hdp + pp];                            \
             }                                                                 \
             dm_vec_sm[t] = dsk_v                                              \
                 * (use_pair_mats ? exp_rev_sm[t]                              \
