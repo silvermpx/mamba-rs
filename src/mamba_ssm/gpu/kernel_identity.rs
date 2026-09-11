@@ -4799,6 +4799,10 @@ pub(crate) struct CapturedGemmGraphPlan {
     pub(crate) context: GemmRouteIdentity,
     pub(crate) launches: ResolvedGemmLaunchSet,
     routes: Box<[ResolvedGemmRoute]>,
+    /// The live route identity every route was last validated against.
+    /// The verdict is a pure function of that identity and the frozen
+    /// routes, so while the identity holds a replay skips the walk.
+    validated_for: std::cell::Cell<Option<GemmRouteIdentity>>,
 }
 
 impl CapturedGemmGraphPlan {
@@ -4819,6 +4823,7 @@ impl CapturedGemmGraphPlan {
             context,
             launches,
             routes,
+            validated_for: std::cell::Cell::new(None),
         })
     }
 
@@ -4835,8 +4840,11 @@ impl CapturedGemmGraphPlan {
         ctx.ensure_gemm_usable()?;
         let live = ctx.gemm_route();
         self.context.ensure_current(live, label)?;
-        for route in self.routes() {
-            ctx.validate_resolved_gemm_route_in(&live, route, label)?;
+        if self.validated_for.get() != Some(live) {
+            for route in self.routes() {
+                ctx.validate_resolved_gemm_route_in(&live, route, label)?;
+            }
+            self.validated_for.set(Some(live));
         }
         launch()
     }
