@@ -86,82 +86,6 @@ DEFINE_CONV1D_STEP_FWD_SILU(f16,  __half,        from_f_f16)
 
 // ======================== BURNIN (T>1) ========================
 
-// Conv1d burnin forward NOSAVE variant (target network — no backward needed).
-// Identical to conv1d_burnin_forward but skips conv_states_out and post_conv_out writes.
-// Saves ~50% memory bandwidth for target path.
-extern "C" __global__ void conv1d_burnin_forward_nosave(
-    float* __restrict__ u_out,          // [batch * T * d_inner] post-SiLU output
-    float* __restrict__ state,          // [batch * d_inner * d_conv] persistent state (mutated)
-    const float* __restrict__ x_branch, // [batch * T * d_inner] input from in_proj split
-    const float* __restrict__ weight,   // [d_inner * d_conv]
-    const float* __restrict__ bias,     // [d_inner]
-    int batch, int T, int d_inner, int d_conv
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
-    if (idx >= total) return;
-
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int state_base = (b * d_inner + d) * d_conv;
-
-    // Serve-shape fast path (d_conv == 4, the production value): the shift
-    // register and the taps live in REGISTERS across the whole T loop, and
-    // global memory sees one x_branch read + one u_out write per t plus a
-    // single state writeback at the end. Value contract: the accumulation
-    // below is the k-ascending chain of the generic loop, term for term —
-    // an f32 kept in a register holds the exact bits a global round-trip
-    // would have returned, so the emitted FMA chain is unchanged.
-    if (d_conv == 4) {
-        float s0 = state[state_base];
-        float s1 = state[state_base + 1];
-        float s2 = state[state_base + 2];
-        float s3 = state[state_base + 3];
-        const float w0 = weight[d * 4];
-        const float w1 = weight[d * 4 + 1];
-        const float w2 = weight[d * 4 + 2];
-        const float w3 = weight[d * 4 + 3];
-        const float bd = bias[d];
-        for (int t = 0; t < T; t++) {
-            int bt_di = (b * T + t) * d_inner + d;
-            s0 = s1;
-            s1 = s2;
-            s2 = s3;
-            s3 = x_branch[bt_di];
-            float val = bd;
-            val += s0 * w0;
-            val += s1 * w1;
-            val += s2 * w2;
-            val += s3 * w3;
-            u_out[bt_di] = val / (1.0f + exp2f(-val * 1.4426950408889634f));
-        }
-        state[state_base] = s0;
-        state[state_base + 1] = s1;
-        state[state_base + 2] = s2;
-        state[state_base + 3] = s3;
-        return;
-    }
-
-    for (int t = 0; t < T; t++) {
-        int bt_di = (b * T + t) * d_inner + d;
-
-        // Shift register left + insert new value
-        for (int k = 0; k < d_conv - 1; k++) {
-            state[state_base + k] = state[state_base + k + 1];
-        }
-        state[state_base + d_conv - 1] = x_branch[bt_di];
-
-        // Depthwise dot product
-        float val = bias[d];
-        for (int k = 0; k < d_conv; k++) {
-            val += state[state_base + k] * weight[d * d_conv + k];
-        }
-
-        // Fused SiLU: u = val * sigmoid(val)
-        u_out[bt_di] = val / (1.0f + exp2f(-val * 1.4426950408889634f));
-    }
-}
-
 // conv1d_burnin_backward typed (bf16/f16/f32) for mixed-precision training.
 // Pattern matches Dao-AILab/causal-conv1d backward: activations T_IN, weights
 // f32 master, recurrent state save (`conv_states`) f32.
@@ -248,9 +172,11 @@ DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
 
 #define DEFINE_CONV1D_BURNIN_TILED(SUFFIX, TY, FROM_F)                        \
 extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
-    TY* u_out, float* state, float* conv_states_saved, TY* post_conv,        \
+    TY* u_out, float* state, float* conv_states_saved,                        \
     const TY* x_branch, const float* weight, const float* bias,              \
-    int batch, int T_len, int d_inner, int d_conv                            \
+    int batch, int T_len, int d_inner, int d_conv,                            \
+    int x_stride /* row stride of x_branch: d_inner, or 2*d_inner when        \
+                    reading the in_proj output directly */                    \
 ) {                                                                          \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
     int total = batch * d_inner;                                             \
@@ -276,18 +202,17 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
          * t0 >= CONV1D_TILE_T > d_conv, so the halo never underruns. */ \
         for (int k = 0; k < d_conv; k++) {                                   \
             int th = t0 - d_conv + k;                                        \
-            win[k] = to_f(x_branch[(b * T_len + th) * d_inner + d]);         \
+            win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
     for (int t = t0; t < t_end; t++) {                                       \
         int bt_di = (b * T_len + t) * d_inner + d;                           \
         for (int k = 0; k < d_conv - 1; k++) win[k] = win[k + 1];            \
-        win[d_conv - 1] = to_f(x_branch[bt_di]);                             \
+        win[d_conv - 1] = to_f(x_branch[(b * T_len + t) * x_stride + d]);     \
         float val = bias[d];                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
             val += win[k] * weight[d * d_conv + k];                          \
         }                                                                    \
-        post_conv[bt_di] = FROM_F(val);                                      \
         u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
     }                                                                        \
     if (t_end == T_len) {                                                    \
@@ -352,25 +277,32 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f32,  float,         from_f_f32)
 DEFINE_CONV1D_BURNIN_NOSAVE_TILED(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
 
-// Tiled d_x half of the conv backward. d_x[t] is a 4-tap anticausal FIR
-// of d_conv_out; the reverse carry walk within a tile is seeded with the
-// EXACT partial sums the serial walk would hold at the tile boundary
-// (same association order), so every d_x element is bit-identical.
-// d_weight/d_bias live in the separate dw-only pass below (their
-// descending-t accumulation order is the numeric contract and must not
-// be tiled).
-#define DEFINE_CONV1D_BWD_DX_TILED(SUFFIX, TY, FROM_F)                        \
-extern "C" __global__ void conv1d_bwd_dx_tiled_##SUFFIX(                      \
+// The conv backward as one kernel per (b, d, tile). The pre-activation
+// is recomputed from the x window instead of read from a tape, so the
+// forward keeps no pre-activation copy; the SiLU derivative is taken once
+// per element instead of once per tap lane; and d_x, the tap gradients and
+// the bias gradient walk the tile together. d_x is the anticausal FIR with
+// its carries seeded exactly as the serial walk would hold them at the
+// tile boundary; the tap and bias accumulators keep the descending-t order
+// within the tile and write one partial row each that the fixed-order
+// reduction folds as before. The recomputed pre-activation is the
+// forward's own chain on the forward's own window values, rounded to the
+// activation type as the forward's store rounded it.
+#define DEFINE_CONV1D_BWD_TILED(SUFFIX, TY, FROM_F)                           \
+extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     TY* __restrict__ d_x_branch,                                              \
+    float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
+    float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
     const TY* __restrict__ d_u,                                               \
-    const TY* __restrict__ post_conv,                                         \
+    const TY* __restrict__ x_branch,                                          \
+    const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in */         \
     const float* __restrict__ weight,                                         \
+    const float* __restrict__ bias,                                           \
     int batch, int T_, int d_inner, int d_conv,                               \
-    /* Row stride and column offset of the destination: the backward     \
-       writes the x half of d_proj [bt, 2*d_inner] in place, so the      \
-       separate concat pass is gone. Values and their order are          \
-       unchanged - only the store address moves. */                      \
-    int out_stride, int out_offset                                            \
+    /* Row stride and column offset of the d_x destination: the x half        \
+       of d_proj [bt, 2*d_inner] in production. */                            \
+    int out_stride, int out_offset,                                           \
+    int x_stride /* row stride of x_branch, as in the forward */              \
 ) {                                                                           \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
     int total = batch * d_inner;                                              \
@@ -378,84 +310,6 @@ extern "C" __global__ void conv1d_bwd_dx_tiled_##SUFFIX(                      \
     if (d_conv > 8) return;                                                   \
     int b = idx / d_inner;                                                    \
     int d = idx % d_inner;                                                    \
-    int t0 = blockIdx.y * CONV1D_TILE_T;                                      \
-    if (t0 >= T_) return;                                                     \
-    int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
-    float carry[8];                                                           \
-    int carry_len = d_conv - 1;                                               \
-    for (int k = 0; k < carry_len; k++) carry[k] = 0.0f;                      \
-    /* Seed carries as if the serial reverse walk had processed           \
-     * t >= t_end: replay steps t_end+carry_len-1 .. t_end (descending)  \
-     * through the same carry recurrence, with dco past T = 0.           */ \
-    for (int ts = t_end + carry_len - 1; ts >= t_end; ts--) {                 \
-        float dco = 0.0f;                                                     \
-        if (ts < T_) {                                                        \
-            int bt_di = (b * T_ + ts) * d_inner + d;                          \
-            float x = to_f(post_conv[bt_di]);                                 \
-            float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));      \
-            float silu_grad = sig * (1.0f + x * (1.0f - sig));                \
-            dco = to_f(d_u[bt_di]) * silu_grad;                               \
-        }                                                                     \
-        if (d_conv > 1) {                                                     \
-            for (int k = 0; k < carry_len - 1; k++) {                         \
-                carry[k] = carry[k + 1]                                       \
-                         + dco * weight[d * d_conv + d_conv - 2 - k];         \
-            }                                                                 \
-            carry[carry_len - 1] = dco * weight[d * d_conv];                  \
-        }                                                                     \
-    }                                                                         \
-    for (int t = t_end - 1; t >= t0; t--) {                                   \
-        int bt_di = (b * T_ + t) * d_inner + d;                                \
-        float x = to_f(post_conv[bt_di]);                                      \
-        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
-        float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
-        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
-        float dxb = d_conv_out * weight[d * d_conv + d_conv - 1];              \
-        if (d_conv > 1) {                                                      \
-            dxb += carry[0];                                                   \
-            for (int k = 0; k < carry_len - 1; k++) {                          \
-                carry[k] = carry[k + 1]                                        \
-                         + d_conv_out * weight[d * d_conv + d_conv - 2 - k];   \
-            }                                                                  \
-            carry[carry_len - 1] = d_conv_out * weight[d * d_conv];            \
-        }                                                                      \
-        d_x_branch[(b * T_ + t) * out_stride + out_offset + d] = FROM_F(dxb);  \
-    }                                                                          \
-}
-
-DEFINE_CONV1D_BWD_DX_TILED(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BWD_DX_TILED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BWD_DX_TILED(f16,  __half,        from_f_f16)
-
-// dw/db half, T-tiled: the single 1300-deep serial walk per lane was
-// the cost (strided loads with no latency overlap). Tiles multiply
-// the lane count by ceil(T / CONV1D_TILE_T).
-#define DEFINE_CONV1D_BWD_DW_TILED(SUFFIX, TY)                                \
-extern "C" __global__ void conv1d_bwd_dw_tiled_##SUFFIX(                      \
-    float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
-    float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
-    const TY* __restrict__ d_u,                                               \
-    const TY* __restrict__ post_conv,                                         \
-    const TY* __restrict__ x_branch,                                          \
-    const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in */         \
-    int batch, int T_, int d_inner, int d_conv                                \
-) {                                                                           \
-    /* Tap-split lanes as before, plus a T tile per blockIdx.y: each          \
-     * (b, d, tap, tile) lane keeps the descending-t add order WITHIN         \
-     * its tile and writes one partial row; the ascending-row                 \
-     * reduce_sum_axis0 folds (b, tile) rows in a fixed order. The            \
-     * per-tile grouping is a different dW/db summation order than            \
-     * the single serial walk (same bit family as the split-M dW              \
-     * change; the partition is a pure function of T). */                     \
-    int lanes = d_conv + 1;                                                   \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    int total = batch * d_inner * lanes;                                      \
-    if (idx >= total) return;                                                 \
-    if (d_conv > 8) return;                                                   \
-    int tap = idx % lanes;                                                    \
-    int bd = idx / lanes;                                                     \
-    int b = bd / d_inner;                                                     \
-    int d = bd % d_inner;                                                     \
     int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;                   \
     int tile = blockIdx.y;                                                    \
     int t0 = tile * CONV1D_TILE_T;                                            \
@@ -463,37 +317,76 @@ extern "C" __global__ void conv1d_bwd_dw_tiled_##SUFFIX(                      \
     int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
     int row = b * n_tiles + tile;                                             \
     int init_base = (b * d_inner + d) * d_conv;                               \
-    if (tap == d_conv) {                                                      \
-        float local_d_bias = 0.0f;                                            \
-        for (int t = t_end - 1; t >= t0; t--) {                               \
-            int bt_di = (b * T_ + t) * d_inner + d;                           \
-            float x = to_f(post_conv[bt_di]);                                 \
+    int carry_len = d_conv - 1;                                               \
+    float carry[8];                                                           \
+    float dw[8];                                                              \
+    float win[8];                                                             \
+    for (int k = 0; k < carry_len; k++) carry[k] = 0.0f;                      \
+    for (int k = 0; k < d_conv; k++) dw[k] = 0.0f;                            \
+    float local_d_bias = 0.0f;                                                \
+    /* The window at step ts holds x[ts - d_conv + 1 + k]; a negative         \
+       index reads the carry-in state past its first slot. */                 \
+    int ts_top = t_end + carry_len - 1;                                       \
+    int ts0 = min(ts_top, T_ - 1);                                            \
+    for (int k = 0; k < d_conv; k++) {                                        \
+        int tx = ts0 - carry_len + k;                                         \
+        win[k] = (tx >= 0)                                                    \
+            ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                    \
+            : conv_init[init_base + tx + d_conv];                             \
+    }                                                                         \
+    /* Descending walk: the steps past the tile seed the d_x carries as       \
+       the serial walk would hold them (dco = 0 past T), then the tile. */    \
+    for (int ts = ts_top; ts >= t0; ts--) {                                   \
+        float dco = 0.0f;                                                     \
+        float du = 0.0f;                                                      \
+        float silu_grad = 0.0f;                                               \
+        if (ts < T_) {                                                        \
+            if (ts < ts0) {                                                   \
+                for (int k = d_conv - 1; k >= 1; k--) win[k] = win[k - 1];    \
+                int tx = ts - carry_len;                                      \
+                win[0] = (tx >= 0)                                            \
+                    ? to_f(x_branch[(b * T_ + tx) * x_stride + d])            \
+                    : conv_init[init_base + tx + d_conv];                     \
+            }                                                                 \
+            float val = bias[d];                                              \
+            for (int k = 0; k < d_conv; k++) {                                \
+                val += win[k] * weight[d * d_conv + k];                       \
+            }                                                                 \
+            float x = to_f(FROM_F(val));                                      \
             float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));      \
-            float silu_grad = sig * (1.0f + x * (1.0f - sig));                \
-            /* explicit two-rounding shape (see the fused kernel note) */     \
-            local_d_bias = __fadd_rn(                                         \
-                local_d_bias, __fmul_rn(to_f(d_u[bt_di]), silu_grad));        \
+            silu_grad = sig * (1.0f + x * (1.0f - sig));                      \
+            du = to_f(d_u[(b * T_ + ts) * d_inner + d]);                      \
+            dco = du * silu_grad;                                             \
         }                                                                     \
-        d_bias_partials[row * d_inner + d] = local_d_bias;                    \
-        return;                                                               \
+        if (ts < t_end) {                                                     \
+            for (int k = 0; k < d_conv; k++) dw[k] += dco * win[k];           \
+            /* explicit two-rounding shape, as the bias gradient always had */ \
+            local_d_bias = __fadd_rn(local_d_bias, __fmul_rn(du, silu_grad)); \
+            float dxb = dco * weight[d * d_conv + d_conv - 1];                \
+            if (d_conv > 1) {                                                 \
+                dxb += carry[0];                                              \
+                for (int k = 0; k < carry_len - 1; k++) {                     \
+                    carry[k] = carry[k + 1]                                   \
+                             + dco * weight[d * d_conv + d_conv - 2 - k];     \
+                }                                                             \
+                carry[carry_len - 1] = dco * weight[d * d_conv];              \
+            }                                                                 \
+            d_x_branch[(b * T_ + ts) * out_stride + out_offset + d] =         \
+                FROM_F(dxb);                                                  \
+        } else if (d_conv > 1) {                                              \
+            for (int k = 0; k < carry_len - 1; k++) {                         \
+                carry[k] = carry[k + 1]                                       \
+                         + dco * weight[d * d_conv + d_conv - 2 - k];         \
+            }                                                                 \
+            carry[carry_len - 1] = dco * weight[d * d_conv];                  \
+        }                                                                     \
     }                                                                         \
-    float local_dw = 0.0f;                                                    \
-    for (int t = t_end - 1; t >= t0; t--) {                                   \
-        int bt_di = (b * T_ + t) * d_inner + d;                               \
-        float x = to_f(post_conv[bt_di]);                                     \
-        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));          \
-        float silu_grad = sig * (1.0f + x * (1.0f - sig));                    \
-        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                      \
-        int tx = t - (d_conv - 1) + tap;                                      \
-        float wv = (tx >= 0)                                                  \
-            ? to_f(x_branch[(b * T_ + tx) * d_inner + d])                     \
-            : conv_init[init_base + tap + t + 1];                             \
-        local_dw += d_conv_out * wv;                                          \
+    for (int k = 0; k < d_conv; k++) {                                        \
+        d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] = dw[k]; \
     }                                                                         \
-    d_weight_partials[row * (d_inner * d_conv) + d * d_conv + tap] =          \
-        local_dw;                                                             \
-}
+    d_bias_partials[row * d_inner + d] = local_d_bias;                        \
+}                                                                             \
 
-DEFINE_CONV1D_BWD_DW_TILED(f32,  float)
-DEFINE_CONV1D_BWD_DW_TILED(bf16, __nv_bfloat16)
-DEFINE_CONV1D_BWD_DW_TILED(f16,  __half)
+DEFINE_CONV1D_BWD_TILED(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BWD_TILED(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_TILED(f16,  __half,        from_f_f16)

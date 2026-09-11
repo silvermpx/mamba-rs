@@ -44,10 +44,9 @@
 //!   typed bias reduction).
 //! - **B5** x_proj backward (typed dW + typed dX → `d_u_xproj`), then
 //!   `d_u += d_u_xproj` via `scatter_add_cols_typed` with `offset=0`.
-//! - **B6** conv1d_burnin_bwd_typed → `d_x_branch` + f32 `d_conv_w/b`
-//!   master grads (Rule-B partials + reduce).
-//! - **B7** concat(`d_x_branch`, `d_gate`) → `d_proj`; in_proj backward
-//!   (typed dW + typed dX → `d_norm`).
+//! - **B6** conv1d_bwd_tiled_typed → the x half of `d_proj` + f32
+//!   `d_conv_w/b` master grads (Rule-B partials + reduce).
+//! - **B7** in_proj backward on `d_proj` (typed dW + typed dX → `d_norm`).
 //! - **B8** rmsnorm_bwd_f32in_typed: typed `d_norm` + f32 `residual` → f32
 //!   `d_pre_norm` + f32 `d_norm_weight` master grad. Then `d_temporal +=
 //!   d_pre_norm` (f32 `vec_add_inplace`).
@@ -186,7 +185,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let dg = scratch.d_proj.cached_ptr();
         let dgin = scratch.d_gated.cached_ptr();
         let y = acts.y.cached_ptr();
-        let gp = acts.gate_pre_silu.cached_ptr();
+        let gp = acts.proj.cached_ptr(); // gate half, read through the same geometry
         bld.arg(&dy);
         bld.arg(&dg);
         bld.arg(&dgin);
@@ -612,10 +611,10 @@ pub fn gpu_backward_mamba_layer_mixed(
             .map_err(|e| format!("d_u += d_u_xproj typed: {e:?}"))?;
     }
 
-    // ─── B6: Conv1d burnin backward ──────────────────────────────────
+    // ─── B6: Conv1d backward ─────────────────────────────────────────
     // Rule B (no atomicAdd): two-stage launch.
-    // Stage 1: conv1d_burnin_bwd_typed writes typed d_x_branch + per-(b,d)
-    //          f32 partials into axis0_partials split as [weight | bias].
+    // Stage 1: conv1d_bwd_tiled_typed writes the x half of d_proj + per-(b,
+    //          tile, d) f32 partials into axis0_partials split as [weight | bias].
     // Stage 2: two reduce_sum_axis0 launches reduce across B → f32 master
     //          grads in d_lw.conv1d_weight / d_lw.conv1d_bias.
     {
@@ -630,21 +629,27 @@ pub fn gpu_backward_mamba_layer_mixed(
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
-        // Stage 1 split (S-conv): tiled d_x + historical-order dw/db.
+        // Stage 1: one tiled kernel walks d_x, the tap partials and the
+        // bias partials together, recomputing the pre-activation from the
+        // x window (no tape). The x half of d_proj is written in place.
         {
-            // Writes the x half of d_proj directly - concat pass gone.
             let dxb = scratch.d_proj.cached_ptr();
             let du = scratch.d_u.cached_ptr();
-            let pc = acts.post_conv.cached_ptr();
+            let xb = acts.proj.cached_ptr(); // x half, read through the row stride
             let cs = acts.conv_states.cached_ptr();
             let w = lw.conv1d_weight.ptr();
+            let cb = lw.conv1d_bias.ptr();
             let mut bld = ctx
                 .stream
-                .launch_builder(k.conv1d_bwd_dx_tiled_typed.get(dtype));
+                .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
             bld.arg(&dxb);
+            bld.arg(&wp_ptr); // d_weight_partials
+            bld.arg(&bp_ptr); // d_bias_partials
             bld.arg(&du);
-            bld.arg(&pc);
+            bld.arg(&xb);
+            bld.arg(&cs); // carry-in window (conv_init)
             bld.arg(&w);
+            bld.arg(&cb);
             bld.arg(&b_i);
             bld.arg(&t_i);
             bld.arg(&di_i);
@@ -653,31 +658,9 @@ pub fn gpu_backward_mamba_layer_mixed(
             let x_off = 0i32;
             bld.arg(&proj_stride);
             bld.arg(&x_off);
+            bld.arg(&proj_stride); // x row stride
             unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_bwd_dx_tiled mixed: {e:?}"))?;
-
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.conv1d_bwd_dw_tiled_typed.get(dtype));
-            bld.arg(&wp_ptr); // d_weight_partials
-            bld.arg(&bp_ptr); // d_bias_partials
-            bld.arg(&du);
-            bld.arg(&pc);
-            let xb = acts.x_branch.cached_ptr();
-            bld.arg(&xb);
-            bld.arg(&cs); // carry-in window (conv_init)
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&dc_i);
-            let lanes = b * di * (d_conv + 1);
-            let dw_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            unsafe { bld.launch(dw_cfg) }
-                .map_err(|e| format!("conv1d_bwd_dw_tiled mixed: {e:?}"))?;
+                .map_err(|e| format!("conv1d_bwd_tiled mixed: {e:?}"))?;
         }
         // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.
         {

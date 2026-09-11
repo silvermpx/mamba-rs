@@ -200,14 +200,6 @@ extern "C" __global__ void vec_add_inplace(
     a[i] += b[i];
 }
 
-extern "C" __global__ void elementwise_mul(
-    float* y, const float* a, const float* b, int n
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    y[i] = a[i] * b[i];
-}
-
 extern "C" __global__ void exp_negate(
     float* y, const float* x, int n
 ) {
@@ -242,60 +234,22 @@ extern "C" __global__ void gather_cols(
     dst[b * dst_dim + d] = src[b * src_stride + offset + d];
 }
 
-extern "C" __global__ void split_gate_silu(
-    float* x_branch,       // [batch * d_inner] first half
-    float* gate_pre_silu,  // [batch * d_inner] second half (saved for backward)
-    float* gate_post_silu, // [batch * d_inner] SiLU(gate)
-    const float* proj,     // [batch * 2*d_inner] in_proj output
-    int batch, int d_inner
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
-    if (idx >= total) return;
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int proj_off = b * 2 * d_inner;
-    x_branch[idx] = proj[proj_off + d];
-    float g = proj[proj_off + d_inner + d];
-    gate_pre_silu[idx] = g;
-    gate_post_silu[idx] = g / (1.0f + exp2f(-g * 1.4426950408889634f));
-}
-
-// Split WITHOUT materializing SiLU(gate): the post-SiLU activation is
-// recomputed from the saved pre-SiLU value wherever it is consumed
-// (`gate_mul_silu` in the forward, `gating_backward` in the backward).
-// Recomputation is EXACT, not approximate: `gate_pre` stores the same
-// value the SiLU was computed from, so the recomputed expression sees an
-// identical input and the shipped SiLU form is reproduced verbatim.
-// Saves one [B*T*d_inner] activation per layer.
-extern "C" __global__ void split_gate(
-    float* __restrict__ x_branch,      // [batch * d_inner] first half
-    float* __restrict__ gate_pre_silu, // [batch * d_inner] second half
-    const float* __restrict__ proj,    // [batch * 2*d_inner] in_proj output
-    int batch, int d_inner
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
-    if (idx >= total) return;
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int proj_off = b * 2 * d_inner;
-    x_branch[idx] = proj[proj_off + d];
-    gate_pre_silu[idx] = proj[proj_off + d_inner + d];
-}
-
-// Gating forward with the SiLU recomputed from `gate_pre`. The SiLU form
+// Gating forward with the SiLU recomputed from the gate. The SiLU form
 // is the DIVISION `g / (1 + exp2(-g*log2e))` the split kernel used - not
-// the algebraically equal `g * sigma`, which rounds differently.
+// the algebraically equal `g * sigma`, which rounds differently. The gate
+// is read through a (row stride, column offset) pair: the gate half of the
+// in_proj output in production, so nothing splits it out first.
 extern "C" __global__ void gate_mul_silu(
     float* __restrict__ gated,
     const float* __restrict__ y,
     const float* __restrict__ gate_pre,
-    int n
+    int n, int d_inner, int gate_stride, int gate_offset
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float g = gate_pre[i];
+    int row = i / d_inner;
+    int col = i - row * d_inner;
+    float g = gate_pre[row * gate_stride + gate_offset + col];
     gated[i] = y[i] * (g / (1.0f + exp2f(-g * 1.4426950408889634f)));
 }
 
@@ -304,23 +258,23 @@ extern "C" __global__ void gating_backward(
     float* d_gate_pre,     // [n] gradient w.r.t. gate pre-SiLU
     const float* d_gated,  // [n] incoming gradient
     const float* y,        // [n] SSM output (saved)
-    const float* gate_pre, // [n] gate pre-SiLU (saved)
+    const float* gate_pre, // gate pre-SiLU, read through the same geometry
     int n, int d_inner,
-    // Row stride and column offset of the gate destination: the gate
-    // gradient lands directly in the d_proj [bt, 2*d_inner] half, so the
-    // separate concat pass is gone. Same values, other store address.
+    // Row stride and column offset of the gate half: the gate is read from
+    // the in_proj output and its gradient lands directly in the d_proj
+    // [bt, 2*d_inner] half, so neither a split nor a concat pass runs.
     int out_stride, int out_offset
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    int row = i / d_inner;
+    int col = i - row * d_inner;
     float dg = d_gated[i];
-    float x = gate_pre[i];
+    float x = gate_pre[row * out_stride + out_offset + col];
     // Post-SiLU recomputed in the split kernel's exact form.
     d_y[i] = dg * (x / (1.0f + exp2f(-x * 1.4426950408889634f)));
     // SiLU derivative: sigma * (1 + x * (1 - sigma))
     float sigma = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));
-    int row = i / d_inner;
-    int col = i - row * d_inner;
     d_gate_pre[row * out_stride + out_offset + col] =
         dg * y[i] * sigma * (1.0f + x * (1.0f - sigma));
 }
@@ -339,16 +293,16 @@ extern "C" __global__ void gating_backward_##SUFFIX(                           \
 ) {                                                                            \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                             \
     if (i >= n) return;                                                        \
+    int row = i / d_inner;                                                     \
+    int col = i - row * d_inner;                                               \
     float dg = to_f(d_gated[i]);                                               \
-    float xv = to_f(gate_pre[i]);                                              \
+    float xv = to_f(gate_pre[row * out_stride + out_offset + col]);            \
     /* Post-SiLU recomputed through the SAME store rounding the deleted    \
        activation carried: FROM_F of the split kernel's division form,     \
        then back to f32 - the exact bits `gate_post[i]` held. */           \
     float gp = to_f(FROM_F(xv / (1.0f + exp2f(-xv * LOG2E))));                 \
     d_y[i] = FROM_F(dg * gp);                                                  \
     float sigma = 1.0f / (1.0f + exp2f(-xv * 1.4426950408889634f));            \
-    int row = i / d_inner;                                                     \
-    int col = i - row * d_inner;                                               \
     d_gate_pre[row * out_stride + out_offset + col] =                          \
         FROM_F(dg * to_f(y[i]) * sigma * (1.0f + xv * (1.0f - sigma)));        \
 }
@@ -493,6 +447,14 @@ DEFINE_BIAS_BROADCAST(f32,  float,         from_f_f32)
 DEFINE_BIAS_BROADCAST(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_BIAS_BROADCAST(f16,  __half,        from_f_f16)
 
+extern "C" __global__ void elementwise_mul(
+    float* y, const float* a, const float* b, int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = a[i] * b[i];
+}
+
 #define DEFINE_ELEMENTWISE_MUL(SUFFIX, T, FROM_F)                             \
 extern "C" __global__ void elementwise_mul_##SUFFIX(                          \
     T* y, const T* a, const T* b, int n                                       \
@@ -628,57 +590,19 @@ DEFINE_GATHER_BC_TMAJOR_TILED(f32,  float)
 DEFINE_GATHER_BC_TMAJOR_TILED(bf16, __nv_bfloat16)
 DEFINE_GATHER_BC_TMAJOR_TILED(f16,  __half)
 
-#define DEFINE_SPLIT_GATE_SILU(SUFFIX, T, FROM_F)                             \
-extern "C" __global__ void split_gate_silu_##SUFFIX(                          \
-    T* x_branch, T* gate_pre_silu, T* gate_post_silu,                         \
-    const T* proj, int batch, int d_inner                                     \
-) {                                                                           \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    int total = batch * d_inner;                                              \
-    if (idx >= total) return;                                                 \
-    int b = idx / d_inner;                                                    \
-    int d = idx % d_inner;                                                    \
-    int proj_off = b * 2 * d_inner;                                           \
-    x_branch[idx] = proj[proj_off + d];                                       \
-    float g = to_f(proj[proj_off + d_inner + d]);                             \
-    gate_pre_silu[idx] = FROM_F(g);                                           \
-    gate_post_silu[idx] = FROM_F(g / (1.0f + exp2f(-g * LOG2E)));             \
-}
-
-DEFINE_SPLIT_GATE_SILU(f32,  float,         from_f_f32)
-DEFINE_SPLIT_GATE_SILU(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SPLIT_GATE_SILU(f16,  __half,        from_f_f16)
-
-/* Typed split WITHOUT the post-SiLU activation (see the f32 twin). */
-#define DEFINE_SPLIT_GATE(SUFFIX, T)                                          \
-extern "C" __global__ void split_gate_##SUFFIX(                               \
-    T* __restrict__ x_branch, T* __restrict__ gate_pre_silu,                  \
-    const T* __restrict__ proj, int batch, int d_inner                        \
-) {                                                                           \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    int total = batch * d_inner;                                              \
-    if (idx >= total) return;                                                 \
-    int b = idx / d_inner;                                                    \
-    int d = idx % d_inner;                                                    \
-    int proj_off = b * 2 * d_inner;                                           \
-    x_branch[idx] = proj[proj_off + d];                                       \
-    gate_pre_silu[idx] = proj[proj_off + d_inner + d];                        \
-}
-
-DEFINE_SPLIT_GATE(f32,  float)
-DEFINE_SPLIT_GATE(bf16, __nv_bfloat16)
-DEFINE_SPLIT_GATE(f16,  __half)
-
 /* Typed gating forward with the SiLU recomputed through its store
  * rounding - reproduces `elementwise_mul(y, gate_post)` exactly. */
 #define DEFINE_GATE_MUL_SILU(SUFFIX, T, FROM_F)                               \
 extern "C" __global__ void gate_mul_silu_##SUFFIX(                            \
     T* __restrict__ gated, const T* __restrict__ y,                           \
-    const T* __restrict__ gate_pre, int n                                     \
+    const T* __restrict__ gate_pre,                                           \
+    int n, int d_inner, int gate_stride, int gate_offset                      \
 ) {                                                                           \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
     if (i >= n) return;                                                       \
-    float g = to_f(gate_pre[i]);                                              \
+    int row = i / d_inner;                                                    \
+    int col = i - row * d_inner;                                              \
+    float g = to_f(gate_pre[row * gate_stride + gate_offset + col]);          \
     float gp = to_f(FROM_F(g / (1.0f + exp2f(-g * LOG2E))));                   \
     gated[i] = FROM_F(to_f(y[i]) * gp);                                       \
 }
@@ -703,13 +627,20 @@ DEFINE_GATE_MUL_SILU(f16,  __half,        from_f_f16)
 #define DEFINE_GATE_MUL_SILU_V(SUFFIX, T, FROM_F)                             \
 extern "C" __global__ void gate_mul_silu_v_##SUFFIX(                          \
     T* __restrict__ gated, const T* __restrict__ y,                           \
-    const T* __restrict__ gate_pre, int n_vec                                 \
+    const T* __restrict__ gate_pre,                                           \
+    int n_vec, int d_inner, int gate_stride, int gate_offset                  \
 ) {                                                                           \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
     if (i >= n_vec) return;                                                   \
     const int NPV = 16 / (int)sizeof(T);                                      \
+    /* One vector never straddles a row: the launcher requires the            \
+       vector width to divide d_inner. */                                     \
+    int e = i * NPV;                                                          \
+    int row = e / d_inner;                                                    \
+    int col = e - row * d_inner;                                              \
+    const T* grow = gate_pre + (size_t)row * gate_stride + gate_offset + col; \
     uint4 yv = reinterpret_cast<const uint4*>(y)[i];                          \
-    uint4 gv = reinterpret_cast<const uint4*>(gate_pre)[i];                   \
+    uint4 gv = *reinterpret_cast<const uint4*>(grow);                         \
     uint4 ov;                                                                 \
     const T* yp = reinterpret_cast<const T*>(&yv);                            \
     const T* gp = reinterpret_cast<const T*>(&gv);                            \

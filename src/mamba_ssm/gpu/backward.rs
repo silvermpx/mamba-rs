@@ -78,7 +78,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(scratch.d_proj.inner_mut());
         builder.arg(scratch.d_gated.inner());
         builder.arg(acts.y.inner());
-        builder.arg(acts.gate_pre_silu.inner());
+        builder.arg(acts.proj.inner()); // gate half, read through the same geometry
         builder.arg(&n);
         builder.arg(&di_i);
         builder.arg(&proj_stride);
@@ -414,21 +414,25 @@ pub fn gpu_backward_mamba_layer(
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
-        // Stage 1 split (S-conv): the tiled d_x half fills the machine
-        // (bit-identical anticausal FIR with serial-order carry seeding);
-        // the dw/db half keeps its historical descending-t accumulation.
+        // Stage 1: one tiled kernel walks d_x, the tap partials and the
+        // bias partials together, recomputing the pre-activation from the
+        // x window (no tape). The x half of d_proj is written in place
+        // (stride 2*d_inner, offset 0).
         {
             let f32k = super::dtype::WeightDtype::F32;
             let mut builder = ctx
                 .stream
-                .launch_builder(ctx.kernels.conv1d_bwd_dx_tiled_typed.get(f32k));
-            // Writes the x half of d_proj directly (stride 2*d_inner,
-            // offset 0) - the concat pass is gone.
+                .launch_builder(ctx.kernels.conv1d_bwd_tiled_typed.get(f32k));
             builder.arg(scratch.d_proj.inner_mut());
+            builder.arg(&wp_ptr); // d_weight_partials
+            builder.arg(&bp_ptr); // d_bias_partials
             builder.arg(scratch.d_u.inner());
-            builder.arg(acts.post_conv.inner());
+            builder.arg(acts.proj.inner()); // x half, read through the row stride
+            builder.arg(acts.conv_states.inner()); // carry-in window (conv_init)
             let cw_ptr = lw.conv1d_weight.cached_ptr();
+            let cb_ptr = lw.conv1d_bias.cached_ptr();
             builder.arg(&cw_ptr);
+            builder.arg(&cb_ptr);
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&di_i);
@@ -437,30 +441,9 @@ pub fn gpu_backward_mamba_layer(
             let x_off = 0i32;
             builder.arg(&proj_stride);
             builder.arg(&x_off);
+            builder.arg(&proj_stride); // x row stride
             unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_bwd_dx_tiled mamba: {:?}", e))?;
-
-            let mut builder = ctx
-                .stream
-                .launch_builder(ctx.kernels.conv1d_bwd_dw_tiled_typed.get(f32k));
-            builder.arg(&wp_ptr); // d_weight_partials
-            builder.arg(&bp_ptr); // d_bias_partials
-            builder.arg(scratch.d_u.inner());
-            builder.arg(acts.post_conv.inner());
-            builder.arg(acts.x_branch.inner());
-            builder.arg(acts.conv_states.inner()); // carry-in window (conv_init)
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&dc_i);
-            let lanes = b * di * (d_conv + 1);
-            let dw_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            unsafe { builder.launch(dw_cfg) }
-                .map_err(|e| format!("conv1d_bwd_dw_tiled mamba: {:?}", e))?;
+                .map_err(|e| format!("conv1d_bwd_tiled mamba: {:?}", e))?;
         }
         // Stage 2a: reduce weight partials [B, d_inner*d_conv] → d_lw.conv1d_weight.
         {
@@ -696,14 +679,11 @@ pub fn gpu_backward_mamba_backbone(
 pub struct GpuMambaTargetScratch {
     // Batched B*T scratch (reusable from online forward scratch)
     pub proj_flat: GpuBuffer,   // [B*T*2*d_inner]
-    pub x_branch: GpuBuffer,    // [B*T*d_inner]
-    pub gate_silu: GpuBuffer,   // [B*T*d_inner] gate after SiLU
     pub u: GpuBuffer,           // [B*T*d_inner]
     pub xdbl: GpuBuffer,        // [B*T*xdbl_dim]
     pub dt_gather: GpuBuffer,   // [B*T*dt_rank]
     pub delta: GpuBuffer,       // [B*T*d_inner]
-    pub y: GpuBuffer,           // [B*T*d_inner]
-    pub gated: GpuBuffer,       // [B*T*d_inner]
+    pub gated: GpuBuffer,       // [B*T*d_inner] the scan's gated store
     pub out_flat: GpuBuffer,    // [B*T*d_model]
     pub residual: GpuBuffer,    // [B*T*d_model] (saved before RmsNorm)
     pub rms_discard: GpuBuffer, // [B*T] (RmsNorm scalars, discarded)
@@ -734,13 +714,10 @@ impl GpuMambaTargetScratch {
 
         Ok(Self {
             proj_flat: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
-            x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
-            gate_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
             u: GpuBuffer::zeros(stream, bt * d_inner)?,
             xdbl: GpuBuffer::zeros(stream, bt * xdbl_dim)?,
             dt_gather: GpuBuffer::zeros(stream, bt * dt_rank)?,
             delta: GpuBuffer::zeros(stream, bt * d_inner)?,
-            y: GpuBuffer::zeros(stream, bt * d_inner)?,
             gated: GpuBuffer::zeros(stream, bt * d_inner)?,
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
@@ -766,13 +743,10 @@ use super::dtype::WeightDtype;
 
 pub struct GpuMambaTargetMixedScratch {
     pub proj_flat: DtypedBuf,
-    pub x_branch: DtypedBuf,
-    pub gate_silu: DtypedBuf,
     pub u: DtypedBuf,
     pub xdbl: DtypedBuf,
     pub dt_gather: DtypedBuf,
     pub delta: DtypedBuf,
-    pub y: DtypedBuf,
     pub gated: DtypedBuf,
     pub out_flat: DtypedBuf,
     /// Residual accumulator — f32 across layers (HF residual_in_fp32).
@@ -803,13 +777,10 @@ impl GpuMambaTargetMixedScratch {
 
         Ok(Self {
             proj_flat: DtypedBuf::zeros(stream, bt * 2 * d_inner, dtype)?,
-            x_branch: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
-            gate_silu: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             u: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, bt * dt_rank, dtype)?,
             delta: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
-            y: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,

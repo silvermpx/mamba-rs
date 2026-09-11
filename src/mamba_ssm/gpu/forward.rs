@@ -99,23 +99,18 @@ pub struct GpuMambaLayerActs {
     /// Post-norm output `[B*T*d_model]`.
     pub post_norm: GpuBuffer,
 
-    // -- F3: Split + gate --
-    /// Gate branch before SiLU `[B*T*d_inner]`.
-    pub gate_pre_silu: GpuBuffer,
-    /// Gate branch after SiLU `[B*T*d_inner]`.
-
-    // -- F3: split --
-    /// x branch after split `[B*T*d_inner]` (saved: the conv backward
-    /// reconstructs its windows from it — the conv tape is gone).
-    pub x_branch: GpuBuffer,
+    // -- F2: in_proj output --
+    /// The in_proj output `[B*T*2*d_inner]`, saved whole: the conv reads
+    /// its x half and the gating its gate half through a row stride, and
+    /// the backward reconstructs the conv windows from the x half, so
+    /// nothing splits it.
+    pub proj: GpuBuffer,
 
     // -- F4a: Conv1d + SiLU --
     /// Only the CARRY-IN window per (b, d) survives as conv tape
-    /// `[B*d_inner*d_conv]`; later windows are reconstructed from
-    /// x_branch in the backward.
+    /// `[B*d_inner*d_conv]`; later windows are reconstructed from the x
+    /// half of `proj` in the backward.
     pub conv_states: GpuBuffer,
-    /// Pre-SiLU conv output `[B*T*d_inner]`.
-    pub post_conv: GpuBuffer,
     /// Post-SiLU conv output, SSM input `[B*T*d_inner]`.
     pub u: GpuBuffer,
 
@@ -179,12 +174,10 @@ impl GpuMambaBackboneActs {
                     residual: GpuBuffer::zeros(stream, bt * d_model)?,
                     rms_vals: GpuBuffer::zeros(stream, bt)?,
                     post_norm: GpuBuffer::zeros(stream, bt * d_model)?,
-                    // F3: Split + gate
-                    gate_pre_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
+                    // F2: in_proj output
+                    proj: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
                     // F4a: Conv1d + SiLU
-                    x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
                     conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
-                    post_conv: GpuBuffer::zeros(stream, bt * d_inner)?,
                     u: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4b-c: x_proj + dt_proj
                     xdbl: GpuBuffer::zeros(stream, bt * xdbl_dim)?,
@@ -231,10 +224,6 @@ pub struct GpuMambaScratch {
     /// Dimensions this scratch was allocated for.
     pub dims: GpuMambaDims,
     // -- Forward scratch --
-    /// In-proj output (x + gate concatenated) `[B*T * 2*d_inner]`.
-    pub proj_flat: GpuBuffer,
-    /// x_branch after split `[B*T*d_inner]`.
-    pub x_branch: GpuBuffer,
     /// Out-proj output `[B*T*d_model]`.
     pub out_flat: GpuBuffer,
     /// Gathered dt portion of xdbl for dt_proj SGEMM `[B*T*dt_rank]`.
@@ -246,8 +235,6 @@ pub struct GpuMambaScratch {
     pub d_gated: GpuBuffer,
     /// Gradient of SSM output y `[B*T*d_inner]`.
     pub d_y: GpuBuffer,
-    /// Gradient of gate branch `[B*T*d_inner]`.
-    pub d_gate: GpuBuffer,
     /// Gradient of discretized delta `[B*T*d_inner]`.
     pub d_delta: GpuBuffer,
     /// Gradient of raw delta (pre-softplus) `[B*T*d_inner]`.
@@ -258,9 +245,8 @@ pub struct GpuMambaScratch {
     pub d_u_xproj: GpuBuffer,
     /// Gradient of x_proj output `[B*T*xdbl_dim]`.
     pub d_xdbl: GpuBuffer,
-    /// Gradient of x_branch `[B*T*d_inner]`.
-    pub d_x_branch: GpuBuffer,
-    /// Gradient of in_proj output `[B*T*2*d_inner]`.
+    /// Gradient of in_proj output `[B*T*2*d_inner]`; the conv and gating
+    /// backwards write their halves in place.
     pub d_proj: GpuBuffer,
     /// Gradient of post-norm activations `[B*T*d_model]`.
     pub d_norm: GpuBuffer,
@@ -326,20 +312,16 @@ impl GpuMambaScratch {
         Ok(Self {
             dims: *dims,
             // Forward scratch
-            proj_flat: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
-            x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
             dt_gather_buf: GpuBuffer::zeros(stream, bt * dt_rank)?,
             // Backward scratch
             d_gated: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_y: GpuBuffer::zeros(stream, bt * d_inner)?,
-            d_gate: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_delta: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_delta_raw: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_u: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_u_xproj: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_xdbl: GpuBuffer::zeros(stream, bt * xdbl_dim)?,
-            d_x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_proj: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
             d_norm: GpuBuffer::zeros(stream, bt * d_model)?,
             d_dt_input: GpuBuffer::zeros(stream, bt * dt_rank)?,
@@ -443,9 +425,11 @@ pub fn gpu_forward_mamba_layer(
     // F2: Batch in_proj -- ONE cuBLAS SGEMM
     //     [B*T, d_model] -> [B*T, 2*d_inner]
     // ===================================================================
+    // The output stays whole: the conv and the gating read their halves
+    // through a row stride, so no split pass runs.
     gpu_gemm_bi_forward_raw(
         ctx,
-        &mut scratch.proj_flat,
+        &mut acts.proj,
         &acts.post_norm,
         lw.in_proj_w.cached_ptr(),
         None,
@@ -453,31 +437,12 @@ pub fn gpu_forward_mamba_layer(
     )?;
 
     // ===================================================================
-    // F3: Split x/gate + SiLU(gate)
-    // ===================================================================
-    // split_gate(x_branch, gate_pre_silu, proj, batch, d_inner) - the
-    // post-SiLU activation is no longer materialized; both consumers
-    // recompute it from gate_pre_silu (identical input, identical form).
-    {
-        let batch_i = bt as i32;
-        let di_i = di as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate);
-        builder.arg(acts.x_branch.inner_mut());
-        builder.arg(acts.gate_pre_silu.inner_mut());
-        builder.arg(scratch.proj_flat.inner());
-        builder.arg(&batch_i);
-        builder.arg(&di_i);
-        unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("split_gate mamba: {:?}", e))?;
-    }
-
-    // ===================================================================
     // F4a: Conv1d burnin + fused SiLU
     // ===================================================================
     // Tiled kernel, typed f32 instantiation. Argument order:
-    // (u_out, state, conv_states_out, post_conv_out, x_branch, weight, bias,
-    //  batch, T, d_inner, d_conv). Grid (b*di, T tiles) instead of a
-    // serial walk over T.
+    // (u_out, state, conv_states_out, x_branch, weight, bias,
+    //  batch, T, d_inner, d_conv, x_stride). Grid (b*di, T tiles) instead
+    // of a serial walk over T; x is the first half of the in_proj output.
     {
         let b_i = b as i32;
         let t_i = t as i32;
@@ -491,8 +456,7 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(acts.u.inner_mut());
         builder.arg(&layer_ptrs.conv_state); // state (raw ptr at layer offset)
         builder.arg(acts.conv_states.inner_mut());
-        builder.arg(acts.post_conv.inner_mut());
-        builder.arg(acts.x_branch.inner());
+        builder.arg(acts.proj.inner());
         let cw_ptr = lw.conv1d_weight.cached_ptr();
         let cb_ptr = lw.conv1d_bias.cached_ptr();
         builder.arg(&cw_ptr);
@@ -501,6 +465,8 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&dc_i);
+        let x_stride = (2 * di) as i32;
+        builder.arg(&x_stride);
         unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
             .map_err(|e| format!("conv1d_burnin_fwd_tiled mamba: {:?}", e))?;
     }
@@ -659,15 +625,22 @@ pub fn gpu_forward_mamba_layer(
     }
 
     // ===================================================================
-    // F4e: Gating — gated = y * SiLU(gate_pre), recomputed
+    // F4e: Gating — gated = y * SiLU(gate), the gate read from the second
+    // half of the in_proj output through the row stride.
     // ===================================================================
     {
         let n = (bt * di) as i32;
+        let di_i = di as i32;
+        let gate_stride = (2 * di) as i32;
+        let gate_off = di as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.gate_mul_silu);
         builder.arg(acts.gated.inner_mut());
         builder.arg(acts.y.inner());
-        builder.arg(acts.gate_pre_silu.inner());
+        builder.arg(acts.proj.inner());
         builder.arg(&n);
+        builder.arg(&di_i);
+        builder.arg(&gate_stride);
+        builder.arg(&gate_off);
         unsafe { builder.launch(grid_1d(bt * di)) }
             .map_err(|e| format!("gate_mul_silu mamba: {:?}", e))?;
     }
@@ -941,23 +914,11 @@ pub fn gpu_forward_mamba_target_burnin(
             (bt, dm, 2 * di),
         )?;
 
-        // === F3: split x + SiLU(gate) [B*T] ===
-        {
-            let bt_i = bt as i32;
-            let di_i = di as i32;
-            let gs_raw = scratch.gate_silu.raw_ptr(&ctx.stream);
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate_silu);
-            builder.arg(scratch.x_branch.inner_mut());
-            builder.arg(scratch.gate_silu.inner_mut()); // gate_pre_silu (discarded)
-            builder.arg(&gs_raw); // gate_post_silu writes to same buffer
-            builder.arg(scratch.proj_flat.inner());
-            builder.arg(&bt_i);
-            builder.arg(&di_i);
-            unsafe { builder.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("split_gate target L{layer_idx}: {:?}", e))?;
-        }
+        // No split: the conv reads the x half of the in_proj output
+        // through the row stride and the scan gates its own store from
+        // the gate half, as the prefill chain does.
 
-        // === F4a: conv1d burnin nosave + fused SiLU [all T, parallel B*d_inner] ===
+        // === F4a: conv1d burnin nosave + fused SiLU, T-tiled ===
         {
             let b_i = b as i32;
             let t_i = t as i32;
@@ -965,10 +926,10 @@ pub fn gpu_forward_mamba_target_burnin(
             let dc_i = d_conv as i32;
             let mut builder = ctx
                 .stream
-                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave);
+                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
             builder.arg(scratch.u.inner_mut()); // post-SiLU output [B*T*di]
             builder.arg(&conv_ptr); // per-layer state
-            builder.arg(scratch.x_branch.inner());
+            builder.arg(scratch.proj_flat.inner());
             let cw_ptr = lw.conv1d_weight.cached_ptr();
             let cb_ptr = lw.conv1d_bias.cached_ptr();
             builder.arg(&cw_ptr);
@@ -977,8 +938,10 @@ pub fn gpu_forward_mamba_target_burnin(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
-            unsafe { builder.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_nosave target L{layer_idx}: {:?}", e))?;
+            let x_stride = (2 * di) as i32;
+            builder.arg(&x_stride);
+            unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_nosave_tiled target L{layer_idx}: {:?}", e))?;
         }
 
         // === F4b: x_proj SGEMM [B*T, di] -> [B*T, xdbl_dim] ===
@@ -1064,12 +1027,16 @@ pub fn gpu_forward_mamba_target_burnin(
             let di_i = di as i32;
             let ds_i = ds as i32;
 
+            // The scan multiplies the gate into its own store, reading the
+            // gate half of the in_proj output through the row stride, so
+            // the gated output lands directly and no gating pass runs.
+            let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);
                 builder.arg(&ssm_ptr);
-                builder.arg(scratch.y.inner_mut());
+                builder.arg(scratch.gated.inner_mut());
                 builder.arg(scratch.delta.inner());
                 builder.arg(scratch.u.inner());
                 builder.arg(scratch.b_gathered.inner());
@@ -1077,10 +1044,7 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&a_neg_ptr);
                 let dp_ptr = lw.d_param.cached_ptr();
                 builder.arg(&dp_ptr);
-                // Gate fusion is a prefill-chain feature; stride 0 disables it
-                // here and the pointer is never dereferenced.
-                let gate_stride = 0i32;
-                builder.arg(&dp_ptr);
+                builder.arg(scratch.proj_flat.inner());
                 builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
@@ -1093,7 +1057,7 @@ pub fn gpu_forward_mamba_target_burnin(
                     .stream
                     .launch_builder(&ctx.kernels.ssm_burnin_fwd_nosave);
                 builder.arg(&ssm_ptr);
-                builder.arg(scratch.y.inner_mut());
+                builder.arg(scratch.gated.inner_mut());
                 builder.arg(scratch.delta.inner());
                 builder.arg(scratch.u.inner());
                 builder.arg(scratch.b_gathered.inner());
@@ -1101,8 +1065,7 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&a_neg_ptr);
                 let dp_ptr = lw.d_param.cached_ptr();
                 builder.arg(&dp_ptr);
-                let gate_stride = 0i32;
-                builder.arg(&dp_ptr);
+                builder.arg(scratch.proj_flat.inner());
                 builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
@@ -1111,29 +1074,6 @@ pub fn gpu_forward_mamba_target_burnin(
                 unsafe { builder.launch(grid_1d(b * di)) }
                     .map_err(|e| format!("ssm_nosave target L{layer_idx}: {:?}", e))?;
             }
-        }
-
-        // === F4e: gating [B*T] — y * gate_silu ===
-        // The 16-byte vectorized twin does the same multiply per element;
-        // it runs when the count divides four and every operand is aligned.
-        {
-            let g = scratch.gated.cached_ptr();
-            let y = scratch.y.cached_ptr();
-            let gs = scratch.gate_silu.cached_ptr();
-            let w = super::launch::vec8_width(4);
-            let (kern, count) = if super::launch::vec8_ok(bt * di, 4, &[g, y, gs]) {
-                (&ctx.kernels.elementwise_mul_v_typed.f32, bt * di / w)
-            } else {
-                (&ctx.kernels.elementwise_mul, bt * di)
-            };
-            let n = count as i32;
-            let mut builder = ctx.stream.launch_builder(kern);
-            builder.arg(&g);
-            builder.arg(&y);
-            builder.arg(&gs);
-            builder.arg(&n);
-            unsafe { builder.launch(grid_1d(count)) }
-                .map_err(|e| format!("gating target L{layer_idx}: {:?}", e))?;
         }
 
         // === F5: out_proj SGEMM [B*T, di] -> [B*T, dm] ===

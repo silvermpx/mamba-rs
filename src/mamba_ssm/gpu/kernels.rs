@@ -146,8 +146,6 @@ pub struct MambaKernels {
     pub ssm_reduce_d_a_log_chunks: CudaFunction,
 
     // -- Conv1d --
-    /// Multi-step conv1d forward without saves (target network).
-    pub conv1d_burnin_fwd_nosave: CudaFunction,
     /// Nosave tiled twin (inference prefill): tile-0 seeds from the
     /// carry-in state, later tiles from the x_branch halo - bit-identical
     /// to the serial nosave walk at two orders more parallelism.
@@ -177,8 +175,6 @@ pub struct MambaKernels {
     pub reduce_sum_axis0: CudaFunction,
     /// In-place vector add: `a[i] += b[i]`.
     pub vec_add_inplace: CudaFunction,
-    /// Elementwise multiply: `c[i] = a[i] * b[i]`.
-    pub elementwise_mul: CudaFunction,
     /// Negate and exponentiate: `out[i] = -exp(a_log[i])`.
     pub exp_negate: CudaFunction,
     pub exp_negate2: CudaFunction,
@@ -193,12 +189,8 @@ pub struct MambaKernels {
     /// t-contiguous. Falls back to the untiled kernel when the tile exceeds
     /// the 48 KB static smem budget (f32 at d_state > 186).
     pub gather_bc_cols_tmajor_tiled: CudaFunction,
-    /// Split in_proj output into x_branch and gate with SiLU on gate.
-    pub split_gate_silu: CudaFunction,
-    /// Split in_proj output into x_branch and gate WITHOUT materializing
-    /// SiLU(gate) - the training path recomputes it at both consumers.
-    pub split_gate: CudaFunction,
-    /// Gating forward that recomputes SiLU(gate) from the saved pre-SiLU.
+    /// Gating forward that recomputes SiLU(gate) from the in_proj output's
+    /// gate half, read through a row stride.
     pub gate_mul_silu: CudaFunction,
     /// Backward through gating: `y = ssm_out * gate_silu`.
     pub gating_backward: CudaFunction,
@@ -232,15 +224,14 @@ pub struct MambaKernels {
     /// Tiled conv1d forward (S-conv): grid (b*di blocks, T tiles); the
     /// window seeds from x_branch halo — bit-identical to the serial walk.
     pub conv1d_burnin_fwd_tiled_typed: TypedKernel,
-    /// Tiled d_x half of the conv backward (anticausal FIR, carry-seeded
-    /// at tile boundaries with the serial association order).
-    pub conv1d_bwd_dx_tiled_typed: TypedKernel,
-    /// dw/db-only half: historical descending-t accumulation, verbatim.
-    pub conv1d_bwd_dw_tiled_typed: TypedKernel,
-    /// Typed dispatch for `conv1d_burnin_backward`. d_x_branch/d_u/post_conv
-    /// typed; conv_states stays f32 (recurrent state); d_weight/d_bias
-    /// accumulate via Rule-B partials + fixed-order reduce. Matches DEFINE_CONV1D_BURNIN_BWD
-    /// macro in conv1d.cu.
+    /// Tiled conv backward: d_x (anticausal FIR, carry-seeded at the tile
+    /// boundaries with the serial association order), the tap partials and
+    /// the bias partials in one walk, the pre-activation recomputed from
+    /// the x window.
+    pub conv1d_bwd_tiled_typed: TypedKernel,
+    /// Typed dispatch for `conv1d_burnin_backward`, the serial reference
+    /// the typed backward parity test drives; production runs the tiled
+    /// kernel above. Matches DEFINE_CONV1D_BURNIN_BWD in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
 
     // -- Typed training-backward kernels (the HOTTEST kernel) --
@@ -269,9 +260,6 @@ pub struct MambaKernels {
     pub gather_bc_cols_tmajor_typed: TypedKernel,
     /// Staged-write twin of the typed t-major gather.
     pub gather_bc_cols_tmajor_tiled_typed: TypedKernel,
-    pub split_gate_silu_typed: TypedKernel,
-    /// Typed split without the post-SiLU activation.
-    pub split_gate_typed: TypedKernel,
     /// Typed gating forward recomputing SiLU(gate).
     pub gate_mul_silu_typed: TypedKernel,
     /// 16-byte vectorized twins of the hot elementwise kernels: one uint4
@@ -1259,7 +1247,6 @@ impl MambaKernels {
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
             ssm_reduce_d_a_log_chunks: get("ssm_reduce_d_a_log_chunks")?,
             // conv1d
-            conv1d_burnin_fwd_nosave: get("conv1d_burnin_forward_nosave")?,
             conv1d_burnin_fwd_nosave_tiled: get("conv1d_burnin_forward_nosave_tiled_f32")?,
             conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
             // activations
@@ -1273,15 +1260,12 @@ impl MambaKernels {
             colsum_accumulate: get("colsum_accumulate")?,
             reduce_sum_axis0: get("reduce_sum_axis0")?,
             vec_add_inplace: get("vec_add_inplace")?,
-            elementwise_mul: get("elementwise_mul")?,
             exp_negate: get("exp_negate")?,
             exp_negate2: get("exp_negate2")?,
             gather_cols: get("gather_cols")?,
             gather_bc_cols: get("gather_bc_cols")?,
             gather_bc_cols_tmajor: get("gather_bc_cols_tmajor")?,
             gather_bc_cols_tmajor_tiled: get("gather_bc_cols_tmajor_tiled")?,
-            split_gate_silu: get("split_gate_silu")?,
-            split_gate: get("split_gate")?,
             gate_mul_silu: get("gate_mul_silu")?,
             gating_backward: get("gating_backward")?,
             residual_add: get("residual_add")?,
@@ -1478,8 +1462,6 @@ impl MambaKernels {
             gather_bc_cols_typed: load_typed("gather_bc_cols")?,
             gather_bc_cols_tmajor_typed: load_typed("gather_bc_cols_tmajor")?,
             gather_bc_cols_tmajor_tiled_typed: load_typed("gather_bc_cols_tmajor_tiled")?,
-            split_gate_silu_typed: load_typed("split_gate_silu")?,
-            split_gate_typed: load_typed("split_gate")?,
             gate_mul_silu_typed: load_typed("gate_mul_silu")?,
             gate_mul_silu_v_typed: load_typed("gate_mul_silu_v")?,
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
@@ -1499,8 +1481,7 @@ impl MambaKernels {
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
             conv1d_burnin_fwd_tiled_typed: load_typed("conv1d_burnin_forward_tiled")?,
-            conv1d_bwd_dx_tiled_typed: load_typed("conv1d_bwd_dx_tiled")?,
-            conv1d_bwd_dw_tiled_typed: load_typed("conv1d_bwd_dw_tiled")?,
+            conv1d_bwd_tiled_typed: load_typed("conv1d_bwd_tiled")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {

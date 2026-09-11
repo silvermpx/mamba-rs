@@ -10,8 +10,8 @@
 //! - **f32 always**: `residual` (residual stream), `rms_vals`/`norm_f_rms`
 //!   (reduction stats), `conv_states` (recurrent state), `h_saved` (BPTT
 //!   carry).
-//! - **typed (bf16/f16/f32)**: `post_norm`, `gate_pre_silu`,
-//!   `post_conv`, `u`, `xdbl`, `delta_raw`, `delta`, `y`, `gated`,
+//! - **typed (bf16/f16/f32)**: `post_norm`, `proj`,
+//!   `u`, `xdbl`, `delta_raw`, `delta`, `y`, `gated`,
 //!   `input_proj_inputs`, `input_proj_outputs`, `norm_f_input` — these are
 //!   GEMM I/O or elementwise activations where bf16 storage is safe.
 //!
@@ -38,18 +38,13 @@ pub struct GpuMambaLayerMixedActs {
     pub rms_vals: GpuBuffer,
     /// typed — post-norm output `[B*T*d_model]`.
     pub post_norm: DtypedBuf,
-    /// typed — gate branch before SiLU `[B*T*d_inner]`.
-    pub gate_pre_silu: DtypedBuf,
-    /// typed — gate branch after SiLU `[B*T*d_inner]`.
-    /// f32 — conv1d state saved per step `[B*T*d_inner*d_conv]` (recurrent).
-    /// x branch after split `[B*T*d_inner]` typed — saved for the
-    /// conv-window reconstruction in the backward (the per-timestep conv
-    /// tape is gone; only the carry-in window below survives).
-    pub x_branch: DtypedBuf,
+    /// typed — the in_proj output `[B*T*2*d_inner]`, saved whole: the
+    /// conv reads its x half and the gating its gate half through a row
+    /// stride, and the backward reconstructs the conv windows from the x
+    /// half, so nothing splits it.
+    pub proj: DtypedBuf,
     /// Carry-in window only, `[B*d_inner*d_conv]`.
     pub conv_states: GpuBuffer,
-    /// typed — pre-SiLU conv output `[B*T*d_inner]`.
-    pub post_conv: DtypedBuf,
     /// typed — post-SiLU conv output, SSM input `[B*T*d_inner]`.
     pub u: DtypedBuf,
     /// typed — x_proj output (dt_raw, B, C concatenated) `[B*T*xdbl_dim]`.
@@ -111,7 +106,6 @@ impl GpuMambaBackboneMixedActs {
                     // f32 — recurrent / reduction
                     residual: GpuBuffer::zeros(stream, bt * d_model)?,
                     rms_vals: GpuBuffer::zeros(stream, bt)?,
-                    x_branch: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
                     h_saved: GpuBuffer::zeros(
                         stream,
@@ -125,8 +119,7 @@ impl GpuMambaBackboneMixedActs {
                     )?,
                     // typed — GEMM I/O / elementwise
                     post_norm: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
-                    gate_pre_silu: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
-                    post_conv: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+                    proj: DtypedBuf::zeros(stream, bt * 2 * d_inner, dtype)?,
                     u: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
                     delta_raw: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
@@ -170,8 +163,6 @@ pub struct GpuMambaMixedTrainScratch {
     pub dtype: WeightDtype,
 
     // ── Forward scratch ───────────────────────────────────────────────
-    /// in_proj output [B*T * 2*d_inner].
-    pub proj_flat: DtypedBuf,
     /// dt gather buffer [B*T * dt_rank].
     pub dt_gather: DtypedBuf,
     /// B gather buffer [B*T * d_state].
@@ -188,8 +179,6 @@ pub struct GpuMambaMixedTrainScratch {
     pub d_gated: DtypedBuf,
     /// gating dY [B*T * d_inner] — feeds `ssm_backward_local_typed`.
     pub d_y: DtypedBuf,
-    /// gating d_gate_pre [B*T * d_inner] — feeds `concat_halves_typed`.
-    pub d_gate: DtypedBuf,
     /// ssm_backward_local per-sample d_B buffer [B*T * d_inner * d_state].
     pub d_b_local: DtypedBuf,
     /// ssm_backward_local per-sample d_C buffer [B*T * d_inner * d_state].
@@ -208,9 +197,8 @@ pub struct GpuMambaMixedTrainScratch {
     pub d_dt_input: DtypedBuf,
     /// d_xdbl accumulator [B*T * xdbl_dim] — feeds x_proj dW.
     pub d_xdbl: DtypedBuf,
-    /// conv1d_burnin_bwd d_x_branch [B*T * d_inner].
-    pub d_x_branch: DtypedBuf,
-    /// concat(d_x_branch, d_gate) [B*T * 2*d_inner] — feeds in_proj dW.
+    /// in_proj output gradient [B*T * 2*d_inner], the conv and gating
+    /// backwards writing their halves in place — feeds in_proj dW.
     pub d_proj: DtypedBuf,
     /// in_proj dX [B*T * d_model] — feeds per-layer `rmsnorm_bwd_f32in`.
     pub d_norm: DtypedBuf,
@@ -267,7 +255,6 @@ impl GpuMambaMixedTrainScratch {
             dims: *dims,
             dtype,
             // forward
-            proj_flat: DtypedBuf::zeros(stream, bt * 2 * di, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
             b_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
             c_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
@@ -276,7 +263,6 @@ impl GpuMambaMixedTrainScratch {
             // backward typed
             d_gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_y: DtypedBuf::zeros(stream, bt * di, dtype)?,
-            d_gate: DtypedBuf::zeros(stream, bt * di, dtype)?,
             // The fold backward writes dB/dC partials at di/G rows; only
             // the non-fold routes (d_inner not divisible by the d-group)
             // need the full depth. Same predicate as the launcher.
@@ -289,7 +275,6 @@ impl GpuMambaMixedTrainScratch {
             dt_xdbl_buf: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
             d_dt_input: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
             d_xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
-            d_x_branch: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_proj: DtypedBuf::zeros(stream, bt * 2 * di, dtype)?,
             d_norm: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             // backward f32
@@ -486,11 +471,12 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 .map_err(|e| format!("rmsnorm_f32in_typed L{layer_idx}: {e:?}"))?;
         }
 
-        // F2: in_proj GEMM typed — [B*T, dm] -> [B*T, 2*di].
+        // F2: in_proj GEMM typed — [B*T, dm] -> [B*T, 2*di], saved whole;
+        // the conv and the gating read their halves through the row stride.
         gpu_gemm_typed_forward_raw(
             ctx,
             TypedPtr {
-                ptr: scratch.proj_flat.cached_ptr(),
+                ptr: layer_acts.proj.cached_ptr(),
                 dtype: dt,
             },
             TypedPtr {
@@ -505,46 +491,24 @@ pub fn gpu_forward_mamba_backbone_mixed(
             (bt, dm, 2 * di),
         )?;
 
-        // F3: split_gate_typed - the post-SiLU activation is no longer
-        // materialized; both consumers recompute it from gate_pre_silu.
-        {
-            let bt_i = bt as i32;
-            let di_i = di as i32;
-            let mut bld = ctx.stream.launch_builder(k.split_gate_typed.get(dt));
-            let xb = layer_acts.x_branch.cached_ptr();
-            let gp = layer_acts.gate_pre_silu.cached_ptr();
-            let pf = scratch.proj_flat.cached_ptr();
-            bld.arg(&xb);
-            bld.arg(&gp);
-            bld.arg(&pf);
-            bld.arg(&bt_i);
-            bld.arg(&di_i);
-            unsafe { bld.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("split_gate_typed L{layer_idx}: {e:?}"))?;
-        }
-
         // F4a: conv1d_burnin_forward_typed — typed I/O, f32 state save.
         {
             let b_i = b as i32;
             let t_i = t as i32;
             let di_i = di as i32;
             let dc_i = d_conv as i32;
-            // Use the TYPED-signature f32 variant here so the argument order
-            // below matches the bf16/f16 kernels. The legacy `conv1d_burnin_fwd`
-            // f32 kernel has `(u_out, post_conv, conv_states, state, x_branch,
-            // ...)` which is a different order — previously plugging it into
-            // the typed call path silently swapped `state` with `post_conv`,
-            // corrupting the persistent conv state on every mixed f32 step.
+            // The typed-signature kernel keeps one argument order for every
+            // dtype: (u_out, state, conv_states_out, x_branch, weight, bias,
+            // batch, T, d_inner, d_conv, x_stride); x is the first half of
+            // the in_proj output.
             let kernel = k.conv1d_burnin_fwd_tiled_typed.get(dt);
             let mut bld = ctx.stream.launch_builder(kernel);
             let u = layer_acts.u.cached_ptr();
             let cs = layer_acts.conv_states.cached_ptr();
-            let pc = layer_acts.post_conv.cached_ptr();
-            let xb = layer_acts.x_branch.cached_ptr();
+            let xb = layer_acts.proj.cached_ptr();
             bld.arg(&u);
             bld.arg(&conv_ptr); // state (f32, layer offset)
             bld.arg(&cs);
-            bld.arg(&pc);
             bld.arg(&xb);
             let cw = lw.conv1d_weight.ptr();
             let cb = lw.conv1d_bias.ptr();
@@ -554,6 +518,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
+            let x_stride = (2 * di) as i32;
+            bld.arg(&x_stride);
             unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_burnin_tiled L{layer_idx}: {e:?}"))?;
         }
@@ -730,24 +696,33 @@ pub fn gpu_forward_mamba_backbone_mixed(
             }
         }
 
-        // F4e: gating — gated = y * SiLU(gate_pre), recomputed.
+        // F4e: gating — gated = y * SiLU(gate), the gate read from the
+        // second half of the in_proj output through the row stride. The
+        // vector twin needs its width to divide d_inner so no vector
+        // straddles a row.
         {
             let g = layer_acts.gated.cached_ptr();
             let y = layer_acts.y.cached_ptr();
-            let gp = layer_acts.gate_pre_silu.cached_ptr();
+            let gp = layer_acts.proj.cached_ptr();
             let w = super::launch::vec8_width(dt.size_bytes());
-            let vec = super::launch::vec8_ok(bt * di, dt.size_bytes(), &[g, y, gp]);
+            let vec = di % w == 0 && super::launch::vec8_ok(bt * di, dt.size_bytes(), &[g, y, gp]);
             let (kern, count) = if vec {
                 (k.gate_mul_silu_v_typed.get(dt), bt * di / w)
             } else {
                 (k.gate_mul_silu_typed.get(dt), bt * di)
             };
             let n = count as i32;
+            let di_i = di as i32;
+            let gate_stride = (2 * di) as i32;
+            let gate_off = di as i32;
             let mut bld = ctx.stream.launch_builder(kern);
             bld.arg(&g);
             bld.arg(&y);
             bld.arg(&gp);
             bld.arg(&n);
+            bld.arg(&di_i);
+            bld.arg(&gate_stride);
+            bld.arg(&gate_off);
             unsafe { bld.launch(grid_1d(count)) }
                 .map_err(|e| format!("gate_mul_silu_typed L{layer_idx}: {e:?}"))?;
         }

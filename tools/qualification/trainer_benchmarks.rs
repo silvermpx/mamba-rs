@@ -896,10 +896,10 @@ fn bench_bwd_kernels_isolated() {
     let bti = bt as i32;
 
     let d_u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let post_conv = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let x_branch = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let conv_init = GpuBuffer::zeros(&ctx.stream, b * di * dc).unwrap();
     let weight = GpuBuffer::zeros(&ctx.stream, di * dc).unwrap();
+    let bias = GpuBuffer::zeros(&ctx.stream, di).unwrap();
     let d_x_branch = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let n_tiles = t.div_ceil(128);
     let wp = GpuBuffer::zeros(&ctx.stream, b * n_tiles * di * dc).unwrap();
@@ -922,47 +922,26 @@ fn bench_bwd_kernels_isolated() {
         );
     };
 
-    time_it("conv_dw_tiled", &|| {
+    time_it("conv_bwd_tiled", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_bwd_dw_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
+        let dxp = d_x_branch.cached_ptr();
         let wpp = wp.cached_ptr();
         let bpp = bp.cached_ptr();
         let dup = d_u.cached_ptr();
-        let pcp = post_conv.cached_ptr();
         let xbp = x_branch.cached_ptr();
         let cip = conv_init.cached_ptr();
+        let wpt = weight.cached_ptr();
+        let bpt = bias.cached_ptr();
+        bld.arg(&dxp);
         bld.arg(&wpp);
         bld.arg(&bpp);
         bld.arg(&dup);
-        bld.arg(&pcp);
         bld.arg(&xbp);
         bld.arg(&cip);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dci);
-        let lanes = b * di * (dc + 1);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { bld.launch(cfg) }.unwrap();
-    });
-
-    time_it("conv_dx_tiled", &|| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_bwd_dx_tiled_typed.get(dtype));
-        let dxp = d_x_branch.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let pcp = post_conv.cached_ptr();
-        let wpt = weight.cached_ptr();
-        bld.arg(&dxp);
-        bld.arg(&dup);
-        bld.arg(&pcp);
         bld.arg(&wpt);
+        bld.arg(&bpt);
         bld.arg(&bi);
         bld.arg(&ti);
         bld.arg(&dii);
@@ -973,6 +952,7 @@ fn bench_bwd_kernels_isolated() {
         let off_i = 0i32;
         bld.arg(&stride_i);
         bld.arg(&off_i);
+        bld.arg(&dii); // x row stride
         unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
     });
 
