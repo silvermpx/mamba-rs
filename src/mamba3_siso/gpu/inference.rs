@@ -2,8 +2,8 @@
 //!
 //! 10-phase forward per layer:
 //!   F1: RMSNorm → F2: in_proj GEMM → F3: m3_split (8-way + fused)
-//!   F4: BCNorm + bias + RoPE → F5: m3_compute_abg (alpha/beta/gamma)
-//!   F6: m3_step_fwd (trapezoidal SSM) → F7: output gating
+//!   F4: BCNorm + bias + RoPE, the angles advanced inside
+//!   F6: m3_step_fwd (trapezoidal SSM, its coefficients computed inside) → F7: output gating
 //!   F8: out_proj GEMM → F9: residual add
 //! Final: F10: norm_f RMSNorm
 //!
@@ -507,10 +507,6 @@ pub struct Mamba3GpuInferenceScratch {
     pub a_val: GpuBuffer,         // [batch * nh]
     pub trap: GpuBuffer,          // [batch * nh]
     pub angles_raw: GpuBuffer,    // [batch * n_angles]
-    pub angle_cumsum: GpuBuffer,  // [batch * nh * n_angles]
-    pub alpha: GpuBuffer,         // [batch * nh]
-    pub beta: GpuBuffer,          // [batch * nh]
-    pub gamma: GpuBuffer,         // [batch * nh]
     pub y: GpuBuffer,             // [batch * d_inner]
     pub gated: GpuBuffer,         // [batch * d_inner]
     pub post_norm: GpuBuffer,     // [batch * d_model] — rmsnorm output (avoids in-place aliasing)
@@ -556,10 +552,6 @@ impl Mamba3GpuInferenceScratch {
             a_val: GpuBuffer::zeros(stream, batch * nh)?,
             trap: GpuBuffer::zeros(stream, batch * nh)?,
             angles_raw: GpuBuffer::zeros(stream, batch * na)?,
-            angle_cumsum: GpuBuffer::zeros(stream, batch * nh * na)?,
-            alpha: GpuBuffer::zeros(stream, batch * nh)?,
-            beta: GpuBuffer::zeros(stream, batch * nh)?,
-            gamma: GpuBuffer::zeros(stream, batch * nh)?,
             y: GpuBuffer::zeros(stream, batch * di)?,
             gated: GpuBuffer::zeros(stream, batch * di)?,
             post_norm: GpuBuffer::zeros(stream, batch * dm)?,
@@ -610,10 +602,6 @@ pub struct Mamba3GpuInferenceMixedScratch {
     pub a_val: GpuBuffer,
     pub trap: GpuBuffer,
     pub angles_raw: GpuBuffer, // f32 (tanh/PI·dt products accumulate in f64)
-    pub angle_cumsum: GpuBuffer, // f32 (sincosf consumer)
-    pub alpha: GpuBuffer,
-    pub beta: GpuBuffer,
-    pub gamma: GpuBuffer,
     pub y: DtypedBuf,
     pub gated: DtypedBuf,
     pub post_norm: DtypedBuf,
@@ -665,10 +653,6 @@ impl Mamba3GpuInferenceMixedScratch {
             a_val: GpuBuffer::zeros(stream, batch * nh)?,
             trap: GpuBuffer::zeros(stream, batch * nh)?,
             angles_raw: GpuBuffer::zeros(stream, batch * na)?,
-            angle_cumsum: GpuBuffer::zeros(stream, batch * nh * na)?,
-            alpha: GpuBuffer::zeros(stream, batch * nh)?,
-            beta: GpuBuffer::zeros(stream, batch * nh)?,
-            gamma: GpuBuffer::zeros(stream, batch * nh)?,
             y: DtypedBuf::zeros(stream, batch * di, dtype)?,
             gated: DtypedBuf::zeros(stream, batch * di, dtype)?,
             post_norm: DtypedBuf::zeros(stream, batch * dm, dtype)?,
@@ -1191,36 +1175,19 @@ impl Mamba3GpuInferenceEngine {
             unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm BC: {e:?}"))?;
         }
 
-        // F4c: Angle accumulation + RoPE
-        if na > 0 {
-            // angle_dt_fwd_batch: accumulates angles for all (batch, head) pairs
-            let grid = cudarc::driver::LaunchConfig {
-                grid_dim: (b as u32, ((nh * na).div_ceil(256)) as u32, 1),
-                block_dim: (256.min((nh * na) as u32), 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let a_ptr = state.angle_state.inner_at(a_off);
-            let mut builder = self
-                .ctx
-                .stream
-                .launch_builder(&self.kernels.m3_angle_dt_fwd_batch);
-            // CUDA signature: angle_cumsum (output), angle_state (in/out)
-            builder.arg(scratch.angle_cumsum.inner());
-            builder.arg(&a_ptr);
-            builder.arg(scratch.angles_raw.inner());
-            builder.arg(scratch.dt.inner());
-            builder.arg(&b_i);
-            builder.arg(&nh_i);
-            builder.arg(&na_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4c angle_dt: {e:?}"))?;
-        }
-
-        // F4b-c fused: bias add (B + C) + RoPE in one launch (biased
-        // tensors materialize for the state writeback consumers;
-        // n_angles == 0 passes through, replacing the old copy branch).
+        // F4b-c: bias add (B + C) + RoPE in one launch, the angles advanced
+        // inside it (the lane that owns an angle steps the persistent state
+        // and rotates with the same value); the biased tensors materialize
+        // for the state writeback consumers; n_angles == 0 passes through.
         {
             let n = b * nh * ds;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let a_ptr: cudarc::driver::sys::CUdeviceptr = if na > 0 {
+                state.angle_state.inner_at(a_off)
+            } else {
+                0
+            };
+            let no_cumsum: cudarc::driver::sys::CUdeviceptr = 0;
             let mut builder = self
                 .ctx
                 .stream
@@ -1233,29 +1200,16 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(scratch.c_normed.inner());
             builder.arg(lw.b_bias.inner());
             builder.arg(lw.c_bias.inner());
-            builder.arg(scratch.angle_cumsum.inner());
+            builder.arg(&no_cumsum);
             builder.arg(&b_i);
             builder.arg(&nh_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
             builder.arg(&na_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4bc bias_rope: {e:?}"))?;
-        }
-
-        // F5: Compute alpha/beta/gamma
-        {
-            let n = b * nh;
-            let n_i = n as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_compute_abg);
-            builder.arg(scratch.alpha.inner());
-            builder.arg(scratch.beta.inner());
-            builder.arg(scratch.gamma.inner());
+            builder.arg(&a_ptr);
+            builder.arg(scratch.angles_raw.inner());
             builder.arg(scratch.dt.inner());
-            builder.arg(scratch.a_val.inner());
-            builder.arg(scratch.trap.inner());
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F5 compute_abg: {e:?}"))?;
+            unsafe { builder.launch(grid) }.map_err(|e| format!("F4bc bias_rope: {e:?}"))?;
         }
 
         // F6: m3_step_fwd (trapezoidal SSM recurrence)
@@ -1277,9 +1231,10 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(scratch.x.inner());
             builder.arg(scratch.k_cur.inner());
             builder.arg(scratch.q_cur.inner());
-            builder.arg(scratch.alpha.inner());
-            builder.arg(scratch.beta.inner());
-            builder.arg(scratch.gamma.inner());
+            // The step computes its own coefficients from dt, a_val and trap.
+            builder.arg(scratch.dt.inner());
+            builder.arg(scratch.a_val.inner());
+            builder.arg(scratch.trap.inner());
             builder.arg(lw.d_param.inner());
             builder.arg(&b_i);
             builder.arg(&nh_i);
@@ -1859,36 +1814,12 @@ impl Mamba3GpuInferenceMixed {
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm B+C: {e:?}"))?;
             }
 
-            // F4c: Angle accumulation + RoPE.
-            if na > 0 {
-                // angle_dt stays f32 (angles_raw f32 + dt f32, f64 accumulator internally).
-                let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: (b as u32, ((nh * na).div_ceil(256)) as u32, 1),
-                    block_dim: (256.min((nh * na) as u32), 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let a_ptr = state.angle_state.inner_at(a_off);
-                let ac_ptr = scratch.angle_cumsum.cached_ptr();
-                let ar_ptr = scratch.angles_raw.cached_ptr();
-                let dt_ptr = scratch.dt.cached_ptr();
-                let mut bld = engine.ctx.stream.launch_builder(&k.m3_angle_dt_fwd_batch);
-                // Pass cached raw pointers (CUDA Graph safe) — .inner() creates
-                // SyncOnDrop guards that invalidate capture.
-                bld.arg(&ac_ptr);
-                bld.arg(&a_ptr);
-                bld.arg(&ar_ptr);
-                bld.arg(&dt_ptr);
-                bld.arg(&b_i);
-                bld.arg(&nh_i);
-                bld.arg(&na_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4c angle_dt: {e:?}"))?;
-            }
-
-            // F4b-c fused: typed bias add (B + C) + RoPE in one launch -
-            // the biased stores round through FROM_F and the rotation
-            // consumes the round-tripped values, exactly the replaced
-            // pair's contract; n_angles == 0 passes through (replacing
-            // the old copy branch).
+            // F4b-c: typed bias add (B + C) + RoPE in one launch, the angles
+            // advanced inside it (f64 accumulation on the owning lane, as
+            // the standalone advance did); the biased stores round through
+            // FROM_F and the rotation consumes the round-tripped values;
+            // n_angles == 0 passes through. Cached raw pointers only: an
+            // .inner() guard would invalidate graph capture.
             {
                 let n = b * nh * ds;
                 let grid = grid_1d(n);
@@ -1900,7 +1831,14 @@ impl Mamba3GpuInferenceMixed {
                 let cn_ptr = scratch.c_normed.cached_ptr();
                 let bbi_ptr = lw.b_bias.ptr();
                 let cbi_ptr = lw.c_bias.ptr();
-                let ac_ptr = scratch.angle_cumsum.cached_ptr();
+                let no_cumsum: cudarc::driver::sys::CUdeviceptr = 0;
+                let a_ptr: cudarc::driver::sys::CUdeviceptr = if na > 0 {
+                    state.angle_state.inner_at(a_off)
+                } else {
+                    0
+                };
+                let ar_ptr = scratch.angles_raw.cached_ptr();
+                let dt_ptr = scratch.dt.cached_ptr();
                 let mut bld = engine
                     .ctx
                     .stream
@@ -1913,29 +1851,16 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&cn_ptr);
                 bld.arg(&bbi_ptr);
                 bld.arg(&cbi_ptr);
-                bld.arg(&ac_ptr);
+                bld.arg(&no_cumsum);
                 bld.arg(&b_i);
                 bld.arg(&nh_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
                 bld.arg(&na_i);
+                bld.arg(&a_ptr);
+                bld.arg(&ar_ptr);
+                bld.arg(&dt_ptr);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4bc bias_rope: {e:?}"))?;
-            }
-
-            // F5: m3_compute_abg — stays f32 (pure coefficient kernel).
-            {
-                let n = b * nh;
-                let n_i = n as i32;
-                let grid = grid_1d(n);
-                let mut bld = engine.ctx.stream.launch_builder(&k.m3_compute_abg);
-                bld.arg(scratch.alpha.inner());
-                bld.arg(scratch.beta.inner());
-                bld.arg(scratch.gamma.inner());
-                bld.arg(scratch.dt.inner());
-                bld.arg(scratch.a_val.inner());
-                bld.arg(scratch.trap.inner());
-                bld.arg(&n_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F5 compute_abg: {e:?}"))?;
             }
 
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
@@ -1963,13 +1888,14 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&x_ptr);
                 bld.arg(&kc_ptr);
                 bld.arg(&qc_ptr);
-                let alpha_ptr = scratch.alpha.cached_ptr();
-                let beta_ptr = scratch.beta.cached_ptr();
-                let gamma_ptr = scratch.gamma.cached_ptr();
+                // The step computes its own coefficients from dt, a_val and trap.
+                let dt_ptr = scratch.dt.cached_ptr();
+                let av_ptr = scratch.a_val.cached_ptr();
+                let tr_ptr = scratch.trap.cached_ptr();
                 let dp_ptr = lw.d_param.ptr();
-                bld.arg(&alpha_ptr);
-                bld.arg(&beta_ptr);
-                bld.arg(&gamma_ptr);
+                bld.arg(&dt_ptr);
+                bld.arg(&av_ptr);
+                bld.arg(&tr_ptr);
                 bld.arg(&dp_ptr);
                 bld.arg(&b_i);
                 bld.arg(&nh_i);

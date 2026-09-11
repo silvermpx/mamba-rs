@@ -486,6 +486,11 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&ng_i);
         builder.arg(&ds_i);
         builder.arg(&na_i);
+        // No angle state on this lane: the saved angles are read.
+        let no_angle: cudarc::driver::sys::CUdeviceptr = 0;
+        builder.arg(&no_angle);
+        builder.arg(&no_angle);
+        builder.arg(&no_angle);
         unsafe { builder.launch(grid_1d(bt * nh * ds)) }
             .map_err(|e| format!("m3_bias_rope_fwd F4: {:?}", e))?;
     }

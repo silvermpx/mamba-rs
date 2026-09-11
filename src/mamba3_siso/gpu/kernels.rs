@@ -38,7 +38,6 @@ pub struct Mamba3Kernels {
     pub bcnorm_bwd: CudaFunction,
     pub bc_bias_add: CudaFunction,
     pub bc_bias_add_bwd: CudaFunction,
-    pub m3_angle_dt_fwd_batch: CudaFunction,
     pub m3_angle_dt_fwd_seq: CudaFunction,
     /// Chunk-parallel angle accumulation pair — replaces the sequential
     /// kernel on multi-chunk windows (its serial fp64 chain dominates
@@ -441,7 +440,6 @@ impl Mamba3Kernels {
             bcnorm_bwd: get("bcnorm_bwd")?,
             bc_bias_add: get("bc_bias_add")?,
             bc_bias_add_bwd: get("bc_bias_add_bwd")?,
-            m3_angle_dt_fwd_batch: get("m3_angle_dt_fwd_batch")?,
             m3_angle_dt_fwd_seq: get("m3_angle_dt_fwd_seq")?,
             m3_angle_chunk_sums: get("m3_angle_chunk_sums")?,
             m3_angle_chunk_apply: get("m3_angle_chunk_apply")?,

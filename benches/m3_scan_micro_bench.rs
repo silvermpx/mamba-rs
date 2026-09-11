@@ -545,6 +545,11 @@ fn coeff_chain_time_and_hash() {
         b.arg(&ng_i);
         b.arg(&ds_i);
         b.arg(&na_i);
+        // No angle state on this lane: the saved angles are read.
+        let no_angle: cudarc::driver::sys::CUdeviceptr = 0;
+        b.arg(&no_angle);
+        b.arg(&no_angle);
+        b.arg(&no_angle);
         unsafe { b.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * nh * ds)) }.unwrap();
     };
     let abg = || {

@@ -240,51 +240,6 @@ extern "C" __global__ void bc_bias_add(
     B_biased[idx] = B_normed[sample * ng * ds + g * ds + n] + bias[h * ds + n];
 }
 
-// ============================================================================
-// 5b. angle_dt_fwd_batch -- Batched angle accumulation for N envs in one launch
-// ============================================================================
-//
-// Same as angle_dt_fwd but handles N envs in a single launch instead of N
-// separate launches. Each env has T=1 in collection mode.
-//
-// Grid: (N, ceil(nh * n_angles / blockDim.x), 1), Block: (min(nh*n_angles, 256))
-// blockIdx.x = env index, threads handle (h, a) pairs.
-//
-// Input:  angles_raw[N * n_angles] -- shared across heads per env
-//         dt[N * nh] -- per (env, head)
-// In/Out: angle_state[N * nh * n_angles] -- persistent per (env, head)
-// Output: angle_cumsum[N * nh * n_angles]
-extern "C" __global__ void m3_angle_dt_fwd_batch(
-    float* __restrict__ angle_cumsum,    // [N * nh * n_angles]
-    float* __restrict__ angle_state,     // [N * nh * n_angles] -- in/out
-    const float* __restrict__ angles_raw,// [N * n_angles]
-    const float* __restrict__ dt_arr,    // [N * nh]
-    int N, int nh, int n_angles
-) {
-    int env = blockIdx.x;
-    if (env >= N) return;
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;
-    int total_per_env = nh * n_angles;
-    if (idx >= total_per_env) return;
-
-    int h = idx / n_angles;
-    int a = idx % n_angles;
-
-    int state_idx = env * total_per_env + h * n_angles + a;
-    double state = (double)angle_state[state_idx];
-    const double TWO_PI_64 = 6.283185307179586;
-
-    float raw = angles_raw[env * n_angles + a];
-    float dt_val = dt_arr[env * nh + h];
-    double delta = (double)(tanhf(raw) * PI * dt_val);
-    state += delta;
-    state = fmod(state, TWO_PI_64);
-    if (state < 0.0) state += TWO_PI_64;
-
-    angle_cumsum[state_idx] = (float)state;
-    angle_state[state_idx] = (float)state;
-}
-
 // Sequential angle accumulation for training: B envs, T timesteps each.
 // Grid: (B, ceil(nh*n_angles/256), 1). Block: (256, 1, 1).
 // angles_raw: [B*T*n_angles], dt_arr: [B*T*nh], angle_state: [B*nh*n_angles]
@@ -1258,7 +1213,14 @@ extern "C" __global__ void m3_bias_rope_fwd(
     const float* __restrict__ B_bias,       // [nh * ds]
     const float* __restrict__ C_bias,       // [nh * ds]
     const float* __restrict__ angle_cumsum, // [N * nh * n_angles]
-    int N, int nh, int ng, int ds, int n_angles
+    int N, int nh, int ng, int ds, int n_angles,
+    // The decode step advances the angles here instead of in a kernel of
+    // its own: with angle_state set, the lane that owns an angle steps it
+    // from angles_raw and dt_arr, stores it, and rotates with the same
+    // value. Training and prefill pass null and read angle_cumsum.
+    float* __restrict__ angle_state,        // [N * nh * n_angles] or null
+    const float* __restrict__ angles_raw,   // [N * n_angles]
+    const float* __restrict__ dt_arr        // [N * nh]
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = N * nh * ds;
@@ -1294,8 +1256,25 @@ extern "C" __global__ void m3_bias_rope_fwd(
         float c1 = C_normed[src + 1] + C_bias[bi + 1];
         int a = n / 2;
         int angle_idx = sample * nh * n_angles + h * n_angles + a;
+        float ang;
+        if (angle_state != nullptr) {
+            /* The standalone advance, line for line: f64 accumulation,
+               the wrap into [0, 2*pi), the f32 store. */
+            double state = (double)angle_state[angle_idx];
+            const double TWO_PI_64 = 6.283185307179586;
+            float raw = angles_raw[sample * n_angles + a];
+            float dt_val = dt_arr[sample * nh + h];
+            double delta = (double)(tanhf(raw) * PI * dt_val);
+            state += delta;
+            state = fmod(state, TWO_PI_64);
+            if (state < 0.0) state += TWO_PI_64;
+            ang = (float)state;
+            angle_state[angle_idx] = ang;
+        } else {
+            ang = angle_cumsum[angle_idx];
+        }
         float cos_a, sin_a;
-        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);
+        sincosf(ang, &sin_a, &cos_a);
         K_out[idx] = cos_a * b0 - sin_a * b1;
         K_out[idx + 1] = sin_a * b0 + cos_a * b1;
         Q_out[idx] = cos_a * c0 - sin_a * c1;
@@ -1318,7 +1297,10 @@ extern "C" __global__ void m3_bias_rope_fwd_##SUFFIX(                           
     const float* __restrict__ B_bias,                                           \
     const float* __restrict__ C_bias,                                           \
     const float* __restrict__ angle_cumsum,                                     \
-    int N, int nh, int ng, int ds, int n_angles                                 \
+    int N, int nh, int ng, int ds, int n_angles,                                \
+    float* __restrict__ angle_state,                                            \
+    const float* __restrict__ angles_raw,                                       \
+    const float* __restrict__ dt_arr                                            \
 ) {                                                                             \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
     int total = N * nh * ds;                                                    \
@@ -1356,8 +1338,23 @@ extern "C" __global__ void m3_bias_rope_fwd_##SUFFIX(                           
         float c1 = to_f(tc1);                                                   \
         int a = n / 2;                                                          \
         int angle_idx = sample * nh * n_angles + h * n_angles + a;              \
+        float ang;                                                              \
+        if (angle_state != nullptr) {                                           \
+            double state = (double)angle_state[angle_idx];                      \
+            const double TWO_PI_64 = 6.283185307179586;                         \
+            float raw = angles_raw[sample * n_angles + a];                      \
+            float dt_val = dt_arr[sample * nh + h];                             \
+            double delta = (double)(tanhf(raw) * PI * dt_val);                  \
+            state += delta;                                                     \
+            state = fmod(state, TWO_PI_64);                                     \
+            if (state < 0.0) state += TWO_PI_64;                                \
+            ang = (float)state;                                                 \
+            angle_state[angle_idx] = ang;                                       \
+        } else {                                                                \
+            ang = angle_cumsum[angle_idx];                                      \
+        }                                                                       \
         float cos_a, sin_a;                                                     \
-        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);                       \
+        sincosf(ang, &sin_a, &cos_a);                                           \
         K_out[idx] = FROM_F(cos_a * b0 - sin_a * b1);                           \
         K_out[idx + 1] = FROM_F(sin_a * b0 + cos_a * b1);                       \
         Q_out[idx] = FROM_F(cos_a * c0 - sin_a * c1);                           \

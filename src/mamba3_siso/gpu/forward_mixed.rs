@@ -499,6 +499,11 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&ng_i);
         bld.arg(&ds_i);
         bld.arg(&na_i);
+        // No angle state on this lane: the saved angles are read.
+        let no_angle: cudarc::driver::sys::CUdeviceptr = 0;
+        bld.arg(&no_angle);
+        bld.arg(&no_angle);
+        bld.arg(&no_angle);
         unsafe { bld.launch(grid_1d(bt * nh * ds)) }
             .map_err(|e| format!("m3_mixed F4 bias_rope: {e:?}"))?;
     }

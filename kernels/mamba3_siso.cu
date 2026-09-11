@@ -73,9 +73,12 @@ extern "C" __global__ void m3_step_fwd(
     const float* x,     // [B * d_inner]   (d_inner = nh * hd)
     const float* k_cur, // [B * nh * ds]   (B after bias+RoPE)
     const float* q_cur, // [B * nh * ds]   (C after bias+RoPE)
-    const float* alpha, // [B * nh]
-    const float* beta,  // [B * nh]
-    const float* gamma, // [B * nh]
+    // The recurrence coefficients are computed here from the step's
+    // dt, a_val and trap, spelled as the standalone coefficient kernel
+    // spelled them; an f32 stored and reloaded carries the same bits.
+    const float* dt,    // [B * nh]
+    const float* a_val, // [B * nh]
+    const float* trap,  // [B * nh]
     const float* D,     // [nh]
     int batch, int nh, int hd, int ds
 ) {
@@ -98,17 +101,20 @@ extern "C" __global__ void m3_step_fwd(
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         h_local[n] = ssm_state[h_base + n];
 
-    // O1: alpha, beta, gamma broadcast from p=0
+    // O1: alpha, beta, gamma computed on p=0 and broadcast
     float alpha_h = 0.0f;
-    if (p == 0) alpha_h = alpha[b * nh + h];
-    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
-
     float beta_h = 0.0f;
-    if (p == 0) beta_h = beta[b * nh + h];
-    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
-
     float gamma_h = 0.0f;
-    if (p == 0) gamma_h = gamma[b * nh + h];
+    if (p == 0) {
+        float dt_v = dt[b * nh + h];
+        float a_v = a_val[b * nh + h];
+        float t_v = trap[b * nh + h];
+        alpha_h = exp2f((a_v * dt_v) * LOG2E);
+        beta_h = alpha_h * dt_v * (1.0f - t_v);
+        gamma_h = t_v * dt_v;
+    }
+    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
+    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
     gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
     // O1: D[h] broadcast from p=0
@@ -170,7 +176,7 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     const TY* x,                                                             \
     const TY* k_cur,                                                         \
     const TY* q_cur,                                                         \
-    const float* alpha, const float* beta, const float* gamma,               \
+    const float* dt, const float* a_val, const float* trap,                  \
     const float* D,                                                          \
     int batch, int nh, int hd, int ds                                        \
 ) {                                                                          \
@@ -186,14 +192,19 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     _Pragma("unroll")                                                        \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) h_local[n] = ssm_state[h_base + n]; \
     float alpha_h = 0.0f;                                                    \
-    if (p == 0) alpha_h = alpha[b * nh + h];                                 \
-    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                       \
     float beta_h = 0.0f;                                                     \
-    if (p == 0) beta_h = beta[b * nh + h];                                   \
-    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);                         \
     float gamma_h = 0.0f;                                                    \
-    if (p == 0) gamma_h = gamma[b * nh + h];                                 \
-    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                       \
+    if (p == 0) {                                                            \
+        float dt_v = dt[b * nh + h];                                         \
+        float a_v = a_val[b * nh + h];                                       \
+        float t_v = trap[b * nh + h];                                        \
+        alpha_h = exp2f((a_v * dt_v) * LOG2E);                               \
+        beta_h = alpha_h * dt_v * (1.0f - t_v);                              \
+        gamma_h = t_v * dt_v;                                                \
+    }                                                                        \
+    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                        \
+    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);                          \
+    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                        \
     float d_skip = 0.0f;                                                     \
     if (p == 0) d_skip = D[h];                                               \
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                         \
