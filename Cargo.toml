@@ -303,6 +303,11 @@ path = "tests/gemm_bi_sm120_contract.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "gemm_bi_sm120_arena_subview"
+path = "tests/gemm_bi_sm120_arena_subview.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_bi_sm89_exact_f32_d128_source_contract"
 path = "tests/gemm_bi_sm89_exact_f32_d128_source_contract.rs"
 

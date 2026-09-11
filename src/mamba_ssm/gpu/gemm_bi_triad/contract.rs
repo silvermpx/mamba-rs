@@ -5179,21 +5179,34 @@ fn sm100_subview_plan(
     let stride = u64::try_from(layout.stride)
         .map_err(|_| format!("SM100 {} stride exceeds u64::MAX", layout.name))?;
     let element_offset = initial.offset_bytes / 2;
-    let origin_x = element_offset % stride;
-    let origin_y = element_offset / stride;
     let width = u64::try_from(layout.width)
         .map_err(|_| format!("SM100 {} width exceeds u64::MAX", layout.name))?;
     let rows = u64::try_from(layout.rows)
         .map_err(|_| format!("SM100 {} rows exceed u64::MAX", layout.name))?;
+    // Described from the allocation base while the operand's row fits the
+    // allocation grid; a matrix sliced out of a flat arena starts inside a
+    // row of that grid and is described from its own first element instead.
+    let allocation_origin_x = element_offset % stride;
+    let fits_allocation_grid = allocation_origin_x
+        .checked_add(width)
+        .is_some_and(|end| end <= stride);
+    let (base, origin_x, origin_y) = if fits_allocation_grid {
+        (
+            initial.allocation_base,
+            allocation_origin_x,
+            element_offset / stride,
+        )
+    } else if layout.pointer.is_multiple_of(16) {
+        (layout.pointer, 0, 0)
+    } else {
+        return Err(format!(
+            "SM100 {} subview starts inside a row of its allocation and is not 16-byte aligned",
+            layout.name
+        ));
+    };
     let logical_end_x = origin_x
         .checked_add(width)
         .ok_or_else(|| format!("SM100 {} column origin overflows u64", layout.name))?;
-    if logical_end_x > stride {
-        return Err(format!(
-            "SM100 {} subview row wraps across its declared stride",
-            layout.name
-        ));
-    }
     let logical_end_y = origin_y
         .checked_add(rows)
         .ok_or_else(|| format!("SM100 {} row origin overflows u64", layout.name))?;
@@ -5233,7 +5246,7 @@ fn sm100_subview_plan(
         ));
     }
     let key = Sm90aTensorMapKey {
-        base: allocation.allocation_base,
+        base,
         global_dimensions: [logical_end_x, logical_end_y],
         outer_byte_stride: stride
             .checked_mul(2)
@@ -6701,21 +6714,37 @@ fn sm120_subview_plan(
     let stride = u64::try_from(layout.stride)
         .map_err(|_| format!("SM120 {} stride exceeds u64::MAX", layout.name))?;
     let element_offset = initial.offset_bytes / 2;
-    let origin_x = element_offset % stride;
-    let origin_y = element_offset / stride;
     let width = u64::try_from(layout.width)
         .map_err(|_| format!("SM120 {} width exceeds u64::MAX", layout.name))?;
     let rows = u64::try_from(layout.rows)
         .map_err(|_| format!("SM120 {} rows exceeds u64::MAX", layout.name))?;
+    // A subview is normally described from its allocation base with the
+    // operand's first element as the tensor-map origin, which keeps any
+    // element-aligned pointer usable. A matrix sliced out of a flat arena
+    // starts inside a row of that grid, so its columns would run past the
+    // declared stride; such a subview is described from its own first
+    // element instead, which the tensor map accepts at swizzle alignment.
+    let allocation_origin_x = element_offset % stride;
+    let fits_allocation_grid = allocation_origin_x
+        .checked_add(width)
+        .is_some_and(|end| end <= stride);
+    let (base, origin_x, origin_y) = if fits_allocation_grid {
+        (
+            initial.allocation_base,
+            allocation_origin_x,
+            element_offset / stride,
+        )
+    } else if layout.pointer.is_multiple_of(128) {
+        (layout.pointer, 0, 0)
+    } else {
+        return Err(format!(
+            "SM120 {} subview starts inside a row of its allocation and is not 128-byte aligned",
+            layout.name
+        ));
+    };
     let logical_end_x = origin_x
         .checked_add(width)
         .ok_or_else(|| format!("SM120 {} column origin overflows u64", layout.name))?;
-    if logical_end_x > stride {
-        return Err(format!(
-            "SM120 {} subview row wraps across its declared stride",
-            layout.name
-        ));
-    }
     let logical_end_y = origin_y
         .checked_add(rows)
         .ok_or_else(|| format!("SM120 {} row origin overflows u64", layout.name))?;
@@ -6755,7 +6784,7 @@ fn sm120_subview_plan(
         ));
     }
     let key = Sm120TensorMapKey {
-        base: allocation.allocation_base,
+        base,
         global_dimensions: [logical_end_x, logical_end_y],
         outer_byte_stride: stride
             .checked_mul(2)
