@@ -8853,6 +8853,12 @@ pub struct GemmBiKernels {
     /// The tc64 TN dW body over the persistent stream-K grid; `None` on the
     /// targets whose portable module does not compose it (CC 12.x).
     pub gemm_bi_tn_tc64_streamk_typed: Option<HalfKernel>,
+    /// How many CTAs of the stream-K kernel one multiprocessor holds at
+    /// once, from the driver's occupancy query at load (0 when the kernel
+    /// is not composed). The persistent grid may not exceed that many per
+    /// multiprocessor: a CTA waits on lower CTAs and can only do so safely
+    /// while every CTA of the grid is resident.
+    pub tc64_streamk_resident_ctas: u32,
     pub gemm_bi_tn_tc128x64_typed: HalfKernel,
     pub gemm_bi_nt_tc64_typed: HalfKernel,
 
@@ -9160,6 +9166,16 @@ impl GemmBiKernels {
             Ok::<HalfKernel, String>(kernel)
         };
 
+        let gemm_bi_tn_tc64_streamk_typed =
+            if sm80_target_composes_streamk(sm80.compiler_identity.target.as_str()) {
+                Some(load_half("gemm_bi_tn_tc64_streamk")?)
+            } else {
+                None
+            };
+        let tc64_streamk_resident_ctas = match &gemm_bi_tn_tc64_streamk_typed {
+            Some(kernel) => streamk_resident_ctas(kernel)?,
+            None => 0,
+        };
         let gemm_bi_nn = load("gemm_bi_nn")?;
         set_dynamic_shared(&gemm_bi_nn, "gemm_bi_nn", 34 * 1024)?;
         let gemm_bi_nn_m64n64_bk16_s2_v1 = load("gemm_bi_nn_m64n64_bk16_s2_v1")?;
@@ -9351,13 +9367,8 @@ impl GemmBiKernels {
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             gemm_bi_tn_tc64_typed: load_half("gemm_bi_tn_tc64")?,
-            gemm_bi_tn_tc64_streamk_typed: if sm80_target_composes_streamk(
-                sm80.compiler_identity.target.as_str(),
-            ) {
-                Some(load_half("gemm_bi_tn_tc64_streamk")?)
-            } else {
-                None
-            },
+            gemm_bi_tn_tc64_streamk_typed: gemm_bi_tn_tc64_streamk_typed,
+            tc64_streamk_resident_ctas,
             gemm_bi_tn_tc128x64_typed: load_half("gemm_bi_tn_tc128x64")?,
             gemm_bi_nt_tc64_typed: load_half("gemm_bi_nt_tc64")?,
             splitk_scratch: std::sync::OnceLock::new(),
@@ -9374,6 +9385,10 @@ impl GemmBiKernels {
 
     pub(crate) fn multiprocessor_count(&self) -> u32 {
         self.multiprocessor_count
+    }
+
+    pub(crate) fn tc64_streamk_resident_ctas(&self) -> u32 {
+        self.tc64_streamk_resident_ctas
     }
 
     /// Whether the board the kernels were bound on belongs to the SM120
@@ -10880,6 +10895,22 @@ fn qualify_scalar_tn_m16n16(function: &CudaFunction) -> Result<(), String> {
 fn set_half_dynamic_shared(kernel: &HalfKernel, name: &str, bytes: i32) -> Result<(), String> {
     set_dynamic_shared(&kernel.bf16, name, bytes)?;
     set_dynamic_shared(&kernel.f16, name, bytes)
+}
+
+/// The CTAs of the stream-K kernel one multiprocessor holds at once, the
+/// smaller of its two half variants; the kernel's shared tiles are static,
+/// so the query carries no dynamic bytes.
+fn streamk_resident_ctas(kernel: &HalfKernel) -> Result<u32, String> {
+    let mut resident = u32::MAX;
+    for (name, function) in [("bf16", &kernel.bf16), ("f16", &kernel.f16)] {
+        let blocks = function
+            .occupancy_max_active_blocks_per_multiprocessor(128, 0, None)
+            .map_err(|error| {
+                format!("query gemm_bi_tn_tc64_streamk_{name} occupancy: {error:?}")
+            })?;
+        resident = resident.min(blocks);
+    }
+    Ok(resident.max(1))
 }
 
 #[cfg(test)]

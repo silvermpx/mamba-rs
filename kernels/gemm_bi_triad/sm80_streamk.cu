@@ -95,8 +95,8 @@
 //
 // Flags form a (CTA, slot) matrix that is zero before the first launch;
 // every consumer clears the flags it waited on, so the matrix is zero again
-// when the kernel exits. Waits target lower CTAs only, and with one resident
-// CTA per multiprocessor (__launch_bounds__(128, 1), grid <= SM count)
+// when the kernel exits. Waits target lower CTAs only, and with the grid
+// bounded by the resident CTA count (the launcher reads it from the driver)
 // every waited-on CTA is running: no wait can starve.
 
 struct GemmBiStreamKRange {

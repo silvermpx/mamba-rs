@@ -82,7 +82,7 @@ fn explicit_gemm_config(mode: GemmMode, family: BiGemmFamily) -> ResolvedGemmEnv
         family,
         tensor_cores: true,
         f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-        half_policy: HalfTriadPolicy::TiledParityV1,
+        half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
     }
 }
 
@@ -169,8 +169,14 @@ fn resolve_gemm_env(
         optional_tier_flag_from_result("MAMBA_RS_BI_TENSOR_CORES", values.tensor_cores)?
             .unwrap_or(true);
     let f32_policy = f32_triad_policy_from_result(values.f32_policy)?;
-    let half_policy = half_triad_policy_from_result(values.half_policy)?
-        .unwrap_or(HalfTriadPolicy::TiledParityV1);
+    // The deterministic tensor-core tier takes the stream-K dW schedule by
+    // default; the scalar tier has no stream-K route and stays tiled.
+    let half_policy =
+        half_triad_policy_from_result(values.half_policy)?.unwrap_or(if tensor_cores {
+            HalfTriadPolicy::AllowStreamKFixedOrderV1
+        } else {
+            HalfTriadPolicy::TiledParityV1
+        });
     let family = bi_gemm_family_from_result(values.family, default_family)?;
     validate_custom_policy(tensor_cores, half_policy)?;
     Ok(ResolvedGemmEnv {

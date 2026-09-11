@@ -2539,7 +2539,7 @@ pub enum PolicyDtype {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Sm80TcPolicyV3 {
+pub struct Sm80TcPolicyV4 {
     pub reject_zero_axes: bool,
     pub square_tile_min: usize,
     pub large_tile_min: usize,
@@ -2565,21 +2565,18 @@ pub struct Sm80TcPolicyV3 {
     pub deep_split_k_tail_min_reduction: usize,
     pub deep_split_k_aligned_min_reduction: usize,
     /// The dW stream-K schedule (SM89, under the half policy that permits
-    /// the fixed-order fold) takes a 64x64 tile grid of at most this many
-    /// waves, as a fraction: the census shows the persistent grid winning up
-    /// to one wave and an eighth (144 tiles on 142 multiprocessors, 0.86)
-    /// and losing from 1.3 waves on (186 tiles, 1.12).
-    pub stream_k_max_wave_numerator: u64,
-    pub stream_k_max_wave_denominator: u64,
-    /// ... and only when the (tile, slab) units give every CTA of the
-    /// persistent grid at least this many 64-row slabs: the fold of one slab
-    /// per contributor is paid per tile, and the census shows the schedule
-    /// losing wherever a CTA holds fewer than four slabs (the d128 and thin
-    /// cells) and winning from thirty-seven on.
+    /// the fixed-order fold) takes a shape only when its (tile, slab) units
+    /// give every multiprocessor at least this many 64-row slabs of work.
+    /// With the persistent grid bounded by the resident CTA count rather
+    /// than one CTA per multiprocessor, the census shows the schedule
+    /// winning on every shape with a reduction of 2048 rows or more, from
+    /// one wave of tiles (the classifier page, 0.82) to eight (0.83), and
+    /// losing wherever the reduction is 1024 rows or fewer (the d128 and
+    /// thin cells, where a CTA holds one or two units).
     pub stream_k_min_slabs_per_cta: u64,
 }
 
-impl Sm80TcPolicyV3 {
+impl Sm80TcPolicyV4 {
     pub const fn current() -> Self {
         Self {
             reject_zero_axes: true,
@@ -2606,14 +2603,12 @@ impl Sm80TcPolicyV3 {
             deep_split_k_output_columns: 128,
             deep_split_k_tail_min_reduction: 511,
             deep_split_k_aligned_min_reduction: 1024,
-            stream_k_max_wave_numerator: 9,
-            stream_k_max_wave_denominator: 8,
             stream_k_min_slabs_per_cta: 32,
         }
     }
 
     pub fn digest(&self, multiprocessor_count: u32) -> Sha256Digest {
-        FramedSha256::new(b"sm80-tc-policy.v3")
+        FramedSha256::new(b"sm80-tc-policy.v4")
             .required(b"reject-zero-axes", &[self.reject_zero_axes as u8])
             .required(
                 b"square-tile-min",
@@ -2712,14 +2707,6 @@ impl Sm80TcPolicyV3 {
                 &(self.deep_split_k_aligned_min_reduction as u64).to_le_bytes(),
             )
             .required(
-                b"stream-k-max-wave-numerator",
-                &self.stream_k_max_wave_numerator.to_le_bytes(),
-            )
-            .required(
-                b"stream-k-max-wave-denominator",
-                &self.stream_k_max_wave_denominator.to_le_bytes(),
-            )
-            .required(
                 b"stream-k-min-slabs-per-cta",
                 &self.stream_k_min_slabs_per_cta.to_le_bytes(),
             )
@@ -2782,7 +2769,7 @@ impl ScalarWavePolicyV1 {
 }
 
 pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
-    let tensor_core = Sm80TcPolicyV3::current().digest(multiprocessor_count);
+    let tensor_core = Sm80TcPolicyV4::current().digest(multiprocessor_count);
     let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
     FramedSha256::new(b"gemm-dispatch-policy.v5")
         .required(

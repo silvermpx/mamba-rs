@@ -15,7 +15,7 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
     ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedNumericContract,
     ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1,
-    Sm80TcPolicyV3, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
+    Sm80TcPolicyV4, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
     canonical_ptx_image, gemm_dispatch_policy_digest, route_backend_contract_sets,
 };
 
@@ -485,7 +485,7 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
 
 #[test]
 fn sm80_tc_policy_v3_digest_covers_geometry_waves_device_and_deep_split_k() {
-    let policy = Sm80TcPolicyV3::current();
+    let policy = Sm80TcPolicyV4::current();
     let hash = policy.digest(142);
     assert_ne!(policy.digest(141), hash);
 
@@ -611,14 +611,14 @@ fn scalar_wave_policy_v1_digest_covers_every_wave_and_device_field() {
     assert_ne!(gemm_dispatch_policy_digest(142), hash);
     assert_ne!(
         gemm_dispatch_policy_digest(142),
-        Sm80TcPolicyV3::current().digest(142)
+        Sm80TcPolicyV4::current().digest(142)
     );
 }
 
 #[test]
 fn vendor_policy_v2_changes_the_dispatch_identity() {
     let multiprocessor_count = 142;
-    let tensor_core = Sm80TcPolicyV3::current().digest(multiprocessor_count);
+    let tensor_core = Sm80TcPolicyV4::current().digest(multiprocessor_count);
     let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
     let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
         .required(b"sm80-tensor-core-policy", &tensor_core)

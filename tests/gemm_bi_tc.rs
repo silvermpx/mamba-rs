@@ -1682,10 +1682,11 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
         );
         assert_eq!(node.launch.block_dim, (128, 1, 1), "{dtype:?}");
     }
-    // The lease restored the tiled parity policy.
+    // The lease restored the context's own policy, the stream-K default of
+    // the tensor-core tier.
     assert_eq!(
         t.ctx.half_triad_policy(),
-        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParityV1
+        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrderV1
     );
 }
 

@@ -7641,7 +7641,7 @@ pub(in crate::mamba_ssm::gpu) fn tc_half_policy_prefers_scalar_forward(
     dims: (usize, usize, usize),
     multiprocessor_count: u32,
 ) -> Result<bool, String> {
-    let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+    let policy = super::super::kernel_identity::Sm80TcPolicyV4::current();
     if compute_capability != policy.deep_split_k_compute_capability
         || dims.2 != policy.deep_split_k_output_columns
     {
@@ -10277,7 +10277,7 @@ fn tc_pick_square_tile(
     geometry: TcGeometry,
     multiprocessor_count: u32,
 ) -> Option<TcTile> {
-    let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+    let policy = super::super::kernel_identity::Sm80TcPolicyV4::current();
     if multiprocessor_count == 0
         || geometry.rows < policy.square_tile_min
         || geometry.columns < policy.square_tile_min
@@ -10325,7 +10325,7 @@ pub(super) fn tc_pick_tile_forward(
     multiprocessor_count: u32,
 ) -> Option<TcTile> {
     let (rows, reduction, columns) = dims;
-    let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+    let policy = super::super::kernel_identity::Sm80TcPolicyV4::current();
     if multiprocessor_count == 0
         || rows == 0
         || reduction == 0
@@ -10378,7 +10378,7 @@ pub(super) fn tc_pick_tile_backward(
             reduction: n_out,
         },
     };
-    let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+    let policy = super::super::kernel_identity::Sm80TcPolicyV4::current();
     if multiprocessor_count == 0
         || (policy.reject_zero_axes
             && (geometry.rows == 0 || geometry.columns == 0 || geometry.reduction == 0))
@@ -10409,24 +10409,24 @@ pub(super) fn tc_pick_tile_backward_for_device(
     if compute_capability != (8, 9) || multiprocessor_count == 0 {
         return portable;
     }
-    // The stream-K dW schedule serves a 64x64 grid of at most one wave and
-    // a fraction whose (tile, slab) units give every CTA of the persistent
-    // grid a deep enough reduction, and only when the half policy permits
-    // its fixed-order fold; a request that stays on the tiled contract never
-    // sees it (internal/perf/sm89-streamk-tn-20260904).
+    // The stream-K dW schedule serves any 64x64 grid whose (tile, slab)
+    // units give every multiprocessor a deep enough reduction, and only
+    // when the half policy permits its fixed-order fold; a request that
+    // stays on the tiled contract never sees it. Its persistent grid is
+    // bounded by the resident CTA count, so the tile count itself no longer
+    // limits it: the census shows it winning from one wave of tiles to
+    // eight wherever the reduction runs 2048 rows or more.
     if op == super::super::kernel_identity::PolicyOp::Dw
         && half_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1
     {
         let (batch, n_in, n_out) = dims;
-        let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+        let policy = super::super::kernel_identity::Sm80TcPolicyV4::current();
         let tiles64 = tc_grid_ctas(n_in, n_out, 64, 64)?;
         let slabs = u64::try_from(batch).ok()?.div_ceil(64);
         let units = tiles64.checked_mul(slabs)?;
         let sms = u64::from(multiprocessor_count);
-        let within_waves = tiles64.checked_mul(policy.stream_k_max_wave_denominator)?
-            <= sms.checked_mul(policy.stream_k_max_wave_numerator)?;
         let deep_enough = units >= sms.checked_mul(policy.stream_k_min_slabs_per_cta)?;
-        if tiles64 > 0 && within_waves && deep_enough {
+        if tiles64 > 0 && deep_enough {
             return Some(TcTile::Tile64StreamK);
         }
     }

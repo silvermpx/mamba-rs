@@ -1560,6 +1560,10 @@ impl MambaKernels {
         self.triad.compute_capability()
     }
 
+    pub(crate) fn tc64_streamk_resident_ctas(&self) -> u32 {
+        self.triad.tc64_streamk_resident_ctas()
+    }
+
     pub(crate) fn triad_sm80_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.triad.sm80_compiler_identity()
     }

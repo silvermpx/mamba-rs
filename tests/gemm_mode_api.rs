@@ -85,7 +85,11 @@ fn gpu_context_constructors_use_explicit_modes_and_deterministic_defaults() {
         "deterministic tensor-core permission default"
     );
     assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
-    assert_eq!(ctx.half_triad_policy(), HalfTriadPolicy::TiledParityV1);
+    assert_eq!(
+        ctx.half_triad_policy(),
+        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+        "the tensor-core tier takes the stream-K weight gradient by default"
+    );
     drop(ctx);
 
     let ctx =

@@ -11855,8 +11855,9 @@ const SM80_STREAMK_SLAB_FLOATS: usize = 128 * 32;
 /// Slots per CTA: a range can end inside its first tile or a later one.
 const SM80_STREAMK_SLOTS_PER_CTA: usize = 2;
 
-/// The persistent grid of the tc64 TN stream-K kernel: one CTA per
-/// multiprocessor, never more CTAs than (tile, slab) units, never zero.
+/// The persistent grid of the tc64 TN stream-K kernel: as many CTAs per
+/// multiprocessor as stay resident, never more CTAs than (tile, slab)
+/// units, never zero.
 pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
     let checked = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked.tuple();
@@ -11868,9 +11869,12 @@ pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> R
     )?;
     let slabs = checked_u32(batch, "reduction rows")?.div_ceil(64);
     let units = u64::from(tiles) * u64::from(slabs);
-    let multiprocessors = u64::from(kernels.multiprocessor_count().max(1));
-    u32::try_from(units.min(multiprocessors).max(1))
-        .map_err(|_| "stream-K grid exceeds u32".to_string())
+    // The kernel's waits target lower CTAs and cannot starve while every
+    // CTA of the grid is resident, so the grid is bounded by the resident
+    // CTA count the loader read from the driver, not by one per SM.
+    let resident = u64::from(kernels.multiprocessor_count().max(1))
+        * u64::from(kernels.tc64_streamk_resident_ctas().max(1));
+    u32::try_from(units.min(resident).max(1)).map_err(|_| "stream-K grid exceeds u32".to_string())
 }
 
 /// The partial-slab and flag pointers of the stream-K dW kernel, from the
