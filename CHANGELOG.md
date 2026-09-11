@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (2026-09-10)
+## 0.7.0 (2026-09-12)
 
 **A big performance release.** The deterministic GEMM kernels that
 mamba-rs uses for training and for serving were rewritten, and they are
@@ -90,8 +90,8 @@ slower than cuBLAS on both boards):
 |---|---|---:|---:|
 | BF16 | Fast | 1.07× | 1.06× |
 | F16 | Fast | 1.08× | 1.06× |
-| F32 deterministic TF32 | Fast TF32 | 0.84× | 1.08× |
-| F32 exact | Pedantic | 0.94× | 1.19× |
+| F32 deterministic TF32 | Fast TF32 | 0.84× | 1.07× |
+| F32 exact | Pedantic | 0.94× | 1.17× |
 
 **The new kernels against the 0.6.9 kernels** (RTX 6000 Ada, CUDA 13.2,
 the same program compiled against both trees, each tree's deterministic

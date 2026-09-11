@@ -349,7 +349,8 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 ## Performance
 
 Measured on an RTX 6000 Ada (SM89, driver 595.45.04) and an RTX 5090
-(CC 12.0, driver 595.84), both on CUDA 13.2. Speedups are cuBLAS time
+(CC 12.0, driver 595.84 for the serving tables and 595.58.03 for the
+training tables), both on CUDA 13.2. Speedups are cuBLAS time
 divided by mamba-rs time; above 1.0 the deterministic kernel is faster.
 Exact f32 is compared with cuBLAS Pedantic, which performs the same
 arithmetic; bf16 and f16 with cuBLAS Fast on the native half-precision
@@ -372,14 +373,14 @@ cuBLAS on both boards):
 
 | precision | compared with | RTX 6000 Ada | RTX 5090 |
 |---|---|---:|---:|
-| BF16 | cuBLAS Fast | 1.09× | 1.06× |
-| F16 | cuBLAS Fast | 1.10× | 1.06× |
-| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.74× | 1.08× |
-| F32, exact | cuBLAS Pedantic | 0.94× | 1.19× |
+| BF16 | cuBLAS Fast | 1.07× | 1.06× |
+| F16 | cuBLAS Fast | 1.08× | 1.06× |
+| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.84× | 1.07× |
+| F32, exact | cuBLAS Pedantic | 0.94× | 1.17× |
 
 Whole training step on the RTX 6000 Ada, 0.7.0 against 0.6.9, same shapes
 and settings in both trees (bf16 with tensor cores, ms per step): d128
-2.35 → 2.10, d256 9.68 → 8.51, d768 22.32 → 20.30, d1536 13.21 → 13.01.
+2.35 → 1.94, d256 9.54 → 7.66, d768 22.17 → 13.60, d1536 13.07 → 9.45.
 The step is dominated by the scan and the other non-GEMM kernels, so the
 whole-step gain is smaller than the kernel gain.
 
