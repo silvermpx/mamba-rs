@@ -63,6 +63,7 @@
 "gemm_bi_scalar_nt_slim_qualification" = "qualification"
 "gemm_bi_sm100_contract" = "gate"
 "gemm_bi_sm100_triad_census" = "qualification"
+"gemm_bi_sm120_arena_subview" = "gate"
 "gemm_bi_sm120_contract" = "gate"
 "gemm_bi_sm120_tf32_selector_qualification" = "qualification"
 "gemm_bi_sm120_tf32_vendor" = "qualification"
