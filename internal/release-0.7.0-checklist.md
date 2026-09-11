@@ -417,6 +417,72 @@ Select their actual supported cases and prerequisites before executing them.
     step: d768 B8 T256 bf16 18.8 to 13.6 ms, f32 30.6 to 24.6; d1536 B4
     T256 bf16 12.2 to 9.6; d256 T128 equal; d128 T64 stays sequential).
     The 0.6.9 and before/after tables are being re-measured on `84486283`.
+  - [x] Committed `68e3424b`, `bb12b439`: the paired matrix of `84486283`
+    showed the exact-f32 forward cells (d768 in_proj, d768 out_proj,
+    classifier page in_proj), their NT siblings and the underfill/d128 cells
+    of the deterministic TF32 route running the plain scalar kernels, below
+    what 0.6.9 had for the same products (d768 in_proj NN 244 to 351 us, NT
+    354 to 637, underfill TN 10 to 81). Two cohorts had closed without a
+    test noticing: the copy-plan admission pins the whole Fixed module,
+    which is composed from the Mamba kernels the pass rewrote; and the
+    portable TF32 cohort pins the sm80 module, whose stream-K source had a
+    comment reworded in `2668453d`. The stream-K file went back to its
+    qualified bytes; the copy plan was re-qualified with the discovery
+    protocol on CUDA 12.8, 13.0 and 13.2 (copy plan 0.49 to 0.74 of the
+    tiled kernel's time on the three cells, 0.67 to 0.73 on the deep
+    4096-row cell it now takes as well, bits equal to the tiled kernel),
+    the NT sibling receipts were regenerated with the archived
+    pre-admission test, and a host test now holds every Ada cohort to the
+    source this tree composes. Evidence:
+    `internal/perf/ada-fixed-copyplan-requal-20260911/`.
+  - [x] Committed `92d7ff1a`, `acb6b12d`, `a205cff6` on the owner's word that
+    the deterministic TF32 route on Ada must reach cuBLAS before 0.7.0 (the
+    RL training in the next project runs on it). The NT N96 body of the
+    joint module was rebuilt from the TN body's structure with both operands
+    through ldmatrix and the half-ulp add (113 registers, no spills, finite
+    bits unchanged): NT d768 in_proj 187 → 116 µs, cuBLAS parity. Five
+    cells were screened with the joint protocol on all three toolkits and
+    moved (TN d768 in_proj to M64N96, TN large_deep to N96, NT large_deep
+    and NT d768 out_proj to the new body, TN d128 in/out to the fused
+    split-K8 kernel); NN large_deep, TN d768 out_proj and NT prism keep
+    their kernels. Joint cohorts re-minted on 12.8/13.0/13.2; the transpose
+    scratch grew to 12.6 M elements for the deep weight gradient, the exact
+    deep cell keeps its own extent constant. Evidence:
+    `internal/perf/ada-tf32-retile-deep-20260911/`. The gate now runs the
+    cuda library tests, the whole TF32 contract file, the joint and
+    selector qualification host tests and the invariance matrix (five
+    stale contract scans from the mode refactor fixed on the way).
+  - [ ] Confirmation on `bb12b439`: integrated once21 on the three cells and
+    the deep cell per toolkit, NT post-admission per toolkit, the paired
+    release matrix and the 0.6.9 adapter, then gate-pass11 with the cuda
+    library tests; then the per-kernel tables and the changelog sentence
+    about the deep cell.
+  - [x] Committed `85d19d1f` on the owner's word: the qualified TF32
+    cohorts no longer compare the driver build. The two CUDA 13.2
+    identities minted on the 5090 differed in nothing but that digest, and
+    the driver-specific cohort admitted three cells where the toolkit
+    cohort admitted twenty-three, so any other driver silently lost every
+    TF32 cell. The identity is the toolkit, the composed source, the
+    compiled artifact and the board; the 5090 matrix must be re-run on the
+    final tree to show the twenty-three cells on its driver.
+  - [x] Committed `bd0eb778`: clippy is clean with `cuda,hf,qualification`
+    on (CI only runs it without features): twelve helpers of eight to
+    fourteen arguments now take named structs, recurring tuple types have
+    aliases, index loops became iterators; no `allow`.
+  - [x] Committed `370ea96f`: the m3_dqkv unit test sized its shared tile
+    without the odd-stride padding and wrote past the allocation; Ada
+    tolerated it, the 5090 faulted. The gate now runs memcheck over it.
+  - [ ] The SM100/SM120 tensor-map plan refused operands sliced out of a
+    flat arena ("subview row wraps"), which failed the bf16 and f16
+    training step on the 5090 for the production shape on every snapshot
+    of this branch (0.6.9 had no such route). Such an operand is now
+    described from its own first element; `gemm_bi_sm120_arena_subview`
+    requires the same kernel and bits as standalone operands. Commit after
+    the 5090 shows the test, the trainer bench and memcheck green.
+  - [ ] Final tree on both boards: 5090 mirrored A-G pass, paired matrix
+    (the first pass lost the matrix to a missing snapshot SHA in the box
+    script) and the full suite; Ada final gate and full suite after the
+    a205cff6 chain releases the GPU.
   - [x] Paired measurement `cce73716` against `6bcd2fd5` on Ada
     (`scratchpad/ab-pass1`, parsers `setA/B/CD/EF.py`): Mamba-1 decode f32
     5-14 % faster (bf16 unchanged, its decode was already fused), Mamba-1

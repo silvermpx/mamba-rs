@@ -56,9 +56,12 @@ the 0.6.9 numbers.
   section below.
 - **Measured, not assumed.** Every automatic kernel selection on the two
   boards was timed cell by cell against cuBLAS Fast and cuBLAS Pedantic,
-  with the winners frozen together with the board, driver and toolkit
-  identity. A kernel outside its frozen identity is not selected; the
-  portable kernel serves instead and says so once.
+  with the winners frozen together with the board, the toolkit and the
+  compiled artifact. A kernel outside its frozen identity is not selected;
+  the portable kernel serves instead and says so once. The driver build is
+  not part of that identity: a box on any driver that loads the artifact
+  gets the same kernels, because the bits come from the compiler and the
+  source, not from the driver.
 
 ### Performance
 
@@ -85,9 +88,9 @@ slower than cuBLAS on both boards):
 
 | precision | compared with | RTX 6000 Ada | RTX 5090 |
 |---|---|---:|---:|
-| BF16 | Fast | 1.09× | 1.06× |
-| F16 | Fast | 1.10× | 1.06× |
-| F32 deterministic TF32 | Fast TF32 | 0.74× | 1.08× |
+| BF16 | Fast | 1.07× | 1.06× |
+| F16 | Fast | 1.08× | 1.06× |
+| F32 deterministic TF32 | Fast TF32 | 0.84× | 1.08× |
 | F32 exact | Pedantic | 0.94× | 1.19× |
 
 **The new kernels against the 0.6.9 kernels** (RTX 6000 Ada, CUDA 13.2,
@@ -97,17 +100,17 @@ speedup over the shapes of each class, and the range):
 
 | family | precision | large shapes | small d128 shapes |
 |---|---|---:|---:|
-| Triad (training) | BF16 | 1.29× (1.02 to 1.58) | 1.08× |
-| Triad (training) | F16 | 1.25× (1.02 to 1.44) | 1.08× |
-| Triad (training) | F32 exact | 1.40× (0.90 to 2.26) | 1.25× (up to 2.98) |
-| Inference (serving) | BF16 | 1.33× (1.27 to 1.43) | |
-| Inference (serving) | F16 | 1.33× (1.27 to 1.42) | |
-| Inference (serving) | F32 exact | 1.39× (1.19 to 1.47) | |
+| Triad (training) | BF16 | 1.31× (1.01 to 1.63) | 1.08× |
+| Triad (training) | F16 | 1.26× (1.02 to 1.42) | 1.08× |
+| Triad (training) | F32 exact | 1.43× (1.05 to 2.29) | 1.25× (up to 2.98) |
+| Inference (serving) | BF16 | 1.32× (1.26 to 1.44) | |
+| Inference (serving) | F16 | 1.34× (1.26 to 1.46) | |
+| Inference (serving) | F32 exact | 1.37× (1.20 to 1.46) | |
 
 The largest single gains are the exact-f32 weight-gradient kernels on the
 d128 shapes (2.0× and 3.0×) and the exact-f32 input-gradient kernel on the
-d768 in_proj shape (2.26×); one cell, the deep 4096-row exact-f32 forward,
-is 10 percent slower because no measured kernel covers it yet. The
+d768 in_proj shape (2.3×); no cell is behind 0.6.9, the smallest gain on a
+large shape being the deep 4096-row exact-f32 weight gradient at 1.05×. The
 deterministic TF32 kernels have no 0.6.9 counterpart; against the only f32
 answer 0.6.9 had, the exact kernels, they are 2.3 to 3.1 times faster on
 the large shapes, at TF32 precision. The complete per-kernel tables, the
@@ -120,14 +123,14 @@ median of four alternating runs, milliseconds per step):
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
-| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.23× | 2.12 | 2.19 |
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.22× | 2.12 | 2.19 |
 | d128, 2 layers, B=16, T=64 | bf16 (tensor cores) | 2.35 | 1.94 | 1.21× | 1.85 | 2.35 |
-| d256, 4 layers, B=16, T=128 | f32 | 12.46 | 10.99 | 1.13× | 8.85 | 9.38 |
-| d256, 4 layers, B=16, T=128 | bf16 (tensor cores) | 9.55 | 7.63 | 1.25× | 7.18 | 9.39 |
-| d768, 4 layers, B=8, T=256 | f32 | 34.84 | 24.56 | 1.42× | 16.89 | 20.52 |
-| d768, 4 layers, B=8, T=256 | bf16 (tensor cores) | 22.19 | 13.60 | 1.63× | 13.37 | 19.94 |
-| d1536, 2 layers, B=4, T=256 | f32 | 24.33 | 19.12 | 1.27× | 11.27 | 15.02 |
-| d1536, 2 layers, B=4, T=256 | bf16 (tensor cores) | 13.06 | 9.52 | 1.37× | 8.96 | 14.58 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.45 | 10.99 | 1.13× | 8.86 | 9.38 |
+| d256, 4 layers, B=16, T=128 | bf16 (tensor cores) | 9.54 | 7.66 | 1.25× | 7.21 | 9.43 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.81 | 24.57 | 1.42× | 16.93 | 20.52 |
+| d768, 4 layers, B=8, T=256 | bf16 (tensor cores) | 22.17 | 13.60 | 1.63× | 13.37 | 19.99 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.49 | 19.09 | 1.28× | 11.07 | 14.86 |
+| d1536, 2 layers, B=4, T=256 | bf16 (tensor cores) | 13.07 | 9.45 | 1.38× | 9.04 | 14.49 |
 
 The whole-step gain, 1.13 to 1.63×, is the GEMM kernels, the Mamba kernel
 pass and the two route changes below together (the second table below
@@ -179,6 +182,30 @@ B4 T256 12.2 → 9.6 ms, d256 B16 T128 the same, d128 B16 T64 stays
 sequential (1.89 against 2.04). Both routes are bit-identical run to run;
 `tiled` and `ScanMode::Sequential` restore the previous families.
 
+**Deterministic TF32 on Ada moved toward cuBLAS Fast TF32** in the last
+pass of the release, since the next project's RL training will run on it.
+The NT kernel of the joint Ada module was rebuilt: in an NT product both
+operands are contiguous along the reduction, so B is loaded through
+`ldmatrix` exactly as A is (one x4 for two atoms, one x2 for the third),
+every operand word is rounded by the half-ulp add instead of `cvt.rna`,
+the copy plan and the fragment addresses are computed once per thread, the
+fragments are double-buffered with the copies spread over the four k8
+issues, there is one barrier per K-tile, and the tile is stored through
+shared memory in float4 rows. Its finite results are bit-identical to the
+previous body (the same ascending k8 chain per element). Five cells moved
+to kernels the tables had never measured them against. Against cuBLAS
+Fast TF32, the same decisions on CUDA 12.8, 13.0 and 13.2: NT d768 in_proj
+0.63 → 1.00×, NT d768 out_proj 0.71 → 1.05×, TN d128 out_proj 0.47 → 0.89×
+(the fused split-K8 kernel, eight partials folded in a fixed order), TN
+d768 in_proj 0.76 → 0.83× (the M64N96 tile), TN large_deep 0.53 → 0.77×,
+NT large_deep 0.64 → 0.73×, TN d128 in_proj 0.49 → 0.58×. Over the 21 Ada
+TF32 cells the geometric mean goes from 0.72× to 0.80×, on the twelve
+large shapes from 0.74× to 0.84×. Three cells did not move: NN large_deep
+(the joint kernels lose to the portable one there), TN d768 out_proj (a
+96 × 96 tile is missing) and NT classifier page (the new body does not
+win). The split-K8 cells carry a reduction order of their own; every
+route stays deterministic run to run.
+
 **Whole steps, 0.7.0 before and after the Mamba kernel pass** (RTX 6000
 Ada, CUDA 13.2, the same programs, mirrored runs of separate processes,
 median of four; the before tree is the one the tables above were taken
@@ -186,24 +213,24 @@ on):
 
 | model, shape, path | before | after | speedup |
 |---|---:|---:|---:|
-| Mamba-1 training, d384 24 layers B8 T1300, bf16 tensor cores, graph | 117.98 ms | 112.25 ms | 1.05× |
-| Mamba-1 training, d384 24 layers B8 T1300, f32, graph | 227.42 ms | 204.70 ms | 1.11× |
-| Mamba-1 training, d768 4 layers B8 T256, bf16 tensor cores, graph | 20.49 ms | 13.53 ms | 1.51× |
-| Mamba-1 training, d768 4 layers B8 T256, f32, graph | 32.24 ms | 24.50 ms | 1.32× |
-| Mamba-1 training, d1536 2 layers B4 T256, bf16 tensor cores, graph | 12.92 ms | 9.48 ms | 1.36× |
-| Mamba-1 training, d1536 2 layers B4 T256, f32, graph | 22.68 ms | 19.15 ms | 1.18× |
-| Mamba-1 training, d256 4 layers B16 T128, bf16 tensor cores, graph | 8.55 ms | 7.63 ms | 1.12× |
-| Mamba-1 training, d256 4 layers B16 T128, f32, graph | 12.09 ms | 11.02 ms | 1.10× |
-| Mamba-1 training, d128 2 layers B16 T64, bf16 tensor cores, graph | 2.11 ms | 1.93 ms | 1.09× |
-| Mamba-1 training, d128 2 layers B16 T64, f32, graph | 2.80 ms | 2.47 ms | 1.13× |
-| Mamba-3 training, d384 24 layers B1 T256, bf16, graph | 17.23 ms | 14.66 ms | 1.18× |
+| Mamba-1 training, d384 24 layers B8 T1300, bf16 tensor cores, graph | 118.13 ms | 112.38 ms | 1.05× |
+| Mamba-1 training, d384 24 layers B8 T1300, f32, graph | 227.41 ms | 204.61 ms | 1.11× |
+| Mamba-1 training, d768 4 layers B8 T256, bf16 tensor cores, graph | 20.43 ms | 13.60 ms | 1.50× |
+| Mamba-1 training, d768 4 layers B8 T256, f32, graph | 32.10 ms | 24.56 ms | 1.31× |
+| Mamba-1 training, d1536 2 layers B4 T256, bf16 tensor cores, graph | 12.93 ms | 9.48 ms | 1.36× |
+| Mamba-1 training, d1536 2 layers B4 T256, f32, graph | 22.70 ms | 19.05 ms | 1.19× |
+| Mamba-1 training, d256 4 layers B16 T128, bf16 tensor cores, graph | 8.57 ms | 7.64 ms | 1.12× |
+| Mamba-1 training, d256 4 layers B16 T128, f32, graph | 12.09 ms | 10.97 ms | 1.10× |
+| Mamba-1 training, d128 2 layers B16 T64, bf16 tensor cores, graph | 2.11 ms | 1.94 ms | 1.09× |
+| Mamba-1 training, d128 2 layers B16 T64, f32, graph | 2.80 ms | 2.48 ms | 1.13× |
+| Mamba-3 training, d384 24 layers B1 T256, bf16, graph | 17.25 ms | 14.68 ms | 1.18× |
 | Mamba-3 training, d384 24 layers B1 T256, f32, graph | 18.31 ms | 15.66 ms | 1.17× |
-| Mamba-3 training, d384 24 layers B8 T1300, bf16, graph | 231.15 ms | 145.48 ms | 1.59× |
-| Mamba-3 training, d384 24 layers B8 T1300, f32, graph | 262.14 ms | 184.88 ms | 1.42× |
-| Mamba-3 prefill, T4621 24 layers d384, f32 | 19.13 ms | 19.09 ms | 1.00× |
-| Mamba-1 decode, d128 3 layers, f32 exact, Triad family, batch 1, graph | 103.81 µs | 78.86 µs | 1.32× |
-| Mamba-1 decode, d128 3 layers, Inference family f32, batch 1, graph | 196.95 µs | 170.81 µs | 1.15× |
-| Mamba-1 decode, d128 3 layers, Inference family bf16, batch 1, graph | 96.68 µs | 83.51 µs | 1.16× |
+| Mamba-3 training, d384 24 layers B8 T1300, bf16, graph | 231.21 ms | 145.47 ms | 1.59× |
+| Mamba-3 training, d384 24 layers B8 T1300, f32, graph | 262.14 ms | 184.93 ms | 1.42× |
+| Mamba-3 prefill, T4621 24 layers d384, f32 | 19.14 ms | 19.05 ms | 1.00× |
+| Mamba-1 decode, d128 3 layers, f32 exact, Triad family, batch 1, graph | 103.98 µs | 79.02 µs | 1.32× |
+| Mamba-1 decode, d128 3 layers, Inference family f32, batch 1, graph | 197.05 µs | 170.53 µs | 1.16× |
+| Mamba-1 decode, d128 3 layers, Inference family bf16, batch 1, graph | 97.38 µs | 83.44 µs | 1.17× |
 | Mamba-1 training forward, d128 3 layers, B1 T32, eager | 786 µs | 682 µs | 1.15× |
 | Mamba-3 decode, d128 4 layers, batch 1, graph | 169.8 µs | 160.6 µs | 1.06× |
 

@@ -113,21 +113,23 @@ Geometric mean of the speedup by family, precision and shape class:
 
 | family | precision | large shapes | small shapes (d128, underfill) |
 |---|---|---:|---:|
-| Triad (training) | BF16 | 1.29× (1.02 to 1.58) | 1.08× |
-| Triad (training) | F16 | 1.25× (1.02 to 1.44) | 1.08× |
-| Triad (training) | F32 exact | 1.40× (0.90 to 2.26) | 1.25× (1.02 to 2.98) |
-| Inference (serving) | BF16 | 1.33× (1.27 to 1.43) | |
-| Inference (serving) | F16 | 1.33× (1.27 to 1.42) | |
-| Inference (serving) | F32 exact | 1.39× (1.19 to 1.47) | |
+| Triad (training) | BF16 | 1.31× (1.01 to 1.63) | 1.08× |
+| Triad (training) | F16 | 1.26× (1.02 to 1.42) | 1.08× |
+| Triad (training) | F32 exact | 1.43× (1.05 to 2.29) | 1.25× (1.02 to 2.98) |
+| Inference (serving) | BF16 | 1.32× (1.26 to 1.44) | |
+| Inference (serving) | F16 | 1.34× (1.26 to 1.46) | |
+| Inference (serving) | F32 exact | 1.37× (1.20 to 1.46) | |
 
 The largest single gains are the exact-f32 weight-gradient kernels on the
 d128 shapes (2.0× and 3.0×) and the exact-f32 input-gradient kernel on
-the d768 in_proj shape (2.26×). Two cells did not move or moved the wrong
-way: the deep 4096-row exact-f32 forward is 10 percent slower than the
-0.6.9 kernel (the new automatic selection has no measured kernel for that
-shape and the scalar kernel serves), and the deep-shape half kernels are
-within 2 percent of the old ones. The small d128 half kernels are the same
-portable kernels in both trees.
+the d768 in_proj shape (2.3×). No cell is behind 0.6.9. The smallest
+gains are on the deep 4096-row shape: its half-precision forward and
+input-gradient kernels are within 3 percent of the old ones and its
+exact-f32 weight gradient is 1.05×; its exact-f32 forward, which an
+earlier measurement had 10 percent behind 0.6.9 while the scalar kernel
+served it, is 1.11× on the copy-plan kernel in this program and 1.5× in
+the isolated matrix. The small d128 half kernels are the same portable
+kernels in both trees.
 
 The cuBLAS arms are the control: on the calls that are identical in both
 trees (half precision, `COMPUTE_32F`) the new process measured 0 to 12
@@ -240,18 +242,18 @@ comparison.
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
-| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.23× | 2.12 | 2.19 |
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.22× | 2.12 | 2.19 |
 | d128, 2 layers, B=16, T=64 | bf16, tensor cores | 2.35 | 1.94 | 1.21× | 1.85 | 2.35 |
-| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.39 | 2.00 | 1.19× | 1.90 | 1.99 |
-| d256, 4 layers, B=16, T=128 | f32 | 12.46 | 10.99 | 1.13× | 8.85 | 9.38 |
-| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.55 | 7.63 | 1.25× | 7.18 | 9.39 |
-| d256, 4 layers, B=16, T=128 | f16, tensor cores | 9.71 | 7.76 | 1.25× | 7.29 | 7.89 |
-| d768, 4 layers, B=8, T=256 | f32 | 34.84 | 24.56 | 1.42× | 16.89 | 20.52 |
-| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.19 | 13.60 | 1.63× | 13.37 | 19.94 |
-| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.32 | 13.85 | 1.61× | 13.64 | 17.72 |
-| d1536, 2 layers, B=4, T=256 | f32 | 24.33 | 19.12 | 1.27× | 11.27 | 15.02 |
-| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.06 | 9.52 | 1.37× | 8.96 | 14.58 |
-| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.39 | 9.93 | 1.35× | 9.32 | 12.95 |
+| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.38 | 1.99 | 1.20× | 1.89 | 1.98 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.45 | 10.99 | 1.13× | 8.86 | 9.38 |
+| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.54 | 7.66 | 1.25× | 7.21 | 9.43 |
+| d256, 4 layers, B=16, T=128 | f16, tensor cores | 9.69 | 7.82 | 1.24× | 7.31 | 7.93 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.81 | 24.57 | 1.42× | 16.93 | 20.52 |
+| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.17 | 13.60 | 1.63× | 13.37 | 19.99 |
+| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.53 | 13.82 | 1.63× | 13.66 | 17.82 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.49 | 19.09 | 1.28× | 11.07 | 14.86 |
+| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.07 | 9.45 | 1.38× | 9.04 | 14.49 |
+| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.44 | 9.81 | 1.37× | 9.19 | 12.91 |
 
 The whole-step gain is the GEMM kernels, the Mamba kernel pass and the
 two route changes of this release together: the stream-K weight gradient
@@ -618,117 +620,117 @@ split reduction followed by its reducer).
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
-| d128 in_proj | NN | 1024 × 128 × 512 | `nn_tc64_bf16` | 5.680 | 4.834 | 0.851× | 5.338 | 4.857 | 0.910× |
-| d128 in_proj | NT | 1024 × 128 × 512 | `nt_tc64_bf16` | 9.342 | 7.679 | 0.822× | 9.230 | 7.218 | 0.782× |
-| d128 in_proj | TN | 1024 × 128 × 512 | `tn_tc64_bf16` | 18.427 | 8.018 | 0.435× | 18.203 | 7.453 | 0.409× |
-| d128 out_proj | NN | 1024 × 256 × 128 | `nn_tc64_bf16` | 6.693 | 5.444 | 0.813× | 6.515 | 5.054 | 0.776× |
-| d128 out_proj | NT | 1024 × 256 × 128 | `nt_tc64_bf16` | 5.464 | 4.691 | 0.859× | 5.221 | 4.249 | 0.814× |
-| d128 out_proj | TN | 1024 × 256 × 128 | `tn_tc64_bf16` | 18.429 | 7.194 | 0.390× | 18.212 | 6.528 | 0.358× |
-| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 62.270 | 77.295 | 1.241× | 61.773 | 76.377 | 1.237× |
-| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_m128n128_bk64_s3_bxor_v1_bf16` | 70.982 | 77.890 | 1.098× | 70.671 | 77.616 | 1.098× |
-| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16` | 86.950 | 91.972 | 1.058× | 86.687 | 88.519 | 1.021× |
-| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 38.299 | 49.052 | 1.280× | 37.822 | 47.833 | 1.265× |
-| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_m96n128_bk64_s3_v1_bf16` | 36.689 | 40.043 | 1.092× | 36.301 | 39.131 | 1.078× |
-| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16` | 55.272 | 50.697 | 0.917× | 55.216 | 49.356 | 0.894× |
-| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 59.923 | 76.179 | 1.281× | 59.209 | 74.752 | 1.262× |
-| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_m128n128_bk64_s3_bxor_v1_bf16` | 48.464 | 61.007 | 1.259× | 48.399 | 60.330 | 1.246× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16` | 77.583 | 54.659 | 0.705× | 76.643 | 53.433 | 0.697× |
+| d128 in_proj | NN | 1024 × 128 × 512 | `nn_tc64_bf16` | 5.630 | 4.801 | 0.853× | 5.311 | 4.823 | 0.908× |
+| d128 in_proj | NT | 1024 × 128 × 512 | `nt_tc64_bf16` | 9.400 | 7.761 | 0.826× | 9.171 | 7.160 | 0.781× |
+| d128 in_proj | TN | 1024 × 128 × 512 | `tn_tc64_bf16` | 18.357 | 7.977 | 0.435× | 18.207 | 7.454 | 0.409× |
+| d128 out_proj | NN | 1024 × 256 × 128 | `nn_tc64_bf16` | 6.684 | 5.439 | 0.814× | 6.422 | 4.959 | 0.772× |
+| d128 out_proj | NT | 1024 × 256 × 128 | `nt_tc64_bf16` | 5.396 | 4.704 | 0.872× | 5.180 | 4.276 | 0.826× |
+| d128 out_proj | TN | 1024 × 256 × 128 | `tn_tc64_bf16` | 18.258 | 7.146 | 0.391× | 18.027 | 6.477 | 0.359× |
+| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 62.244 | 78.193 | 1.256× | 61.786 | 77.320 | 1.251× |
+| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_m128n128_bk64_s3_bxor_v1_bf16` | 70.934 | 76.491 | 1.078× | 70.641 | 75.896 | 1.074× |
+| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16` | 86.937 | 90.478 | 1.041× | 86.599 | 87.164 | 1.007× |
+| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 37.936 | 46.993 | 1.239× | 37.729 | 46.738 | 1.239× |
+| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_m96n128_bk64_s3_v1_bf16` | 36.589 | 37.906 | 1.036× | 36.250 | 38.132 | 1.052× |
+| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16` | 55.178 | 50.797 | 0.921× | 55.159 | 49.418 | 0.896× |
+| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_m128n128_bk64_s3_v1_bf16` | 59.667 | 73.473 | 1.231× | 59.114 | 73.045 | 1.236× |
+| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_m128n128_bk64_s3_bxor_v1_bf16` | 48.645 | 61.848 | 1.271× | 48.668 | 61.128 | 1.256× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16` | 77.557 | 55.133 | 0.711× | 77.039 | 53.863 | 0.699× |
 
-Geometric mean over the 15 cells: eager 0.890×, graph 0.869× (mamba-rs faster in 7 of 15 cells eager, 7 of 15 graph).
+Geometric mean over the 15 cells: eager 0.884×, graph 0.865× (mamba-rs faster in 7 of 15 cells eager, 7 of 15 graph).
 
 #### F16 in; F16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
-| d128 in_proj | NN | 1024 × 128 × 512 | `nn_tc64_f16` | 5.680 | 5.385 | 0.948× | 5.341 | 5.101 | 0.955× |
-| d128 in_proj | NT | 1024 × 128 × 512 | `nt_tc64_f16` | 9.349 | 5.899 | 0.631× | 9.237 | 5.255 | 0.569× |
-| d128 in_proj | TN | 1024 × 128 × 512 | `tn_tc64_f16` | 18.431 | 7.983 | 0.433× | 18.119 | 7.477 | 0.413× |
-| d128 out_proj | NN | 1024 × 256 × 128 | `nn_tc64_f16` | 6.601 | 4.756 | 0.723× | 6.511 | 4.174 | 0.641× |
-| d128 out_proj | NT | 1024 × 256 × 128 | `nt_tc64_f16` | 5.456 | 4.581 | 0.840× | 5.232 | 4.053 | 0.775× |
-| d128 out_proj | TN | 1024 × 256 × 128 | `tn_tc64_f16` | 18.262 | 7.518 | 0.412× | 18.013 | 6.581 | 0.365× |
-| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 62.270 | 59.291 | 0.953× | 61.786 | 58.786 | 0.952× |
-| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_m128n128_bk64_s3_bxor_v1_f16` | 70.997 | 75.695 | 1.067× | 70.700 | 77.063 | 1.090× |
-| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16` | 86.753 | 91.286 | 1.052× | 86.727 | 88.612 | 1.022× |
-| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 38.028 | 47.585 | 1.251× | 37.725 | 47.249 | 1.253× |
-| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_m96n128_bk64_s3_v1_f16` | 36.683 | 40.186 | 1.096× | 36.316 | 39.200 | 1.079× |
-| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16` | 56.249 | 50.717 | 0.902× | 56.191 | 49.331 | 0.878× |
-| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 59.742 | 74.815 | 1.252× | 59.194 | 74.135 | 1.252× |
-| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_m128n128_bk64_s3_bxor_v1_f16` | 48.466 | 96.338 | 1.988× | 48.419 | 95.406 | 1.971× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16` | 77.566 | 54.615 | 0.704× | 76.595 | 53.454 | 0.698× |
+| d128 in_proj | NN | 1024 × 128 × 512 | `nn_tc64_f16` | 5.630 | 5.348 | 0.950× | 5.310 | 5.065 | 0.954× |
+| d128 in_proj | NT | 1024 × 128 × 512 | `nt_tc64_f16` | 9.390 | 6.765 | 0.720× | 9.159 | 5.273 | 0.576× |
+| d128 in_proj | TN | 1024 × 128 × 512 | `tn_tc64_f16` | 18.347 | 7.874 | 0.429× | 18.107 | 7.473 | 0.413× |
+| d128 out_proj | NN | 1024 × 256 × 128 | `nn_tc64_f16` | 6.684 | 4.717 | 0.706× | 6.420 | 4.253 | 0.663× |
+| d128 out_proj | NT | 1024 × 256 × 128 | `nt_tc64_f16` | 5.395 | 4.499 | 0.834× | 5.180 | 4.022 | 0.776× |
+| d128 out_proj | TN | 1024 × 256 × 128 | `tn_tc64_f16` | 18.263 | 7.444 | 0.408× | 18.030 | 6.583 | 0.365× |
+| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 62.230 | 59.152 | 0.951× | 61.798 | 58.603 | 0.948× |
+| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_m128n128_bk64_s3_bxor_v1_f16` | 71.057 | 70.400 | 0.991× | 70.788 | 71.017 | 1.003× |
+| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16` | 86.842 | 90.590 | 1.043× | 86.705 | 86.877 | 1.002× |
+| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 38.020 | 46.623 | 1.226× | 37.754 | 46.345 | 1.228× |
+| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_m96n128_bk64_s3_v1_f16` | 36.590 | 39.022 | 1.066× | 36.260 | 39.201 | 1.081× |
+| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16` | 56.061 | 50.679 | 0.904× | 56.134 | 49.480 | 0.881× |
+| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_m128n128_bk64_s3_v1_f16` | 59.792 | 73.232 | 1.225× | 59.209 | 72.747 | 1.229× |
+| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_m128n128_bk64_s3_bxor_v1_f16` | 48.666 | 96.380 | 1.980× | 48.676 | 95.174 | 1.955× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16` | 77.675 | 55.082 | 0.709× | 77.019 | 53.872 | 0.699× |
 
-Geometric mean over the 15 cells: eager 0.881×, graph 0.851× (mamba-rs faster in 6 of 15 cells eager, 6 of 15 graph).
+Geometric mean over the 15 cells: eager 0.877×, graph 0.845× (mamba-rs faster in 5 of 15 cells eager, 6 of 15 graph).
 
 #### F32 in, F32 out, deterministic TF32, against cuBLAS Fast TF32 (COMPUTE_32F_FAST_TF32)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
-| underfill | NN | 256 × 512 × 384 | `nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4` | 11.169 | 10.019 | 0.897× | 10.742 | 9.758 | 0.908× |
-| underfill | NT | 256 × 512 × 384 | `nt_sm80_mma_tf32_v1_m16n32_bk32_s4` | 10.129 | 7.993 | 0.789× | 10.132 | 7.682 | 0.758× |
-| underfill | TN | 256 × 512 × 384 | `tn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 10.468 | 7.828 | 0.748× | 10.268 | 7.837 | 0.763× |
-| d128 in_proj | NN | 1024 × 128 × 512 | `nn_sm80_mma_tf32_v1_m64n64_bk32_s2` | 10.010 | 5.746 | 0.574× | 9.738 | 5.558 | 0.571× |
-| d128 in_proj | NT | 1024 × 128 × 512 | `nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3` | 12.094 | 9.377 | 0.775× | 11.869 | 9.059 | 0.763× |
-| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 19.094 | 9.998 | 0.524× | 19.092 | 9.382 | 0.491× |
-| d128 out_proj | NN | 1024 × 256 × 128 | `nn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 7.661 | 6.820 | 0.890× | 7.561 | 6.511 | 0.860× |
-| d128 out_proj | NT | 1024 × 256 × 128 | `nt_sm80_mma_tf32_v1_m16n32_bk32_s4` | 7.894 | 5.141 | 0.651× | 7.808 | 4.969 | 0.638× |
-| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 19.038 | 9.821 | 0.516× | 18.829 | 8.953 | 0.475× |
-| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm80_mma_tf32_v1_m128n128_bk32_s3` | 123.649 | 101.701 | 0.823× | 121.881 | 100.987 | 0.829× |
-| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1` | 186.780 | 117.156 | 0.627× | 186.520 | 116.807 | 0.626× |
-| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1` | 175.386 | 135.216 | 0.771× | 172.985 | 132.109 | 0.764× |
-| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1` | 64.184 | 64.124 | 0.999× | 63.604 | 62.879 | 0.989× |
-| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2` | 93.860 | 66.813 | 0.712× | 93.590 | 66.277 | 0.708× |
-| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1` | 94.189 | 82.818 | 0.879× | 93.487 | 82.333 | 0.881× |
-| large deep | NN | 4096 × 3072 × 1536 | `nn_sm80_mma_tf32_v1_m128n128_bk32_s3` | 490.325 | 390.071 | 0.796× | 493.568 | 392.670 | 0.796× |
-| large deep | NT | 4096 × 3072 × 1536 | `nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2` | 658.631 | 424.521 | 0.645× | 661.618 | 426.496 | 0.645× |
-| large deep | TN | 4096 × 3072 × 1536 | `tn_sm80_mma_tf32_v1_m64n64_bk32_s2` | 896.512 | 474.950 | 0.530× | 895.488 | 470.723 | 0.526× |
-| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1` | 104.277 | 103.248 | 0.990× | 102.758 | 103.215 | 1.005× |
-| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2` | 144.683 | 76.944 | 0.532× | 144.323 | 76.594 | 0.531× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1` | 140.317 | 100.243 | 0.714× | 138.917 | 99.350 | 0.715× |
+| underfill | NN | 256 × 512 × 384 | `nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4` | 11.165 | 10.040 | 0.899× | 10.743 | 9.761 | 0.909× |
+| underfill | NT | 256 × 512 × 384 | `nt_sm80_mma_tf32_v1_m16n32_bk32_s4` | 10.130 | 7.998 | 0.789× | 10.131 | 7.682 | 0.758× |
+| underfill | TN | 256 × 512 × 384 | `tn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 10.471 | 7.828 | 0.748× | 10.267 | 7.838 | 0.763× |
+| d128 in_proj | NN | 1024 × 128 × 512 | `nn_sm80_mma_tf32_v1_m64n64_bk32_s2` | 9.944 | 5.673 | 0.570× | 9.740 | 5.512 | 0.566× |
+| d128 in_proj | NT | 1024 × 128 × 512 | `nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3` | 12.166 | 9.427 | 0.775× | 11.902 | 9.087 | 0.763× |
+| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4` | 16.634 | 10.112 | 0.608× | 16.458 | 9.358 | 0.569× |
+| d128 out_proj | NN | 1024 × 256 × 128 | `nn_sm80_mma_tf32_v1_m16n32_bk32_s4` | 7.652 | 6.805 | 0.889× | 7.575 | 6.573 | 0.868× |
+| d128 out_proj | NT | 1024 × 256 × 128 | `nt_sm80_mma_tf32_v1_m16n32_bk32_s4` | 7.901 | 5.147 | 0.651× | 7.826 | 4.961 | 0.634× |
+| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3` | 10.219 | 9.845 | 0.963× | 9.954 | 8.973 | 0.901× |
+| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_sm80_mma_tf32_v1_m128n128_bk32_s3` | 123.648 | 101.675 | 0.822× | 121.906 | 100.818 | 0.827× |
+| d768 in_proj | NT | 2048 × 768 × 3072 | `nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1` | 115.331 | 117.147 | 1.016× | 114.874 | 116.736 | 1.016× |
+| d768 in_proj | TN | 2048 × 768 × 3072 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1` | 159.579 | 134.572 | 0.843× | 157.760 | 132.045 | 0.837× |
+| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1` | 63.687 | 62.922 | 0.988× | 63.343 | 62.553 | 0.988× |
+| d768 out_proj | NT | 2048 × 1536 × 768 | `nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1` | 64.990 | 66.788 | 1.028× | 63.314 | 66.253 | 1.046× |
+| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1` | 94.073 | 82.567 | 0.878× | 93.484 | 82.304 | 0.880× |
+| large deep | NN | 4096 × 3072 × 1536 | `nn_sm80_mma_tf32_v1_m128n128_bk32_s3` | 481.621 | 383.195 | 0.796× | 484.523 | 383.706 | 0.792× |
+| large deep | NT | 4096 × 3072 × 1536 | `nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1` | 526.988 | 408.430 | 0.775× | 530.153 | 411.282 | 0.776× |
+| large deep | TN | 4096 × 3072 × 1536 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1` | 601.796 | 474.988 | 0.789× | 600.064 | 470.935 | 0.785× |
+| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1` | 104.189 | 103.119 | 0.990× | 102.439 | 102.730 | 1.003× |
+| classifier page in_proj | NT | 4621 × 384 × 1928 | `nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2` | 144.647 | 76.980 | 0.532× | 144.383 | 76.610 | 0.531× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_tf32_pre_rna_transpose_32x32_v1 + tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1` | 140.514 | 100.260 | 0.714× | 139.209 | 99.341 | 0.714× |
 
-Geometric mean over the 21 cells: eager 0.718×, graph 0.709× (mamba-rs faster in 0 of 21 cells eager, 1 of 21 graph).
+Geometric mean over the 21 cells: eager 0.800×, graph 0.792× (mamba-rs faster in 2 of 21 cells eager, 3 of 21 graph).
 
 #### F32 in, F32 out, exact, against cuBLAS Fast TF32 (COMPUTE_32F_FAST_TF32)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
-| d128 in_proj | NN | 1024 × 128 × 512 | `nn_splitk32_partial + splitk_reduce` | 15.721 | 5.745 | 0.366× | 15.056 | 5.573 | 0.370× |
-| d128 in_proj | NT | 1024 × 128 × 512 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 17.271 | 9.377 | 0.543× | 15.744 | 9.059 | 0.575× |
-| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm89_f32_d128_in_m16n16_f64fold_v1` | 35.271 | 10.008 | 0.284× | 35.260 | 9.381 | 0.266× |
-| d128 out_proj | NN | 1024 × 256 × 128 | `nn_splitk32_partial + splitk_reduce` | 10.220 | 6.818 | 0.667× | 9.517 | 6.494 | 0.682× |
-| d128 out_proj | NT | 1024 × 256 × 128 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 13.028 | 5.147 | 0.395× | 11.521 | 4.963 | 0.431× |
-| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm89_f32_d128_out_m8n16_f64fold_v1` | 27.545 | 9.868 | 0.358× | 27.474 | 8.967 | 0.326× |
-| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 289.402 | 118.443 | 0.409× | 289.353 | 117.737 | 0.407× |
-| d768 in_proj | NT | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 283.971 | 122.110 | 0.430× | 282.993 | 121.761 | 0.430× |
-| d768 in_proj | TN | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + tn_sm89_f32_n64_dual_chunk_fused_finalize_v1` | 309.489 | 134.189 | 0.433× | 307.977 | 131.986 | 0.429× |
-| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 136.739 | 63.888 | 0.467× | 137.728 | 64.102 | 0.466× |
-| d768 out_proj | NT | 2048 × 1536 × 768 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 139.840 | 66.848 | 0.478× | 138.951 | 66.317 | 0.477× |
-| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1 + splitm_reduce` | 189.023 | 82.898 | 0.439× | 188.148 | 82.332 | 0.438× |
-| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 195.812 | 109.568 | 0.557× | 198.371 | 110.547 | 0.555× |
-| classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 299.008 | 76.912 | 0.257× | 298.044 | 76.567 | 0.257× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1 + splitm_reduce` | 235.306 | 100.230 | 0.426× | 234.484 | 99.338 | 0.424× |
+| d128 in_proj | NN | 1024 × 128 × 512 | `nn_splitk32_partial + splitk_reduce` | 15.710 | 5.674 | 0.361× | 15.039 | 5.528 | 0.368× |
+| d128 in_proj | NT | 1024 × 128 × 512 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 17.150 | 9.423 | 0.549× | 15.692 | 9.060 | 0.577× |
+| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm89_f32_d128_in_m16n16_f64fold_v1` | 35.239 | 10.104 | 0.287× | 35.273 | 9.345 | 0.265× |
+| d128 out_proj | NN | 1024 × 256 × 128 | `nn_splitk32_partial + splitk_reduce` | 10.200 | 6.809 | 0.668× | 9.499 | 6.581 | 0.693× |
+| d128 out_proj | NT | 1024 × 256 × 128 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 12.828 | 5.140 | 0.401× | 11.344 | 4.968 | 0.438× |
+| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm89_f32_d128_out_m8n16_f64fold_v1` | 27.506 | 9.777 | 0.355× | 27.546 | 8.945 | 0.325× |
+| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 283.989 | 116.395 | 0.410× | 284.139 | 116.019 | 0.408× |
+| d768 in_proj | NT | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 274.701 | 118.223 | 0.430× | 276.103 | 119.498 | 0.433× |
+| d768 in_proj | TN | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + tn_sm89_f32_n64_dual_chunk_fused_finalize_v1` | 309.489 | 134.112 | 0.433× | 307.863 | 131.994 | 0.429× |
+| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 135.002 | 63.501 | 0.470× | 134.393 | 62.579 | 0.466× |
+| d768 out_proj | NT | 2048 × 1536 × 768 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 139.802 | 66.842 | 0.478× | 138.894 | 66.331 | 0.478× |
+| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1 + splitm_reduce` | 188.749 | 82.572 | 0.437× | 187.961 | 82.300 | 0.438× |
+| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 198.805 | 110.416 | 0.555× | 194.999 | 109.025 | 0.559× |
+| classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 298.965 | 76.982 | 0.257× | 297.984 | 76.614 | 0.257× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1 + splitm_reduce` | 235.082 | 100.295 | 0.427× | 234.095 | 99.354 | 0.424× |
 
-Geometric mean over the 15 cells: eager 0.422×, graph 0.422× (mamba-rs faster in 0 of 15 cells eager, 0 of 15 graph).
+Geometric mean over the 15 cells: eager 0.423×, graph 0.423× (mamba-rs faster in 0 of 15 cells eager, 0 of 15 graph).
 
 #### F32 in, F32 out, exact, against cuBLAS Pedantic (COMPUTE_32F_PEDANTIC)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
-| d128 in_proj | NN | 1024 × 128 × 512 | `nn_splitk32_partial + splitk_reduce` | 15.719 | 10.031 | 0.638× | 15.058 | 9.421 | 0.626× |
-| d128 in_proj | NT | 1024 × 128 × 512 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 17.258 | 13.831 | 0.802× | 15.744 | 13.458 | 0.855× |
-| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm89_f32_d128_in_m16n16_f64fold_v1` | 35.264 | 12.759 | 0.362× | 35.249 | 11.349 | 0.322× |
-| d128 out_proj | NN | 1024 × 256 × 128 | `nn_splitk32_partial + splitk_reduce` | 10.222 | 8.728 | 0.854× | 9.513 | 8.337 | 0.876× |
-| d128 out_proj | NT | 1024 × 256 × 128 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 13.023 | 8.215 | 0.631× | 11.517 | 7.671 | 0.666× |
-| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm89_f32_d128_out_m8n16_f64fold_v1` | 27.527 | 10.531 | 0.383× | 27.475 | 9.840 | 0.358× |
-| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 271.116 | 329.416 | 1.206× | 270.775 | 325.928 | 1.204× |
-| d768 in_proj | NT | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 354.304 | 353.792 | 0.992× | 352.202 | 349.920 | 0.993× |
-| d768 in_proj | TN | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + tn_sm89_f32_n64_dual_chunk_fused_finalize_v1` | 309.609 | 269.339 | 0.871× | 308.211 | 267.244 | 0.867× |
-| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 165.894 | 171.794 | 1.036× | 166.580 | 172.459 | 1.033× |
-| d768 out_proj | NT | 2048 × 1536 × 768 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 171.662 | 177.217 | 1.033× | 170.918 | 177.508 | 1.034× |
-| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1 + splitm_reduce` | 188.947 | 134.740 | 0.713× | 188.151 | 133.743 | 0.711× |
-| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 255.621 | 282.368 | 1.104× | 253.915 | 281.899 | 1.103× |
-| classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 301.538 | 245.858 | 0.815× | 300.514 | 244.834 | 0.815× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1 + splitm_reduce` | 235.398 | 189.975 | 0.807× | 234.223 | 187.834 | 0.802× |
+| d128 in_proj | NN | 1024 × 128 × 512 | `nn_splitk32_partial + splitk_reduce` | 15.733 | 10.005 | 0.636× | 15.035 | 9.362 | 0.623× |
+| d128 in_proj | NT | 1024 × 128 × 512 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 17.152 | 13.751 | 0.802× | 15.692 | 13.357 | 0.851× |
+| d128 in_proj | TN | 1024 × 128 × 512 | `tn_sm89_f32_d128_in_m16n16_f64fold_v1` | 35.239 | 12.706 | 0.361× | 35.279 | 11.309 | 0.321× |
+| d128 out_proj | NN | 1024 × 256 × 128 | `nn_splitk32_partial + splitk_reduce` | 10.197 | 8.691 | 0.852× | 9.497 | 8.429 | 0.888× |
+| d128 out_proj | NT | 1024 × 256 × 128 | `transpose_f32_2d + nn_splitk32_partial + splitk_reduce` | 12.819 | 8.183 | 0.638× | 11.349 | 7.800 | 0.687× |
+| d128 out_proj | TN | 1024 × 256 × 128 | `tn_sm89_f32_d128_out_m8n16_f64fold_v1` | 27.508 | 10.556 | 0.384× | 27.540 | 9.830 | 0.357× |
+| d768 in_proj | NN | 2048 × 768 × 3072 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 268.434 | 323.885 | 1.207× | 268.337 | 322.921 | 1.203× |
+| d768 in_proj | NT | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 349.553 | 346.565 | 0.991× | 348.537 | 345.721 | 0.992× |
+| d768 in_proj | TN | 2048 × 768 × 3072 | `transpose_f32_32x16_d768_v1 + tn_sm89_f32_n64_dual_chunk_fused_finalize_v1` | 309.301 | 268.835 | 0.869× | 308.043 | 267.033 | 0.867× |
+| d768 out_proj | NN | 2048 × 1536 × 768 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 162.621 | 168.199 | 1.034× | 162.429 | 167.587 | 1.032× |
+| d768 out_proj | NT | 2048 × 1536 × 768 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 169.351 | 175.037 | 1.034× | 169.899 | 175.496 | 1.033× |
+| d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1 + splitm_reduce` | 188.757 | 134.256 | 0.711× | 187.961 | 133.635 | 0.711× |
+| classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_fixed_sm89_f32_n64_copyplan_v1` | 248.301 | 276.005 | 1.112× | 251.502 | 278.656 | 1.108× |
+| classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768_v1 + nn_fixed_sm89_f32_n64_copyplan_v1` | 298.963 | 243.517 | 0.815× | 297.978 | 242.639 | 0.814× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1 + splitm_reduce` | 235.085 | 189.318 | 0.805× | 234.089 | 187.740 | 0.802× |
 
-Geometric mean over the 15 cells: eager 0.775×, graph 0.772× (mamba-rs faster in 4 of 15 cells eager, 4 of 15 graph).
+Geometric mean over the 15 cells: eager 0.776×, graph 0.773× (mamba-rs faster in 4 of 15 cells eager, 4 of 15 graph).
 
 ### RTX 5090
 

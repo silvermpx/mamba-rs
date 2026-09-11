@@ -157,7 +157,16 @@ the full qualification once for the promoted domains:
    CUDA 13.0 or 12.8; a win on SM89 does not admit SM80 or SM120. Appending
    a source fragment changes the module's artifact identity, so retained
    routes of that module are requalified on the final build even when their
-   own files are byte-identical.
+   own files are byte-identical. The same holds for any byte of any fragment
+   the module composes, a reworded comment included, and the closure is
+   silent: the admission is a predicate over the live identity, so the route
+   falls back to the plain kernel and every functional test stays green.
+   The Fixed module in particular composes the Mamba kernels, so a scan or
+   norm edit closes the copy-plan cohorts. Keep a host test that holds each
+   cohort's source digest to the source the tree composes, run the
+   discovery stage before repopulating a cohort (it expects the plain route
+   to still be the automatic one), and re-read the paired matrix for the
+   selected symbol, not only the timing.
 8. Preserve evidence: raw samples, source snapshots, telemetry and a
    SHA-256 manifest covering every file in the evidence directory. Never overwrite a wrong-shape or losing run; mark why it
    is not admissible. Measured losers stay until a release cleanup pass
