@@ -127,7 +127,7 @@ fn integrated_copyplan_must_use_actual_fixed_auto_and_confirmation_windows() {
 #[test]
 fn live_comparison_releases_the_qualified_lease_before_other_cuda_work() {
     let (_, body) = TEST_SOURCE
-        .split_once("\n    fn run_live_copyplan_comparison(stage:")
+        .split_once("\n    fn run_live_copyplan_comparison(")
         .unwrap();
     let (_, lease_body) = body
         .split_once("let mut auto = qualify_physical_launch(")
