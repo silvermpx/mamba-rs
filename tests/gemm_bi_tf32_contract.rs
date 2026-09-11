@@ -3139,25 +3139,15 @@ fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
         ],
         "strict F32 triad environment result parser",
     );
-    let env = braced_scope_after(CONTEXT_SOURCE, "fn f32_triad_policy_from_env");
-    let expected_tail = "f32_triad_policy_from_result(std::env::var(\"MAMBA_RS_BI_F32_POLICY\"))";
-    let tail_offset = env
-        .find(expected_tail)
-        .expect("exact F32 triad environment delegation");
-    let env_mask = source_mask(env);
-    let body_open = env_mask.find('{').expect("environment wrapper body");
-    let body_close = env_mask.rfind('}').expect("environment wrapper close");
-    assert_eq!(
-        &env_mask[tail_offset..tail_offset + expected_tail.len()],
-        source_mask(expected_tail),
-        "exact environment delegation must be executable code"
-    );
-    assert!(
-        env_mask[body_open + 1..tail_offset].trim().is_empty()
-            && env_mask[tail_offset + expected_tail.len()..body_close]
-                .trim()
-                .is_empty(),
-        "exact environment delegation must be the wrapper's sole returned tail expression"
+    // The environment is read once into GemmEnvValues and resolved in one
+    // place; the f32 policy value reaches the strict parser unchanged.
+    assert_contains_all(
+        &source_mask(CONTEXT_SOURCE),
+        &[
+            "f32_policy: std::env::var(",
+            "let f32_policy = f32_triad_policy_from_result(values.f32_policy)?;",
+        ],
+        "exact environment delegation",
     );
 }
 
@@ -3186,8 +3176,22 @@ fn deterministic_tf32_policy_is_separate_from_cublas_tf32_state() {
     ));
     assert_contains_all(
         &disable_cublas,
-        &["cublasSetMathMode", "cublas_tf32.set(false)"],
+        &["legacy_disable_tf32()", "set_gemm_mode"],
         "legacy cuBLAS TF32 setter",
+    );
+    let set_mode = source_mask(braced_scope_after(
+        CONTEXT_SOURCE,
+        "pub fn set_gemm_mode(&self, mode: GemmMode)",
+    ));
+    assert_contains_all(
+        &set_mode,
+        &["change_math_mode", "mode.cublas_math()"],
+        "GEMM mode owns the cuBLAS math mode",
+    );
+    assert_contains_all(
+        &source_mask(CONTEXT_SOURCE),
+        &["cublasSetMathMode"],
+        "cuBLAS math-mode backend",
     );
     assert!(
         !disable_cublas.contains("f32_triad_policy.set"),
@@ -3595,7 +3599,7 @@ fn graph_plan_records_every_resolved_launch_and_replays_without_allocation() {
     );
     assert_contains_all(
         TRAINING_GRAPH_SOURCE,
-        &["CapturedGemmGraphPlan", "with_validated_launch"],
+        &["CapturedGemmGraphPlan", "with_validated_gemm_graph_launch"],
         "f32 graph physical-route replay guard",
     );
 }
@@ -4334,6 +4338,13 @@ fn typed_fallback_records_scalar_routes_without_reading_f32_policy() {
             "record_physical_exact_scalar_f32_backward_dx",
         ),
     ] {
+        // The dx recorder takes its arguments through one more hop; the
+        // observer split lives in that hop's body.
+        let split = if fallback == "record_physical_exact_scalar_f32_backward_dx" {
+            "record_physical_exact_scalar_f32_backward_dx_with_arguments"
+        } else {
+            fallback
+        };
         let entry_scope = source_mask(braced_scope_after(BLAS_SOURCE, entry));
         assert!(
             entry_scope.contains(shared.trim_start_matches("fn ")),
@@ -4349,7 +4360,7 @@ fn typed_fallback_records_scalar_routes_without_reading_f32_policy() {
                 && !shared_scope.contains("AllowDeterministicTf32V1"),
             "{shared} typed numeric contract must ignore f32 TF32 policy"
         );
-        let fallback_scope = source_mask(braced_scope_after(LAUNCH_SOURCE, fallback));
+        let fallback_scope = source_mask(braced_scope_after(LAUNCH_SOURCE, split));
         assert_code_contains_all(
             &fallback_scope,
             &[
@@ -8173,7 +8184,7 @@ fn f32_triad_capture_path_is_prepared_and_records_scalar_fallback_nodes() {
 fn production_f32_wrappers_preserve_the_complete_auto_operand_contract() {
     for (marker, required) in [
         (
-            "fn launch_cached_f32_forward_selected",
+            "fn launch_cached_f32_forward_ptrs_selected",
             &[
                 "output,",
                 "a: x_ptr",
@@ -8195,10 +8206,10 @@ fn production_f32_wrappers_preserve_the_complete_auto_operand_contract() {
             ][..],
         ),
         (
-            "fn launch_cached_f32_backward_dx_selected",
+            "fn launch_cached_f32_backward_dx_ptrs_selected",
             &[
-                "output: dx.raw_ptr(&ctx.stream)",
-                "dy.raw_ptr(&ctx.stream)",
+                "output: dx,",
+                "a: if reduction_is_zero { 0 } else { dy }",
                 "b: if reduction_is_zero { 0 } else { w_ptr }",
                 "bias: None",
                 "alpha: 1.0",
