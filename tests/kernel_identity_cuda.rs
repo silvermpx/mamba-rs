@@ -895,7 +895,11 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             .collect();
         let expected_sm120_exact_n64 =
             if first.kernels.compiler_identity().target.as_str() == "compute_120" {
-                std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"])
+                std::collections::BTreeSet::from([
+                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
+                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+                ])
             } else {
                 std::collections::BTreeSet::new()
             };
