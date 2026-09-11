@@ -544,10 +544,10 @@ pub fn state_capacity(d_state: usize) -> Result<usize, String> {
         ));
     }
     // 16-granular: the cap sizes the per-thread state register arrays in
-    // every scan kernel; a 64-floor at d_state=16 made them 4x oversized,
-    // which is pure local-memory traffic once the runtime-bounded loops
-    // force the arrays out of registers. Callers with larger
-    // states still get the exact padded fit.
+    // every scan kernel and bounds their loops, which unroll to constant
+    // indices so the arrays stay in registers; a 64-floor at d_state=16
+    // made them 4x oversized. Callers with larger states still get the
+    // exact padded fit.
     Ok(d_state.div_ceil(16) * 16)
 }
 

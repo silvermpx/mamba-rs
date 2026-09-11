@@ -58,7 +58,8 @@ extern "C" __global__ void ssm_step_forward(
     float h_local[MAMBA_RS_STATE_CAP];
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
@@ -68,7 +69,8 @@ extern "C" __global__ void ssm_step_forward(
     float delta_u_d = delta_d * u_d; // C2: hoisted
     float y_d = D[d] * u_d;
 
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         // Opt B: exp2f instead of expf
         float da = exp2f(delta_d * a_local[n] * LOG2E);
         h_local[n] = da * h_local[n] + delta_u_d * B[b * d_state + n];
@@ -76,7 +78,8 @@ extern "C" __global__ void ssm_step_forward(
     }
 
     // Opt A: write back h once
-    for (int n = 0; n < d_state; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
         h[h_base + n] = h_local[n];
 
     y[idx] = y_d;
@@ -116,7 +119,8 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float h_local[MAMBA_RS_STATE_CAP];                                     \
     float a_local[MAMBA_RS_STATE_CAP];                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                              \
-    for (int n = 0; n < d_state; n++) {                                    \
+    _Pragma("unroll")                                                      \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
     }                                                                      \
@@ -127,14 +131,16 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float u_d = to_f(u[idx]);                                              \
     float delta_u_d = delta_d * u_d;                                       \
     float y_d = D[d] * u_d;                                                \
-    for (int n = 0; n < d_state; n++) {                                    \
+    _Pragma("unroll")                                                      \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
         float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
         float B_n = to_f(xdbl[xdbl_base + b_offset + n]);                  \
         float C_n = to_f(xdbl[xdbl_base + c_offset + n]);                  \
         h_local[n] = da * h_local[n] + delta_u_d * B_n;                    \
         y_d += h_local[n] * C_n;                                           \
     }                                                                      \
-    for (int n = 0; n < d_state; n++)                                      \
+    _Pragma("unroll")                                                      \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)          \
         h[h_base + n] = h_local[n];                                        \
     /* The gate's SiLU as the split kernel spelled it, then its store. */  \
     float g = to_f(proj_gate[b * gate_stride + d_inner + d]);              \
@@ -176,13 +182,15 @@ extern "C" __global__ void ssm_burnin_forward(
     float h_local[MAMBA_RS_STATE_CAP];
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
 
     // Save initial h state at time index 0
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         int hs_idx = (b * (T + 1) + 0) * d_inner * d_state + d * d_state + n;
         h_saved[hs_idx] = h_local[n];
     }
@@ -199,7 +207,8 @@ extern "C" __global__ void ssm_burnin_forward(
         float delta_u_d = delta_d * u_d; // C2: hoisted
         float y_d = D[d] * u_d;
 
-        for (int n = 0; n < d_state; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
 
@@ -213,14 +222,16 @@ extern "C" __global__ void ssm_burnin_forward(
         y_out[bt_di] = y_d;
 
         // Save h AFTER step t = h_saved at time index t+1
-        for (int n = 0; n < d_state; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
             int hs_idx = (b * (T + 1) + (t + 1)) * d_inner * d_state + d * d_state + n;
             h_saved[hs_idx] = h_local[n];
         }
     }
 
     // Opt A: write back final h once
-    for (int n = 0; n < d_state; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
         h[h_base + n] = h_local[n];
 }
 
@@ -252,7 +263,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     float h_local[MAMBA_RS_STATE_CAP];
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
     }
@@ -266,7 +278,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
         float delta_u_d = delta_d * u_d; // C2: hoisted
         float y_d = D[d] * u_d;
 
-        for (int n = 0; n < d_state; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
             h_local[n] = da * h_local[n] + delta_u_d * B[bt_ds + n];
@@ -283,7 +296,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     }
 
     // Opt A: write back final h once
-    for (int n = 0; n < d_state; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
         h[h_base + n] = h_local[n];
 }
 
@@ -309,7 +323,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
     float h_local[MAMBA_RS_STATE_CAP];                                                     \
     float a_local[MAMBA_RS_STATE_CAP];                                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
-    for (int n = 0; n < d_state; n++) {                                    \
+    _Pragma("unroll")                                                      \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {        \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
     }                                                                      \
@@ -320,7 +335,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
         float u_d = to_f(u[bt_di]);                                        \
         float delta_u_d = delta_d * u_d;                                   \
         float y_d = D[d] * u_d;                                            \
-        for (int n = 0; n < d_state; n++) {                                \
+        _Pragma("unroll")                                                  \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {    \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                \
             h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]); \
             y_d += h_local[n] * to_f(C[bt_ds + n]);                        \
@@ -336,7 +352,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
         }                                                                  \
         y_out[bt_di] = ty;                                                 \
     }                                                                      \
-    for (int n = 0; n < d_state; n++)                                      \
+    _Pragma("unroll")                                                      \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)          \
         h[h_base + n] = h_local[n];                                        \
 }
 
@@ -363,11 +380,13 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     float h_local[MAMBA_RS_STATE_CAP];                                                      \
     float a_local[MAMBA_RS_STATE_CAP];                                                      \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                               \
-    for (int n = 0; n < d_state; n++) {                                     \
+    _Pragma("unroll")                                                       \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
         h_local[n] = h[h_base + n];                                         \
         a_local[n] = a_neg[d * d_state + n];                                \
     }                                                                       \
-    for (int n = 0; n < d_state; n++) {                                     \
+    _Pragma("unroll")                                                       \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
         int hs_idx = (b * (T_len + 1) + 0) * d_inner * d_state              \
                      + d * d_state + n;                                     \
         h_saved[hs_idx] = h_local[n];                                       \
@@ -384,19 +403,22 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
         float u_d = to_f(u[bt_di]);                                         \
         float delta_u_d = delta_d * u_d;                                    \
         float y_d = D[d] * u_d;                                             \
-        for (int n = 0; n < d_state; n++) {                                 \
+        _Pragma("unroll")                                                   \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {     \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                 \
             h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]);  \
             y_d += h_local[n] * to_f(C[bt_ds + n]);                         \
         }                                                                   \
         y_out[bt_di] = FROM_F(y_d);                                         \
-        for (int n = 0; n < d_state; n++) {                                 \
+        _Pragma("unroll")                                                   \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {     \
             int hs_idx = (b * (T_len + 1) + (t + 1)) * d_inner * d_state    \
                          + d * d_state + n;                                 \
             h_saved[hs_idx] = h_local[n];                                   \
         }                                                                   \
     }                                                                       \
-    for (int n = 0; n < d_state; n++)                                       \
+    _Pragma("unroll")                                                       \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)           \
         h[h_base + n] = h_local[n];                                         \
 }
 
@@ -446,7 +468,8 @@ extern "C" __global__ void ssm_backward_local(
     // Opt A: cache a_neg in registers
     float a_local[MAMBA_RS_STATE_CAP];
     if (d_state > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < d_state; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
         a_local[n] = a_neg[d * d_state + n];
 
     // d_h carries gradient backward through time
@@ -458,7 +481,8 @@ extern "C" __global__ void ssm_backward_local(
     // Register carry for the BPTT state: in the reverse-T walk,
     // h_curr(t) == h_prev(t+1) — carrying it halves h_saved reads.
     float h_carry[MAMBA_RS_STATE_CAP];
-    for (int n = 0; n < d_state; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         d_h[n] = 0.0f;
         d_a_acc[n] = 0.0f;
         h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state + (d * d_state + n)];
@@ -481,7 +505,8 @@ extern "C" __global__ void ssm_backward_local(
 
         float d_delta_val = 0.0f;
 
-        for (int n = 0; n < d_state; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
             // h_curr = state AFTER step t (carried register: at t=T-1 it
             // was seeded from h_saved[T]; afterwards it is last round's
             // h_prev — identical value, one global load saved).
@@ -524,7 +549,8 @@ extern "C" __global__ void ssm_backward_local(
 
     // One store per element replaces T global RMWs; full-domain write,
     // so the per-layer zeroing of d_a_log_local is gone with it.
-    for (int n = 0; n < d_state; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)
         d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];
 
     d_D_local[b * d_inner + d] = local_d_D;
@@ -577,7 +603,8 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     float d_h[MAMBA_RS_STATE_CAP];                                                              \
     float d_a_acc[MAMBA_RS_STATE_CAP];                                                          \
     float h_carry[MAMBA_RS_STATE_CAP];                                                          \
-    for (int n = 0; n < d_state; n++) {                                         \
+    _Pragma("unroll")                                                           \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {             \
         a_local[n] = a_neg[d * d_state + n];                                    \
         d_h[n] = 0.0f;                                                          \
         d_a_acc[n] = 0.0f;                                                      \
@@ -596,7 +623,8 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
         float d_u_val = dy_d * D[d];                                            \
         float d_delta_val = 0.0f;                                               \
                                                                                 \
-        for (int n = 0; n < d_state; n++) {                                     \
+        _Pragma("unroll")                                                       \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {         \
             int h_prev_idx = (b * (T + 1) + t)       * d_inner * d_state        \
                              + (d * d_state + n);                               \
             float h_curr = h_carry[n];                                          \
@@ -623,7 +651,8 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
         d_u[bt_di]     = FROM_F(d_u_val);                                       \
     }                                                                           \
                                                                                 \
-    for (int n = 0; n < d_state; n++)                                           \
+    _Pragma("unroll")                                                           \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)               \
         d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];            \
                                                                                 \
     d_D_local[b * d_inner + d] = local_d_D;                                     \

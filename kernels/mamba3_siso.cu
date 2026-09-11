@@ -94,7 +94,8 @@ extern "C" __global__ void m3_step_fwd(
     float h_local[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         h_local[n] = ssm_state[h_base + n];
 
     // O1: alpha, beta, gamma broadcast from p=0
@@ -121,7 +122,8 @@ extern "C" __global__ void m3_step_fwd(
 
     float y_val = d_skip * x_val;
 
-    for (int n = 0; n < ds; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
         // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
         float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
         if (p == 0) {
@@ -139,7 +141,8 @@ extern "C" __global__ void m3_step_fwd(
     }
 
     // Write back SSM state
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         ssm_state[h_base + n] = h_local[n];
 
     // Write output
@@ -147,7 +150,8 @@ extern "C" __global__ void m3_step_fwd(
 
     // Update k_state: only p=0 writes (k_cur is shared across all p in this head)
     if (p == 0) {
-        for (int n = 0; n < ds; n++)
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
             k_state[b * nh * ds + h * ds + n] = k_cur[b * nh * ds + h * ds + n];
     }
 
@@ -179,7 +183,8 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     float h_local[MAMBA_RS_STATE_CAP];                                                       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
-    for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) h_local[n] = ssm_state[h_base + n]; \
     float alpha_h = 0.0f;                                                    \
     if (p == 0) alpha_h = alpha[b * nh + h];                                 \
     alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                       \
@@ -195,7 +200,8 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     float x_val = to_f(x[b * d_inner + h * hd + p]);                         \
     float v_prev = v_state[b * nh * hd + h * hd + p];                        \
     float y_val = d_skip * x_val;                                            \
-    for (int n = 0; n < ds; n++) {                                           \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {               \
         float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                         \
         if (p == 0) {                                                        \
             kc_n = to_f(k_cur[b * nh * ds + h * ds + n]);                    \
@@ -209,10 +215,12 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
                      gamma_h * x_val * kc_n;                                 \
         y_val += h_local[n] * qc_n;                                          \
     }                                                                        \
-    for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];         \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) ssm_state[h_base + n] = h_local[n]; \
     y[b * d_inner + h * hd + p] = FROM_F(y_val);                             \
     if (p == 0) {                                                            \
-        for (int n = 0; n < ds; n++)                                         \
+        _Pragma("unroll")                                                    \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)             \
             k_state[b * nh * ds + h * ds + n] =                              \
                 to_f(k_cur[b * nh * ds + h * ds + n]);                       \
     }                                                                        \
@@ -270,7 +278,8 @@ extern "C" __global__ void m3_burnin_fwd(
     float h_local[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         h_local[n] = ssm_state[h_base + n];
 
     // O1: D[h] broadcast once before T loop
@@ -279,7 +288,8 @@ extern "C" __global__ void m3_burnin_fwd(
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // Save initial h at time 0 (O5 transposed layout)
-    for (int n = 0; n < ds; n++) {
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
         int hs_idx = n * d_inner + h * hd + p;
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];
     }
@@ -287,7 +297,8 @@ extern "C" __global__ void m3_burnin_fwd(
     for (int t = 0; t < T; t++) {
         // Save k_prev: only p=0 writes (k_state is per-head, shared across p)
         if (p == 0) {
-            for (int n = 0; n < ds; n++)
+            #pragma unroll
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
                 k_prev_saved[(b * T + t) * nh * ds + h * ds + n] = k_state[b * nh * ds + h * ds + n];
         }
 
@@ -314,7 +325,8 @@ extern "C" __global__ void m3_burnin_fwd(
 
         float y_val = d_skip * x_val;
 
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
             // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
             if (p == 0) {
@@ -335,14 +347,16 @@ extern "C" __global__ void m3_burnin_fwd(
         y_out[x_idx] = y_val;
 
         // Save h AFTER step t (O5 transposed layout)
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
             int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p;
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];
         }
 
         // Update k_state: p=0 writes
         if (p == 0) {
-            for (int n = 0; n < ds; n++)
+            #pragma unroll
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
                 k_state[b * nh * ds + h * ds + n] = k_flat[(b * T + t) * nh * ds + h * ds + n];
         }
 
@@ -351,7 +365,8 @@ extern "C" __global__ void m3_burnin_fwd(
     }
 
     // Write back final SSM state to persistent buffer
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         ssm_state[h_base + n] = h_local[n];
 }
 
@@ -391,17 +406,20 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     float h_local[MAMBA_RS_STATE_CAP];                                                       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
-    for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) h_local[n] = ssm_state[h_base + n]; \
     float d_skip = 0.0f;                                                     \
     if (p == 0) d_skip = D[h];                                               \
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                          \
-    for (int n = 0; n < ds; n++) {                                           \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {               \
         int hs_idx = n * d_inner + h * hd + p;                               \
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];                 \
     }                                                                        \
     for (int t = 0; t < T; t++) {                                            \
         if (p == 0) {                                                        \
-            for (int n = 0; n < ds; n++)                                     \
+            _Pragma("unroll")                                                \
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)         \
                 k_prev_saved[(b * T + t) * nh * ds + h * ds + n] =           \
                     k_state[b * nh * ds + h * ds + n];                       \
         }                                                                    \
@@ -420,7 +438,8 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
         float x_val = to_f(x_flat[x_idx]);                                   \
         float v_prev = v_state[b * nh * hd + h * hd + p];                    \
         float y_val = d_skip * x_val;                                        \
-        for (int n = 0; n < ds; n++) {                                       \
+        _Pragma("unroll")                                                    \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {           \
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                     \
             if (p == 0) {                                                    \
                 kc_n = to_f(k_flat[(b * T + t) * nh * ds + h * ds + n]);     \
@@ -435,18 +454,21 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
             y_val += h_local[n] * qc_n;                                      \
         }                                                                    \
         y_out[x_idx] = FROM_F(y_val);                                        \
-        for (int n = 0; n < ds; n++) {                                       \
+        _Pragma("unroll")                                                    \
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {           \
             int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p;        \
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];             \
         }                                                                    \
         if (p == 0) {                                                        \
-            for (int n = 0; n < ds; n++)                                     \
+            _Pragma("unroll")                                                \
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)         \
                 k_state[b * nh * ds + h * ds + n] =                          \
                     to_f(k_flat[(b * T + t) * nh * ds + h * ds + n]);        \
         }                                                                    \
         v_state[b * nh * hd + h * hd + p] = x_val;                           \
     }                                                                        \
-    for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];         \
+    _Pragma("unroll")                                                        \
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) ssm_state[h_base + n] = h_local[n]; \
 }
 
 DEFINE_M3_BURNIN_FWD(bf16, __nv_bfloat16, from_f_bf16)
@@ -489,7 +511,8 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
     float h_local[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         h_local[n] = ssm_state[h_base + n];
 
     // O1: D[h] broadcast once before T loop
@@ -518,7 +541,8 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 
         float y_val = d_skip * x_val;
 
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
             // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
             if (p == 0) {
@@ -540,7 +564,8 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 
         // Update k_state: p=0 writes
         if (p == 0) {
-            for (int n = 0; n < ds; n++)
+            #pragma unroll
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
                 k_state[b * nh * ds + h * ds + n] = k_flat[(b * T + t) * nh * ds + h * ds + n];
         }
 
@@ -549,7 +574,8 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
     }
 
     // Write back final SSM state to persistent buffer
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         ssm_state[h_base + n] = h_local[n];
 }
 
@@ -625,14 +651,16 @@ extern "C" __global__ void m3_backward_seq(
     // d_h: BPTT hidden state gradient carried backward through time
     float d_h_reg[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         d_h_reg[n] = 0.0f;
 
     // d_k_carry: gradient for k_prev accumulated at timestep (t+1).
     // Flushed to d_k[t] at the start of processing timestep t.
     // Only lane p=0 accumulates (after warp reduce over p).
     float d_k_carry[MAMBA_RS_STATE_CAP];
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds)
         d_k_carry[n] = 0.0f;
 
     // d_v_carry: gradient for v_prev accumulated at timestep (t+1).
@@ -650,12 +678,14 @@ extern "C" __global__ void m3_backward_seq(
         // from current iteration adds to same slot, merge via local accumulator
         // `d_k_write[n]` flushed once per t (see after main n-loop).
         float d_k_write[MAMBA_RS_STATE_CAP];
-        for (int n = 0; n < ds; n++) d_k_write[n] = 0.0f;
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) d_k_write[n] = 0.0f;
         // --- Flush d_k_carry from previous iteration into local d_k_write ---
         // d_k_carry holds gradient for k_prev[t+1] = k_cur[t], so write to d_k[t].
         // Skip at first iteration (t == T-1): carry is zero.
         if (t < T - 1 && p == 0) {
-            for (int n = 0; n < ds; n++) {
+            #pragma unroll
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
                 d_k_write[n] += d_k_carry[n];
                 d_k_carry[n] = 0.0f;
             }
@@ -692,7 +722,8 @@ extern "C" __global__ void m3_backward_seq(
         float d_gamma_acc = 0.0f;
         float d_v_prev_acc = 0.0f;
 
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
             // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
             if (p == 0) {
@@ -765,7 +796,8 @@ extern "C" __global__ void m3_backward_seq(
 
         // flush d_k for this timestep (single writer from lane 0).
         if (p == 0) {
-            for (int n = 0; n < ds; n++) {
+            #pragma unroll
+            for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < ds) {
                 d_k[(b * T + t) * nh * ds + h * ds + n] = d_k_write[n];
             }
         }
