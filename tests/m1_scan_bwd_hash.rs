@@ -127,6 +127,14 @@ fn m1_scan_bwd_output_hashes() {
         h.download(&ctx.stream, &mut hv).unwrap();
         ctx.stream.synchronize().unwrap();
         eprintln!("HASH fwd_h_final {:016x}", digest::fnv1a_f32(&hv));
+        let mut yv = vec![0f32; bt * di];
+        y.download_f32(&ctx.stream, &mut yv).unwrap();
+        ctx.stream.synchronize().unwrap();
+        eprintln!("HASH fwd_y {:016x}", digest::fnv1a_f32(&yv));
+        let mut tv = vec![0f32; scan_tape_len(b, t, di, ds)];
+        tape.download(&ctx.stream, &mut tv).unwrap();
+        ctx.stream.synchronize().unwrap();
+        eprintln!("HASH fwd_tape {:016x}", digest::fnv1a_f32(&tv));
     }
 
     let d_y = upload_typed(&det(bt * di, 17, 0.1));
@@ -288,6 +296,86 @@ fn m1_scan_bwd_output_hashes() {
         &[
             ("reduce_d_B", &d_b_red, bt * ds),
             ("reduce_d_C", &d_c_red, bt * ds),
+        ],
+    );
+}
+
+/// The f32 training forward (the saving parallel scan) has no other
+/// recorded digest: the graph parity test compares it with itself and the
+/// trainer parity tests use tolerances. Hash its output, final state and
+/// slim tape once per build.
+#[test]
+#[ignore = "bit-gate recorder"]
+fn m1_scan_fwd_f32_output_hashes() {
+    let (b, t, di, ds) = (8usize, 1300usize, 768usize, 16usize);
+    let device = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
+    let k = &ctx.kernels;
+    let bt = b * t;
+    let upload_f32 = |data: &[f32]| -> GpuBuffer {
+        let mut buf = GpuBuffer::zeros(&ctx.stream, data.len()).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf.upload(&ctx.stream, data).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf
+    };
+    let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+    let y = GpuBuffer::zeros(&ctx.stream, bt * di).unwrap();
+    let delta = upload_f32(&det(bt * di, 11, 0.05));
+    let delta_saved = GpuBuffer::zeros(&ctx.stream, bt * di).unwrap();
+    let u = upload_f32(&det(bt * di, 12, 0.5));
+    let bb = upload_f32(&det(bt * ds, 13, 0.3));
+    let cc = upload_f32(&det(bt * ds, 14, 0.3));
+    let a_neg = upload_f32(
+        &det(di * ds, 15, 0.2)
+            .iter()
+            .map(|x| -x.abs())
+            .collect::<Vec<_>>(),
+    );
+    let dpar = upload_f32(&det(di, 16, 0.1));
+    let tape = GpuBuffer::zeros(&ctx.stream, scan_tape_len(b, t, di, ds)).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let (bi, ti, dii, dsi) = (b as i32, t as i32, di as i32, ds as i32);
+    // Slim tape: the launcher hands the kernel the tape as both the saved
+    // states and the tape, so the recorder does the same.
+    let slim = 1i32;
+    let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd);
+    let hp = h.cached_ptr();
+    let yp = y.cached_ptr();
+    let hs = tape.cached_ptr();
+    let dp = delta.cached_ptr();
+    let dsv = delta_saved.cached_ptr();
+    let up = u.cached_ptr();
+    let bp = bb.cached_ptr();
+    let cp = cc.cached_ptr();
+    let ap = a_neg.cached_ptr();
+    let ddp = dpar.cached_ptr();
+    let tape_ptr = tape.cached_ptr();
+    bld.arg(&hp);
+    bld.arg(&yp);
+    bld.arg(&hs);
+    bld.arg(&dp);
+    bld.arg(&dsv);
+    bld.arg(&up);
+    bld.arg(&bp);
+    bld.arg(&cp);
+    bld.arg(&ap);
+    bld.arg(&ddp);
+    bld.arg(&bi);
+    bld.arg(&ti);
+    bld.arg(&dii);
+    bld.arg(&dsi);
+    bld.arg(&tape_ptr);
+    bld.arg(&slim);
+    unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+    hash_outputs::hash_outputs(
+        &ctx,
+        &[
+            ("f32_fwd_y", &y, bt * di),
+            ("f32_fwd_h_final", &h, b * di * ds),
+            ("f32_fwd_delta_saved", &delta_saved, bt * di),
+            ("f32_fwd_tape", &tape, scan_tape_len(b, t, di, ds)),
         ],
     );
 }

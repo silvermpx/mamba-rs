@@ -211,8 +211,18 @@ name = "ddp_reduction_tree"
 path = "tests/ddp_reduction_tree.rs"
 
 [[test]]
+name = "conv_tiled_hash"
+path = "tests/conv_tiled_hash.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "decode_digest"
 path = "tests/decode_digest.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_decode_digest"
+path = "tests/m3_decode_digest.rs"
 required-features = ["cuda"]
 
 [[test]]

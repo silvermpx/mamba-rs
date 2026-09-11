@@ -15,6 +15,8 @@
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/digest.rs"]
+mod digest;
 
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::cpu::target::{MambaTargetSeqScratch, forward_mamba_target_sequence};
@@ -179,6 +181,10 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
     out_gpu
         .download(&ctx.stream, &mut gpu_out)
         .expect("download");
+    eprintln!(
+        "HASH target:m1:{scan_mode:?}:T{seq_len} {:016x}",
+        digest::fnv1a_f32(&gpu_out)
+    );
 
     assert!(
         gpu_out.iter().any(|v| v.abs() > 1e-3),
@@ -302,6 +308,10 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
         .expect("target forward");
     ctx.stream.synchronize().expect("sync");
     let got = out.to_cpu(&ctx.stream).expect("download");
+    eprintln!(
+        "HASH target:m3:parallel={parallel}:T{seq_len} {:016x}",
+        digest::fnv1a_f32(&got)
+    );
 
     assert!(
         got.iter().any(|v| v.abs() > 1e-3),
