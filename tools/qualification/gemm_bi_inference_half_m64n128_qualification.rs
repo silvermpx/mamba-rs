@@ -356,7 +356,7 @@ impl RunMetadata {
         let identity = device.identity();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let qualification_source_sha256 = verify_compiled_source(
-            &manifest.join("tests/gemm_bi_inference_half_m64n128_qualification.rs"),
+            &manifest.join("tools/qualification/gemm_bi_inference_half_m64n128_qualification.rs"),
             QUALIFICATION_SOURCE,
         )?;
         let rust_dispatch_source_sha256 = verify_compiled_source(
@@ -2179,7 +2179,8 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         for (path, compiled) in [
             (
-                manifest.join("tests/gemm_bi_inference_half_m64n128_qualification.rs"),
+                manifest
+                    .join("tools/qualification/gemm_bi_inference_half_m64n128_qualification.rs"),
                 QUALIFICATION_SOURCE,
             ),
             (
