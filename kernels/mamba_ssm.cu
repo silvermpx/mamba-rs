@@ -29,6 +29,23 @@
 
 #include "_typed_prelude.cuh"
 
+// The state update is one expression, da * h + delta_u * B, and the
+// compiler decides which of the two products to fuse into the FMA; the
+// choice changes the last bit of every state from the second step on,
+// and it changed once between two spellings of the same kernel. Both
+// forms are written out here with the rounding intrinsics, and every
+// sequential kernel names the one its 0.6.9 build used: the decay product
+// fused on the f32 lanes and in every burn-in, the input product fused on
+// the typed decode steps. The output accumulates as one FMA per state.
+__device__ __forceinline__ float ssm_update_decay_fused(float da, float h,
+                                                        float du, float B) {
+    return __fmaf_rn(da, h, __fmul_rn(du, B));
+}
+__device__ __forceinline__ float ssm_update_input_fused(float da, float h,
+                                                        float du, float B) {
+    return __fmaf_rn(du, B, __fmul_rn(da, h));
+}
+
 // ======================== FORWARD ========================
 
 // SSM step forward (T=1): one step per (batch, d_inner) thread.
@@ -73,8 +90,9 @@ extern "C" __global__ void ssm_step_forward(
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
         // Opt B: exp2f instead of expf
         float da = exp2f(delta_d * a_local[n] * LOG2E);
-        h_local[n] = da * h_local[n] + delta_u_d * B[b * d_state + n];
-        y_d += h_local[n] * C[b * d_state + n];
+        h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,
+                                            B[b * d_state + n]);
+        y_d = __fmaf_rn(h_local[n], C[b * d_state + n], y_d);
     }
 
     // Opt A: write back h once
@@ -95,7 +113,7 @@ extern "C" __global__ void ssm_step_forward(
 //
 // proj_gate points at the in_proj output [batch, gate_stride]; the gate of
 // channel d sits at column d_inner + d.
-#define DEFINE_SSM_STEP_FWD_FUSED(SUFFIX, T, FROM_F)                       \
+#define DEFINE_SSM_STEP_FWD_FUSED(SUFFIX, T, FROM_F, UPDATE)               \
 extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     float* h,                                                              \
     T* y,                                                                  \
@@ -136,8 +154,8 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
         float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
         float B_n = to_f(xdbl[xdbl_base + b_offset + n]);                  \
         float C_n = to_f(xdbl[xdbl_base + c_offset + n]);                  \
-        h_local[n] = da * h_local[n] + delta_u_d * B_n;                    \
-        y_d += h_local[n] * C_n;                                           \
+        h_local[n] = UPDATE(da, h_local[n], delta_u_d, B_n);               \
+        y_d = __fmaf_rn(h_local[n], C_n, y_d);                             \
     }                                                                      \
     _Pragma("unroll")                                                      \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state)          \
@@ -148,9 +166,9 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     y[idx] = FROM_F(y_d * gp);                                             \
 }
 
-DEFINE_SSM_STEP_FWD_FUSED(f32,  float,         from_f_f32)
-DEFINE_SSM_STEP_FWD_FUSED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_STEP_FWD_FUSED(f16,  __half,        from_f_f16)
+DEFINE_SSM_STEP_FWD_FUSED(f32,  float,         from_f_f32,  ssm_update_decay_fused)
+DEFINE_SSM_STEP_FWD_FUSED(bf16, __nv_bfloat16, from_f_bf16, ssm_update_input_fused)
+DEFINE_SSM_STEP_FWD_FUSED(f16,  __half,        from_f_f16,  ssm_update_input_fused)
 
 // SSM burn-in forward (T>1): iterate T steps for each (batch, d_inner) thread.
 // Saves h_saved[B*(T+1)*d_inner*d_state] for backward BPTT and
@@ -215,8 +233,9 @@ extern "C" __global__ void ssm_burnin_forward(
             // No da saved: backward recomputes da from delta and a_neg
             // (cheaper than a global-memory round-trip at d_state=16).
 
-            h_local[n] = da * h_local[n] + delta_u_d * B[bt_ds + n];
-            y_d += h_local[n] * C[bt_ds + n];
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,
+                                                B[bt_ds + n]);
+            y_d = __fmaf_rn(h_local[n], C[bt_ds + n], y_d);
         }
 
         y_out[bt_di] = y_d;
@@ -282,8 +301,9 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
-            h_local[n] = da * h_local[n] + delta_u_d * B[bt_ds + n];
-            y_d += h_local[n] * C[bt_ds + n];
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,
+                                                B[bt_ds + n]);
+            y_d = __fmaf_rn(h_local[n], C[bt_ds + n], y_d);
         }
 
         if (gate_stride > 0) {
@@ -338,8 +358,9 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
         _Pragma("unroll")                                                  \
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {    \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                \
-            h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]); \
-            y_d += h_local[n] * to_f(C[bt_ds + n]);                        \
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d, \
+                                                to_f(B[bt_ds + n]));       \
+            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);          \
         }                                                                  \
         TY ty = FROM_F(y_d);                                               \
         if (gate_stride > 0) {                                             \
@@ -406,8 +427,9 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
         _Pragma("unroll")                                                   \
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n < d_state) {     \
             float da = exp2f(delta_d * a_local[n] * LOG2E);                 \
-            h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]);  \
-            y_d += h_local[n] * to_f(C[bt_ds + n]);                         \
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,  \
+                                                to_f(B[bt_ds + n]));        \
+            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);           \
         }                                                                   \
         y_out[bt_di] = FROM_F(y_d);                                         \
         _Pragma("unroll")                                                   \
