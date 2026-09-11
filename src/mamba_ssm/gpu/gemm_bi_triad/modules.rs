@@ -2076,16 +2076,21 @@ fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             }
             Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3 => {
                 require_ptx_entry_tokens(
-                    "TriadSm89Tf32Joint NT A-ldmatrix GEMM",
+                    "TriadSm89Tf32Joint NT ldmatrix GEMM",
                     entry,
                     &[
-                        "cp.async.cg.shared.global",
-                        "cp.async.ca.shared.global",
+                        "cp.async.cg.shared.global.L2::128B",
                         "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
-                        "cvt.rna.tf32.f32",
+                        "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
                         "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
                     ],
                 )?;
+                if ptx_has_unquoted_token(&entry.body, |token| token == "cvt.rna.tf32.f32") {
+                    return Err(format!(
+                        "{} add-half NT route unexpectedly uses pre-RNA conversion",
+                        spec.symbol
+                    ));
+                }
             }
             Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3
             | Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3 => {
@@ -11695,7 +11700,7 @@ mod tests {
                 "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
             }
             Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3 => {
-                "cp.async.cg.shared.global [%r0], [%rd0], 16;\ncp.async.ca.shared.global [%r0], [%rd0], 4;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\nldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r0,%r1}, [%r4];\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
             }
             Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3
             | Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3 => {

@@ -659,7 +659,7 @@ fn seven_typed_specs_bind_symbols_abi_and_retained_resources() {
             (256, 1, 1),
             86_016,
             0,
-            110,
+            128,
             Some(1),
             5,
             64,
@@ -706,11 +706,10 @@ fn nt_a_ldmatrix_n96_is_a_sealed_joint_export_with_the_direct_nt_layout() {
     );
     let body = extract_section(joint::SOURCE, NT_A_LDMATRIX_N96_SECTION);
     assert!(body.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));
-    assert!(
-        body.contains("valid == 0 ? 0 : (long long)global_column * params.ldb + global_reduction")
-    );
-    assert!(body.contains("const int k_offsets[4] = {0, 8, 16, 24}"));
-    assert!(body.contains("nt_n96_rna(__uint_as_float(raw0))"));
+    assert!(body.contains("ldmatrix.sync.aligned.m8n8.x2.shared.b16"));
+    assert!(body.contains("plan.b_row_valid[issue] ? bytes : 0"));
+    assert!(body.contains("fragments.b[2][1] = nt_n96_add_half(raw1)"));
+    assert!(!body.contains("cvt.rna.tf32.f32 %0, %1;\" : \"=r\"(result) : \"f\"(value));\n    return result;\n}\n\n// BEGIN MEASURED"));
     assert_eq!(
         joint::kernel_spec(joint::NT_A_LDMATRIX_N96_SYMBOL)
             .expect("NT A-ldmatrix joint spec")

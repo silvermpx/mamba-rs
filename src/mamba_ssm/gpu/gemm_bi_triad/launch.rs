@@ -3808,7 +3808,7 @@ fn tf32_resolved_route(
         ),
         Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => (
             PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1,
-            ResolvedNumericContract::MmaTf32RnaV1,
+            ResolvedNumericContract::MmaTf32AddHalfUlpV1,
         ),
         Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
             PhysicalGemmBackend::MmaTf32RnaSplitK2V1,

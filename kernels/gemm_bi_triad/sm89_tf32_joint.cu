@@ -1995,46 +1995,187 @@ struct __align__(16) NtN96S3Storage {
 
 static_assert(sizeof(NtN96S3Storage) == 86016, "NT N96 S3 storage");
 
-__device__ __forceinline__ float& nt_n96_a_slot(
-    NtN96S3Storage* storage, int stage, int row, int reduction) {
-    return storage->a[stage][row][reduction ^ ((row & 7) << 2)];
+// A stage plane keeps 32 reduction floats per row; the 16-byte chunk index
+// is folded with the row so that eight consecutive rows never share a bank
+// group, for the copies and for ldmatrix alike.
+__device__ __forceinline__ int nt_n96_slot(int row, int reduction) {
+    return row * 32 + (reduction ^ ((row & 7) << 2));
 }
 
-__device__ __forceinline__ float& nt_n96_b_slot(
-    NtN96S3Storage* storage, int stage, int column, int reduction) {
-    return storage->b[stage][column][reduction ^ ((column & 7) << 2)];
+// The tensor core reads the upper 19 bits of a tf32 operand. Adding half an
+// ulp of the kept mantissa before that truncation rounds every finite value
+// to the nearest, the result cvt.rna gives, in one instruction.
+__device__ __forceinline__ unsigned nt_n96_add_half(unsigned bits) {
+    return bits + 0x1000U;
+}
+
+__device__ __forceinline__ void nt_n96_copy_cg(
+    unsigned shared_dst, const void* global_src, int valid_bytes) {
+    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;\n"
+                 :: "r"(shared_dst), "l"(global_src), "r"(valid_bytes));
+}
+
+// Both operands are reduction-contiguous, so every thread owns one 16-byte
+// chunk of four A rows and three B rows for the whole kernel; the sources
+// advance by one slab per K-tile and the destinations by one stage plane.
+struct NtN96CopyPlan {
+    const float* a_source[4];
+    const float* b_source[3];
+    unsigned a_destination[4];
+    unsigned b_destination[3];
+    bool a_row_valid[4];
+    bool b_row_valid[3];
+    int reduction_offset;
+};
+
+__device__ __forceinline__ void nt_n96_copy_plan(
+    NtN96S3Storage* storage, const float* a, const float* b,
+    const GbfTf32NtN96Params& params, int tile_row, int tile_column,
+    NtN96CopyPlan& plan) {
+    plan.reduction_offset = ((int)threadIdx.x & 7) * 4;
+#pragma unroll
+    for (int slice = 0; slice < 4; ++slice) {
+        int row = ((int)threadIdx.x + slice * 256) >> 3;
+        int global_row = tile_row + row;
+        plan.a_row_valid[slice] = global_row < params.m;
+        plan.a_source[slice] =
+            a + (long long)(plan.a_row_valid[slice] ? global_row : 0) * params.lda
+            + plan.reduction_offset;
+        plan.a_destination[slice] = (unsigned)__cvta_generic_to_shared(
+            &storage->a[0][0][0] + nt_n96_slot(row, plan.reduction_offset));
+    }
+#pragma unroll
+    for (int slice = 0; slice < 3; ++slice) {
+        int column = ((int)threadIdx.x + slice * 256) >> 3;
+        int global_column = tile_column + column;
+        plan.b_row_valid[slice] = global_column < params.k;
+        plan.b_source[slice] =
+            b + (long long)(plan.b_row_valid[slice] ? global_column : 0) * params.ldb
+            + plan.reduction_offset;
+        plan.b_destination[slice] = (unsigned)__cvta_generic_to_shared(
+            &storage->b[0][0][0] + nt_n96_slot(column, plan.reduction_offset));
+    }
+}
+
+__device__ __forceinline__ void nt_n96_stage_slice(
+    const NtN96CopyPlan& plan, unsigned a_stage_bytes, unsigned b_stage_bytes,
+    int reduction_base, int reduction, int issue) {
+    int remaining = reduction - reduction_base - plan.reduction_offset;
+    remaining = remaining < 0 ? 0 : (remaining > 4 ? 4 : remaining);
+    int bytes = remaining * 4;
+    nt_n96_copy_cg(
+        plan.a_destination[issue] + a_stage_bytes, plan.a_source[issue],
+        plan.a_row_valid[issue] ? bytes : 0);
+    if (issue < 3) {
+        nt_n96_copy_cg(
+            plan.b_destination[issue] + b_stage_bytes, plan.b_source[issue],
+            plan.b_row_valid[issue] ? bytes : 0);
+    }
+}
+
+__device__ __forceinline__ void nt_n96_advance_plan(NtN96CopyPlan& plan) {
+#pragma unroll
+    for (int slice = 0; slice < 4; ++slice) plan.a_source[slice] += 32;
+#pragma unroll
+    for (int slice = 0; slice < 3; ++slice) plan.b_source[slice] += 32;
 }
 
 __device__ __forceinline__ void nt_n96_stage_async(
-    NtN96S3Storage* storage, int stage, const float* a, const float* b,
-    GbfTf32NtN96Params params, int tile_row, int tile_column, int reduction_base) {
-    for (int linear = (int)threadIdx.x; linear < 128 * 8; linear += 256) {
-        int row = linear >> 3;
-        int reduction = (linear & 7) * 4;
-        int global_row = tile_row + row;
-        int global_reduction = reduction_base + reduction;
-        int valid = global_row < params.m ? params.n - global_reduction : 0;
-        valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
-        unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &nt_n96_a_slot(storage, stage, row, reduction));
-        const float* source = nt_n96_cp_async_source(
-            a, valid == 0 ? 0 : (long long)global_row * params.lda + global_reduction, valid * 4);
-        nt_n96_cp_async_zfill<false, 128>(destination, source, valid * 4);
-    }
-    for (int linear = (int)threadIdx.x; linear < 96 * 8; linear += 256) {
-        int column = linear >> 3;
-        int reduction = (linear & 7) * 4;
-        int global_column = tile_column + column;
-        int global_reduction = reduction_base + reduction;
-        int valid = global_column < params.k ? params.n - global_reduction : 0;
-        valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
-        unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &nt_n96_b_slot(storage, stage, column, reduction));
-        const float* source = nt_n96_cp_async_source(
-            b, valid == 0 ? 0 : (long long)global_column * params.ldb + global_reduction, valid * 4);
-        nt_n96_cp_async_zfill<false, 128>(destination, source, valid * 4);
+    const NtN96CopyPlan& plan, unsigned a_stage_bytes, unsigned b_stage_bytes,
+    int reduction_base, int reduction) {
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        nt_n96_stage_slice(
+            plan, a_stage_bytes, b_stage_bytes, reduction_base, reduction, issue);
     }
     asm volatile("cp.async.commit_group;\n" ::);
+}
+
+struct NtN96Fragments {
+    unsigned a[4][4];
+    unsigned b[3][2];
+};
+
+// This lane's ldmatrix row addresses in stage 0, per k8 step: the four A
+// atoms of sixteen rows, the first two B atoms as one x4 and the third as
+// an x2. The stage plane offset is added at load time.
+struct NtN96FragmentAddresses {
+    unsigned a[4][4];
+    unsigned b01[4];
+    unsigned b2[4];
+};
+
+__device__ __forceinline__ void nt_n96_fragment_addresses(
+    NtN96S3Storage* storage, int warp_m, int warp_n, int lane,
+    NtN96FragmentAddresses& addresses) {
+    unsigned a_base = (unsigned)__cvta_generic_to_shared(&storage->a[0][0][0]);
+    unsigned b_base = (unsigned)__cvta_generic_to_shared(&storage->b[0][0][0]);
+    int a_row = warp_m + (lane & 15);
+    int a_reduction = (lane >> 4) << 2;
+    int b_reduction = ((lane >> 3) & 1) << 2;
+    int b01_column = warp_n + (((lane >> 4) & 1) << 3) + (lane & 7);
+    int b2_column = warp_n + 16 + (lane & 7);
+#pragma unroll
+    for (int step = 0; step < 4; ++step) {
+#pragma unroll
+        for (int m_atom = 0; m_atom < 4; ++m_atom) {
+            addresses.a[m_atom][step] = a_base
+                + (unsigned)nt_n96_slot(a_row + m_atom * 16, step * 8 + a_reduction) * 4U;
+        }
+        addresses.b01[step] =
+            b_base + (unsigned)nt_n96_slot(b01_column, step * 8 + b_reduction) * 4U;
+        addresses.b2[step] =
+            b_base + (unsigned)nt_n96_slot(b2_column, step * 8 + b_reduction) * 4U;
+    }
+}
+
+__device__ __forceinline__ void nt_n96_load_fragments(
+    const NtN96FragmentAddresses& addresses, unsigned a_stage_bytes,
+    unsigned b_stage_bytes, int step, NtN96Fragments& fragments) {
+#pragma unroll
+    for (int m_atom = 0; m_atom < 4; ++m_atom) {
+        unsigned raw0, raw1, raw2, raw3;
+        asm volatile(
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+            : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
+            : "r"(addresses.a[m_atom][step] + a_stage_bytes));
+        fragments.a[m_atom][0] = nt_n96_add_half(raw0);
+        fragments.a[m_atom][1] = nt_n96_add_half(raw1);
+        fragments.a[m_atom][2] = nt_n96_add_half(raw2);
+        fragments.a[m_atom][3] = nt_n96_add_half(raw3);
+    }
+    {
+        unsigned raw0, raw1, raw2, raw3;
+        asm volatile(
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+            : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
+            : "r"(addresses.b01[step] + b_stage_bytes));
+        fragments.b[0][0] = nt_n96_add_half(raw0);
+        fragments.b[0][1] = nt_n96_add_half(raw1);
+        fragments.b[1][0] = nt_n96_add_half(raw2);
+        fragments.b[1][1] = nt_n96_add_half(raw3);
+    }
+    {
+        unsigned raw0, raw1;
+        asm volatile(
+            "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+            : "=r"(raw0), "=r"(raw1)
+            : "r"(addresses.b2[step] + b_stage_bytes));
+        fragments.b[2][0] = nt_n96_add_half(raw0);
+        fragments.b[2][1] = nt_n96_add_half(raw1);
+    }
+}
+
+__device__ __forceinline__ void nt_n96_mma(
+    const NtN96Fragments& fragments, float (&acc)[4][3][4]) {
+#pragma unroll
+    for (int m_atom = 0; m_atom < 4; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < 3; ++n_atom) {
+            gbf_tf32_mma_m16n8k8(
+                acc[m_atom][n_atom], fragments.a[m_atom], fragments.b[n_atom]);
+        }
+    }
 }
 
 __device__ __forceinline__ void nt_n96_zero(
@@ -2066,68 +2207,92 @@ __device__ __forceinline__ void nt_n96_s3_kernel(
     int warp_n = (warp & 3) * 24;
     int group = lane >> 2;
     int thread = lane & 3;
-    float accumulators[4][3][4] = {};
+    float acc[4][3][4] = {};
+    NtN96FragmentAddresses addresses;
+    nt_n96_fragment_addresses(storage, warp_m, warp_n, lane, addresses);
+    NtN96CopyPlan plan;
+    nt_n96_copy_plan(storage, a, b, params, tile_row, tile_column, plan);
     unsigned tile_count = (static_cast<unsigned>(params.n) + 31U) / 32U;
 #pragma unroll
     for (unsigned tile = 0; tile < 2; ++tile) {
         if (tile < tile_count) {
-            nt_n96_stage_async(storage, (int)tile, a, b, params, tile_row, tile_column,
-                (int)(tile * 32U));
+            nt_n96_stage_async(
+                plan, tile * 128U * 32U * 4U, tile * 96U * 32U * 4U,
+                (int)(tile * 32U), params.n);
+            nt_n96_advance_plan(plan);
         } else {
             asm volatile("cp.async.commit_group;\n" ::);
         }
     }
+    int read_stage = 0;
     for (unsigned tile = 0; tile < tile_count; ++tile) {
         asm volatile("cp.async.wait_group 1;\n" ::);
         __syncthreads();
         unsigned next = tile + 2;
-        if (next < tile_count) {
-            nt_n96_stage_async(storage, (int)(next % 3U), a, b, params, tile_row, tile_column,
-                (int)(next * 32U));
-        } else {
-            asm volatile("cp.async.commit_group;\n" ::);
-        }
-        int stage = (int)(tile % 3U);
-        const int k_offsets[4] = {0, 8, 16, 24};
+        bool has_next = next < tile_count;
+        int write_stage = read_stage == 0 ? 2 : read_stage - 1;
+        unsigned write_a_bytes = (unsigned)write_stage * 128U * 32U * 4U;
+        unsigned write_b_bytes = (unsigned)write_stage * 96U * 32U * 4U;
+        unsigned read_a_bytes = (unsigned)read_stage * 128U * 32U * 4U;
+        unsigned read_b_bytes = (unsigned)read_stage * 96U * 32U * 4U;
+        NtN96Fragments fragments[2];
+        nt_n96_load_fragments(addresses, read_a_bytes, read_b_bytes, 0, fragments[0]);
 #pragma unroll
         for (int issue = 0; issue < 4; ++issue) {
-            int k8 = k_offsets[issue];
-            unsigned a_fragments[4][4];
-            unsigned b_fragments[3][2];
-            #pragma unroll
-        for (int m_atom = 0; m_atom < 4; ++m_atom) {
-            int row = warp_m + m_atom * 16 + (lane & 15);
-            int reduction = k8 + ((lane >> 4) << 2);
-            unsigned address = (unsigned)__cvta_generic_to_shared(
-                &nt_n96_a_slot(storage, stage, row, reduction));
-            unsigned raw0, raw1, raw2, raw3;
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
-                : "r"(address));
-            a_fragments[m_atom][0] = nt_n96_rna(__uint_as_float(raw0));
-            a_fragments[m_atom][1] = nt_n96_rna(__uint_as_float(raw1));
-            a_fragments[m_atom][2] = nt_n96_rna(__uint_as_float(raw2));
-            a_fragments[m_atom][3] = nt_n96_rna(__uint_as_float(raw3));
+            if (has_next) {
+                nt_n96_stage_slice(
+                    plan, write_a_bytes, write_b_bytes, (int)(next * 32U), params.n, issue);
+            }
+            if (issue < 3) {
+                nt_n96_load_fragments(
+                    addresses, read_a_bytes, read_b_bytes, issue + 1,
+                    fragments[(issue + 1) & 1]);
+            }
+            nt_n96_mma(fragments[issue & 1], acc);
         }
+        asm volatile("cp.async.commit_group;\n" ::);
+        if (has_next) nt_n96_advance_plan(plan);
+        if (++read_stage == 3) read_stage = 0;
+    }
+    __syncthreads();
+    float* tile_output = reinterpret_cast<float*>(shared_bytes);
+    bool vector_rows = tile_column + 96 <= params.k && (params.ldc & 3) == 0
+        && (reinterpret_cast<unsigned long long>(output) & 15ull) == 0ull;
+    if (vector_rows) {
+#pragma unroll
+        for (int m_atom = 0; m_atom < 4; ++m_atom) {
 #pragma unroll
             for (int n_atom = 0; n_atom < 3; ++n_atom) {
-                int column = warp_n + n_atom * 8 + group;
-                b_fragments[n_atom][0] = nt_n96_rna(
-                    nt_n96_b_slot(storage, stage, column, k8 + thread));
-                b_fragments[n_atom][1] = nt_n96_rna(
-                    nt_n96_b_slot(storage, stage, column, k8 + thread + 4));
-            }
 #pragma unroll
-            for (int m_atom = 0; m_atom < 4; ++m_atom) {
-#pragma unroll
-                for (int n_atom = 0; n_atom < 3; ++n_atom) {
-                    gbf_tf32_mma_m16n8k8(
-                        accumulators[m_atom][n_atom], a_fragments[m_atom], b_fragments[n_atom]);
+                for (int half = 0; half < 2; ++half) {
+                    int row = warp_m + m_atom * 16 + group + half * 8;
+                    int column = warp_n + n_atom * 8 + 2 * thread;
+                    *reinterpret_cast<float2*>(tile_output + row * 104 + column) =
+                        make_float2(
+                            acc[m_atom][n_atom][2 * half],
+                            acc[m_atom][n_atom][2 * half + 1]);
                 }
             }
         }
         __syncthreads();
+#pragma unroll 4
+        for (int linear = (int)threadIdx.x; linear < 128 * 24; linear += 256) {
+            int row = linear / 24;
+            int chunk = (linear % 24) * 4;
+            int global_row = tile_row + row;
+            if (global_row >= params.m) continue;
+            float4 value = *reinterpret_cast<const float4*>(
+                tile_output + row * 104 + chunk);
+            if (params.alpha != 1.0f) {
+                value.x = __fmul_rn(params.alpha, value.x);
+                value.y = __fmul_rn(params.alpha, value.y);
+                value.z = __fmul_rn(params.alpha, value.z);
+                value.w = __fmul_rn(params.alpha, value.w);
+            }
+            *reinterpret_cast<float4*>(
+                output + (long long)global_row * params.ldc + tile_column + chunk) = value;
+        }
+        return;
     }
 #pragma unroll
     for (int m_atom = 0; m_atom < 4; ++m_atom) {
@@ -2139,8 +2304,8 @@ __device__ __forceinline__ void nt_n96_s3_kernel(
                 int column = tile_column + warp_n + n_atom * 8 + 2 * thread + (element & 1);
                 if (row < params.m && column < params.k) {
                     float value = params.alpha == 1.0f
-                        ? accumulators[m_atom][n_atom][element]
-                        : __fmul_rn(params.alpha, accumulators[m_atom][n_atom][element]);
+                        ? acc[m_atom][n_atom][element]
+                        : __fmul_rn(params.alpha, acc[m_atom][n_atom][element]);
                     output[(long long)row * params.ldc + column] = value;
                 }
             }

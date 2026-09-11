@@ -2778,7 +2778,7 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
         instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
         tile: (128, 96),
         bk: 32,
         map_bk: 32,

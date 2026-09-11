@@ -4,7 +4,7 @@ pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_tf
 pub const PRIMITIVES: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89_tf32_joint_primitives.cuh");
 
-pub const SOURCE_SHA256: &str = "c0f147ce21f56ba2d4a1d8a1b8b5e73708bed292a36e929c46abc2d84356e7da";
+pub const SOURCE_SHA256: &str = "ecb068cd5a5e2cefe342d95b88b520f566981bc1fa1d88457659313d8db0042e";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
 
@@ -149,7 +149,8 @@ const fn gemm_spec(
 // Register caps cover the largest spill-free allocation observed across the
 // supported CUDA 12.8, 13.0, and 13.2 JITs. CUDA 13.2 allocates 124/124/127
 // registers for the original N96 kernels; CUDA 12.8 and 13.0 allocate
-// 131/131/135. The NT A-ldmatrix route allocates 108/108/110 respectively.
+// 131/131/135. The NT route with both operands through ldmatrix and the
+// half-ulp add allocates 113 on CUDA 13.2.
 // Occupancy remains sealed independently below.
 pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
     gemm_spec(
@@ -170,7 +171,7 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
         NT_A_LDMATRIX_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3,
         86_016,
-        110,
+        128,
         1,
     ),
     gemm_spec(

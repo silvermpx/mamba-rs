@@ -191,6 +191,184 @@ mod live {
         },
     ];
 
+    /// Screens, not admissions: routes that already exist, tried on cells
+    /// the tables never measured them on (the deep 4096-row products, the
+    /// d128 weight gradients) and one retile of an admitted cell. Every
+    /// ratio is recorded whether or not the candidate wins.
+    const RETILE_AND_DEEP_CASES: [Case; 11] = [
+        Case {
+            name: "tn_d768_in_m64n96",
+            op: ResolvedGemmOp::Tn,
+            dims: (2_048, 768, 3_072),
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
+            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+            prior_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
+        },
+        Case {
+            name: "tn_large_deep_n96",
+            op: ResolvedGemmOp::Tn,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M64N64,
+                stages: Tf32PortableStages::S2,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+        },
+        Case {
+            name: "tn_large_deep_m64n96",
+            op: ResolvedGemmOp::Tn,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M64N64,
+                stages: Tf32PortableStages::S2,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+        },
+        Case {
+            name: "tn_large_deep_m64n64",
+            op: ResolvedGemmOp::Tn,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M64N64,
+                stages: Tf32PortableStages::S2,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+        },
+        Case {
+            name: "nn_large_deep_n96",
+            op: ResolvedGemmOp::Nn,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89NnN96V1,
+            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M128N128,
+                stages: Tf32PortableStages::S3,
+            }),
+            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+        },
+        Case {
+            name: "nn_large_deep_direct_n96",
+            op: ResolvedGemmOp::Nn,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89NnDirectN96V1,
+            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M128N128,
+                stages: Tf32PortableStages::S3,
+            }),
+            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+        },
+        Case {
+            name: "nt_large_deep_a_ldmatrix",
+            op: ResolvedGemmOp::Nt,
+            dims: (4_096, 3_072, 1_536),
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        },
+        Case {
+            name: "tn_d128_in_splitk8_s3",
+            op: ResolvedGemmOp::Tn,
+            dims: (1_024, 128, 512),
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M32N32,
+                stages: Tf32PortableStages::S3,
+            }),
+            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        },
+        Case {
+            name: "tn_d128_in_splitk8_s4",
+            op: ResolvedGemmOp::Tn,
+            dims: (1_024, 128, 512),
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M32N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        },
+        Case {
+            name: "tn_d128_out_splitk8_s3",
+            op: ResolvedGemmOp::Tn,
+            dims: (1_024, 256, 128),
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M32N32,
+                stages: Tf32PortableStages::S3,
+            }),
+            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        },
+        Case {
+            name: "tn_d128_out_splitk8_s4",
+            op: ResolvedGemmOp::Tn,
+            dims: (1_024, 256, 128),
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M32N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            }),
+            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        },
+    ];
+
+    /// The rebuilt NT body against the compact8 finalist on the cells the
+    /// finalist serves on the lower toolkits (on CUDA 13.2 the d768 in_proj
+    /// row is the production-body comparison above).
+    const NT_BODY_CASES: [Case; 3] = [
+        Case {
+            name: "nt_d768_in_ldmatrix",
+            op: ResolvedGemmOp::Nt,
+            dims: (2_048, 768, 3_072),
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        },
+        Case {
+            name: "nt_d768_out_ldmatrix",
+            op: ResolvedGemmOp::Nt,
+            dims: (2_048, 1_536, 768),
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        },
+        Case {
+            name: "nt_prism_ldmatrix",
+            op: ResolvedGemmOp::Nt,
+            dims: (4_621, 384, 1_928),
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        },
+    ];
+
     struct PhaseResult {
         ratios: Vec<f64>,
         candidate_p50_us: f64,
@@ -423,6 +601,137 @@ mod live {
             digest_hex(&portable.device.driver.build_digest),
         );
         Ok(())
+    }
+
+    /// The production-body protocol over `cases`, recording every ratio: a
+    /// candidate that loses its once3 screen is reported and skipped, one
+    /// that passes is confirmed with once7, and only a drifted binding fails
+    /// the run. Any of the three Ada toolkits may run it.
+    fn screen_cases_recording_every_ratio(cases: &[Case]) -> Result<(), String> {
+        let candidate_device = GpuDevice::new(0)?;
+        let comparator_device = GpuDevice::new(0)?;
+        for device in [&candidate_device, &comparator_device] {
+            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+                return Err(format!(
+                    "the screen requires exact CC8.9/142SM, got {:?}/{}SM",
+                    device.compute_capability,
+                    device.multiprocessor_count(),
+                ));
+            }
+        }
+        let candidate_ctx = GpuCtx::new(&candidate_device)?;
+        let comparator_ctx = GpuCtx::new(&comparator_device)?;
+        configure(&candidate_ctx);
+        configure(&comparator_ctx);
+        let nvrtc = candidate_ctx
+            .kernels
+            .triad_sm89_tf32_joint_compiler_identity()
+            .ok_or_else(|| "TriadSm89Tf32Joint compiler identity is absent".to_string())?
+            .nvrtc_version;
+        let candidate_requests: Vec<_> = cases.iter().map(|case| request(*case, true)).collect();
+        let comparator_requests: Vec<_> = cases.iter().map(|case| request(*case, false)).collect();
+        presize_physical_qualification_suite(&candidate_ctx, &candidate_requests)?;
+        presize_physical_qualification_suite(&comparator_ctx, &comparator_requests)?;
+        for (index, case) in cases.iter().copied().enumerate() {
+            let mut candidate = qualify_physical_launch(&candidate_ctx, candidate_requests[index])?;
+            let mut comparator =
+                qualify_physical_launch(&comparator_ctx, comparator_requests[index])?;
+            let candidate_evidence = candidate.evidence();
+            let comparator_evidence = comparator.evidence();
+            if !candidate_evidence.eager_graph_equal()
+                || candidate_evidence.uniform_module_kind() != Some(case.route.module_kind())
+                || candidate_evidence.nodes().last().map(|node| node.symbol)
+                    != Some(case.candidate_symbol)
+                || !comparator_evidence.eager_graph_equal()
+                || comparator_evidence.uniform_module_kind() != Some(case.prior_route.module_kind())
+                || comparator_evidence.nodes().last().map(|node| node.symbol)
+                    != Some(case.prior_symbol)
+            {
+                return Err(format!(
+                    "{} screen binding drifted: candidate={:?} comparator={:?}",
+                    case.name,
+                    candidate_evidence.nodes(),
+                    comparator_evidence.nodes(),
+                ));
+            }
+            for path in [Path::Eager, Path::Graph] {
+                let mut screen_ratios = Vec::new();
+                let mut screens_pass = true;
+                for order in [PairOrder::Abba, PairOrder::Baab] {
+                    let screen = run_phase(
+                        case,
+                        &candidate_ctx,
+                        &mut candidate,
+                        &comparator_ctx,
+                        &mut comparator,
+                        path,
+                        order,
+                        "retile_deep_screen_once3",
+                        SCREEN_WINDOWS,
+                        0x89_7f_3330_u64 ^ index as u64,
+                    )?;
+                    screens_pass &= phase_passed(&screen);
+                    screen_ratios.push((
+                        screen.ratio_p50,
+                        screen.ratio_p95,
+                        screen.candidate_p50_us,
+                        screen.comparator_p50_us,
+                    ));
+                }
+                let mut official_ratios = Vec::new();
+                let mut officials_pass = screens_pass;
+                if screens_pass {
+                    for order in [PairOrder::Abba, PairOrder::Baab] {
+                        let official = run_phase(
+                            case,
+                            &candidate_ctx,
+                            &mut candidate,
+                            &comparator_ctx,
+                            &mut comparator,
+                            path,
+                            order,
+                            "retile_deep_official_once7",
+                            OFFICIAL_WINDOWS,
+                            0x89_7f_3370_u64 ^ index as u64,
+                        )?;
+                        officials_pass &= phase_passed(&official);
+                        official_ratios.push((
+                            official.ratio_p50,
+                            official.ratio_p95,
+                            official.candidate_p50_us,
+                            official.comparator_p50_us,
+                        ));
+                    }
+                }
+                println!(
+                    "{{\"schema\":\"MambaTriadSm89Tf32RetileDeepScreenV1\",\"case\":\"{}\",\"op\":\"{:?}\",\"dims\":{:?},\"nvrtc\":[{},{}],\"candidate\":\"{}\",\"prior\":\"{}\",\"path\":\"{}\",\"screen_once3\":{:?},\"official_once7\":{:?},\"retain\":{}}}",
+                    case.name,
+                    case.op,
+                    case.dims,
+                    nvrtc.0,
+                    nvrtc.1,
+                    case.candidate_symbol,
+                    case.prior_symbol,
+                    path.as_str(),
+                    screen_ratios,
+                    official_ratios,
+                    officials_pass,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an idle RTX 6000 Ada on CUDA 12.8/13.0/13.2; records every ratio of the retiled and deep cells"]
+    fn sm89_tf32_screens_retiled_and_deep_cells_once3_then_once7() -> Result<(), String> {
+        screen_cases_recording_every_ratio(&RETILE_AND_DEEP_CASES)
+    }
+
+    #[test]
+    #[ignore = "requires an idle RTX 6000 Ada on CUDA 12.8/13.0/13.2; the NT body on the compact8 cells"]
+    fn sm89_tf32_screens_nt_body_on_the_compact8_cells_once3_then_once7() -> Result<(), String> {
+        screen_cases_recording_every_ratio(&NT_BODY_CASES)
     }
 
     #[test]
