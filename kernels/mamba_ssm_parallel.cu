@@ -253,7 +253,63 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 }
 
 // ============================================================================
-// Shared memory layout (in extern __shared__ float[]):
+// Both block scans at once: the forward scan of (fa, fb) and the reverse
+// scan of (ra, rb), each exactly as its own helper computes it, sharing
+// the two barriers. The backward runs a forward replay and a reverse scan
+// per state dimension that do not depend on each other, so interleaving
+// them halves the barrier count without touching a single operation.
+// ============================================================================
+__device__ __forceinline__ void block_scan_fwd_and_reverse_ab(
+    float &fa, float &fb, float &ra, float &rb,
+    float *smem_fwd_wa, float *smem_fwd_wb,
+    float *smem_rev_wa, float *smem_rev_wb
+) {
+    int warp_id = threadIdx.x / 32;
+    int lane    = threadIdx.x & 31;
+
+    warp_inclusive_scan_ab(fa, fb);
+    warp_inclusive_reverse_scan_ab(ra, rb);
+    if (lane == 31) {
+        smem_fwd_wa[warp_id] = fa;
+        smem_fwd_wb[warp_id] = fb;
+    }
+    if (lane == 0) {
+        smem_rev_wa[warp_id] = ra;
+        smem_rev_wb[warp_id] = rb;
+    }
+    __syncthreads();
+
+    if (warp_id == 0 && lane < NWARPS) {
+        float wa = smem_fwd_wa[lane];
+        float wb = smem_fwd_wb[lane];
+        warp_inclusive_scan_ab(wa, wb, (1u << NWARPS) - 1u);
+        smem_fwd_wa[lane] = wa;
+        smem_fwd_wb[lane] = wb;
+        float va = smem_rev_wa[lane];
+        float vb = smem_rev_wb[lane];
+        warp_inclusive_reverse_scan_ab(va, vb, (1u << NWARPS) - 1u, NWARPS);
+        smem_rev_wa[lane] = va;
+        smem_rev_wb[lane] = vb;
+    }
+    __syncthreads();
+
+    if (warp_id > 0) {
+        float pa = smem_fwd_wa[warp_id - 1];
+        float pb = smem_fwd_wb[warp_id - 1];
+        fb = fa * pb + fb;
+        fa = fa * pa;
+    }
+    if (warp_id < NWARPS - 1) {
+        float na = smem_rev_wa[warp_id + 1];
+        float nb = smem_rev_wb[warp_id + 1];
+        rb = ra * nb + rb;
+        ra = ra * na;
+    }
+    // No __syncthreads here -- caller syncs before the workspace is reused.
+}
+
+// ============================================================================
+// Shared memory layout of the backward kernels (in extern __shared__ float[]):
 //
 //   [0                       .. NWARPS)          = smem_wa      (block scan)
 //   [NWARPS                  .. 2*NWARPS)        = smem_wb      (block scan)
@@ -264,6 +320,11 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 //   [2*NWARPS+2*MAX_DS+2*NTHR .. +CHUNK_SIZE)    = smem_stage   (coalesced load staging)
 //
 // Total: 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
+//
+// The forward kernels pack a smaller layout at the runtime d_state: the two
+// block-scan rows, the two carry rows, and one exchange slot per warp for
+// the prefix hand-off (2*NWARPS + 2*d_state + 2*NWARPS floats); they load
+// and store directly and keep no staging region. The launcher sizes it.
 // ============================================================================
 #define SMEM_WA_OFF        0
 #define SMEM_WB_OFF        (NWARPS)
@@ -308,7 +369,7 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 // Single-pass Y accumulation within the d_state loop.
 //
 // Grid: (batch, d_inner). Block: NTHREADS.
-// Shared memory: SMEM_TOTAL_FLOATS * sizeof(float).
+// Shared memory: the forward layout described above, sized by the launcher.
 // ============================================================================
 extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_scan_fwd(
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
@@ -348,8 +409,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float *smem_run_a  = smem + 2 * NWARPS;
     float *smem_run_b  = smem_run_a + d_state;
     float *smem_exch_a = smem_run_b + d_state;
-    float *smem_exch_b = smem_exch_a + NTHREADS;
-    float *smem_stage  = smem_exch_b + NTHREADS;
+    float *smem_exch_b = smem_exch_a + NWARPS;
 
     float D_d = D[did];
     int h_base = (bid * d_inner + did) * d_state;
@@ -384,21 +444,12 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     for (int chunk = 0; chunk < n_chunks; chunk++) {
         int chunk_start = chunk * CHUNK_SIZE;
 
-        // ================================================================
-        // Coalesced delta load via shared memory staging.
-        // Striped load: thread k loads indices k, k+NTHREADS, k+2*NTHREADS, ...
-        // Then blocked read from smem_stage for per-thread NITEMS.
-        // Layout in global: delta[(bid*T + t) * d_inner + did] -- adjacent t
-        // are d_inner elements apart, so threads in ONE block (fixed did)
-        // stride by d_inner: NOT coalesced within a block. The win comes
-        // from ACROSS blocks - blocks with adjacent did hit adjacent
-        // addresses at each t, and the striped smem stage amortizes the
-        // pattern to one pass per chunk. (m-8: the old text claimed
-        // in-block coalescing, inverted.)
-        // ================================================================
-        // Barrier diet (S2b): the staging round trip is value-neutral and
-        // its lane stride exceeded the 32-byte sector either way — direct
-        // loads drop the staging barriers with zero arithmetic change.
+        // Direct per-thread loads. In global memory adjacent t are d_inner
+        // elements apart, so threads of one block (fixed did) never share
+        // a sector whichever thread issues the load; the merging happens
+        // across blocks, where neighbouring did hit adjacent addresses at
+        // each t. Staging the chunk through shared memory only added
+        // barriers.
         float delta_vals[NITEMS];
         float u_vals[NITEMS];
         float delta_u_vals[NITEMS];
@@ -470,25 +521,30 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             __syncthreads();
             block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);
 
-            // Store inclusive scan results for exclusive prefix extraction
+            // Exclusive prefix of thread t = inclusive value of thread t-1:
+            // the lane above hands it down through a shuffle; a warp's first
+            // lane takes it from the previous warp's last lane through a
+            // per-warp slot; thread 0 takes the identity. The last slot is
+            // the block total thread 0 folds into the running prefix. The
+            // values are the very registers the full exchange used to copy.
+            // Every warp reads the running prefix before the barrier, so
+            // thread 0 may overwrite it right after.
+            if ((threadIdx.x & 31) == 31) {
+                smem_exch_a[threadIdx.x >> 5] = scan_a;
+                smem_exch_b[threadIdx.x >> 5] = scan_b;
+            }
+            float run_a = smem_run_a[n];
+            float run_b = smem_run_b[n];
             __syncthreads();
-            smem_exch_a[threadIdx.x] = scan_a;
-            smem_exch_b[threadIdx.x] = scan_b;
-            __syncthreads();
-
-            // Exclusive prefix: inclusive result of thread (t-1), or identity for thread 0
-            float excl_a, excl_b;
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);
             if (threadIdx.x == 0) {
                 excl_a = 1.0f;
                 excl_b = 0.0f;
-            } else {
-                excl_a = smem_exch_a[threadIdx.x - 1];
-                excl_b = smem_exch_b[threadIdx.x - 1];
+            } else if ((threadIdx.x & 31) == 0) {
+                excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];
+                excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];
             }
-
-            // Read inter-chunk running prefix for this state dimension
-            float run_a = smem_run_a[n];
-            float run_b = smem_run_b[n];
             // Slim tape: record this chunk's entry prefix (chunk 0's
             // identity row was written above). Single writer.
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {
@@ -501,17 +557,10 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             // Initial state for this (b, d, n) triple
             float h_0 = h[h_base + n];
 
-            // Barrier: every warp must have READ run_a/run_b before thread 0
-            // overwrites them below — without it a warp scheduled late reads
-            // the post-chunk prefix and composes wrong h_t (CUB's prefix-
-            // callback machinery synchronizes here internally; we must too).
-            __syncthreads();
-
-            // Update running prefix for next chunk (thread 0 only -- data dependency):
-            //   new_run = block_total o old_run
+            // Running prefix for the next chunk: new_run = block_total o old_run
             if (threadIdx.x == 0) {
-                float block_a = smem_exch_a[NTHREADS - 1];
-                float block_b = smem_exch_b[NTHREADS - 1];
+                float block_a = smem_exch_a[NWARPS - 1];
+                float block_b = smem_exch_b[NWARPS - 1];
                 smem_run_a[n] = block_a * run_a;
                 smem_run_b[n] = block_a * run_b + block_b;
             }
@@ -560,24 +609,22 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             }
         } // end d_state loop
 
-        // ================================================================
-        // Coalesced y_out write via shared memory staging.
-        // Write blocked into smem_stage, sync, write striped to global.
-        // ================================================================
+        // Each thread stores its own items. Within a block did is fixed,
+        // so neighbouring t are d_inner apart and every lane lands in its
+        // own sector whichever thread issues the store; staging the chunk
+        // through shared memory to restripe it bought nothing and cost
+        // two barriers per chunk.
         #pragma unroll
         for (int i = 0; i < NITEMS; i++) {
-            smem_stage[threadIdx.x * NITEMS + i] = out_vals[i];
-        }
-        __syncthreads();
-
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-            int t = chunk_start + s;
+            int t = chunk_start + threadIdx.x * NITEMS + i;
             if (t < T) {
-                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];
+                y_out[(bid * T + t) * d_inner + did] = out_vals[i];
             }
         }
-        __syncthreads();
     } // end chunk loop
+    // Thread 0 wrote the last chunk's running prefix after the scan
+    // barrier; every thread reads its state dimension below.
+    __syncthreads();
 
     // Write final SSM state: h[n] = run_a[n] * h_init[n] + run_b[n]
     // Parallelized across threads.
@@ -621,8 +668,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float *smem_run_a  = smem + 2 * NWARPS;
     float *smem_run_b  = smem_run_a + d_state;
     float *smem_exch_a = smem_run_b + d_state;
-    float *smem_exch_b = smem_exch_a + NTHREADS;
-    float *smem_stage  = smem_exch_b + NTHREADS;
+    float *smem_exch_b = smem_exch_a + NWARPS;
 
     float D_d = D[did];
     int h_base = (bid * d_inner + did) * d_state;
@@ -699,31 +745,29 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             __syncthreads();
             block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);
 
+            // Exclusive prefix through the lane above and a per-warp slot,
+            // as in the saving kernel.
+            if ((threadIdx.x & 31) == 31) {
+                smem_exch_a[threadIdx.x >> 5] = scan_a;
+                smem_exch_b[threadIdx.x >> 5] = scan_b;
+            }
+            float run_a = smem_run_a[n];
+            float run_b = smem_run_b[n];
             __syncthreads();
-            smem_exch_a[threadIdx.x] = scan_a;
-            smem_exch_b[threadIdx.x] = scan_b;
-            __syncthreads();
-
-            float excl_a, excl_b;
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);
             if (threadIdx.x == 0) {
                 excl_a = 1.0f;
                 excl_b = 0.0f;
-            } else {
-                excl_a = smem_exch_a[threadIdx.x - 1];
-                excl_b = smem_exch_b[threadIdx.x - 1];
+            } else if ((threadIdx.x & 31) == 0) {
+                excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];
+                excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];
             }
-
-            float run_a = smem_run_a[n];
-            float run_b = smem_run_b[n];
             float h_0 = h[h_base + n];
 
-            // Barrier: all warps must read run_a/b before thread 0 updates
-            // them (same read-write race as the saving variant above).
-            __syncthreads();
-
             if (threadIdx.x == 0) {
-                float block_a = smem_exch_a[NTHREADS - 1];
-                float block_b = smem_exch_b[NTHREADS - 1];
+                float block_a = smem_exch_a[NWARPS - 1];
+                float block_b = smem_exch_b[NWARPS - 1];
                 smem_run_a[n] = block_a * run_a;
                 smem_run_b[n] = block_a * run_b + block_b;
             }
@@ -747,19 +791,12 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             }
         } // end d_state loop
 
-        // ================================================================
-        // Coalesced y_out write via shared memory staging.
-        // ================================================================
+        // Direct per-thread stores, as in the saving kernel.
         #pragma unroll
         for (int i = 0; i < NITEMS; i++) {
-            smem_stage[threadIdx.x * NITEMS + i] = out_vals[i];
-        }
-        __syncthreads();
-
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-            int t = chunk_start + s;
+            int t = chunk_start + threadIdx.x * NITEMS + i;
             if (t < T) {
-                float yv = smem_stage[s];
+                float yv = out_vals[i];
                 if (gate_stride > 0) {
                     // Fused gating: the same one-rounding product the
                     // separate elementwise mul performed, on the same
@@ -772,8 +809,10 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                 y_out[(bid * T + t) * d_inner + did] = yv;
             }
         }
-        __syncthreads();
     } // end chunk loop
+    // Thread 0 wrote the last chunk's running prefix after the scan
+    // barrier; every thread reads its state dimension below.
+    __syncthreads();
 
     // Write final SSM state (parallelized across threads)
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {
@@ -789,7 +828,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
 // state + running prefix + block scan + registers stay f32. Only the
 // activation I/O tensors (delta, u, B, C, y_out) become typed. BPTT
 // state (`h`, `h_saved`), model parameters (`a_neg`, `D`),
-// and ALL `smem_*` (including smem_stage) remain f32.
+// and ALL `smem_*` remain f32.
 // ============================================================================
 
 #define DEFINE_SSM_PARALLEL_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                   \
@@ -821,13 +860,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float *smem_run_a  = smem + 2 * NWARPS;                                   \
     float *smem_run_b  = smem_run_a + d_state;                                \
     float *smem_exch_a = smem_run_b + d_state;                                \
-    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
-    /* Typed smem stage: 2-byte slots reuse the f32 stage region. The         \
-       typed launch helper only allocates CHUNK_SIZE * sizeof(T_ACT) bytes    \
-       for this region (vs CHUNK_SIZE * 4 for the f32 path), saving 2 KB     \
-       per block → enables an extra resident block on Ada. Load stores T_ACT directly; upcast happens only     \
-       inside the compute loop via to_f(). */                                 \
-    T_ACT *smem_stage = (T_ACT *)(smem_exch_b + NTHREADS);                    \
+    float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
@@ -916,20 +949,24 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             float scan_b = thread_b[NITEMS - 1];                              \
             __syncthreads();                                                  \
             block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);        \
-            __syncthreads();                                                  \
-            smem_exch_a[threadIdx.x] = scan_a;                                \
-            smem_exch_b[threadIdx.x] = scan_b;                                \
-            __syncthreads();                                                  \
-            float excl_a, excl_b;                                             \
-            if (threadIdx.x == 0) {                                           \
-                excl_a = 1.0f;                                                \
-                excl_b = 0.0f;                                                \
-            } else {                                                          \
-                excl_a = smem_exch_a[threadIdx.x - 1];                        \
-                excl_b = smem_exch_b[threadIdx.x - 1];                        \
+            /* Exclusive prefix through the lane above and a per-warp slot,  \
+               as in the f32 kernel; the last slot is the block total. */     \
+            if ((threadIdx.x & 31) == 31) {                                   \
+                smem_exch_a[threadIdx.x >> 5] = scan_a;                       \
+                smem_exch_b[threadIdx.x >> 5] = scan_b;                       \
             }                                                                 \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
+            __syncthreads();                                                  \
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);            \
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);            \
+            if (threadIdx.x == 0) {                                           \
+                excl_a = 1.0f;                                                \
+                excl_b = 0.0f;                                                \
+            } else if ((threadIdx.x & 31) == 0) {                             \
+                excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];                 \
+                excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];                 \
+            }                                                                 \
             /* Slim tape: chunk-entry prefix (single writer). */              \
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {                 \
                 int row =                                                     \
@@ -938,15 +975,12 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 run_tape[row + 3 * chunk + 1] = run_b;                        \
             }                                                                 \
             float h_0 = h[h_base + n];                                        \
-            /* barrier: all warps read run_a/b before thread 0 updates */     \
-            __syncthreads();                                                  \
             if (threadIdx.x == 0) {                                           \
-                float block_a = smem_exch_a[NTHREADS - 1];                    \
-                float block_b = smem_exch_b[NTHREADS - 1];                    \
+                float block_a = smem_exch_a[NWARPS - 1];                      \
+                float block_b = smem_exch_b[NWARPS - 1];                      \
                 smem_run_a[n] = block_a * run_a;                              \
                 smem_run_b[n] = block_a * run_b + block_b;                    \
             }                                                                 \
-            __syncthreads();                                                  \
             float c_row[NITEMS];                                              \
             load_row8(C + (bid * d_state + n) * T,                            \
                       chunk_start + threadIdx.x * NITEMS, T, c_row);          \
@@ -977,19 +1011,17 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             }                                                                 \
         }                                                                     \
                                                              \
+        /* Direct per-thread stores, as in the f32 kernel. */                 \
         _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
-        }                                                                     \
-        __syncthreads();                                                      \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
+            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
             if (t < T) {                                                      \
-                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];         \
+                y_out[(bid * T + t) * d_inner + did] = FROM_F(out_vals[i]);   \
             }                                                                 \
         }                                                                     \
-        __syncthreads();                                                      \
     }                                                                         \
+    /* The last running-prefix write by thread 0 precedes the reads below. */ \
+    __syncthreads();                                                          \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
         float h_0 = h[h_base + n];                                            \
         h[h_base + n] = smem_run_a[n] * h_0 + smem_run_b[n];                  \
@@ -1025,9 +1057,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float *smem_run_a  = smem + 2 * NWARPS;                                   \
     float *smem_run_b  = smem_run_a + d_state;                                \
     float *smem_exch_a = smem_run_b + d_state;                                \
-    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
-    /* Typed smem stage: 2-byte slots vs 4-byte f32. */    \
-    T_ACT *smem_stage = (T_ACT *)(smem_exch_b + NTHREADS);                    \
+    float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
@@ -1091,26 +1121,28 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             float scan_b = thread_b[NITEMS - 1];                              \
             __syncthreads();                                                  \
             block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);        \
-            __syncthreads();                                                  \
-            smem_exch_a[threadIdx.x] = scan_a;                                \
-            smem_exch_b[threadIdx.x] = scan_b;                                \
-            __syncthreads();                                                  \
-            float excl_a, excl_b;                                             \
-            if (threadIdx.x == 0) {                                           \
-                excl_a = 1.0f;                                                \
-                excl_b = 0.0f;                                                \
-            } else {                                                          \
-                excl_a = smem_exch_a[threadIdx.x - 1];                        \
-                excl_b = smem_exch_b[threadIdx.x - 1];                        \
+            /* Exclusive prefix through the lane above and a per-warp slot,  \
+               as in the f32 kernel; the last slot is the block total. */     \
+            if ((threadIdx.x & 31) == 31) {                                   \
+                smem_exch_a[threadIdx.x >> 5] = scan_a;                       \
+                smem_exch_b[threadIdx.x >> 5] = scan_b;                       \
             }                                                                 \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
-            float h_0 = h[h_base + n];                                        \
-            /* barrier: all warps read run_a/b before thread 0 updates */     \
             __syncthreads();                                                  \
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);            \
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);            \
             if (threadIdx.x == 0) {                                           \
-                float block_a = smem_exch_a[NTHREADS - 1];                    \
-                float block_b = smem_exch_b[NTHREADS - 1];                    \
+                excl_a = 1.0f;                                                \
+                excl_b = 0.0f;                                                \
+            } else if ((threadIdx.x & 31) == 0) {                             \
+                excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];                 \
+                excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];                 \
+            }                                                                 \
+            float h_0 = h[h_base + n];                                        \
+            if (threadIdx.x == 0) {                                           \
+                float block_a = smem_exch_a[NWARPS - 1];                      \
+                float block_b = smem_exch_b[NWARPS - 1];                      \
                 smem_run_a[n] = block_a * run_a;                              \
                 smem_run_b[n] = block_a * run_b + block_b;                    \
             }                                                                 \
@@ -1132,15 +1164,12 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             }                                                                 \
         }                                                                     \
                                                              \
+        /* Direct per-thread stores, as in the f32 kernel. */                 \
         _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
-        }                                                                     \
-        __syncthreads();                                                      \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
+            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
             if (t < T) {                                                      \
-                T_ACT ty = FROM_F(smem_stage[s]);                             \
+                T_ACT ty = FROM_F(out_vals[i]);                               \
                 if (gate_stride > 0) {                                        \
                     /* Round-trip emulation of the replaced chain: the     \
                      * baseline stored y typed, stored SiLU(gate) typed,   \
@@ -1155,8 +1184,9 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
                 y_out[(bid * T + t) * d_inner + did] = ty;                    \
             }                                                                 \
         }                                                                     \
-        __syncthreads();                                                      \
     }                                                                         \
+    /* The last running-prefix write by thread 0 precedes the reads below. */ \
+    __syncthreads();                                                          \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
         float h_0 = h[h_base + n];                                            \
         h[h_base + n] = smem_run_a[n] * h_0 + smem_run_b[n];                  \
@@ -1657,25 +1687,26 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
     if (d_state > MAX_DSTATE) return;                                         \
     int n_groups = d_inner / G;                                               \
     extern __shared__ float smem[];                                           \
-    /* Layout: rev warp scan (2*NWARPS), fwd-replay warp scan            \
-       (2*NWARPS), exch (2*NTHREADS), fexch (2*NTHREADS), post           \
-       (2*G*d_state), chunk_first_a (G*d_state), next_a            \
-       (NTHREADS), da_red (NTHREADS), hbound (NTHREADS), then the        \
-       typed delta/u/dy stage (3*G*CHUNK_SIZE T_ACT slots). */           \
+    /* Layout: rev warp scan (2*NWARPS), fwd-replay warp scan                 \
+       (2*NWARPS), one slot per warp for the reverse postfix hand-off         \
+       (2*NWARPS), the same for the replay prefix (2*NWARPS), post            \
+       (2*G*d_state), chunk_first_a (G*d_state), next_a (NWARPS),             \
+       da_red (G*NTHREADS), hbound (NWARPS), then the typed                   \
+       delta/u/dy stage (3*G*CHUNK_SIZE T_ACT slots). */                      \
     float *smem_rev_wa = smem;                                                \
     float *smem_rev_wb = smem_rev_wa + NWARPS;                                \
     float *smem_fwd_wa = smem_rev_wb + NWARPS;                                \
     float *smem_fwd_wb = smem_fwd_wa + NWARPS;                                \
     float *smem_exch_a = smem_fwd_wb + NWARPS;                                \
-    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
-    float *smem_fexch_a = smem_exch_b + NTHREADS;                             \
-    float *smem_fexch_b = smem_fexch_a + NTHREADS;                            \
-    float *smem_post_a = smem_fexch_b + NTHREADS;                             \
-    float *smem_post_b = smem_post_a + SCAN_BWD_DGROUP * d_state;          \
-    float *smem_chunk_first_a = smem_post_b + SCAN_BWD_DGROUP * d_state;   \
-    float *smem_next_a = smem_chunk_first_a + SCAN_BWD_DGROUP * d_state;   \
-    float *smem_da_red = smem_next_a + NTHREADS;                              \
-    float *smem_hbound = smem_da_red + NTHREADS;                              \
+    float *smem_exch_b = smem_exch_a + NWARPS;                                \
+    float *smem_fexch_a = smem_exch_b + NWARPS;                               \
+    float *smem_fexch_b = smem_fexch_a + NWARPS;                              \
+    float *smem_post_a = smem_fexch_b + NWARPS;                               \
+    float *smem_post_b = smem_post_a + SCAN_BWD_DGROUP * d_state;             \
+    float *smem_chunk_first_a = smem_post_b + SCAN_BWD_DGROUP * d_state;      \
+    float *smem_next_a = smem_chunk_first_a + SCAN_BWD_DGROUP * d_state;      \
+    float *smem_da_red = smem_next_a + NWARPS;                                \
+    float *smem_hbound = smem_da_red + SCAN_BWD_DGROUP * NTHREADS;            \
     T_ACT *smem_dio = (T_ACT *)(smem_hbound + NTHREADS);                      \
     T_ACT *stage_delta = smem_dio;                                            \
     T_ACT *stage_u = stage_delta + SCAN_BWD_DGROUP * CHUNK_SIZE;              \
@@ -1774,6 +1805,9 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                 acc_B[i] = 0.0f;                                              \
                 acc_C[i] = 0.0f;                                              \
             }                                                                 \
+            float da_acc[SCAN_BWD_DGROUP];                                    \
+            _Pragma("unroll")                                                 \
+            for (int gg = 0; gg < G; gg++) da_acc[gg] = 0.0f;                 \
             for (int gg = 0; gg < G; gg++) {                                  \
                 int did = did0 + gg;                                          \
                 float a_dn = a_neg[did * d_state + n];                        \
@@ -1801,18 +1835,21 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         d_local[i] = 0.0f;                                    \
                     }                                                         \
                 }                                                             \
-                /* Slim-tape replay (see the ungrouped kernel). */            \
-                float H_vals[NITEMS];                                         \
-                float h_prev_boundary = 0.0f;                                 \
+                /* Slim-tape replay pairs (see the ungrouped kernel); the     \
+                   full tape scans identities and reads h_saved instead. */   \
                 int hsave_row = (bid * d_inner + did) * d_state;              \
+                float f_run_a = 1.0f;                                         \
+                float f_run_b = 0.0f;                                         \
+                float f_hentry = 0.0f;                                        \
+                float f_h0 = 0.0f;                                            \
+                float fwd_a[NITEMS];                                          \
+                float fwd_b[NITEMS];                                          \
                 if (slim_tape) {                                              \
                     int row = (hsave_row + n) * 3 * n_chunks;                 \
-                    float f_run_a = run_tape[row + 3 * chunk + 0];            \
-                    float f_run_b = run_tape[row + 3 * chunk + 1];            \
-                    float f_hentry = run_tape[row + 3 * chunk + 2];           \
-                    float f_h0 = run_tape[row + 2];                           \
-                    float fwd_a[NITEMS];                                      \
-                    float fwd_b[NITEMS];                                      \
+                    f_run_a = run_tape[row + 3 * chunk + 0];                  \
+                    f_run_b = run_tape[row + 3 * chunk + 1];                  \
+                    f_hentry = run_tape[row + 3 * chunk + 2];                 \
+                    f_h0 = run_tape[row + 2];                                 \
                     _Pragma("unroll")                                         \
                     for (int i = 0; i < NITEMS; i++) {                        \
                         int t = chunk_start + threadIdx.x * NITEMS + i;       \
@@ -1830,56 +1867,39 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         fwd_b[i] = fwd_a[i] * fwd_b[i - 1] + fwd_b[i];        \
                         fwd_a[i] = fwd_a[i] * fwd_a[i - 1];                   \
                     }                                                         \
-                    float fscan_a = fwd_a[NITEMS - 1];                        \
-                    float fscan_b = fwd_b[NITEMS - 1];                        \
-                    __syncthreads();                                          \
-                    block_inclusive_scan_ab(                                  \
-                        fscan_a, fscan_b, smem_fwd_wa, smem_fwd_wb);          \
-                    __syncthreads();                                          \
-                    smem_fexch_a[threadIdx.x] = fscan_a;                      \
-                    smem_fexch_b[threadIdx.x] = fscan_b;                      \
-                    __syncthreads();                                          \
-                    float fexcl_a, fexcl_b;                                   \
-                    if (threadIdx.x == 0) {                                   \
-                        fexcl_a = 1.0f;                                       \
-                        fexcl_b = 0.0f;                                       \
-                    } else {                                                  \
-                        fexcl_a = smem_fexch_a[threadIdx.x - 1];              \
-                        fexcl_b = smem_fexch_b[threadIdx.x - 1];              \
-                    }                                                         \
+                } else {                                                      \
                     _Pragma("unroll")                                         \
                     for (int i = 0; i < NITEMS; i++) {                        \
-                        float comp_a = fwd_a[i] * fexcl_a;                    \
-                        float comp_b = fwd_a[i] * fexcl_b + fwd_b[i];         \
-                        float final_a = comp_a * f_run_a;                     \
-                        float final_b = comp_a * f_run_b + comp_b;            \
-                        H_vals[i] = final_a * f_h0 + final_b;                 \
+                        fwd_a[i] = 1.0f;                                      \
+                        fwd_b[i] = 0.0f;                                      \
                     }                                                         \
-                    smem_hbound[threadIdx.x] = H_vals[NITEMS - 1];            \
-                    __syncthreads();                                          \
-                    h_prev_boundary = (threadIdx.x == 0)                      \
-                        ? f_hentry                                            \
-                        : smem_hbound[threadIdx.x - 1];                       \
-                    __syncthreads();                                          \
                 }                                                             \
-                smem_next_a[threadIdx.x] = da_vals[0];                        \
+                /* The reverse pairs need the next thread's first decay:      \
+                   the lane below hands it up through a shuffle, a warp's     \
+                   last lane takes it from the next warp's first lane         \
+                   through a per-warp slot, and the block's last thread       \
+                   takes the later chunk's boundary. This barrier also        \
+                   retires the previous state dimension's use of every        \
+                   slot and of the scan workspace. */                         \
+                if ((threadIdx.x & 31) == 0) {                                \
+                    smem_next_a[threadIdx.x >> 5] = da_vals[0];               \
+                }                                                             \
                 __syncthreads();                                              \
+                float boundary_next_a =                                       \
+                    __shfl_down_sync(warp_mask, da_vals[0], 1);               \
+                if ((int)threadIdx.x == NTHREADS - 1) {                       \
+                    boundary_next_a = smem_chunk_first_a[gg * d_state + n];   \
+                } else if ((threadIdx.x & 31) == 31) {                        \
+                    boundary_next_a = smem_next_a[(threadIdx.x >> 5) + 1];    \
+                }                                                             \
                 float thread_a[NITEMS];                                       \
                 float thread_b[NITEMS];                                       \
                 for (int i = 0; i < NITEMS - 1; i++) {                        \
                     thread_a[i] = da_vals[i + 1];                             \
                     thread_b[i] = d_local[i];                                 \
                 }                                                             \
-                float boundary_next_a;                                        \
-                if ((int)threadIdx.x < NTHREADS - 1) {                        \
-                    boundary_next_a = smem_next_a[threadIdx.x + 1];           \
-                } else {                                                      \
-                    boundary_next_a =                                         \
-                        smem_chunk_first_a[gg * d_state + n];              \
-                }                                                             \
                 thread_a[NITEMS - 1] = boundary_next_a;                       \
                 thread_b[NITEMS - 1] = d_local[NITEMS - 1];                   \
-                __syncthreads();                                              \
                 _Pragma("unroll")                                             \
                 for (int i = 0; i < NITEMS; i++) {                            \
                     int t = chunk_start + threadIdx.x * NITEMS + i;           \
@@ -1893,36 +1913,76 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                                   thread_b[i];                                \
                     thread_a[i] = thread_a[i] * thread_a[i + 1];              \
                 }                                                             \
+                float fscan_a = fwd_a[NITEMS - 1];                            \
+                float fscan_b = fwd_b[NITEMS - 1];                            \
                 float scan_a = thread_a[0];                                   \
                 float scan_b = thread_b[0];                                   \
-                block_inclusive_reverse_scan_ab(                              \
-                    scan_a, scan_b, smem_rev_wa, smem_rev_wb);                \
+                block_scan_fwd_and_reverse_ab(fscan_a, fscan_b, scan_a,       \
+                                              scan_b, smem_fwd_wa,            \
+                                              smem_fwd_wb, smem_rev_wa,       \
+                                              smem_rev_wb);                   \
+                /* Replay prefix from the lane above, reverse postfix from    \
+                   the lane below, per-warp slots between warps. The          \
+                   running postfix is read before the barrier, so thread 0    \
+                   may fold this chunk into it right after. */                \
+                if ((threadIdx.x & 31) == 31) {                               \
+                    smem_fexch_a[threadIdx.x >> 5] = fscan_a;                 \
+                    smem_fexch_b[threadIdx.x >> 5] = fscan_b;                 \
+                }                                                             \
+                if ((threadIdx.x & 31) == 0) {                                \
+                    smem_exch_a[threadIdx.x >> 5] = scan_a;                   \
+                    smem_exch_b[threadIdx.x >> 5] = scan_b;                   \
+                }                                                             \
+                float run_a = smem_post_a[gg * d_state + n];                  \
+                float run_b = smem_post_b[gg * d_state + n];                  \
                 __syncthreads();                                              \
-                smem_exch_a[threadIdx.x] = scan_a;                            \
-                smem_exch_b[threadIdx.x] = scan_b;                            \
-                __syncthreads();                                              \
-                float next_a, next_b;                                         \
-                if ((int)threadIdx.x < NTHREADS - 1) {                        \
-                    next_a = smem_exch_a[threadIdx.x + 1];                    \
-                    next_b = smem_exch_b[threadIdx.x + 1];                    \
-                } else {                                                      \
+                float fexcl_a = __shfl_up_sync(warp_mask, fscan_a, 1);        \
+                float fexcl_b = __shfl_up_sync(warp_mask, fscan_b, 1);        \
+                if (threadIdx.x == 0) {                                       \
+                    fexcl_a = 1.0f;                                           \
+                    fexcl_b = 0.0f;                                           \
+                } else if ((threadIdx.x & 31) == 0) {                         \
+                    fexcl_a = smem_fexch_a[(threadIdx.x >> 5) - 1];           \
+                    fexcl_b = smem_fexch_b[(threadIdx.x >> 5) - 1];           \
+                }                                                             \
+                float next_a = __shfl_down_sync(warp_mask, scan_a, 1);        \
+                float next_b = __shfl_down_sync(warp_mask, scan_b, 1);        \
+                if ((int)threadIdx.x == NTHREADS - 1) {                       \
                     next_a = 1.0f;                                            \
                     next_b = 0.0f;                                            \
+                } else if ((threadIdx.x & 31) == 31) {                        \
+                    next_a = smem_exch_a[(threadIdx.x >> 5) + 1];             \
+                    next_b = smem_exch_b[(threadIdx.x >> 5) + 1];             \
                 }                                                             \
-                float run_a = smem_post_a[gg * d_state + n];               \
-                float run_b = smem_post_b[gg * d_state + n];               \
-                __syncthreads();                                              \
                 if (threadIdx.x == 0) {                                       \
-                    float chunk_a = scan_a;                                   \
-                    float chunk_b = scan_b;                                   \
-                    smem_post_a[gg * d_state + n] = chunk_a * run_a;       \
-                    smem_post_b[gg * d_state + n] =                        \
-                        chunk_a * run_b + chunk_b;                            \
+                    smem_post_a[gg * d_state + n] = scan_a * run_a;           \
+                    smem_post_b[gg * d_state + n] =                           \
+                        scan_a * run_b + scan_b;                              \
+                }                                                             \
+                float H_vals[NITEMS];                                         \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    float comp_a = fwd_a[i] * fexcl_a;                        \
+                    float comp_b = fwd_a[i] * fexcl_b + fwd_b[i];             \
+                    float final_a = comp_a * f_run_a;                         \
+                    float final_b = comp_a * f_run_b + comp_b;                \
+                    H_vals[i] = final_a * f_h0 + final_b;                     \
+                }                                                             \
+                /* The previous timestep's replayed state comes from the      \
+                   lane above the same way. */                                \
+                if ((threadIdx.x & 31) == 31) {                               \
+                    smem_hbound[threadIdx.x >> 5] = H_vals[NITEMS - 1];       \
                 }                                                             \
                 __syncthreads();                                              \
+                float h_prev_boundary =                                       \
+                    __shfl_up_sync(warp_mask, H_vals[NITEMS - 1], 1);         \
+                if (threadIdx.x == 0) {                                       \
+                    h_prev_boundary = f_hentry;                               \
+                } else if ((threadIdx.x & 31) == 0) {                         \
+                    h_prev_boundary = smem_hbound[(threadIdx.x >> 5) - 1];    \
+                }                                                             \
                 float post_a = next_a * run_a;                                \
                 float post_b = next_a * run_b + next_b;                       \
-                float d_a_acc = 0.0f;                                         \
                 _Pragma("unroll")                                             \
                 for (int i = 0; i < NITEMS; i++) {                            \
                     int t = chunk_start + threadIdx.x * NITEMS + i;           \
@@ -1944,40 +2004,53 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                     d_delta_acc[gg][i] += dh * (a_dn * da_vals[i] * h_prev    \
                                                 + u_vals[i] * b_vals[i]);     \
                     d_u_acc[gg][i] += dh * delta_vals[i] * b_vals[i];         \
-                    d_a_acc += dh * da_vals[i] * delta_vals[i] * a_dn *       \
-                               h_prev;                                        \
+                    da_acc[gg] += dh * da_vals[i] * delta_vals[i] * a_dn *    \
+                                  h_prev;                                     \
                 }                                                             \
-                smem_da_red[threadIdx.x] = d_a_acc;                           \
-                __syncthreads();                                              \
-                for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) { \
-                    if ((int)threadIdx.x < stride) {                          \
-                        smem_da_red[threadIdx.x] +=                           \
-                            smem_da_red[threadIdx.x + stride];                \
+                /* This chunk's first decay is the earlier chunk's            \
+                   boundary; the last thread read the old value before        \
+                   the scan barrier above. */                                 \
+                if (threadIdx.x == 0) {                                       \
+                    smem_chunk_first_a[gg * d_state + n] = da_vals[0];        \
+                }                                                             \
+            }                                                                 \
+            /* d_a: one block reduction per group, the four sharing their     \
+               barriers; each keeps its own lane pairing and add order. */    \
+            _Pragma("unroll")                                                 \
+            for (int gg = 0; gg < G; gg++) {                                  \
+                smem_da_red[gg * NTHREADS + threadIdx.x] = da_acc[gg];        \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) {     \
+                if ((int)threadIdx.x < stride) {                              \
+                    _Pragma("unroll")                                         \
+                    for (int gg = 0; gg < G; gg++) {                          \
+                        smem_da_red[gg * NTHREADS + threadIdx.x] +=           \
+                            smem_da_red[gg * NTHREADS + threadIdx.x + stride]; \
                     }                                                         \
-                    __syncthreads();                                          \
                 }                                                             \
-                float da_warp = 0.0f;                                         \
-                if (threadIdx.x < 32) {                                       \
-                    da_warp = smem_da_red[threadIdx.x];                       \
+                __syncthreads();                                              \
+            }                                                                 \
+            if (threadIdx.x < 32) {                                           \
+                _Pragma("unroll")                                             \
+                for (int gg = 0; gg < G; gg++) {                              \
+                    float da_warp = smem_da_red[gg * NTHREADS + threadIdx.x]; \
                     for (int off = 16; off > 0; off >>= 1)                    \
                         da_warp += __shfl_down_sync(warp_mask, da_warp,       \
                                                     off);                     \
+                    if (threadIdx.x == 0) {                                   \
+                        /* One partial SLOT per chunk instead of a global     \
+                           read-modify-write per (chunk, lane, n): slot       \
+                           order mirrors the walk (chunk_loop ascends =       \
+                           chunks DESCEND in time), and the chunked           \
+                           reducer folds the slots in exactly this order      \
+                           before adding across the batch - the same          \
+                           left-to-right chain the accumulator produced. */   \
+                        d_a_log_local[((bid * n_chunks + chunk_loop)          \
+                                       * d_inner + did0 + gg) * d_state + n]  \
+                            = da_warp;                                        \
+                    }                                                         \
                 }                                                             \
-                if (threadIdx.x == 0) {                                       \
-                    /* One partial SLOT per chunk instead of a global      \
-                       read-modify-write per (chunk, lane, n): slot order  \
-                       mirrors the walk (chunk_loop ascends = chunks       \
-                       DESCEND in time), and the chunked reducer folds     \
-                       the slots in exactly this order before adding       \
-                       across the batch - the same left-to-right chain     \
-                       the accumulator produced. */                        \
-                    d_a_log_local[((bid * n_chunks + chunk_loop)              \
-                                   * d_inner + did) * d_state + n]            \
-                        = da_warp;                                            \
-                    smem_chunk_first_a[gg * d_state + n] =                 \
-                        smem_next_a[0];                                       \
-                }                                                             \
-                __syncthreads();                                              \
             }                                                                 \
             /* One partial row per (n, group): [b][n][group][t]. The row is   \
                t-contiguous, but the lane->t mapping is blocked - a direct  \
@@ -1985,7 +2058,6 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                the CHUNK tile and store striped: consecutive lanes then     \
                write consecutive addresses. Values unchanged.            */ \
             int row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;     \
-            __syncthreads();                                                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 stage_bc[threadIdx.x * NITEMS + i] = FROM_F(acc_B[i]);        \

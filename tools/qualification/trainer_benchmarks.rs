@@ -524,7 +524,7 @@ fn bench_scan_kernels_isolated() {
     use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
     use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::launch::{grid_parallel_scan_bwd, grid_parallel_scan_typed};
+    use mamba_rs::mamba_ssm::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd};
 
     let (b, t, di, ds) = (8usize, 1300usize, 768usize, 16usize);
     let device = GpuDevice::new(0).unwrap();
@@ -602,7 +602,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&dsi);
         bld.arg(&hs);
         bld.arg(&slim0);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2, ds)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
     };
     let fwd_tape = GpuBuffer::zeros(
         &ctx.stream,
@@ -642,7 +642,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&dsi);
         bld.arg(&tp);
         bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2, ds)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
     };
 
     for _ in 0..3 {

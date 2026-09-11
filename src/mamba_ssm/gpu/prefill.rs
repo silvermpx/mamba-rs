@@ -1184,15 +1184,8 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                unsafe {
-                    bld.launch(super::launch::grid_parallel_scan_typed(
-                        b,
-                        di,
-                        dt.size_bytes(),
-                        ds,
-                    ))
-                }
-                .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
+                unsafe { bld.launch(super::launch::grid_parallel_scan(b, di, ds)) }
+                    .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
             } else {
                 assert!(
                     ds <= k.state_cap,

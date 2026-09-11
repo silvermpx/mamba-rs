@@ -688,15 +688,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
                 bld.arg(&hs);
                 bld.arg(&slim_i);
-                unsafe {
-                    bld.launch(super::launch::grid_parallel_scan_typed(
-                        b,
-                        di,
-                        dt.size_bytes(),
-                        ds,
-                    ))
-                }
-                .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
+                unsafe { bld.launch(super::launch::grid_parallel_scan(b, di, ds)) }
+                    .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
             } else {
                 assert!(
                     ds <= k.state_cap,

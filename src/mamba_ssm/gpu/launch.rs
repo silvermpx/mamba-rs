@@ -106,13 +106,15 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
     }
 }
 
-/// Launch config for parallel prefix scan SSM kernel.
+/// Launch config for the parallel prefix scan forward kernels (f32 and
+/// typed alike: every shared-memory cell is f32).
 ///
 /// Grid: `(batch, d_inner)` — one block per (b, d) pair.
 /// Block: 128 threads (matches NTHREADS in mamba_ssm_parallel.cu).
-/// Shared memory: for block scan, running prefix, exchange, and coalesced staging.
-///   Layout (floats): 2*NWARPS + 2*MAX_DSTATE + 2*NTHREADS + CHUNK_SIZE
-///   = 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
+/// Shared memory: the two block-scan rows, the two running-prefix rows at
+/// the actual d_state, and one exchange slot per warp for the prefix
+/// hand-off; the kernels load and store directly, so there is no staging
+/// region. Layout (floats): 2*NWARPS + 2*d_state + 2*NWARPS.
 /// Parallel-scan launch geometry — MUST mirror NTHREADS/NITEMS in
 /// mamba_ssm_parallel.cu (block size, warp count, chunk length and the
 /// slim-tape chunk count all derive from these two numbers).
@@ -164,9 +166,7 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize, d_state: usize) -> Launc
          the kernel would return without writing y"
     );
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    // Runtime d_state: the kernel packs its run/exchange/stage regions at
-    // the actual d_state (address-only vs the padded MAX_DSTATE layout).
-    let smem_floats = 2 * NWARPS + 2 * d_state + 2 * SCAN_NTHREADS + SCAN_CHUNK;
+    let smem_floats = 2 * NWARPS + 2 * d_state + 2 * NWARPS;
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
@@ -203,9 +203,12 @@ pub fn grid_parallel_scan_bwd_fold(
     const NWARPS: usize = SCAN_NTHREADS / 32;
     let g = SCAN_BWD_DGROUP;
     // Slot stride is the RUNTIME d_state (the kernel guard still bounds
-    // it by its compile-time capacity): at ds=16 this returns ~11.5 KB of
-    // smem per block vs the old 256-slot stride and lifts residency.
-    let f32_floats = 4 * NWARPS + 4 * SCAN_NTHREADS + 3 * g * d_state + 3 * SCAN_NTHREADS;
+    // it by its compile-time capacity). Two warp-scan workspaces, four
+    // per-warp hand-off rows (reverse postfix, replay prefix), the
+    // per-group postfix/carry/boundary lanes, the next-decay and
+    // replayed-state hand-off rows, and one d_a reduce tile per group.
+    let f32_floats =
+        4 * NWARPS + 4 * NWARPS + 3 * g * d_state + NWARPS + g * SCAN_NTHREADS + NWARPS;
     let stage_bytes = (3 * g + 1) * SCAN_CHUNK * bytes_per_act;
     LaunchConfig {
         grid_dim: (batch as u32, (d_inner / g) as u32, 1),
@@ -231,46 +234,6 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
         shared_mem_bytes: total_bytes as u32,
-    }
-}
-
-/// Launch config for the typed (bf16/f16) M1 parallel scan forward kernel.
-///
-/// Differs from [`grid_parallel_scan`] by allocating only `CHUNK_SIZE *
-/// sizeof(T_ACT)` bytes for the smem staging area (vs 4 bytes per slot for
-/// f32). On bf16/f16 this saves 2 KB per block, taking total smem from
-/// 7200 B → 5152 B and enabling the kernel's `__launch_bounds__(128, 4)`
-/// to actually fit 4 resident blocks per SM on Ada (~10–15 % throughput
-/// lift on memory-bound configs on memory-bound configs).
-///
-/// `bytes_per_act` must be `2` for bf16/f16 or `4` for f32 (in which case
-/// this is identical to [`grid_parallel_scan`]).
-pub fn grid_parallel_scan_typed(
-    batch: usize,
-    d_inner: usize,
-    bytes_per_act: usize,
-    d_state: usize,
-) -> LaunchConfig {
-    debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
-    assert!(
-        d_inner <= 65535,
-        "grid_parallel_scan_typed: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
-    );
-    assert!(
-        d_state <= 256,
-        "grid_parallel_scan_typed: d_state {d_state} exceeds the kernel MAX_DSTATE guard - \
-         the kernel would return without writing y"
-    );
-    const NWARPS: usize = SCAN_NTHREADS / 32;
-    // Fixed f32 region (block scan, running prefix, exchange) at the
-    // actual d_state (address-only vs the padded MAX_DSTATE layout).
-    let fixed_floats = 2 * NWARPS + 2 * d_state + 2 * SCAN_NTHREADS;
-    let fixed_bytes = fixed_floats * std::mem::size_of::<f32>();
-    let stage_bytes = SCAN_CHUNK * bytes_per_act;
-    LaunchConfig {
-        grid_dim: (batch as u32, d_inner as u32, 1),
-        block_dim: (SCAN_NTHREADS as u32, 1, 1),
-        shared_mem_bytes: (fixed_bytes + stage_bytes) as u32,
     }
 }
 

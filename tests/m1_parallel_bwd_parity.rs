@@ -460,7 +460,7 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
 
 fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype, slim: bool) {
     use mamba_rs::mamba_ssm::gpu::launch::{
-        SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold, grid_parallel_scan_typed, scan_tape_len,
+        SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_tape_len,
     };
     assert_eq!(
         di % SCAN_BWD_DGROUP,
@@ -517,7 +517,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         bld.arg(&ds_i);
         bld.arg(&tp);
         bld.arg(&slim_i);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes(), ds)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
         ctx.stream.synchronize().unwrap();
     };
     // Full-tape forward FIRST and the reference h captured BEFORE the
@@ -775,11 +775,8 @@ fn diag_fold_slim_vs_full_positions() {
             bld.arg(&tp);
             bld.arg(&sl);
             unsafe {
-                bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_typed(
-                    b,
-                    di,
-                    dtype.size_bytes(),
-                    ds,
+                bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan(
+                    b, di, ds,
                 ))
             }
             .unwrap();

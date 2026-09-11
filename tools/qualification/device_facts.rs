@@ -16,7 +16,9 @@ use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::launch::{grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold};
+use mamba_rs::mamba_ssm::gpu::launch::{
+    grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
+};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
 #[test]
@@ -37,24 +39,64 @@ fn device_and_kernel_facts() {
         dev_attr(DevAttr::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE),
     );
 
-    let (b, di) = (8usize, 768usize);
+    let (b, di, ds) = (8usize, 768usize, 16usize);
     let dtype = WeightDtype::Bf16;
     let m3k = Mamba3Kernels::compile(ctx.stream.context(), arch::arch0()).unwrap();
 
-    let fold_cfg = grid_parallel_scan_bwd_fold(b, di, 16, dtype.size_bytes());
+    let fold_cfg = grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes());
+    let fold_f32_cfg = grid_parallel_scan_bwd_fold(b, di, ds, 4);
     let plain_cfg = grid_parallel_scan_bwd(b, di);
-    let facts: [(&str, &cudarc::driver::CudaFunction, u32, usize); 4] = [
+    let fwd_cfg = grid_parallel_scan(b, di, ds);
+    // The chunked Mamba-3 backward at the production head shape, the
+    // pair-matrix tier: the same tile arithmetic as the launcher.
+    let (cs, hd) = (64usize, 16usize);
+    let dqkv_floats = 2 * cs * (ds + 1)
+        + 2 * cs * (hd + 1)
+        + 4 * cs
+        + 2 * hd * ds
+        + cs * (cs - 1) * 3 / 2
+        + 2 * cs;
+    let dqkv_block = (hd * 16.min(1024 / hd)) as u32;
+    let block_of =
+        |cfg: &cudarc::driver::LaunchConfig| cfg.block_dim.0 * cfg.block_dim.1 * cfg.block_dim.2;
+    let facts: Vec<(&str, &cudarc::driver::CudaFunction, u32, usize)> = vec![
         (
             "ssm_parallel_bwd_fold_bf16 (production)",
             ctx.kernels.ssm_parallel_bwd_fold_typed.get(dtype),
-            fold_cfg.block_dim.0 * fold_cfg.block_dim.1 * fold_cfg.block_dim.2,
+            block_of(&fold_cfg),
             fold_cfg.shared_mem_bytes as usize,
+        ),
+        (
+            "ssm_parallel_bwd_fold_f32 (f32 training)",
+            ctx.kernels
+                .ssm_parallel_bwd_fold_typed
+                .get(WeightDtype::F32),
+            block_of(&fold_f32_cfg),
+            fold_f32_cfg.shared_mem_bytes as usize,
         ),
         (
             "ssm_parallel_bwd_bf16 (legacy route)",
             ctx.kernels.ssm_parallel_bwd_typed.get(dtype),
-            plain_cfg.block_dim.0 * plain_cfg.block_dim.1 * plain_cfg.block_dim.2,
+            block_of(&plain_cfg),
             plain_cfg.shared_mem_bytes as usize,
+        ),
+        (
+            "ssm_parallel_scan_fwd (f32 training)",
+            &ctx.kernels.ssm_parallel_fwd,
+            block_of(&fwd_cfg),
+            fwd_cfg.shared_mem_bytes as usize,
+        ),
+        (
+            "ssm_parallel_scan_fwd_bf16 (production)",
+            ctx.kernels.ssm_parallel_fwd_typed.get(dtype),
+            block_of(&fwd_cfg),
+            fwd_cfg.shared_mem_bytes as usize,
+        ),
+        (
+            "ssm_parallel_scan_fwd_nosave_bf16 (prefill, target)",
+            ctx.kernels.ssm_parallel_fwd_nosave_typed.get(dtype),
+            block_of(&fwd_cfg),
+            fwd_cfg.shared_mem_bytes as usize,
         ),
         (
             "ssm_reduce_d_BC_tmajor_bf16",
@@ -67,6 +109,13 @@ fn device_and_kernel_facts() {
             m3k.m3_chunk_scan_fwd_typed.get(dtype),
             256,
             0,
+        ),
+        ("m3_dqkv (f32)", &m3k.m3_dqkv, dqkv_block, dqkv_floats * 4),
+        (
+            "m3_dqkv_bf16 (production)",
+            m3k.m3_dqkv_typed.get(dtype),
+            dqkv_block,
+            dqkv_floats * 4,
         ),
     ];
     for (name, f, block, smem) in facts {

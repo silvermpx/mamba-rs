@@ -23,7 +23,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::launch::{
-    SCAN_BWD_DGROUP, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold, grid_parallel_scan_typed,
+    SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
     scan_tape_len,
 };
 
@@ -119,7 +119,7 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&dsi);
         bld.arg(&tape_ptr);
         bld.arg(&slim);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes(), ds)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
     {
