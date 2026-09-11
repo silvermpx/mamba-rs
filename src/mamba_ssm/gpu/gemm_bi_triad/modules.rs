@@ -14409,33 +14409,38 @@ mod tests {
             (
                 "base",
                 compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
-                615_645,
-                "fab86c118b49e88eaa566ef1c4322d039641fa11fbfa3c2dde402470b97b1d11",
+                588_547,
+                "e655aaa1d5be584115692fb1db26e6b2f694965d251b50b835e9e93aea28ec69",
             ),
             (
                 "sm_89",
                 compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
-                723_257,
-                "8ab4752c6f4b766486db09d22ddfc99df93dc1eb0507177f7edf92cc731233f4",
+                696_159,
+                "d402b603ad4d1b823cf9c3d632ba522303df73de4169129285b3885870fddbbd",
             ),
             (
                 "compute_120",
                 compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap(),
-                719_063,
-                "8a9a5186c2a7763fab0027ab03417f6189730eac103e57d4863becd4a8a90a71",
+                691_965,
+                "0a11f23b3a45387b97a88be77db64190a8c7fb6cca2102b121a63506807b2049",
             ),
         ];
 
+        let mut moved = Vec::new();
         for (name, source, expected_len, expected_sha256) in cases {
-            assert_eq!(source.len(), expected_len, "{name} composed source length");
-            assert_eq!(
-                crate::mamba_ssm::gpu::kernel_identity::digest_hex(&super::FramedSha256::bytes(
-                    source.as_bytes()
-                )),
-                expected_sha256,
-                "{name} composed source SHA-256"
+            let sha256 = crate::mamba_ssm::gpu::kernel_identity::digest_hex(
+                &super::FramedSha256::bytes(source.as_bytes()),
             );
+            if source.len() != expected_len || sha256 != expected_sha256 {
+                moved.push(format!("{name}: length {} sha256 {sha256}", source.len()));
+            }
         }
+        assert!(
+            moved.is_empty(),
+            "the Fixed composed source moved; refreeze every target from the live values \
+             (and requalify the cohorts that pin it):\n{}",
+            moved.join("\n")
+        );
     }
 
     #[test]

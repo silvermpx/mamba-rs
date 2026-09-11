@@ -10541,16 +10541,27 @@ mod tc_policy_tests {
                 "{dims:?}"
             );
         }
-        // The measured losers keep the tiled pick under both policies: more
-        // than a wave and an eighth of tiles (prism_in_proj 186 tiles, 1.12;
-        // large 576 tiles, 1.23; a filled 32 x 24 grid), or too few slabs
-        // per CTA (d128_out_proj 8 tiles x 16 slabs, 1.34; d128_in_proj
-        // 16 x 16, 1.22; underfill 48 x 4, 1.56; split_candidate 4 x 128,
-        // 1.65; a shallow 512-row batch).
+        // Grids of more than a wave of tiles used to stay tiled; with the
+        // persistent grid bounded by the resident CTA count the depth rule
+        // alone decides, and these three (prism_in_proj 186 tiles x 73
+        // slabs, large 576 x 32, a filled 32 x 24 grid) are deep enough.
+        for dims in [(4621, 384, 1928), (2048, 3072, 768), (10400, 2048, 1536)] {
+            assert_eq!(
+                pick(dims, stream_k, (8, 9)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+            assert_ne!(
+                pick(dims, tiled, (8, 9)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+        }
+        // Too few (tile, slab) units to give every multiprocessor a deep
+        // reduction keep the tiled pick under both policies: d128_out_proj
+        // 8 tiles x 16 slabs, d128_in_proj 16 x 16, underfill 48 x 4,
+        // split_candidate 256 x 2, a shallow 512-row batch.
         for dims in [
-            (4621, 384, 1928),
-            (2048, 3072, 768),
-            (10400, 2048, 1536),
             (1024, 256, 128),
             (1024, 128, 512),
             (256, 512, 384),
@@ -10689,23 +10700,23 @@ mod tc_policy_tests {
         for (multiprocessor_count, expected) in [
             (
                 48,
-                "43f85c45907dc58d8523ade791ab18a2f6c5bce66d138c711566082c08ab552d",
+                "8ffb9f41f6b4df65840cc56b04d9075d5dc90023bf669af69ed36767f8cd78ae",
             ),
             (
                 80,
-                "1d325d5d0d620fbe52895506fcdfc1ea578d0ed4cae87724aea71e16b6a6cf65",
+                "716558ebb2cc88e4c6e478b2dfddba5f183fe16ed58bcfd5fa46b4e147424746",
             ),
             (
                 108,
-                "f88caa7b24c9aefc5f1b545789901257b5b54fa8ab11f62297843fa83bb7ce05",
+                "62fd8115a3fed77d4a5fb1e958cc1c1f8bfeedc41fd9e86d624bf7f1c438a28f",
             ),
             (
                 120,
-                "b1257cb5790e53811adb3ccd7f35be46e7a40bc33fa996a6487290a33e3813aa",
+                "27df93074ce978142c01210058242d9a1b715302f722f656d6b0b6fde370e569",
             ),
             (
                 142,
-                "b9456bad001b11b2b9dcb88f4322f8a8cdb078e2b2dcec66e779001bf3623775",
+                "05849a39ab8eaafd08f55ee27e72c18b3bb9bc4aa009818be5ba6ae872093012",
             ),
         ] {
             let actual = digest_hex(&gemm_dispatch_policy_digest(multiprocessor_count));

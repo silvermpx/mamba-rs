@@ -2486,7 +2486,7 @@ mod tests {
                         family,
                         tensor_cores: true,
                         f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-                        half_policy: HalfTriadPolicy::TiledParityV1,
+                        half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
                     }
                 );
             }
@@ -2607,7 +2607,10 @@ mod tests {
         assert!(resolved.tensor_cores);
         assert_eq!(resolved.family, BiGemmFamily::Inference);
         assert_eq!(resolved.f32_policy, F32TriadPolicy::ExactScalarFmaV1);
-        assert_eq!(resolved.half_policy, HalfTriadPolicy::TiledParityV1);
+        assert_eq!(
+            resolved.half_policy,
+            HalfTriadPolicy::AllowStreamKFixedOrderV1
+        );
 
         let mut values = empty_gemm_env();
         values.tensor_cores = Ok("false".into());
