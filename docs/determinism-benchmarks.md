@@ -240,27 +240,28 @@ comparison.
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
-| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.64 | 1.15× | 2.28 | 2.35 |
-| d128, 2 layers, B=16, T=64 | bf16, tensor cores | 2.35 | 1.96 | 1.20× | 1.87 | 2.36 |
-| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.38 | 1.99 | 1.20× | 1.89 | 1.98 |
-| d256, 4 layers, B=16, T=128 | f32 | 12.45 | 11.46 | 1.09× | 9.25 | 9.85 |
-| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.54 | 7.75 | 1.23× | 7.31 | 9.63 |
-| d256, 4 layers, B=16, T=128 | f16, tensor cores | 9.68 | 7.86 | 1.23× | 7.40 | 8.03 |
-| d768, 4 layers, B=8, T=256 | f32 | 34.64 | 31.35 | 1.10× | 23.67 | 27.33 |
-| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.09 | 18.84 | 1.17× | 18.66 | 25.22 |
-| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.29 | 19.04 | 1.17× | 18.83 | 22.90 |
-| d1536, 2 layers, B=4, T=256 | f32 | 24.34 | 22.32 | 1.09× | 14.29 | 18.12 |
-| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.04 | 12.06 | 1.08× | 11.49 | 17.11 |
-| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.38 | 12.35 | 1.08× | 11.80 | 15.46 |
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.23× | 2.12 | 2.19 |
+| d128, 2 layers, B=16, T=64 | bf16, tensor cores | 2.35 | 1.94 | 1.21× | 1.85 | 2.35 |
+| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.39 | 2.00 | 1.19× | 1.90 | 1.99 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.46 | 10.99 | 1.13× | 8.85 | 9.38 |
+| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.55 | 7.63 | 1.25× | 7.18 | 9.39 |
+| d256, 4 layers, B=16, T=128 | f16, tensor cores | 9.71 | 7.76 | 1.25× | 7.29 | 7.89 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.84 | 24.56 | 1.42× | 16.89 | 20.52 |
+| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.19 | 13.60 | 1.63× | 13.37 | 19.94 |
+| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.32 | 13.85 | 1.61× | 13.64 | 17.72 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.33 | 19.12 | 1.27× | 11.27 | 15.02 |
+| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.06 | 9.52 | 1.37× | 8.96 | 14.58 |
+| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.39 | 9.93 | 1.35× | 9.32 | 12.95 |
 
-The whole-step gain is the GEMM kernels and the Mamba kernel pass of this
-release together (the changelog's Performance section separates the two).
-Two settings that are new in 0.7.0 and off by default: with
-`MAMBA_RS_BI_F32_POLICY=tf32` the d768 f32 step drops from 31.4 to 26.2 ms
-(the only shape of the four with a measured deterministic TF32 kernel; the
-others keep the exact kernels and the same time), and the stream-K half
-policy does not change any of these four steps because their
-weight-gradient shapes are not among its measured cells.
+The whole-step gain is the GEMM kernels, the Mamba kernel pass and the
+two route changes of this release together: the stream-K weight gradient
+on every deep reduction, on by default in the tensor-core tier, and the
+parallel scan route from 65 steps on (the changelog's Performance section
+has the parts). The cuBLAS arms moved with them, since they share every
+kernel but the products. One setting stays off by default: with
+`MAMBA_RS_BI_F32_POLICY=tf32` the d768 f32 step takes the deterministic
+TF32 kernels (the only shape of the four with a measured one; the others
+keep the exact kernels and the same time).
 
 ### Inference step
 

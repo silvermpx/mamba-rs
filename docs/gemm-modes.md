@@ -90,7 +90,7 @@ The plain constructors read these variables once, at construction. The
 | `MAMBA_RS_BI_GEMM_FAMILY` | `triad`, `inference` | the family of the context's role (see [Two kernel families](#two-kernel-families)); an empty value means `triad` |
 | `MAMBA_RS_BI_TENSOR_CORES` | `1`, `true`, `yes`, `on` or `0`, `false`, `no`, `off` | on; an empty value means off |
 | `MAMBA_RS_BI_F32_POLICY` | `exact`, `tf32` | `exact` |
-| `MAMBA_RS_BI_HALF_POLICY` | `tiled`, `streamk` | `tiled` |
+| `MAMBA_RS_BI_HALF_POLICY` | `tiled`, `streamk` | `streamk` with tensor cores on, `tiled` with them off |
 | `MAMBA_RS_ARCH_RUNG` | `off` | on |
 
 The four `MAMBA_RS_BI_*` variables describe settings inside the
@@ -142,7 +142,7 @@ captured with one family refuses to replay with the other.
 |---|---|---|
 | tensor cores (`set_bi_tensor_cores`, `MAMBA_RS_BI_TENSOR_CORES`) | on (default), off | permission to run bf16 and f16 products on the tensor-core kernels. Off keeps every product on the scalar kernels, which are slower. The tensor-core kernels are their own bit family: repeated launches of one kernel are bit-identical, but they do not reproduce the scalar kernels' bits. |
 | f32 policy (`set_f32_triad_policy`, `MAMBA_RS_BI_F32_POLICY`) | `exact` (default), `tf32` | `exact` multiplies f32 inputs with one fused multiply-add per step in ascending K order. `tf32` permits the deterministic TF32 kernels on the shapes and boards where they were measured, and stays exact everywhere else. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order; it is not the vendor's Fast TF32. |
-| half policy (`set_half_triad_policy`, `MAMBA_RS_BI_HALF_POLICY`) | `tiled` (default), `streamk` | `tiled` reproduces the portable tensor-core kernels bit for bit. `streamk` permits the measured stream-K kernels for the weight gradient, which fold per-block partial sums in a fixed order and are a separate bit family. Requires tensor cores. |
+| half policy (`set_half_triad_policy`, `MAMBA_RS_BI_HALF_POLICY`) | `streamk` (default with tensor cores), `tiled` | `streamk` takes the stream-K kernel for a weight gradient whenever the reduction is deep enough for its persistent grid to pay (32 or more 64-row slabs per multiprocessor); it folds per-block partial sums in a fixed order and is a separate bit family. `tiled` reproduces the portable tensor-core kernels bit for bit. `streamk` requires tensor cores. |
 
 ## What is guaranteed
 

@@ -403,6 +403,20 @@ Select their actual supported cases and prerequisites before executing them.
     the scalar loads back into the rewritten fold changes nothing in bf16
     (1.677 against 1.684 ms) and costs 2.5 % in f32; the rewrite keeps the
     vector loads.
+  - [x] Committed `2668453d`, `84486283` (gate-pass10 45/45; sixth ledger 158
+    same and 3 moved against `cce73716`, the moved three being the
+    training-run weight digests of `parallel_run_determinism`, which is the
+    route change below and the reason). On the owner's word that 0.7.0
+    need not reproduce 0.6.9's bits: the stream-K weight gradient on every
+    reduction of 2048 rows or more is the tensor-core tier's default (grid
+    bounded by the resident CTA count read at load, policy `Sm80TcPolicyV4`
+    without the wave cap; tiled to stream-K on Ada: classifier page
+    in_proj 79.9 to 65.5 us, out_proj 63.8 to 36.9, production in_proj 162
+    to 98, input_proj 135 to 48, out_proj 135 to 62); and the automatic
+    scan threshold moved from 256 to 64 (sequential to parallel, whole
+    step: d768 B8 T256 bf16 18.8 to 13.6 ms, f32 30.6 to 24.6; d1536 B4
+    T256 bf16 12.2 to 9.6; d256 T128 equal; d128 T64 stays sequential).
+    The 0.6.9 and before/after tables are being re-measured on `84486283`.
   - [x] Paired measurement `cce73716` against `6bcd2fd5` on Ada
     (`scratchpad/ab-pass1`, parsers `setA/B/CD/EF.py`): Mamba-1 decode f32
     5-14 % faster (bf16 unchanged, its decode was already fused), Mamba-1
@@ -441,7 +455,20 @@ Select their actual supported cases and prerequisites before executing them.
     half cell already; the exact-f32 chain still has the split-K reducer
     as a second launch (the TF32 lane fuses it, an in-tree model); the
     two driver capability queries per half dW/dX call are gone
-    (`am-half-backward-capability`).
+    (`am-half-backward-capability`). Screened on Ada on 2026-09-11 with
+    the owner's leave to move bits, and only one survived: the stream-K
+    weight gradient on every deep reduction (its grid bounded by the
+    resident CTA count instead of one per SM: tiled to stream-K, the
+    classifier page in_proj 79.9 to 65.5 us, its out_proj 63.8 to 36.9, the
+    production in_proj 162 to 98, input_proj 135 to 48, out_proj 135 to 62,
+    d768 out_proj 66.6 to 44.5; the d128 and thin shapes lose and stay
+    tiled), now the tensor-core tier's default. Lost on the same board
+    and taken back out: the TF32 TN d128 cells on the fused split-K8
+    M32N32 kernel (19 to 35 and 27 us), the TF32 TN d768 in_proj on
+    `Sm89TnPreRnaM64N96S2V1` (175 to 308 us), the copyplan row for the deep
+    exact-f32 forward (the qualification gate keeps the cell on
+    `gemm_bi_nn`), and the inference pair-store guard (unmeasured; the
+    inference performance harness needs its bindings).
   - [ ] Owner decisions, each a new numeric route: pin the scan's FMA
     contraction (`__fmaf_rn`) so bit identity no longer rests on the
     compiler default; the d-group fold of dB/dC on the sequential route;

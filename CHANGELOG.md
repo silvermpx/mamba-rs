@@ -2,16 +2,22 @@
 
 ## 0.7.0 (2026-09-10)
 
-A performance release. The deterministic GEMM kernels that mamba-rs uses
-for training and for serving were rewritten, and they are now the default:
-every GPU context multiplies with the crate's own kernels unless you ask for
-cuBLAS by name. The new kernels were measured on an RTX 6000 Ada and an
-RTX 5090 against cuBLAS in both of its precision settings and against the
-kernels 0.6.9 shipped; the numbers are summarised below and given in full,
+**A big performance release.** The deterministic GEMM kernels that
+mamba-rs uses for training and for serving were rewritten, and they are
+now the default: every GPU context multiplies with the crate's own
+kernels unless you ask for cuBLAS by name. Every Mamba kernel around them
+(the scans, the convolution, the norms, the reductions, the decode steps)
+then went through a pass of its own, and two routes moved to their faster
+family. On an RTX 6000 Ada a training step of the release shapes is 1.13
+to 1.63 times faster than 0.6.9, the Mamba-3 production step 1.47 times
+faster than the tree before the Mamba pass, and the decode steps 1.1 to
+1.3 times faster; the numbers are summarised below and given in full,
 kernel by kernel, in [docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
 Model weights, checkpoints and the CPU paths are unchanged. GPU results
-change bit for bit compared with 0.6.9 because a different kernel now
-computes them; `GemmMode::CublasPedantic` reproduces the 0.6.9 numbers.
+change bit for bit compared with 0.6.9 because different kernels and, on
+short sequences, a different scan route now compute them;
+`GemmMode::CublasPedantic` together with `ScanMode::Sequential` reproduces
+the 0.6.9 numbers.
 
 ### Highlights
 
@@ -114,24 +120,24 @@ median of four alternating runs, milliseconds per step):
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
-| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.64 | 1.15× | 2.28 | 2.35 |
-| d128, 2 layers, B=16, T=64 | bf16 (tensor cores) | 2.35 | 1.96 | 1.20× | 1.87 | 2.36 |
-| d256, 4 layers, B=16, T=128 | f32 | 12.45 | 11.46 | 1.09× | 9.25 | 9.85 |
-| d256, 4 layers, B=16, T=128 | bf16 (tensor cores) | 9.54 | 7.75 | 1.23× | 7.31 | 9.63 |
-| d768, 4 layers, B=8, T=256 | f32 | 34.64 | 31.35 | 1.10× | 23.67 | 27.33 |
-| d768, 4 layers, B=8, T=256 | bf16 (tensor cores) | 22.09 | 18.84 | 1.17× | 18.66 | 25.22 |
-| d1536, 2 layers, B=4, T=256 | f32 | 24.34 | 22.32 | 1.09× | 14.29 | 18.12 |
-| d1536, 2 layers, B=4, T=256 | bf16 (tensor cores) | 13.04 | 12.06 | 1.08× | 11.49 | 17.11 |
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.47 | 1.23× | 2.12 | 2.19 |
+| d128, 2 layers, B=16, T=64 | bf16 (tensor cores) | 2.35 | 1.94 | 1.21× | 1.85 | 2.35 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.46 | 10.99 | 1.13× | 8.85 | 9.38 |
+| d256, 4 layers, B=16, T=128 | bf16 (tensor cores) | 9.55 | 7.63 | 1.25× | 7.18 | 9.39 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.84 | 24.56 | 1.42× | 16.89 | 20.52 |
+| d768, 4 layers, B=8, T=256 | bf16 (tensor cores) | 22.19 | 13.60 | 1.63× | 13.37 | 19.94 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.33 | 19.12 | 1.27× | 11.27 | 15.02 |
+| d1536, 2 layers, B=4, T=256 | bf16 (tensor cores) | 13.06 | 9.52 | 1.37× | 8.96 | 14.58 |
 
-The whole-step gain, 8 to 23 percent, is the GEMM kernels and the Mamba
-kernel pass together (the second table below separates the two). The
-deterministic bf16 training step is now within 1 percent of cuBLAS Fast
-on the d768 model and faster than cuBLAS Pedantic everywhere; f16 behaves
-like bf16. Opting the f32 step into deterministic TF32
-(`MAMBA_RS_BI_F32_POLICY=tf32`) brings the d768 model from 31.4 ms to
-26.2 ms per step, within 11 percent of cuBLAS Fast; on the other three
-shapes no measured TF32 kernel exists yet and the exact kernels serve, so
-the time does not change.
+The whole-step gain, 1.13 to 1.63×, is the GEMM kernels, the Mamba kernel
+pass and the two route changes below together (the second table below
+separates the pass). The cuBLAS columns moved too, since those arms share
+every kernel but the products. The deterministic bf16 training step is
+now within 2 percent of cuBLAS Fast on the d768 model and 1.5 times faster
+than cuBLAS Pedantic there; f16 behaves like bf16. Opting the f32 step
+into deterministic TF32 (`MAMBA_RS_BI_F32_POLICY=tf32`) keeps its gain on
+the d768 model; on the other three shapes no measured TF32 kernel exists
+yet and the exact kernels serve, so the time does not change.
 
 **The Mamba kernels** (everything around the GEMMs) went through their own
 pass after the GEMM work, at the production classifier shape (d384, 24
@@ -155,6 +161,24 @@ The Mamba-1 f32 decode step runs on the same seven fused kernels per
 layer as the half-precision step, and the Mamba-3 decode step on nine
 kernels per layer instead of eleven.
 
+**Two routes moved to the faster family** on the owner's word that the
+new release need not reproduce 0.6.9's bits on the GPU. The half-precision
+weight gradient takes the stream-K kernel on every reduction of 2048 rows
+or more, with its persistent grid bounded by the CTAs the board keeps
+resident (two per SM) instead of one per SM: tiled to stream-K on Ada, the
+classifier page in_proj 79.9 → 65.5 µs and its out_proj 63.8 → 36.9, the
+production training in_proj (10400 rows) 162 → 98, input_proj 135 → 48
+and out_proj 135 → 62, the d768 out_proj 66.6 → 44.5; the d128 and thin
+shapes, where a CTA would hold one or two units, lose and stay tiled. And
+a Mamba-1 sequence of 65 to 256 steps trains on the parallel scan route:
+the automatic threshold sat at 256 from before the parallel backward
+existed, and every release shape of the training tables was on the
+sequential kernel. Sequential against parallel, whole step with graph
+replay: d768 B8 T256 18.8 → 13.6 ms in bf16 and 30.6 → 24.6 in f32, d1536
+B4 T256 12.2 → 9.6 ms, d256 B16 T128 the same, d128 B16 T64 stays
+sequential (1.89 against 2.04). Both routes are bit-identical run to run;
+`tiled` and `ScanMode::Sequential` restore the previous families.
+
 **Whole steps, 0.7.0 before and after the Mamba kernel pass** (RTX 6000
 Ada, CUDA 13.2, the same programs, mirrored runs of separate processes,
 median of four; the before tree is the one the tables above were taken
@@ -162,29 +186,37 @@ on):
 
 | model, shape, path | before | after | speedup |
 |---|---:|---:|---:|
-| Mamba-1 training, d384 24 layers B8 T1300, bf16 tensor cores, graph | 118.1 ms | 115.0 ms | 1.03× |
-| Mamba-1 training, d384 24 layers B8 T1300, f32, graph | 227.4 ms | 204.7 ms | 1.11× |
-| Mamba-1 training, d768 4 layers B8 T256, bf16 tensor cores, graph | 20.35 ms | 18.81 ms | 1.08× |
-| Mamba-1 training, d768 4 layers B8 T256, f32, graph | 32.27 ms | 31.44 ms | 1.03× |
-| Mamba-1 training, d1536 2 layers B4 T256, bf16 tensor cores, graph | 13.02 ms | 12.15 ms | 1.07× |
-| Mamba-1 training, d128 2 layers B16 T64, bf16 tensor cores, graph | 2.11 ms | 1.96 ms | 1.08× |
-| Mamba-3 training, d384 24 layers B8 T1300, bf16, graph | 231.1 ms | 157.0 ms | 1.47× |
-| Mamba-3 training, d384 24 layers B8 T1300, f32, graph | 262.0 ms | 184.7 ms | 1.42× |
-| Mamba-3 training, d384 24 layers B1 T256, bf16, graph | 17.24 ms | 14.68 ms | 1.17× |
-| Mamba-3 prefill, T4621 24 layers d384, f32 | 19.09 ms | 19.07 ms | 1.00× |
-| Mamba-1 decode, d128 3 layers, f32 exact, Triad family, batch 1, graph | 103.9 µs | 79.0 µs | 1.31× |
-| Mamba-1 decode, d128 3 layers, Inference family, batch 1, graph | f32 196.8 / bf16 97.0 µs | 170.7 / 83.3 µs | 1.15× / 1.16× |
+| Mamba-1 training, d384 24 layers B8 T1300, bf16 tensor cores, graph | 117.98 ms | 112.25 ms | 1.05× |
+| Mamba-1 training, d384 24 layers B8 T1300, f32, graph | 227.42 ms | 204.70 ms | 1.11× |
+| Mamba-1 training, d768 4 layers B8 T256, bf16 tensor cores, graph | 20.49 ms | 13.53 ms | 1.51× |
+| Mamba-1 training, d768 4 layers B8 T256, f32, graph | 32.24 ms | 24.50 ms | 1.32× |
+| Mamba-1 training, d1536 2 layers B4 T256, bf16 tensor cores, graph | 12.92 ms | 9.48 ms | 1.36× |
+| Mamba-1 training, d1536 2 layers B4 T256, f32, graph | 22.68 ms | 19.15 ms | 1.18× |
+| Mamba-1 training, d256 4 layers B16 T128, bf16 tensor cores, graph | 8.55 ms | 7.63 ms | 1.12× |
+| Mamba-1 training, d256 4 layers B16 T128, f32, graph | 12.09 ms | 11.02 ms | 1.10× |
+| Mamba-1 training, d128 2 layers B16 T64, bf16 tensor cores, graph | 2.11 ms | 1.93 ms | 1.09× |
+| Mamba-1 training, d128 2 layers B16 T64, f32, graph | 2.80 ms | 2.47 ms | 1.13× |
+| Mamba-3 training, d384 24 layers B1 T256, bf16, graph | 17.23 ms | 14.66 ms | 1.18× |
+| Mamba-3 training, d384 24 layers B1 T256, f32, graph | 18.31 ms | 15.66 ms | 1.17× |
+| Mamba-3 training, d384 24 layers B8 T1300, bf16, graph | 231.15 ms | 145.48 ms | 1.59× |
+| Mamba-3 training, d384 24 layers B8 T1300, f32, graph | 262.14 ms | 184.88 ms | 1.42× |
+| Mamba-3 prefill, T4621 24 layers d384, f32 | 19.13 ms | 19.09 ms | 1.00× |
+| Mamba-1 decode, d128 3 layers, f32 exact, Triad family, batch 1, graph | 103.81 µs | 78.86 µs | 1.32× |
+| Mamba-1 decode, d128 3 layers, Inference family f32, batch 1, graph | 196.95 µs | 170.81 µs | 1.15× |
+| Mamba-1 decode, d128 3 layers, Inference family bf16, batch 1, graph | 96.68 µs | 83.51 µs | 1.16× |
 | Mamba-1 training forward, d128 3 layers, B1 T32, eager | 786 µs | 682 µs | 1.15× |
-| Mamba-3 decode, d128 4 layers, batch 1, graph | 170.0 µs | 160.9 µs | 1.06× |
+| Mamba-3 decode, d128 4 layers, batch 1, graph | 169.8 µs | 160.6 µs | 1.06× |
 
 The Mamba-3 training step gains the most: its chunked backward's pair
-kernel was a third of the step and the column sums a seventh. The Mamba-1
-bf16 production step gains three percent end to end: the first batch of
-the pass had cost its fold backward a fifth (1.75 to 2.08 ms per launch,
-the vector row loads), and the register rewrite took it to 1.68; the f32
-step gains eleven percent. The per-kernel rows above take their before
-column from the tree the ledger was recorded on, marked where that is the
-mid-pass tree.
+kernel was a third of the step, the column sums a seventh, and its weight
+gradients now run on the stream-K kernel. The Mamba-1 bf16 production
+step gains five percent end to end: the first batch of the pass had cost
+its fold backward a fifth (1.75 to 2.08 ms per launch, the vector row
+loads), the register rewrite took it to 1.68, and the stream-K weight
+gradient took the rest; the f32 step gains eleven percent. The release
+shapes at T=256 gain a third to a half from the parallel scan route. The
+per-kernel rows above take their before column from the tree the ledger
+was recorded on, marked where that is the mid-pass tree.
 
 **Whole inference step, 0.6.9 against 0.7.0** (RTX 6000 Ada, the
 `MambaConfig::default()` model with d_model 128 and 3 layers, one decode
@@ -226,9 +258,11 @@ step; the full tables are in
 - Two policies inside the deterministic mode, both new: `F32TriadPolicy`
   (`exact`, the default, or `tf32`, which permits the measured deterministic
   TF32 kernels and stays exact elsewhere) through `set_f32_triad_policy` and
-  `MAMBA_RS_BI_F32_POLICY`, and `HalfTriadPolicy` (`tiled`, the default, or
-  `streamk`, which permits the measured stream-K weight-gradient kernels)
-  through `set_half_triad_policy` and `MAMBA_RS_BI_HALF_POLICY`.
+  `MAMBA_RS_BI_F32_POLICY`, and `HalfTriadPolicy` (`streamk`, the default
+  with tensor cores on, which takes the stream-K weight-gradient kernel on
+  every reduction deep enough to pay for it, or `tiled`, which reproduces
+  the portable tensor-core kernels bit for bit) through
+  `set_half_triad_policy` and `MAMBA_RS_BI_HALF_POLICY`.
 - `GpuCtx::gemm_route` returns the complete numeric route: mode, family,
   policies, the selected kernels, and the compiler, artifact and device
   identity. Captured graphs record it and every replay checks it; a mode,
@@ -244,6 +278,13 @@ step; the full tables are in
   GPU outputs differ bit for bit from 0.6.9. Construct with
   `GemmMode::CublasPedantic` to get the 0.6.9 numbers, or
   `GemmMode::CublasFast` for the fastest vendor path.
+- Two routes inside the deterministic mode changed their numeric family
+  where they were faster: the half-precision weight gradient takes the
+  stream-K kernel on every reduction of 2048 rows or more (its fixed-order
+  fold groups the sum differently from the tiled kernel; `tiled` restores
+  the old bits), and a Mamba-1 sequence of 65 to 256 steps trains on the
+  parallel scan route instead of the sequential kernel (`ScanMode::
+  Sequential` restores it). Both stay bit-identical run to run.
 - `BiGemmFamily::Fixed` is `BiGemmFamily::Inference`, the module
   `gemm_bi_fixed` is `gemm_bi_inference`, and `MAMBA_RS_BI_GEMM_FAMILY`
   accepts `triad` and `inference` only; `fixed` is rejected. Frozen kernel

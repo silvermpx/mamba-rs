@@ -60,16 +60,17 @@ fold partials, backward GEMMs 15.4 (dt_proj 3.5), conv dw 2.6 / dx
 
 Same shape as above (d_model 384, 24 layers, B=8, T=1300, graph replay),
 one board, the deterministic GEMMs of 0.7.0 in both columns; the pass
-touched only the kernels around them and kept every output bit-identical
-to the previous release (the digest suites of the decode step, the scan
-forward and backward, the convolution and whole training runs were
-recorded on both trees and match). Milliseconds per step, median of four
-mirrored runs:
+touched the kernels around them, then moved the weight gradient to the
+stream-K kernel. The digest suites of the decode step, the scan forward
+and backward, the convolution and the whole training runs were recorded
+on both trees: all match but the weight digests of the training run,
+which the stream-K fold groups differently. Milliseconds per step, median
+of four mirrored runs:
 
 | tree | bf16 (tensor cores) | f32 |
 |------|--------------------:|----:|
-| 0.7.0 before the pass | 118.1 | 227.4 |
-| 0.7.0 | 115.0 | 204.7 |
+| 0.7.0 before the pass | 118.0 | 227.4 |
+| 0.7.0 | 112.3 | 204.7 |
 
 Per kernel, per launch, at this shape: the fold backward 2.06 to 1.68 ms
 (bf16) and 3.76 to 2.79 ms (f32), the conv backward 286 to 245 µs (one

@@ -27,16 +27,17 @@ gradient digests and every parity suite match.
 ## Training step — production shape, the 0.7.0 kernel pass (RTX 6000 Ada, CUDA 13.2)
 
 Same shape (d_model 384, 24 layers, B=8, T=1300), one board, the
-deterministic GEMMs of 0.7.0 in both columns; the pass kept every output
-bit-identical to the previous release under the digest suites (the
+deterministic GEMMs of 0.7.0 in both columns; the pass kept every kernel
+output bit-identical to the previous release under the digest suites (the
 chunked backward's pair kernel, the decode step, the prefill and whole
-training runs, recorded on both trees). Milliseconds per step, median of
+training runs, recorded on both trees), and the bf16 step then moved its
+weight gradients to the stream-K kernel. Milliseconds per step, median of
 four mirrored runs:
 
 | tree | f32 | bf16 |
 |------|----:|-----:|
-| 0.7.0 before the pass | 262.0 | 231.1 |
-| 0.7.0 | 184.7 | 157.0 |
+| 0.7.0 before the pass | 262.1 | 231.2 |
+| 0.7.0 | 184.9 | 145.5 |
 
 Per kernel, per launch: the pair kernel of the chunked backward
 (`m3_dqkv`) 3.41 to 1.58 ms, its tiles padded to an odd stride so the

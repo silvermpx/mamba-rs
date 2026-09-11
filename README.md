@@ -8,8 +8,11 @@ cuBLAS.
 
 ## What's new in 0.7.0
 
-0.7.0 is a performance release built around new deterministic GEMM
-kernels, and the deterministic kernels are now the default.
+0.7.0 is a big performance release: new deterministic GEMM kernels, now
+the default, a pass over every Mamba kernel around them, and the two
+scan and weight-gradient routes moved to their faster families. A
+training step of the release shapes runs 1.13 to 1.63 times faster than
+0.6.9 on an RTX 6000 Ada.
 
 - **Every GPU context has a `GemmMode`.** `Deterministic` (the default)
   runs the crate's own kernels and never calls cuBLAS; `CublasFast` and
@@ -29,7 +32,8 @@ kernels, and the deterministic kernels are now the default.
   on the tensor cores in TF32 with one fixed rounding and a fixed
   summation order, the accumulation stays f32, and the bits are
   reproducible like the rest of the deterministic mode. 0.6.9 had no such
-  setting. Stream-K weight-gradient kernels are a second new opt-in.
+  setting. Stream-K weight-gradient kernels serve the deep reductions by
+  default.
 - **Explicit-mode constructors** beside every environment-reading one, and
   a recorded numeric route on every captured graph.
 
