@@ -13,13 +13,14 @@
 
 #include "_typed_prelude.cuh"
 
-// Register hold depth for the forward kernels: the first RMSN_HOLD strided
-// elements per thread stay in registers between the reduction pass and the
-// output write, removing the second global read of x whenever
+// Register hold depth: the first RMSN_HOLD strided elements per thread stay
+// in registers between the reduction pass and the output write, removing
+// the second global read of x (and, in the backward, of dy) whenever
 // dim <= RMSN_HOLD * blockDim.x (every shipped d_model). Sum order is
-// unchanged (k ascending == i ascending) and out-of-range slots contribute
-// +0.0f, which cannot alter the accumulator: it starts at +0.0f and only
-// ever adds squares, so it is never -0.0f.
+// unchanged (k ascending == i ascending). In the forward, out-of-range
+// slots contribute +0.0f, which cannot alter the accumulator: it starts at
+// +0.0f and only ever adds squares, so it is never -0.0f. The backward sums
+// signed products, so it skips out-of-range slots outright.
 #define RMSN_HOLD 4
 
 __device__ __forceinline__ float warp_reduce_sum(float val) {
@@ -259,9 +260,26 @@ extern "C" __global__ void rmsnorm_backward(
     int off = b * dim;
     float inv_rms = 1.0f / rms_saved[b];
 
-    // Strided accumulation of dy * y_hat for the reduction
+    // Strided accumulation of dy * y_hat for the reduction; the first
+    // RMSN_HOLD elements per thread stay in registers for the store pass.
+    float xh[RMSN_HOLD];
+    float dyh[RMSN_HOLD];
     float sum = 0.0f;
-    for (int i = d; i < dim; i += blockDim.x) {
+    #pragma unroll
+    for (int k = 0; k < RMSN_HOLD; ++k) {
+        int i = d + k * (int)blockDim.x;
+        if (i < dim) {
+            xh[k] = x[off + i];
+            dyh[k] = dy[off + i];
+            float x_hat = xh[k] * inv_rms;
+            float y_val = x_hat * scale[i];
+            sum += dyh[k] * y_val;
+        } else {
+            xh[k] = 0.0f;
+            dyh[k] = 0.0f;
+        }
+    }
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {
         float x_hat = x[off + i] * inv_rms;
         float dy_val = dy[off + i];
         float y_val = x_hat * scale[i];
@@ -286,27 +304,43 @@ extern "C" __global__ void rmsnorm_backward(
 
     float mean_dy_y = sdata[0] / (float)dim;
 
-    // Strided gradient write: each thread handles multiple elements when dim > blockDim.x
-    for (int i = d; i < dim; i += blockDim.x) {
+    // Gradient write from the held values, then the strided tail when
+    // dim > RMSN_HOLD * blockDim.x.
+    // accumulate=1 folds the old separate vec_add_inplace into this
+    // store: same two operands, same per-element order, one launch
+    // and one B*T*dm round trip fewer. dx may alias dy when
+    // accumulate=0 (norm_f in-place): the sum pass reads all dy
+    // before the barrier, and the tail reads dy[off+i] before
+    // storing the same element.
+    // __fadd_rn pins the two-rounding shape of the old
+    // store-then-vec_add pair: without it nvcc contracts the final
+    // `* inv_rms` into an FMA with the accumulator (one rounding)
+    // and every digest moves.
+    #pragma unroll
+    for (int k = 0; k < RMSN_HOLD; ++k) {
+        int i = d + k * (int)blockDim.x;
+        if (i < dim) {
+            float x_hat = xh[k] * inv_rms;
+            float dy_val = dyh[k];
+            float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;
+            float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val;
+            dx[off + i] = dx_store;
+            if (dx_typed != nullptr) {
+                dx_typed[off + i] = 0.0f + dx_store;
+            }
+            // Rule B: per-sample per-dim partial (no atomic; reduced externally).
+            d_scale_partials[off + i] = dy_val * x_hat;
+        }
+    }
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {
         float x_hat = x[off + i] * inv_rms;
         float dy_val = dy[off + i];
         float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;
-        // accumulate=1 folds the old separate vec_add_inplace into this
-        // store: same two operands, same per-element order, one launch
-        // and one B*T*dm round trip fewer. dx may alias dy when
-        // accumulate=0 (norm_f in-place): the sum pass reads all dy
-        // before the barrier, and this pass reads dy[off+i] before
-        // storing the same element.
-        // __fadd_rn pins the two-rounding shape of the old
-        // store-then-vec_add pair: without it nvcc contracts the final
-        // `* inv_rms` into an FMA with the accumulator (one rounding)
-        // and every digest moves.
         float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val;
         dx[off + i] = dx_store;
         if (dx_typed != nullptr) {
             dx_typed[off + i] = 0.0f + dx_store;
         }
-        // Rule B: per-sample per-dim partial (no atomic; reduced externally).
         d_scale_partials[off + i] = dy_val * x_hat;
     }
 }
@@ -346,8 +380,26 @@ extern "C" __global__ void rmsnorm_backward_##SUFFIX(                          \
     extern __shared__ float sdata[];                                           \
     int off = b * dim;                                                         \
     float inv_rms = 1.0f / rms_saved[b];                                       \
+    /* The first RMSN_HOLD elements per thread stay in registers between       \
+       the reduction and the store, as in the forward. */                      \
+    float xh[RMSN_HOLD];                                                       \
+    float dyh[RMSN_HOLD];                                                      \
     float sum = 0.0f;                                                          \
-    for (int i = d; i < dim; i += blockDim.x) {                                \
+    _Pragma("unroll")                                                          \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                      \
+        int i = d + k * (int)blockDim.x;                                       \
+        if (i < dim) {                                                         \
+            xh[k] = to_f(x[off + i]);                                          \
+            dyh[k] = to_f(dy[off + i]);                                        \
+            float x_hat = xh[k] * inv_rms;                                     \
+            float y_val = x_hat * scale[i];                                    \
+            sum += dyh[k] * y_val;                                             \
+        } else {                                                               \
+            xh[k] = 0.0f;                                                      \
+            dyh[k] = 0.0f;                                                     \
+        }                                                                      \
+    }                                                                          \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {  \
         float x_hat = to_f(x[off + i]) * inv_rms;                              \
         float dy_val = to_f(dy[off + i]);                                      \
         float y_val = x_hat * scale[i];                                        \
@@ -367,14 +419,24 @@ extern "C" __global__ void rmsnorm_backward_##SUFFIX(                          \
     }                                                                          \
     __syncthreads();                                                           \
     float mean_dy_y = sdata[0] / (float)dim;                                   \
-    for (int i = d; i < dim; i += blockDim.x) {                                \
+    _Pragma("unroll")                                                          \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                      \
+        int i = d + k * (int)blockDim.x;                                       \
+        if (i < dim) {                                                         \
+            float x_hat = xh[k] * inv_rms;                                     \
+            float dy_val = dyh[k];                                             \
+            dx[off + i] = FROM_F((scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms); \
+            /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
+            d_scale_partials[off + i] = dy_val * x_hat;                        \
+        }                                                                      \
+    }                                                                          \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {  \
         float x_hat = to_f(x[off + i]) * inv_rms;                              \
         float dy_val = to_f(dy[off + i]);                                      \
         dx[off + i] = FROM_F((scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms); \
-        /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
         d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \
-}
+}                                                                              \
 
 DEFINE_RMSNORM_BWD(f32,  float,         from_f_f32)
 DEFINE_RMSNORM_BWD(bf16, __nv_bfloat16, from_f_bf16)
@@ -418,8 +480,26 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     extern __shared__ float sdata[];                                           \
     int off = b * dim;                                                         \
     float inv_rms = 1.0f / rms_saved[b];                                       \
+    /* The first RMSN_HOLD elements per thread stay in registers between       \
+       the reduction and the store, as in the forward. */                      \
+    float xh[RMSN_HOLD];                                                       \
+    float dyh[RMSN_HOLD];                                                      \
     float sum = 0.0f;                                                          \
-    for (int i = d; i < dim; i += blockDim.x) {                                \
+    _Pragma("unroll")                                                          \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                      \
+        int i = d + k * (int)blockDim.x;                                       \
+        if (i < dim) {                                                         \
+            xh[k] = x[off + i];                                                \
+            dyh[k] = to_f(dy[off + i]);                                        \
+            float x_hat = xh[k] * inv_rms;                                     \
+            float y_val = x_hat * scale[i];                                    \
+            sum += dyh[k] * y_val;                                             \
+        } else {                                                               \
+            xh[k] = 0.0f;                                                      \
+            dyh[k] = 0.0f;                                                     \
+        }                                                                      \
+    }                                                                          \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {  \
         float x_hat = x[off + i] * inv_rms;                                    \
         float dy_val = to_f(dy[off + i]);                                      \
         float y_val = x_hat * scale[i];                                        \
@@ -439,19 +519,34 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     }                                                                          \
     __syncthreads();                                                           \
     float mean_dy_y = sdata[0] / (float)dim;                                   \
-    for (int i = d; i < dim; i += blockDim.x) {                                \
+    _Pragma("unroll")                                                          \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                      \
+        int i = d + k * (int)blockDim.x;                                       \
+        if (i < dim) {                                                         \
+            float x_hat = xh[k] * inv_rms;                                     \
+            float dy_val = dyh[k];                                             \
+            float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;  \
+            float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val; \
+            dx[off + i] = dx_store;                                            \
+            if (dx_typed != nullptr) {                                         \
+                dx_typed[off + i] = FROM_F(0.0f + dx_store);                   \
+            }                                                                  \
+            /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
+            d_scale_partials[off + i] = dy_val * x_hat;                        \
+        }                                                                      \
+    }                                                                          \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {  \
         float x_hat = x[off + i] * inv_rms;                                    \
         float dy_val = to_f(dy[off + i]);                                      \
-        float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms; \
+        float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;      \
         float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val; \
         dx[off + i] = dx_store;                                                \
         if (dx_typed != nullptr) {                                             \
             dx_typed[off + i] = FROM_F(0.0f + dx_store);                       \
         }                                                                      \
-        /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
         d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \
-}
+}                                                                              \
 
 DEFINE_RMSNORM_BWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_BWD_F32IN(f16,  __half,        from_f_f16)
