@@ -6742,7 +6742,7 @@ fn qualified_fixed_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
             .any(|identity| identity.matches(facts))
 }
 
-const NN_FIXED_COPYPLAN_SM89_CELLS: [F32TriadShape; 3] = [
+const NN_FIXED_COPYPLAN_SM89_CELLS: [F32TriadShape; 4] = [
     F32TriadShape {
         m: 2048,
         k: 768,
@@ -6766,6 +6766,17 @@ const NN_FIXED_COPYPLAN_SM89_CELLS: [F32TriadShape; 3] = [
         lda: 384,
         ldb: 1928,
         ldc: 1928,
+    },
+    // The deep 4096-row forward: the plain kernel held it at 23.5 TFLOP/s
+    // where the copy plan holds its other cells at 33 to 35, the one cell
+    // of the release table that ran slower than 0.6.9.
+    F32TriadShape {
+        m: 4096,
+        k: 3072,
+        n: 1536,
+        lda: 3072,
+        ldb: 1536,
+        ldc: 1536,
     },
 ];
 
@@ -8609,12 +8620,13 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nn_fixed_copyplan_selector_admits_only_three_exact_measured_cells() {
+    fn nn_fixed_copyplan_selector_admits_only_the_exact_measured_cells() {
         let operands = nn_qualified_operands();
         let cells = [
             (2_048, 768, 3_072),
             (2_048, 1_536, 768),
             (4_621, 384, 1_928),
+            (4_096, 3_072, 1_536),
         ];
         for cohort in 0..FIXED_COPYPLAN_EVIDENCE_COHORTS.len() {
             let facts = fixed_copyplan_facts(cohort);
