@@ -114,7 +114,7 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   are favorable but do not supply current-source confirmation/post-AUTO proof.
   Keep it in the follow-up inventory; do not widen a13.2 gate by assumption.
   Evidence: `internal/perf/sm120-fixed-full-census-20260906/`.
-- [ ] Preserve or justify every route from the saved RTX 5090 inference and
+- [x] Preserve or justify every route from the saved RTX 5090 inference and Done: the final 5090 matrix (595.58.03, tree d1c58a79) keeps every saved route; the 12 large deterministic TF32 cells run the SM120 tensor-map kernels, the small cells their qualified portable or exact routes.
   Triad snapshots; investigate any newly observed route or speed regression.
   The 66-cell assembly smoke passes132 eager/graph rows;65 physical routes
   match the saved snapshot. The remaining TN underfill change is the retained
@@ -479,7 +479,7 @@ Select their actual supported cases and prerequisites before executing them.
     described from its own first element; `gemm_bi_sm120_arena_subview`
     requires the same kernel and bits as standalone operands. Commit after
     the 5090 shows the test, the trainer bench and memcheck green.
-  - [ ] Final tree on both boards: 5090 mirrored A-G pass, paired matrix
+  - [x] Final tree on both boards: 5090 mirrored A-G pass, paired matrix Done: 5090 mirrored A-G pass (new arms all green, old arms fail by the arena defect the new tree fixes), scan bench, bit ledger, paired matrix with the full SHA, full suite (781 lib, 158 targets, three explained reds rerun green); Ada gate on the final tree 54/54 twice, full suite (781 lib, 158 targets, six explained reds rerun green).
     (the first pass lost the matrix to a missing snapshot SHA in the box
     script) and the full suite; Ada final gate and full suite after the
     a205cff6 chain releases the GPU.
