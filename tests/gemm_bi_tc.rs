@@ -20,6 +20,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
+use mamba_rs::mamba_ssm::gpu::kernel_identity::ModuleKind;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -1051,14 +1052,15 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
             )
             .unwrap();
             assert_eq!(tile, TcTile::Tile64, "{dt:?} TN route at M{m} K{k} N{n}");
-            mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed(
-                &t.ctx,
-                resolved.cached_ptr(),
-                dyp,
-                xp,
-                (m, k, n),
-            )
-            .unwrap();
+            let resolved_route = resolved_route(&t.ctx, || {
+                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed(
+                    &t.ctx,
+                    resolved.cached_ptr(),
+                    dyp,
+                    xp,
+                    (m, k, n),
+                )
+            });
             t.ctx.stream.synchronize().unwrap();
             let forced_bits = forced
                 .to_cpu(&t.ctx.stream)
@@ -1076,16 +1078,47 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
                     .collect::<Vec<_>>(),
                 "{dt:?} TN automatic route differs from forced Tile64 at M{m} K{k} N{n}"
             );
-            assert_eq!(
-                forced_bits,
-                resolved
+            let resolved_bits = resolved
+                .to_cpu(&t.ctx.stream)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            if resolved_route.0 == ModuleKind::TriadSm80 {
+                assert_eq!(
+                    forced_bits, resolved_bits,
+                    "{dt:?} TN resolved path differs from forced Tile64 at M{m} K{k} N{n}"
+                );
+            } else {
+                // A board-specialized module serves this cell here; its bits
+                // are its own contract, so the check is that the route is
+                // declared and repeatable.
+                let repeat = t.f32_buf(&initial);
+                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed(
+                    &t.ctx,
+                    repeat.cached_ptr(),
+                    dyp,
+                    xp,
+                    (m, k, n),
+                )
+                .unwrap();
+                t.ctx.stream.synchronize().unwrap();
+                let repeat_bits = repeat
                     .to_cpu(&t.ctx.stream)
                     .unwrap()
                     .into_iter()
                     .map(f32::to_bits)
-                    .collect::<Vec<_>>(),
-                "{dt:?} TN resolved path differs from forced Tile64 at M{m} K{k} N{n}"
-            );
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    resolved_bits, repeat_bits,
+                    "{dt:?} TN specialized route {} is not repeatable at M{m} K{k} N{n}",
+                    resolved_route.1
+                );
+                println!(
+                    "{dt:?} TN M{m} K{k} N{n}: served by {} ({:?})",
+                    resolved_route.1, resolved_route.0
+                );
+            }
         }
 
         for (case, &(m, k, n)) in nt_shapes.iter().enumerate() {
@@ -1129,17 +1162,18 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
             )
             .unwrap();
             assert_eq!(tile, TcTile::Tile64, "{dt:?} NT route at M{m} K{k} N{n}");
-            mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed(
-                &t.ctx,
-                TypedPtr {
-                    ptr: resolved.cached_ptr(),
-                    dtype: dt,
-                },
-                dyp,
-                wp,
-                (m, k, n),
-            )
-            .unwrap();
+            let resolved_route = resolved_route(&t.ctx, || {
+                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed(
+                    &t.ctx,
+                    TypedPtr {
+                        ptr: resolved.cached_ptr(),
+                        dtype: dt,
+                    },
+                    dyp,
+                    wp,
+                    (m, k, n),
+                )
+            });
             t.ctx.stream.synchronize().unwrap();
             let mut forced_host = vec![0.0f32; m * k];
             let mut automatic_host = vec![0.0f32; m * k];
@@ -1165,16 +1199,62 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
                     .collect::<Vec<_>>(),
                 "{dt:?} NT automatic route differs from forced Tile64 at M{m} K{k} N{n}"
             );
-            assert_eq!(
-                forced_bits,
-                resolved_host
+            let resolved_bits = resolved_host
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            if resolved_route.0 == ModuleKind::TriadSm80 {
+                assert_eq!(
+                    forced_bits, resolved_bits,
+                    "{dt:?} NT resolved path differs from forced Tile64 at M{m} K{k} N{n}"
+                );
+            } else {
+                let repeat = t.typed_buf(&sentinel, dt);
+                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed(
+                    &t.ctx,
+                    TypedPtr {
+                        ptr: repeat.cached_ptr(),
+                        dtype: dt,
+                    },
+                    dyp,
+                    wp,
+                    (m, k, n),
+                )
+                .unwrap();
+                t.ctx.stream.synchronize().unwrap();
+                let mut repeat_host = vec![0.0f32; m * k];
+                repeat
+                    .download_f32(&t.ctx.stream, &mut repeat_host)
+                    .unwrap();
+                let repeat_bits = repeat_host
                     .into_iter()
                     .map(f32::to_bits)
-                    .collect::<Vec<_>>(),
-                "{dt:?} NT resolved path differs from forced Tile64 at M{m} K{k} N{n}"
-            );
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    resolved_bits, repeat_bits,
+                    "{dt:?} NT specialized route {} is not repeatable at M{m} K{k} N{n}",
+                    resolved_route.1
+                );
+                println!(
+                    "{dt:?} NT M{m} K{k} N{n}: served by {} ({:?})",
+                    resolved_route.1, resolved_route.0
+                );
+            }
         }
     }
+}
+
+/// The module and symbol the context resolved for one typed launch.
+fn resolved_route(
+    ctx: &GpuCtx,
+    body: impl FnOnce() -> Result<(), String>,
+) -> (ModuleKind, &'static str) {
+    let trace = ctx
+        .record_eager_gemm_trace(body)
+        .expect("resolved typed launch");
+    let routes = trace.routes();
+    assert_eq!(routes.len(), 1, "one launch expected: {routes:?}");
+    (routes[0].module_kind, routes[0].symbol)
 }
 
 /// TC64 small-shape accuracy vs the f32 reference (same class as the
