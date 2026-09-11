@@ -428,6 +428,10 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&ds_i);
         let eps_g5: f32 = dims.rms_norm_eps;
         builder.arg(&eps_g5);
+        // B_raw and C_raw are dense [bt, ng*ds] here (the prefill reads
+        // them inside the projection and passes its row width instead).
+        let src_stride = (ng * ds) as i32;
+        builder.arg(&src_stride);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd B+C F4: {:?}", e))?;
     }
     // F5: angle accumulation (chunk-parallel; see gpu_angle_chunked_fwd)
@@ -1045,6 +1049,9 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&ds_i);
             let eps_g5: f32 = dims.rms_norm_eps;
             builder.arg(&eps_g5);
+            // Dense B_raw/C_raw rows, as in the training forward.
+            let src_stride = (ng * ds) as i32;
+            builder.arg(&src_stride);
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("bcnorm_fwd B+C tgt L{l}: {:?}", e))?;
         }

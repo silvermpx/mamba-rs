@@ -598,6 +598,9 @@ impl Mamba3Prefill {
                 b.arg(&ng_i);
                 b.arg(&ds_i);
                 b.arg(&eps);
+                // Dense B_raw/C_raw rows on this lane.
+                let src_stride = (ng * ds) as i32;
+                b.arg(&src_stride);
                 unsafe { b.launch(cfg) }.map_err(|e| format!("prefill bcnorm B+C L{l}: {e:?}"))?;
             }
             // RoPE angle accumulation continues from the persistent
