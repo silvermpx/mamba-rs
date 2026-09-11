@@ -530,7 +530,11 @@ fn bench_scan_kernels_isolated() {
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
     let k = &ctx.kernels;
-    let dtype = WeightDtype::Bf16;
+    let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
+        Ok("f32") => WeightDtype::F32,
+        Ok("f16") => WeightDtype::F16,
+        _ => WeightDtype::Bf16,
+    };
 
     let bt = b * t;
     let upload_typed = |data: &[f32]| -> DtypedBuf {

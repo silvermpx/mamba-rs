@@ -209,7 +209,12 @@ pub fn grid_parallel_scan_bwd_fold(
     // replayed-state hand-off rows, and one d_a reduce tile per group.
     let f32_floats =
         4 * NWARPS + 4 * NWARPS + 3 * g * d_state + NWARPS + g * SCAN_NTHREADS + NWARPS;
-    let stage_bytes = (3 * g + 1) * SCAN_CHUNK * bytes_per_act;
+    // The f32 kernel stages three of its four lanes and reads the fourth
+    // from global memory, so two blocks fit the SM's shared memory; the
+    // half kernels stage all four. Mirrors the STAGED argument of
+    // DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD in mamba_ssm_parallel.cu.
+    let staged = if bytes_per_act == 4 { g - 1 } else { g };
+    let stage_bytes = (3 * staged + 1) * SCAN_CHUNK * bytes_per_act;
     LaunchConfig {
         grid_dim: (batch as u32, (d_inner / g) as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
