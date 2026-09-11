@@ -828,6 +828,14 @@ fn launch_scalar_tn_slim(
         .map_err(|error| format!("scalar TN slim synchronize: {error:?}"))
 }
 
+/// The three device pointers of one NT tensor-core launch.
+#[derive(Clone, Copy)]
+struct NtOperands {
+    c: u64,
+    a: u64,
+    b: u64,
+}
+
 fn enqueue_tc_nt(
     t: &Ctx,
     schedule: BackwardSchedule,
@@ -837,19 +845,18 @@ fn enqueue_tc_nt(
     b: u64,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    enqueue_tc_nt_with_alpha(t, schedule, dtype, c, a, b, dims, 1.0)
+    enqueue_tc_nt_with_alpha(t, schedule, dtype, NtOperands { c, a, b }, dims, 1.0)
 }
 
 fn enqueue_tc_nt_with_alpha(
     t: &Ctx,
     schedule: BackwardSchedule,
     dtype: WeightDtype,
-    c: u64,
-    a: u64,
-    b: u64,
+    operands: NtOperands,
     dims: (usize, usize, usize),
     alpha: f32,
 ) -> Result<(), String> {
+    let NtOperands { c, a, b } = operands;
     let (m, k, n) = dims;
     let (function, edge, threads, shared_mem_bytes) = match schedule {
         BackwardSchedule::Tile128 => (&t.ctx.kernels.gemm_bi_nt_tc_typed, 128, 256, 73_728),

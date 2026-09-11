@@ -105,12 +105,13 @@ mod sm89_exact_f32_tn_admission_tests {
         },
     ];
 
-    const CASES: [(
+    type AdmissionCase = (
         Sm89ExactF32TnRoute,
         (usize, usize, usize),
         ScalarDispatchPlan,
         ScalarDispatchPlan,
-    ); 3] = [
+    );
+    const CASES: [AdmissionCase; 3] = [
         (
             Sm89ExactF32TnRoute::D768InDualChunkFused,
             (2_048, 768, 3_072),
@@ -8908,10 +8909,13 @@ mod scalar_wave_policy_tests {
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ];
-        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
+        for (cohort, candidate) in NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
+            .iter()
+            .enumerate()
+        {
             let facts = nt_fixed_copyplan_sibling_facts(cohort);
             assert!(
-                NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[cohort].matches(facts),
+                candidate.matches(facts),
                 "cohort {cohort} candidate identity"
             );
             for (dims, selected, fallback) in cells {
@@ -9179,10 +9183,12 @@ mod scalar_wave_policy_tests {
             request.shape.k.checked_mul(request.shape.n),
             Some(super::NT_LARGE_DEEP_TRANSPOSE_ELEMENTS)
         );
-        assert!(
-            super::NT_LARGE_DEEP_TRANSPOSE_ELEMENTS
-                <= super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
-        );
+        const {
+            assert!(
+                super::NT_LARGE_DEEP_TRANSPOSE_ELEMENTS
+                    <= super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
+            )
+        };
         assert_eq!(
             scalar_launch_plan(facts, request, operands).unwrap(),
             ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
@@ -13827,7 +13833,7 @@ mod tf32_tests {
                 u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
             })
         }
-        let cases: [(
+        type LowerToolkitCase = (
             Tf32AutoQualificationIdentity,
             Tf32AutoQualificationIdentity,
             (i32, i32),
@@ -13838,7 +13844,8 @@ mod tf32_tests {
             &'static str,
             &'static str,
             &'static str,
-        ); 2] = [
+        );
+        let cases: [LowerToolkitCase; 2] = [
             (
                 SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
                 SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,

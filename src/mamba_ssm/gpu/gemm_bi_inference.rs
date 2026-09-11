@@ -517,6 +517,24 @@ struct FixedTileDevice {
     compute_capability: (u32, u32),
 }
 
+/// Which of the Fixed SM89 half-precision holders this context has bound.
+#[derive(Clone, Copy)]
+struct FixedSm89HalfHolders {
+    pipeline_available: bool,
+    swizzle_available: bool,
+    s3_available: bool,
+}
+
+/// The board and toolkit facts the TF32 tile pick reads.
+#[derive(Clone, Copy)]
+struct FixedTf32Stack {
+    multiprocessors: u32,
+    compute_capability: (u32, u32),
+    nvrtc_version: (i32, i32),
+    nvrtc_library_known: bool,
+    sm120_tma: bool,
+}
+
 // Actual NVRTC CUDA12.8/13.0/13.2 qualification on the 142-SM Ada target.
 // The preferred route is the reviewed direct-pair winner; compatibility
 // fallback remains limited to independently qualified holders. Returning None
@@ -527,10 +545,13 @@ fn fixed_select_sm89_half_auto_tile(
     device: FixedTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
-    pipeline_available: bool,
-    swizzle_available: bool,
-    s3_available: bool,
+    holders: FixedSm89HalfHolders,
 ) -> Option<InferenceTile> {
+    let FixedSm89HalfHolders {
+        pipeline_available,
+        swizzle_available,
+        s3_available,
+    } = holders;
     use InferenceTile::{
         Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
     };
@@ -650,9 +671,7 @@ mod sm89_pipeline_auto_tests {
         dims: (usize, usize, usize),
         has_bias: bool,
         known_library: bool,
-        pipeline_available: bool,
-        swizzle_available: bool,
-        s3_available: bool,
+        holders: FixedSm89HalfHolders,
     ) -> Option<InferenceTile> {
         fixed_select_sm89_half_auto_tile(
             operands(dtype, has_bias),
@@ -667,9 +686,7 @@ mod sm89_pipeline_auto_tests {
             },
             nvrtc,
             known_library,
-            pipeline_available,
-            swizzle_available,
-            s3_available,
+            holders,
         )
     }
 
@@ -683,9 +700,11 @@ mod sm89_pipeline_auto_tests {
                     (4621, 768, 2304),
                     false,
                     true,
-                    true,
-                    true,
-                    true,
+                    FixedSm89HalfHolders {
+                        pipeline_available: true,
+                        swizzle_available: true,
+                        s3_available: true
+                    }
                 ),
                 Some(S3),
                 "CUDA13.2 {dtype:?} B0/no-bias must select the measured S3 winner"
@@ -944,9 +963,11 @@ mod sm89_pipeline_auto_tests {
                                 dims,
                                 has_bias,
                                 true,
-                                pipeline_available,
-                                swizzle_available,
-                                s3_available,
+                                FixedSm89HalfHolders {
+                                    pipeline_available,
+                                    swizzle_available,
+                                    s3_available
+                                }
                             ),
                             expected,
                             "{nvrtc:?} {dtype:?} {dims:?} bias={has_bias} pipeline={pipeline_available} swizzle={swizzle_available} s3={s3_available}"
@@ -970,7 +991,18 @@ mod sm89_pipeline_auto_tests {
         };
         let ops = operands(WeightDtype::Bf16, false);
         let choose = |o, s, d, v, known, pipeline, swizzle| {
-            fixed_select_sm89_half_auto_tile(o, s, d, v, known, pipeline, swizzle, true)
+            fixed_select_sm89_half_auto_tile(
+                o,
+                s,
+                d,
+                v,
+                known,
+                FixedSm89HalfHolders {
+                    pipeline_available: pipeline,
+                    swizzle_available: swizzle,
+                    s3_available: true,
+                },
+            )
         };
 
         assert_eq!(choose(ops, shape, device, (13, 2), false, true, true), None);
@@ -981,9 +1013,11 @@ mod sm89_pipeline_auto_tests {
                 device,
                 (13, 2),
                 true,
-                false,
-                false,
-                false,
+                FixedSm89HalfHolders {
+                    pipeline_available: false,
+                    swizzle_available: false,
+                    s3_available: false
+                }
             ),
             None
         );
@@ -2635,17 +2669,19 @@ fn fixed_sm120_half_maps(
 }
 
 fn fixed_pick_tf32(
-    rows: usize,
-    inner: usize,
-    cols: usize,
-    multiprocessors: u32,
-    compute_capability: (u32, u32),
-    nvrtc_version: (i32, i32),
-    sm120_tma: bool,
+    dims: (usize, usize, usize),
+    stack: FixedTf32Stack,
     has_bias: bool,
     output_aligned: bool,
-    nvrtc_library_known: bool,
 ) -> InferenceTile {
+    let (rows, inner, cols) = dims;
+    let FixedTf32Stack {
+        multiprocessors,
+        compute_capability,
+        nvrtc_version,
+        nvrtc_library_known,
+        sm120_tma,
+    } = stack;
     if rows <= 16 || cols <= 32 {
         return InferenceTile::Tf32M16S4;
     }
@@ -4674,16 +4710,16 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             InferenceTile::Tf32RnaM128N128S3
         } else {
             fixed_pick_tf32(
-                batch,
-                n_in,
-                n_out,
-                ctx.kernels.multiprocessor_count(),
-                ctx.compute_capability(),
-                ctx.kernels.compiler_identity().nvrtc_version,
-                sm120_tma,
+                (batch, n_in, n_out),
+                FixedTf32Stack {
+                    multiprocessors: ctx.kernels.multiprocessor_count(),
+                    compute_capability: ctx.compute_capability(),
+                    nvrtc_version: ctx.kernels.compiler_identity().nvrtc_version,
+                    nvrtc_library_known: ctx.kernels.compiler_identity().nvrtc_library_known,
+                    sm120_tma,
+                },
                 operands.bias_ptr.is_some(),
                 operands.c.ptr.is_multiple_of(8),
-                ctx.kernels.compiler_identity().nvrtc_library_known,
             )
         };
         launch_tf32(ctx, tile, &args, true, observer)?;
@@ -4867,9 +4903,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                 device,
                 compiler.nvrtc_version,
                 compiler.nvrtc_library_known,
-                ctx.kernels.fixed_sm89_half_pipeline.is_some(),
-                ctx.kernels.fixed_sm89_half_swizzle.is_some(),
-                ctx.kernels.fixed_sm89_half_s3.is_some(),
+                FixedSm89HalfHolders {
+                    pipeline_available: ctx.kernels.fixed_sm89_half_pipeline.is_some(),
+                    swizzle_available: ctx.kernels.fixed_sm89_half_swizzle.is_some(),
+                    s3_available: ctx.kernels.fixed_sm89_half_s3.is_some(),
+                },
             )
         });
         match selected {
@@ -7380,7 +7418,7 @@ mod tests {
     use super::{
         FixedHalfMapCache, FixedHalfMapKey, FixedPostBiasMapCache, FixedPostBiasMapKey,
         FixedSm120HalfExactDevice, FixedSm120HalfExactRequest, FixedTensorMap, FixedTf32MapCache,
-        FixedTf32MapKey, FixedTileDevice, InferenceSm120HalfTile, InferenceTile,
+        FixedTf32MapKey, FixedTf32Stack, FixedTileDevice, InferenceSm120HalfTile, InferenceTile,
         fixed_adjust_arch_tile, fixed_pick_f32_exact, fixed_pick_f32out_tile,
         fixed_pick_sm120_f32out, fixed_pick_sm120_half, fixed_pick_sm120_half_exact,
         fixed_pick_tf32, fixed_pick_tile,
@@ -7941,15 +7979,15 @@ mod tests {
     fn sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells() {
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                2304,
-                170,
-                (12, 0),
-                (13, 2),
-                true,
+                (4621, 768, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M128S2
@@ -7957,15 +7995,15 @@ mod tests {
         for has_bias in [false, true] {
             assert_eq!(
                 fixed_pick_tf32(
-                    2048,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (2048, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    true,
                     true
                 ),
                 InferenceTile::Tf32Sm120M64S2PairStore,
@@ -7973,16 +8011,16 @@ mod tests {
             );
             assert_eq!(
                 fixed_pick_tf32(
-                    2048,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (2048, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    false,
-                    true
+                    false
                 ),
                 InferenceTile::Tf32Sm120M64S2ProducerWarp,
                 "unaligned C must retain the previously qualified schedule"
@@ -8000,7 +8038,18 @@ mod tests {
                 (2048, 768, 2304, 170, (12, 0), (13, 2), false),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, true, true),
+                    fixed_pick_tf32(
+                        (m, k, n),
+                        FixedTf32Stack {
+                            multiprocessors: sms,
+                            compute_capability: cc,
+                            nvrtc_version: nvrtc,
+                            nvrtc_library_known: true,
+                            sm120_tma: loaded
+                        },
+                        has_bias,
+                        true
+                    ),
                     if loaded {
                         InferenceTile::Tf32Sm120M64S2
                     } else {
@@ -8012,15 +8061,15 @@ mod tests {
         for nvrtc_version in [(12, 8), (13, 0), (13, 1), (13, 3)] {
             assert_eq!(
                 fixed_pick_tf32(
-                    4621,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    nvrtc_version,
-                    true,
+                    (4621, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version,
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     false,
-                    true,
                     true
                 ),
                 InferenceTile::Tf32Sm120M64S2,
@@ -8028,15 +8077,15 @@ mod tests {
             );
             assert_eq!(
                 fixed_pick_tf32(
-                    2048,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    nvrtc_version,
-                    true,
+                    (2048, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version,
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     false,
-                    true,
                     true
                 ),
                 InferenceTile::Tf32Sm120M64S2,
@@ -8045,75 +8094,75 @@ mod tests {
         }
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                2304,
-                169,
-                (12, 0),
-                (13, 2),
-                true,
+                (4621, 768, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 169,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                2304,
-                170,
-                (12, 1),
-                (13, 2),
-                true,
+                (4621, 768, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 1),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4622,
-                768,
-                2304,
-                170,
-                (12, 0),
-                (13, 2),
-                true,
+                (4622, 768, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                769,
-                2304,
-                170,
-                (12, 0),
-                (13, 2),
-                true,
+                (4621, 769, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                2305,
-                170,
-                (12, 0),
-                (13, 2),
-                true,
+                (4621, 768, 2305),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
@@ -8138,7 +8187,18 @@ mod tests {
                 (4621, 384, 1928, 170, (12, 0), (13, 2), false, true, true),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, aligned, known),
+                    fixed_pick_tf32(
+                        (m, k, n),
+                        FixedTf32Stack {
+                            multiprocessors: sms,
+                            compute_capability: cc,
+                            nvrtc_version: nvrtc,
+                            nvrtc_library_known: known,
+                            sm120_tma: loaded
+                        },
+                        has_bias,
+                        aligned
+                    ),
                     if loaded {
                         InferenceTile::Tf32Sm120M64S2
                     } else {
@@ -8149,61 +8209,61 @@ mod tests {
             // Unknown libraries do not change previously qualified B/D behavior.
             assert_eq!(
                 fixed_pick_tf32(
-                    4621,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (4621, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: false,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    true,
-                    false
+                    true
                 ),
                 InferenceTile::Tf32Sm120M128S2
             );
             assert_eq!(
                 fixed_pick_tf32(
-                    2048,
-                    768,
-                    2304,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (2048, 768, 2304),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: false,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    true,
-                    false
+                    true
                 ),
                 InferenceTile::Tf32Sm120M64S2PairStore
             );
             assert_eq!(
                 fixed_pick_tf32(
-                    4621,
-                    384,
-                    1928,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (4621, 384, 1928),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    true,
                     true
                 ),
                 InferenceTile::Tf32Sm120M128S2
             );
             assert_eq!(
                 fixed_pick_tf32(
-                    4621,
-                    384,
-                    1928,
-                    170,
-                    (12, 0),
-                    (13, 2),
-                    true,
+                    (4621, 384, 1928),
+                    FixedTf32Stack {
+                        multiprocessors: 170,
+                        compute_capability: (12, 0),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: true,
+                        sm120_tma: true
+                    },
                     has_bias,
-                    false,
-                    true
+                    false
                 ),
                 InferenceTile::Tf32Sm120M64S2
             );
@@ -8215,16 +8275,16 @@ mod tests {
         for has_bias in [false, true] {
             assert_eq!(
                 fixed_pick_tf32(
-                    16,
-                    1928,
-                    384,
-                    142,
-                    (8, 9),
-                    (13, 2),
-                    false,
+                    (16, 1928, 384),
+                    FixedTf32Stack {
+                        multiprocessors: 142,
+                        compute_capability: (8, 9),
+                        nvrtc_version: (13, 2),
+                        nvrtc_library_known: true,
+                        sm120_tma: false
+                    },
                     has_bias,
-                    true,
-                    true,
+                    true
                 ),
                 InferenceTile::Tf32M16S4,
                 "Ada thin route must remain ahead of the C promotion",
@@ -8232,16 +8292,16 @@ mod tests {
             for output_aligned in [false, true] {
                 assert_eq!(
                     fixed_pick_tf32(
-                        4621,
-                        1928,
-                        384,
-                        142,
-                        (8, 9),
-                        (13, 2),
-                        false,
+                        (4621, 1928, 384),
+                        FixedTf32Stack {
+                            multiprocessors: 142,
+                            compute_capability: (8, 9),
+                            nvrtc_version: (13, 2),
+                            nvrtc_library_known: true,
+                            sm120_tma: false
+                        },
                         has_bias,
-                        output_aligned,
-                        true,
+                        output_aligned
                     ),
                     InferenceTile::Tf32M64S2,
                     "confirmed Ada C row bias={has_bias} output_aligned={output_aligned}",
@@ -8265,7 +8325,18 @@ mod tests {
                 (4621, 1928, 384, 142, (8, 9), (13, 2), false),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, false, has_bias, true, known),
+                    fixed_pick_tf32(
+                        (m, k, n),
+                        FixedTf32Stack {
+                            multiprocessors: sms,
+                            compute_capability: cc,
+                            nvrtc_version: nvrtc,
+                            nvrtc_library_known: known,
+                            sm120_tma: false
+                        },
+                        has_bias,
+                        true
+                    ),
                     InferenceTile::Tf32M128S2,
                     "unqualified Ada C boundary M={m} K={k} N={n} SMs={sms} CC={cc:?} NVRTC={nvrtc:?} known={known}",
                 );
@@ -8277,64 +8348,75 @@ mod tests {
     fn tf32_selector_keeps_portable_and_thin_fallbacks() {
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                1928,
-                170,
-                (12, 0),
-                (13, 2),
+                (4621, 768, 1928),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: false
+                },
                 false,
-                false,
-                true,
                 true
             ),
             InferenceTile::Tf32M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                1928,
-                170,
-                (12, 0),
-                (13, 2),
-                true,
+                (4621, 768, 1928),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
                 false,
-                true,
                 true
             ),
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(1, 768, 1928, 170, (12, 0), (13, 2), true, false, true, true),
+            fixed_pick_tf32(
+                (1, 768, 1928),
+                FixedTf32Stack {
+                    multiprocessors: 170,
+                    compute_capability: (12, 0),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: true
+                },
+                false,
+                true
+            ),
             InferenceTile::Tf32M16S4
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                2304,
-                142,
-                (8, 9),
-                (13, 2),
+                (4621, 768, 2304),
+                FixedTf32Stack {
+                    multiprocessors: 142,
+                    compute_capability: (8, 9),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: false
+                },
                 false,
-                false,
-                true,
                 true
             ),
             InferenceTile::Tf32M64S2
         );
         assert_eq!(
             fixed_pick_tf32(
-                4621,
-                768,
-                384,
-                142,
-                (8, 9),
-                (13, 2),
+                (4621, 768, 384),
+                FixedTf32Stack {
+                    multiprocessors: 142,
+                    compute_capability: (8, 9),
+                    nvrtc_version: (13, 2),
+                    nvrtc_library_known: true,
+                    sm120_tma: false
+                },
                 false,
-                false,
-                true,
                 true
             ),
             InferenceTile::Tf32M128S2

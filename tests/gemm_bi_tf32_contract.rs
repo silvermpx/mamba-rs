@@ -4308,7 +4308,7 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
         active_production_function_scope(GRAPH_CAPTURE_SOURCE, "with_validated_gemm_graph_launch")
             .unwrap();
     assert_code_contains_all(
-        &seam,
+        seam,
         &[
             "ensure_gemm_usable",
             "require_deterministic_gemm_graph_plan",

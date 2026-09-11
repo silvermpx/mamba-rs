@@ -321,8 +321,10 @@ mod ada_s3_pair {
         assert_eq!(observed, complement, "S3 poison upload readback");
         assert!(
             observed
-                .chunks_exact(2)
-                .zip(expected.chunks_exact(2))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<2>().0)
                 .all(|(a, b)| a != b),
             "every output storage word must differ before independent replay"
         );
@@ -340,9 +342,11 @@ mod ada_s3_pair {
     }
 
     fn half_bits(raw: &[u8], dtype: WeightDtype) -> Vec<u32> {
-        raw.chunks_exact(2)
+        raw.as_chunks::<2>()
+            .0
+            .iter()
             .map(|v| {
-                let bits = u16::from_le_bytes([v[0], v[1]]);
+                let bits = u16::from_le_bytes(*v);
                 match dtype {
                     WeightDtype::Bf16 => half::bf16::from_bits(bits).to_f32().to_bits(),
                     WeightDtype::F16 => half::f16::from_bits(bits).to_f32().to_bits(),
@@ -490,15 +494,17 @@ mod ada_s3_pair {
                     },
                     ops.x.dtype,
                     1,
-                    symbol,
-                    (p.gridDimX, p.gridDimY, p.gridDimZ),
-                    (p.blockDimX, p.blockDimY, p.blockDimZ),
-                    p.sharedMemBytes,
-                    abi,
-                    terminal,
-                    pointers,
+                    ObservedGemmNode {
+                        symbol,
+                        grid: (p.gridDimX, p.gridDimY, p.gridDimZ),
+                        block: (p.blockDimX, p.blockDimY, p.blockDimZ),
+                        shared_bytes: p.sharedMemBytes,
+                        driver_abi: abi,
+                        terminal_sixth_rejected: terminal,
+                        pointers,
+                        bundle,
+                    },
                     [ops.c.ptr, ops.x.ptr, ops.w.ptr, 0],
-                    bundle,
                     shape,
                 )
                 .unwrap();
@@ -519,7 +525,9 @@ mod ada_s3_pair {
             Ok("1"),
             "explicit stage-specific S3 pair enable required"
         );
-        assert!(!cfg!(debug_assertions), "S3 pairing requires release");
+        if cfg!(debug_assertions) {
+            panic!("S3 pairing requires release");
+        }
         let environment: Vec<_> = std::env::vars_os()
             .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect();
@@ -843,7 +851,7 @@ mod ada_s3_pair {
                             arms[arm]
                         );
                     }
-                    for (bracket, observations) in samples.chunks_exact(4).enumerate() {
+                    for (bracket, observations) in samples.as_chunks::<4>().0.iter().enumerate() {
                         let (w, traversal, comparison, _, _, _) = observations[0];
                         let pair: Vec<_> = observations.iter().map(|o| (o.4, o.5)).collect();
                         let ratio = pair_ratio(&pair, comparison).unwrap();
@@ -9915,7 +9923,7 @@ fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
     let mut promotions = 0;
     for nvrtc in [(12, 7), (12, 8), (13, 0), (13, 1), (13, 2), (13, 3)] {
         for row in ["tf32", "f16", "bf16", "f16_f32", "f32_exact_fast"] {
-            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.into_iter().enumerate() {
+            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.iter().copied().enumerate() {
                 for has_bias in [false, true] {
                     let want = match (nvrtc, row, index, has_bias) {
                         ((12, 8) | (13, 0) | (13, 2), "tf32", 4, false) => {
@@ -9956,7 +9964,7 @@ fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
     assert_eq!(promotions, 5);
     for nvrtc in [(12, 8), (13, 0), (13, 2)] {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.into_iter().enumerate() {
+            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.iter().copied().enumerate() {
                 for bias in [false, true] {
                     let old = expected_ada_half_auto_v43(nvrtc, dtype, cell.shape, bias);
                     let want = match (nvrtc, dtype, index, bias) {
@@ -10844,7 +10852,9 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         Ok("0"),
         "NVIDIA_TF32_OVERRIDE=0 disables the explicit FAST_TF32 denominator"
     );
-    assert!(!cfg!(debug_assertions), "hot-cell spike requires --release");
+    if cfg!(debug_assertions) {
+        panic!("hot-cell spike requires --release");
+    }
     fixed_sm120_tf32_bd_environment_preflight("Fixed exact-TMA hot-cell spike")
         .expect("quiet-GPU preflight");
     let device = GpuDevice::new(0).expect("hot-cell spike CUDA device");
@@ -11404,7 +11414,9 @@ fn fixed_sm120_exact_tma_fma_b0_tile_tournament() {
         Ok("1"),
         "set MAMBA_FIXED_SM120_FMA_TOURNAMENT=1 for the explicit B0 tournament"
     );
-    assert!(!cfg!(debug_assertions), "B0 tournament requires --release");
+    if cfg!(debug_assertions) {
+        panic!("B0 tournament requires --release");
+    }
     let device = GpuDevice::new(0).expect("B0 tournament CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
     assert_eq!(device.multiprocessor_count(), 170);
@@ -12674,21 +12686,37 @@ fn fixed_explicit_vendor_paths(requested: Option<&str>) -> Result<Vec<&'static s
     Ok(paths)
 }
 
-fn fixed_explicit_vendor_pipeline_graph_contract(
-    tile: InferenceTile,
-    dtype: WeightDtype,
-    node_count: usize,
-    symbol: &str,
+/// One GEMM kernel node as read back from a captured graph: the launch
+/// geometry, the driver's parameter layout and the bound pointers.
+struct ObservedGemmNode<'a> {
+    symbol: &'a str,
     grid: (u32, u32, u32),
     block: (u32, u32, u32),
     shared_bytes: u32,
     driver_abi: Vec<(usize, usize)>,
     terminal_sixth_rejected: bool,
     pointers: [u64; 4],
-    expected_pointers: [u64; 4],
     bundle: [u32; 8],
+}
+
+fn fixed_explicit_vendor_pipeline_graph_contract(
+    tile: InferenceTile,
+    dtype: WeightDtype,
+    node_count: usize,
+    node: ObservedGemmNode<'_>,
+    expected_pointers: [u64; 4],
     shape: InferenceShape,
 ) -> Result<(), String> {
+    let ObservedGemmNode {
+        symbol,
+        grid,
+        block,
+        shared_bytes,
+        driver_abi,
+        terminal_sixth_rejected,
+        pointers,
+        bundle,
+    } = node;
     if matches!(
         tile,
         InferenceTile::Tf32RnaM128N96S3
@@ -12699,15 +12727,17 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
             tile,
             dtype,
             node_count,
-            symbol,
-            grid,
-            block,
-            shared_bytes,
-            driver_abi,
-            terminal_sixth_rejected,
-            pointers,
+            ObservedGemmNode {
+                symbol,
+                grid,
+                block,
+                shared_bytes,
+                driver_abi,
+                terminal_sixth_rejected,
+                pointers,
+                bundle,
+            },
             expected_pointers,
-            bundle,
             shape,
         );
     }
@@ -12795,17 +12825,20 @@ fn fixed_explicit_vendor_finalist_graph_contract(
     tile: InferenceTile,
     dtype: WeightDtype,
     node_count: usize,
-    symbol: &str,
-    grid: (u32, u32, u32),
-    block: (u32, u32, u32),
-    shared_bytes: u32,
-    driver_abi: Vec<(usize, usize)>,
-    terminal_sixth_rejected: bool,
-    pointers: [u64; 4],
+    node: ObservedGemmNode<'_>,
     expected_pointers: [u64; 4],
-    bundle: [u32; 8],
     shape: InferenceShape,
 ) -> Result<(), String> {
+    let ObservedGemmNode {
+        symbol,
+        grid,
+        block,
+        shared_bytes,
+        driver_abi,
+        terminal_sixth_rejected,
+        pointers,
+        bundle,
+    } = node;
     let (row, bm, bn, threads, shared, tf32) = match tile {
         InferenceTile::Tf32RnaM128N96S3 => ("tf32", 128usize, 96usize, 256, 86_016, true),
         InferenceTile::TcM64N64Sm89S3 => ("f16", 64, 64, 128, 49_152, false),
@@ -12816,13 +12849,13 @@ fn fixed_explicit_vendor_finalist_graph_contract(
     let legal_shape = if tf32 {
         shape.m > 0
             && shape.k <= i32::MAX as usize - 31
-            && shape.k % 4 == 0
+            && shape.k.is_multiple_of(4)
             && shape.n > 0
             && shape.n <= i32::MAX as usize - 95
-            && shape.n % 4 == 0
+            && shape.n.is_multiple_of(4)
             && expected_pointers[0] != 0
-            && expected_pointers[0] % 4 == 0
-            && expected_pointers[3] % 4 == 0
+            && expected_pointers[0].is_multiple_of(4)
+            && expected_pointers[3].is_multiple_of(4)
             && (shape.k == 0
                 || expected_pointers[1..3]
                     .iter()
@@ -12945,15 +12978,17 @@ fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
                 tile,
                 dtype,
                 nodes,
-                name,
-                actual_grid,
-                actual_block,
-                actual_shared,
-                actual_abi,
-                terminal,
-                actual_ptrs,
+                ObservedGemmNode {
+                    symbol: name,
+                    grid: actual_grid,
+                    block: actual_block,
+                    shared_bytes: actual_shared,
+                    driver_abi: actual_abi,
+                    terminal_sixth_rejected: terminal,
+                    pointers: actual_ptrs,
+                    bundle: actual_bundle,
+                },
                 pointers,
-                actual_bundle,
                 shape,
             )
         };
@@ -13469,20 +13504,22 @@ fn fixed_explicit_vendor_graph_inventory(
                 tile,
                 dtype,
                 count,
-                symbol,
-                (params.gridDimX, params.gridDimY, params.gridDimZ),
-                block,
-                params.sharedMemBytes,
-                driver_abi,
-                terminal_sixth_rejected,
-                pointers,
+                ObservedGemmNode {
+                    symbol,
+                    grid: (params.gridDimX, params.gridDimY, params.gridDimZ),
+                    block,
+                    shared_bytes: params.sharedMemBytes,
+                    driver_abi,
+                    terminal_sixth_rejected,
+                    pointers,
+                    bundle,
+                },
                 [
                     operands.c.ptr,
                     operands.x.ptr,
                     operands.w.ptr,
                     operands.bias_ptr.unwrap_or(0),
                 ],
-                bundle,
                 shape,
             )
             .unwrap_or_else(|error| panic!("{label}: {error}"));
@@ -14116,7 +14153,20 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
     let bundle = [1.0f32.to_bits(), 0, 4621, 1928, 384, 384, 1928, 1928];
     let valid = |tile, dtype, nodes, symbol, grid, block, shared, abi, sixth, actual, params| {
         fixed_explicit_vendor_pipeline_graph_contract(
-            tile, dtype, nodes, symbol, grid, block, shared, abi, sixth, actual, pointers, params,
+            tile,
+            dtype,
+            nodes,
+            ObservedGemmNode {
+                symbol,
+                grid,
+                block,
+                shared_bytes: shared,
+                driver_abi: abi,
+                terminal_sixth_rejected: sixth,
+                pointers: actual,
+                bundle: params,
+            },
+            pointers,
             shape,
         )
     };

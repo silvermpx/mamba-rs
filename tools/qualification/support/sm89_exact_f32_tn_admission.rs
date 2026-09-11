@@ -244,17 +244,30 @@ fn launch_transpose(ctx: &GpuCtx, cell: RawCell, output: u64, input: u64) -> Res
         .map_err(|error| format!("launch retained F32 transpose: {error:?}"))
 }
 
+/// The device buffers one candidate TN launch reads and writes.
+#[derive(Clone, Copy)]
+struct CandidateBuffers {
+    output: u64,
+    partial: u64,
+    transposed: u64,
+    x: u64,
+    dy: u64,
+}
+
 fn launch_candidate(
     ctx: &GpuCtx,
     route: Sm89ExactF32TnRoute,
     cell: RawCell,
-    output: u64,
-    candidate_partial: u64,
-    transposed: u64,
-    x: u64,
-    dy: u64,
+    buffers: CandidateBuffers,
     alpha: f32,
 ) -> Result<(), String> {
+    let CandidateBuffers {
+        output,
+        partial: candidate_partial,
+        transposed,
+        x,
+        dy,
+    } = buffers;
     let (m, k, n) = cell.dims;
     match route {
         Sm89ExactF32TnRoute::D768InDualChunkFused => {
@@ -329,10 +342,10 @@ fn compare_words(label: &str, actual: &[u32], expected: &[u32]) -> Result<(), St
     Ok(())
 }
 
-pub fn raw_seed_words(
-    cell: RawCell,
-    exceptional: bool,
-) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), String> {
+/// The seeded X, dY and output words of one raw cell.
+pub type RawSeedWords = (Vec<u32>, Vec<u32>, Vec<u32>);
+
+pub fn raw_seed_words(cell: RawCell, exceptional: bool) -> Result<RawSeedWords, String> {
     cell.validate()?;
     let (m, k, n) = cell.dims;
     let mut x = crate::full_mantissa::finite_full_mantissa_values(m * k, 0x8931_a001);
@@ -409,11 +422,13 @@ pub fn run_raw_probe_repeated(
             ctx,
             route,
             cell,
-            candidate_output.ptr(),
-            candidate_partial.ptr(),
-            transposed.ptr(),
-            x.ptr(),
-            dy.ptr(),
+            CandidateBuffers {
+                output: candidate_output.ptr(),
+                partial: candidate_partial.ptr(),
+                transposed: transposed.ptr(),
+                x: x.ptr(),
+                dy: dy.ptr(),
+            },
             alpha,
         )?;
     }

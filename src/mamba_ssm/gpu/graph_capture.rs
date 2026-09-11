@@ -406,7 +406,7 @@ pub(crate) mod model_gemm_guard_tests {
             let rebuilt =
                 CapturedGemmGraphPlan::new(plan.context, launches, routes.into_boxed_slice())
                     .unwrap();
-            let policy_visible = matches!(change, 2 | 3 | 4);
+            let policy_visible = matches!(change, 2..=4);
             let result =
                 with_validated_gemm_graph_launch(ctx, true, Some(&rebuilt), "tampered", || {
                     calls.set(calls.get() + 1);

@@ -477,9 +477,9 @@ fn qualify_nt_auto_finalist_pair(
     );
 }
 
-fn parse_sm89_finalist_admitted_cells(
-    filter: Option<&str>,
-) -> Result<Vec<(&'static str, (usize, usize, usize))>, String> {
+type AdmittedCell = (&'static str, (usize, usize, usize));
+
+fn parse_sm89_finalist_admitted_cells(filter: Option<&str>) -> Result<Vec<AdmittedCell>, String> {
     const CELLS: [(&str, (usize, usize, usize)); 4] = [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),

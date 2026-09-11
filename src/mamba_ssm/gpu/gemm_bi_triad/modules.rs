@@ -9372,7 +9372,7 @@ impl GemmBiKernels {
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             gemm_bi_tn_tc64_typed: load_half("gemm_bi_tn_tc64")?,
-            gemm_bi_tn_tc64_streamk_typed: gemm_bi_tn_tc64_streamk_typed,
+            gemm_bi_tn_tc64_streamk_typed,
             tc64_streamk_resident_ctas,
             gemm_bi_tn_tc128x64_typed: load_half("gemm_bi_tn_tc128x64")?,
             gemm_bi_nt_tc64_typed: load_half("gemm_bi_nt_tc64")?,
@@ -15774,10 +15774,11 @@ mod tests {
     fn fixed_sm89_half_swizzle_ptx_is_all_or_nothing_and_instruction_exact() {
         let baseline = fixed_sm89_half_test_ptx();
         super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &baseline).unwrap();
-        for index in 0..2 {
-            let dtype = if index == 0 { "bf16" } else { "f16" };
-            let entry =
-                fixed_sm89_half_test_entry(FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[index], dtype);
+        for (symbol, dtype) in FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS
+            .into_iter()
+            .zip(["bf16", "f16"])
+        {
+            let entry = fixed_sm89_half_test_entry(symbol, dtype);
             super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &baseline.replacen(&entry, "", 1))
                 .expect_err("both homogeneous-half swizzle exports are mandatory");
             for required in [
@@ -15878,10 +15879,11 @@ mod tests {
     fn fixed_sm89_half_s3_ptx_is_all_or_nothing_and_instruction_exact() {
         let baseline = fixed_sm89_half_test_ptx();
         super::validate_fixed_sm89_half_s3_ptx("sm_89", &baseline).unwrap();
-        for index in 0..2 {
-            let dtype = if index == 0 { "bf16" } else { "f16" };
-            let entry =
-                fixed_sm89_half_s3_test_entry(FIXED_SM89_HALF_S3_TEST_SYMBOLS[index], dtype);
+        for (symbol, dtype) in FIXED_SM89_HALF_S3_TEST_SYMBOLS
+            .into_iter()
+            .zip(["bf16", "f16"])
+        {
+            let entry = fixed_sm89_half_s3_test_entry(symbol, dtype);
             super::validate_fixed_sm89_half_s3_ptx("sm_89", &baseline.replacen(&entry, "", 1))
                 .expect_err("both homogeneous-half s3 exports are mandatory");
             for required in [
@@ -16625,7 +16627,7 @@ mod tests {
             super::FIXED_SM120_POSTBIAS_REGISTER_CAP as u32,
             super::super::contract::SM120_FMA_REGISTER_CAP
         );
-        let layout = vec![
+        let layout = [
             (0, 8),
             (8, 8),
             (16, 8),

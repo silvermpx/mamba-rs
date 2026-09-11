@@ -461,8 +461,7 @@ mod model_gemm_manifest_tests {
                         let mut native_scratch = engine.alloc_mixed_scratch().unwrap();
                         let ctx = &engine.engine.ctx;
                         let trace;
-                        let manifest;
-                        if native {
+                        let manifest = if native {
                             engine
                                 .step_mixed_native(
                                     &input,
@@ -485,7 +484,7 @@ mod model_gemm_manifest_tests {
                                 .temporal
                                 .download_f32(&ctx.stream, &mut output)
                                 .unwrap();
-                            manifest = engine.eager_mixed_native_gemm_manifest.get().unwrap();
+                            engine.eager_mixed_native_gemm_manifest.get().unwrap()
                         } else {
                             engine
                                 .step(&input, &mut output, &mut state, &mut legacy_scratch)
@@ -503,8 +502,8 @@ mod model_gemm_manifest_tests {
                                 .temporal
                                 .download(&ctx.stream, &mut output)
                                 .unwrap();
-                            manifest = engine.eager_legacy_gemm_manifest.get().unwrap();
-                        }
+                            engine.eager_legacy_gemm_manifest.get().unwrap()
+                        };
                         let expected_bits = bits(&output);
                         if native {
                             unsafe {

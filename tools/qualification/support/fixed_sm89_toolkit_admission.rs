@@ -478,7 +478,7 @@ fn validate_configuration(
         }
     }
     let mut recomputed: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::with_capacity(windows));
-    for (index, bracket) in observations.chunks_exact(4).enumerate() {
+    for (index, bracket) in observations.as_chunks::<4>().0.iter().enumerate() {
         let value = ratio(bracket)?;
         let (window, comparison, recorded) = pair_ratios[index];
         if (window, comparison) != (bracket[0].window, bracket[0].comparison)
@@ -701,8 +701,10 @@ impl Guarded {
     fn words(&self, ctx: &GpuCtx) -> Result<Vec<u32>, String> {
         let bytes = fixed_explicit_vendor_raw_bytes(ctx, &self.device);
         let words = bytes
-            .chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         if words[..GUARD_WORDS].iter().any(|word| *word != CANARY)
             || words[GUARD_WORDS + self.active..]
@@ -1097,7 +1099,7 @@ fn inspect_custom_graph(
                 case.operands(arm).c.ptr,
                 case.a.ptr(),
                 case.b.ptr(),
-                case.has_bias.then(|| case.bias.ptr()).unwrap_or(0),
+                if case.has_bias { case.bias.ptr() } else { 0 },
             ],
             parameters,
             abi,
@@ -1589,15 +1591,15 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             0.0025,
             &format!("Task7 Fast numerical {literal_name}"),
         );
-        for arm in 0..3 {
+        for (arm, expected_arm) in expected.iter().enumerate().take(3) {
             for _ in 0..2 {
-                case.outputs[arm].output_gate(&ctx, &expected[arm], || case.launch(&ctx, arm))?;
+                case.outputs[arm].output_gate(&ctx, expected_arm, || case.launch(&ctx, arm))?;
             }
         }
         let mut one = Vec::with_capacity(3);
         let mut twenty = Vec::with_capacity(3);
         let mut physical = Vec::with_capacity(3);
-        for arm in 0..3 {
+        for (arm, expected_arm) in expected.iter().enumerate().take(3) {
             let graph = unsafe {
                 capture_into_graph(&ctx.stream, || {
                     case.launch(&ctx, arm)?;
@@ -1633,7 +1635,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             };
             for replay in [&graph, &graph20] {
                 for _ in 0..2 {
-                    case.outputs[arm].output_gate(&ctx, &expected[arm], || {
+                    case.outputs[arm].output_gate(&ctx, expected_arm, || {
                         replay
                             .launch()
                             .map_err(|error| format!("Task7 graph replay: {error}"))
@@ -1775,7 +1777,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
                         observation.us,
                     ))?;
                 }
-                for (bracket, values) in observations.chunks_exact(4).enumerate() {
+                for (bracket, values) in observations.as_chunks::<4>().0.iter().enumerate() {
                     let value = ratio(values)?;
                     let comparison = values[0].comparison;
                     ratio_sets[comparison].push(value);
@@ -2382,14 +2384,15 @@ mod tests {
         assert!(ordered_dot(&[f32::NAN], &[1.0], None).is_err());
     }
 
-    fn closed_configuration(
-        windows: usize,
-        start: usize,
-    ) -> (
+    /// The raw observations, the per-window pair ratios and the per-comparison
+    /// percentiles of one closed schedule.
+    type ClosedConfiguration = (
         Vec<Observation>,
         Vec<(usize, usize, f64)>,
         Vec<(usize, f64, f64)>,
-    ) {
+    );
+
+    fn closed_configuration(windows: usize, start: usize) -> ClosedConfiguration {
         let mut raw = Vec::new();
         let mut pairs = Vec::new();
         let mut by_comparison: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::new());
@@ -2398,7 +2401,7 @@ mod tests {
             for observation in &mut scheduled {
                 observation.us = 10.0 + observation.arm as f64;
             }
-            for bracket in scheduled.chunks_exact(4) {
+            for bracket in scheduled.as_chunks::<4>().0 {
                 let value = ratio(bracket).unwrap();
                 pairs.push((window, bracket[0].comparison, value));
                 by_comparison[bracket[0].comparison].push(value);
@@ -2437,12 +2440,9 @@ mod tests {
 
     #[test]
     fn real_loss_or_mixed_p95_is_valid_evidence_but_not_admission() {
-        assert_eq!(literal_admitted(&[(0.8, 0.9); 4]).unwrap(), true);
-        assert_eq!(
-            literal_admitted(&[(0.8, 0.9), (0.8, 1.0), (0.8, 0.9), (0.8, 0.9)]).unwrap(),
-            false
-        );
-        assert_eq!(literal_admitted(&[(1.1, 1.2); 4]).unwrap(), false);
+        assert!(literal_admitted(&[(0.8, 0.9); 4]).unwrap());
+        assert!(!literal_admitted(&[(0.8, 0.9), (0.8, 1.0), (0.8, 0.9), (0.8, 0.9)]).unwrap());
+        assert!(!literal_admitted(&[(1.1, 1.2); 4]).unwrap());
         assert!(literal_admitted(&[(0.8, 0.9); 3]).is_err());
         assert!(literal_admitted(&[(f64::NAN, 0.9); 4]).is_err());
     }

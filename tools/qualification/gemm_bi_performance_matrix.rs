@@ -5260,15 +5260,18 @@ impl FinalAutoJsonlSink {
 
     fn finish(
         mut self,
-        expected_records: usize,
-        selected_cells: usize,
-        selected_views: usize,
-        windows: usize,
-        full_inventory: bool,
-        source_sha: &str,
+        report: FinalAutoReport<'_>,
         quiet_gpu: &QuietGpu,
         device: &GpuDevice,
     ) -> Result<(), String> {
+        let FinalAutoReport {
+            expected_records,
+            selected_cells,
+            selected_views,
+            windows,
+            full_inventory,
+            source_sha,
+        } = report;
         if self.records != expected_records {
             return Err(format!(
                 "incomplete final AUTO evidence: got {} records, expected {expected_records}",
@@ -5489,20 +5492,74 @@ fn measure_final_auto_vendor_window_ms(
     }
 }
 
+/// What the completion record of one final AUTO run states about it.
+struct FinalAutoReport<'a> {
+    expected_records: usize,
+    selected_cells: usize,
+    selected_views: usize,
+    windows: usize,
+    full_inventory: bool,
+    source_sha: &'a str,
+}
+
+/// The contexts and facts one final AUTO run shares across every cell.
+#[derive(Clone, Copy)]
+struct FinalAutoRun<'a> {
+    auto_ctx: &'a GpuCtx,
+    vendor_ctx: &'a GpuCtx,
+    quiet_gpu: &'a QuietGpu,
+    source_sha: &'a str,
+    variant: &'a str,
+    windows: usize,
+}
+
+/// One timed path and order with its calibrated iteration counts.
+#[derive(Clone, Copy)]
+struct FinalAutoPass {
+    path: Tf32TournamentPath,
+    order: PathOrder,
+    iterations: FinalAutoPairIterations,
+}
+
+/// The cuBLAS arm of one final AUTO cell: its buffers and captured graph.
+#[derive(Clone, Copy)]
+struct FinalAutoVendorArm<'a> {
+    buffers: &'a CublasDenominatorBuffers,
+    graph: &'a CudaGraph,
+}
+
+/// Everything one final AUTO pair record reports beyond the run facts.
+struct FinalAutoRecord<'a> {
+    cell: Cell,
+    comparator: FinalAutoComparator,
+    pass: FinalAutoPass,
+    samples: &'a FinalAutoPairSamples,
+    physical: &'a QualifiedPhysicalLaunchEvidence,
+    preflight: &'a str,
+    postflight: &'a str,
+}
+
 fn collect_final_auto_pair(
-    auto_ctx: &GpuCtx,
-    vendor_ctx: &GpuCtx,
+    run: &FinalAutoRun<'_>,
     cell: Cell,
     vendor_cell: CublasDenominatorCell,
     comparator: FinalAutoComparator,
     physical: &mut QualifiedPhysicalLaunch<'_>,
-    buffers: &CublasDenominatorBuffers,
-    graph: &CudaGraph,
-    path: Tf32TournamentPath,
-    order: PathOrder,
-    iterations: FinalAutoPairIterations,
-    windows: usize,
+    vendor: FinalAutoVendorArm<'_>,
+    pass: FinalAutoPass,
 ) -> Result<FinalAutoPairSamples, String> {
+    let FinalAutoRun {
+        auto_ctx,
+        vendor_ctx,
+        windows,
+        ..
+    } = *run;
+    let FinalAutoVendorArm { buffers, graph } = vendor;
+    let FinalAutoPass {
+        path,
+        order,
+        iterations,
+    } = pass;
     const SALT: u64 = 0x51a7_0f1a;
     let mut auto_us = Vec::with_capacity(windows);
     let mut vendor_us = Vec::with_capacity(windows);
@@ -5603,20 +5660,29 @@ fn render_final_auto_identity(identity: &GemmRouteIdentity) -> String {
 
 fn emit_final_auto_record(
     sink: &mut FinalAutoJsonlSink,
-    ctx: &GpuCtx,
-    quiet_gpu: &QuietGpu,
-    source_sha: &str,
-    variant: &str,
-    cell: Cell,
-    comparator: FinalAutoComparator,
-    path: Tf32TournamentPath,
-    order: PathOrder,
-    iterations: FinalAutoPairIterations,
-    samples: &FinalAutoPairSamples,
-    physical: &QualifiedPhysicalLaunchEvidence,
-    preflight: &str,
-    postflight: &str,
+    run: &FinalAutoRun<'_>,
+    record: FinalAutoRecord<'_>,
 ) -> Result<(), String> {
+    let FinalAutoRun {
+        auto_ctx: ctx,
+        quiet_gpu,
+        source_sha,
+        variant,
+        ..
+    } = *run;
+    let FinalAutoRecord {
+        cell,
+        comparator,
+        pass: FinalAutoPass {
+            path,
+            order,
+            iterations,
+        },
+        samples,
+        physical,
+        preflight,
+        postflight,
+    } = record;
     let (auto_p50, auto_p95) = final_auto_summary(&samples.auto_us);
     let (vendor_p50, vendor_p95) = final_auto_summary(&samples.vendor_us);
     let (ratio_p50, ratio_p95) = final_auto_summary(&samples.ratios);
@@ -5694,17 +5760,18 @@ fn emit_final_auto_record(
 }
 
 fn run_final_auto_comparator(
-    auto_ctx: &GpuCtx,
-    vendor_ctx: &GpuCtx,
-    quiet_gpu: &QuietGpu,
-    source_sha: &str,
-    variant: &str,
+    run: &FinalAutoRun<'_>,
     cell: Cell,
     comparator: FinalAutoComparator,
-    windows: usize,
     physical: &mut QualifiedPhysicalLaunch<'_>,
     sink: &mut FinalAutoJsonlSink,
 ) -> Result<usize, String> {
+    let FinalAutoRun {
+        auto_ctx,
+        vendor_ctx,
+        quiet_gpu,
+        ..
+    } = *run;
     const SALT: u64 = 0x51a7_0f1a;
     let vendor_cell = final_auto_vendor_cell(cell)?;
     let buffers = allocate_cublas_denominator_buffers(vendor_ctx, vendor_cell)?;
@@ -5788,35 +5855,38 @@ fn run_final_auto_comparator(
                 }
             }
             let samples = collect_final_auto_pair(
-                auto_ctx,
-                vendor_ctx,
+                run,
                 cell,
                 vendor_cell,
                 comparator,
                 physical,
-                &buffers,
-                &graph,
-                path,
-                order,
-                iterations,
-                windows,
+                FinalAutoVendorArm {
+                    buffers: &buffers,
+                    graph: &graph,
+                },
+                FinalAutoPass {
+                    path,
+                    order,
+                    iterations,
+                },
             )?;
             let postflight = quiet_gpu.verify_post_cohort(&label)?;
             emit_final_auto_record(
                 sink,
-                auto_ctx,
-                quiet_gpu,
-                source_sha,
-                variant,
-                cell,
-                comparator,
-                path,
-                order,
-                iterations,
-                &samples,
-                physical.evidence(),
-                &preflight,
-                &postflight,
+                run,
+                FinalAutoRecord {
+                    cell,
+                    comparator,
+                    pass: FinalAutoPass {
+                        path,
+                        order,
+                        iterations,
+                    },
+                    samples: &samples,
+                    physical: physical.evidence(),
+                    preflight: &preflight,
+                    postflight: &postflight,
+                },
             )?;
             records += 1;
         }
@@ -5825,32 +5895,17 @@ fn run_final_auto_comparator(
 }
 
 fn run_final_auto_cell(
-    auto_ctx: &GpuCtx,
-    vendor_ctx: &GpuCtx,
-    quiet_gpu: &QuietGpu,
-    source_sha: &str,
-    variant: &str,
+    run: &FinalAutoRun<'_>,
     cell: Cell,
-    windows: usize,
     sink: &mut FinalAutoJsonlSink,
 ) -> Result<usize, String> {
+    let auto_ctx = run.auto_ctx;
     let request = qualification_request(cell);
     let mut physical = prepare_cell(auto_ctx, cell)?;
     physical.validate_timed_request(auto_ctx, request)?;
     let mut records = 0;
     for comparator in final_auto_comparator_views(cell) {
-        records += run_final_auto_comparator(
-            auto_ctx,
-            vendor_ctx,
-            quiet_gpu,
-            source_sha,
-            variant,
-            cell,
-            comparator,
-            windows,
-            &mut physical,
-            sink,
-        )?;
+        records += run_final_auto_comparator(run, cell, comparator, &mut physical, sink)?;
     }
     Ok(records)
 }
@@ -8701,25 +8756,29 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
     let mut records = 0;
     for cell in cells.iter().copied() {
         records += run_final_auto_cell(
-            &auto_ctx,
-            &vendor_ctx,
-            &quiet_gpu,
-            source_sha,
-            &variant,
+            &FinalAutoRun {
+                auto_ctx: &auto_ctx,
+                vendor_ctx: &vendor_ctx,
+                quiet_gpu: &quiet_gpu,
+                source_sha,
+                variant: &variant,
+                windows,
+            },
             cell,
-            windows,
             &mut sink,
         )
         .unwrap_or_else(|error| panic!("{}: {error}", cell_id(cell)));
     }
     assert_eq!(records, expected_records, "final AUTO emitted record count");
     sink.finish(
-        expected_records,
-        cells.len(),
-        selected_views,
-        windows,
-        full_inventory,
-        source_sha,
+        FinalAutoReport {
+            expected_records,
+            selected_cells: cells.len(),
+            selected_views,
+            windows,
+            full_inventory,
+            source_sha,
+        },
         &quiet_gpu,
         &device,
     )
@@ -11148,19 +11207,34 @@ mod sm89_nt_finalist_once21 {
         )
     }
 
-    fn emit_row(
+    /// One NT finalist cell as measured on one path and order, with the
+    /// output digests and launches of both arms.
+    struct NtFinalistRow<'a, 'b> {
         cell: NtCell,
-        comparison: &str,
         path: Tf32TournamentPath,
         order: PathOrder,
-        samples: &PairSamples,
-        candidate_digest: &str,
-        current_digest: &str,
-        fast_digest: &str,
-        candidate: &QualifiedPhysicalLaunch<'_>,
-        current: &QualifiedPhysicalLaunch<'_>,
-        modes: &str,
-    ) -> bool {
+        samples: &'a PairSamples,
+        candidate_digest: &'a str,
+        current_digest: &'a str,
+        fast_digest: &'a str,
+        candidate: &'a QualifiedPhysicalLaunch<'b>,
+        current: &'a QualifiedPhysicalLaunch<'b>,
+        modes: &'a str,
+    }
+
+    fn emit_row(comparison: &str, row: NtFinalistRow<'_, '_>) -> bool {
+        let NtFinalistRow {
+            cell,
+            path,
+            order,
+            samples,
+            candidate_digest,
+            current_digest,
+            fast_digest,
+            candidate,
+            current,
+            modes,
+        } = row;
         let (candidate_p50, candidate_p95) = summary(&samples.candidate_us);
         let (denominator_p50, denominator_p95) = summary(&samples.denominator_us);
         let (ratio_p50, ratio_p95) = summary(&samples.ratios);
@@ -11517,17 +11591,19 @@ mod sm89_nt_finalist_once21 {
                     snapshot_physical(&current_ctx, &current, &fixture, "current/finalist")?;
                 let fast_digest = snapshot_fast(&fast_ctx, &fast, &fixture)?;
                 admitted_current &= emit_row(
-                    cell,
                     "current",
-                    path,
-                    order,
-                    &samples,
-                    &candidate_digest,
-                    &current_digest,
-                    &fast_digest,
-                    &candidate,
-                    &current,
-                    &modes,
+                    NtFinalistRow {
+                        cell,
+                        path,
+                        order,
+                        samples: &samples,
+                        candidate_digest: &candidate_digest,
+                        current_digest: &current_digest,
+                        fast_digest: &fast_digest,
+                        candidate: &candidate,
+                        current: &current,
+                        modes: &modes,
+                    },
                 );
                 rows += 1;
             }
@@ -11585,17 +11661,19 @@ mod sm89_nt_finalist_once21 {
                     snapshot_physical(&current_ctx, &current, &fixture, "current/Fast shadow")?;
                 let fast_digest = snapshot_fast(&fast_ctx, &fast, &fixture)?;
                 emit_row(
-                    cell,
                     "fast",
-                    path,
-                    order,
-                    &samples,
-                    &candidate_digest,
-                    &current_digest,
-                    &fast_digest,
-                    &candidate,
-                    &current,
-                    &modes,
+                    NtFinalistRow {
+                        cell,
+                        path,
+                        order,
+                        samples: &samples,
+                        candidate_digest: &candidate_digest,
+                        current_digest: &current_digest,
+                        fast_digest: &fast_digest,
+                        candidate: &candidate,
+                        current: &current,
+                        modes: &modes,
+                    },
                 );
                 rows += 1;
             }

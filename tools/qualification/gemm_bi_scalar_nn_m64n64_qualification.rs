@@ -868,13 +868,12 @@ mod cuda_qualification {
         symbol: &'static str,
     ) -> Result<Kernel, String> {
         let (_, dynamic_shared) = ada_candidate_shared(symbol)?;
-        let function = if symbol == FIXED_COPYPLAN_SYMBOL && runtime.live_copyplan.is_some() {
-            runtime.live_copyplan.as_ref().unwrap().clone()
-        } else {
-            runtime
+        let function = match runtime.live_copyplan.as_ref() {
+            Some(live) if symbol == FIXED_COPYPLAN_SYMBOL => live.clone(),
+            _ => runtime
                 .module
                 .load_function(symbol)
-                .map_err(|error| format!("load {symbol}: {error:?}"))?
+                .map_err(|error| format!("load {symbol}: {error:?}"))?,
         };
         if dynamic_shared > 0 {
             function
@@ -1193,11 +1192,15 @@ mod cuda_qualification {
         }
     }
 
+    /// The candidate and generic kernels of one Ada pair, their captured
+    /// graphs, the shared fixture and the golden output words.
+    type AdaPair = (Kernel, Kernel, CudaGraph, CudaGraph, Fixture, Vec<u32>);
+
     fn check_ada_pair(
         runtime: &Runtime,
         case: Case,
         candidate_symbol: &'static str,
-    ) -> Result<(Kernel, Kernel, CudaGraph, CudaGraph, Fixture, Vec<u32>), String> {
+    ) -> Result<AdaPair, String> {
         if candidate_symbol == FIXED_COPYPLAN_SYMBOL
             && !copyplan_epilogue_supported(case.alpha, case.beta, case.bias)
         {
@@ -1336,18 +1339,30 @@ mod cuda_qualification {
         )
     }
 
+    /// The two arms of one Ada screen with their captured graphs.
+    #[derive(Clone, Copy)]
+    struct AdaScreenKernels<'a> {
+        candidate: &'a Kernel,
+        generic: &'a Kernel,
+        candidate_graph: &'a CudaGraph,
+        generic_graph: &'a CudaGraph,
+    }
+
     fn screen_ada_stratum(
         runtime: &Runtime,
         cell: AdaShortScreenCell,
-        candidate: &Kernel,
-        generic: &Kernel,
-        candidate_graph: &CudaGraph,
-        generic_graph: &CudaGraph,
+        kernels: AdaScreenKernels<'_>,
         fixture: &mut Fixture,
         expected: &[u32],
         path: AdaPath,
         order: AdaOrder,
     ) -> Result<[f64; 2], String> {
+        let AdaScreenKernels {
+            candidate,
+            generic,
+            candidate_graph,
+            generic_graph,
+        } = kernels;
         for _ in 0..ADA_WARMUPS {
             for arm in [Arm::Production, Arm::Generic] {
                 let (kernel, graph) = match arm {
@@ -1568,7 +1583,9 @@ mod cuda_qualification {
         if cells.is_empty() {
             return Err("Ada NN discovery cell filter is empty".into());
         }
-        assert!(!cfg!(debug_assertions), "Ada discovery requires --release");
+        if cfg!(debug_assertions) {
+            return Err("Ada discovery requires --release".into());
+        }
         let quiet = QuietGpu::for_cuda_ordinal(0)?;
         let pre = quiet.require_pre_context(&format!("{cohort}/pre-context"))?;
         let copyplan = cells
@@ -1626,10 +1643,12 @@ mod cuda_qualification {
                     strata.push(screen_ada_stratum(
                         &runtime,
                         cell,
-                        &candidate,
-                        &generic,
-                        &candidate_graph,
-                        &generic_graph,
+                        AdaScreenKernels {
+                            candidate: &candidate,
+                            generic: &generic,
+                            candidate_graph: &candidate_graph,
+                            generic_graph: &generic_graph,
+                        },
                         &mut fixture,
                         &golden,
                         path,
@@ -2010,7 +2029,9 @@ mod cuda_qualification {
         } else {
             "MambaBiLiveCopyPlanDecisionV1"
         };
-        assert!(!cfg!(debug_assertions), "live comparison requires release");
+        if cfg!(debug_assertions) {
+            return Err("live comparison requires release".into());
+        }
         if std::env::var("NVIDIA_TF32_OVERRIDE").ok().as_deref() == Some("0") {
             return Err("FAST_TF32 is disabled by NVIDIA_TF32_OVERRIDE".into());
         }

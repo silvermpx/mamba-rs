@@ -19,6 +19,7 @@
 //!    K-reduction association by design — every bucket stays
 //!    deterministic, but the buckets are distinct fixed orders. Strict
 //!    all-M invariance is the INFERENCE matvec_bi kernel's contract.
+//!
 //! The trainer-step wall clock lives in benches/gemm_bi_trainer_step_bench.rs.
 
 #![cfg(feature = "cuda")]

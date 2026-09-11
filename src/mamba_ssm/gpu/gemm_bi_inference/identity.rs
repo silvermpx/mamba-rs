@@ -1429,7 +1429,8 @@ mod tests {
     fn every_terminal_has_its_exact_storage_geometry_and_arithmetic_tuple() {
         // Literal census expectations from the approved vocabulary. This table
         // does not call a production selector or terminal constructor.
-        let expected: &[(&str, u8, (u32, u32, u32, u8, u32, u32), [u8; 3])] = &[
+        type TerminalRow = (&'static str, u8, (u32, u32, u32, u8, u32, u32), [u8; 3]);
+        let expected: &[TerminalRow] = &[
             ("gemm_bi_f32_f32_s2", 31, (64, 64, 32, 2, 128, 0), [1, 1, 1]),
             (
                 "gemm_bi_f32_f32_n128_s2",

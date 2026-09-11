@@ -35,7 +35,7 @@ fn assert_tied_half_inputs_preserve_f32_product_bit(dtype: WeightDtype, precisio
     let logits = DtypedBuf::zeros(&ctx.stream, BATCH * VOCAB_PADDED, WeightDtype::F32)
         .expect("allocate F32 logits owner");
     temporal
-        .upload_f32(&ctx.stream, &vec![input; BATCH * D_MODEL])
+        .upload_f32(&ctx.stream, &[input; BATCH * D_MODEL])
         .expect("upload exactly representable temporal input");
     embed
         .upload_f32(&ctx.stream, &vec![input; VOCAB_PADDED * D_MODEL])

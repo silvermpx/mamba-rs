@@ -560,7 +560,7 @@ mod live {
                     &auto_ctx,
                     &mut auto,
                     graph,
-                    0x89_7f_3200_u64 ^ index as u64,
+                    0x897f_3200_u64 ^ index as u64,
                 )?;
                 if let Some(expected) = &repeated {
                     if &bits != expected {
@@ -661,7 +661,7 @@ mod live {
                     &prior_ctx,
                     &mut prior,
                     graph,
-                    0x89_7f_32a0_u64 ^ index as u64,
+                    0x897f_32a0_u64 ^ index as u64,
                 )?;
                 if let Some(expected) = &repeated {
                     if &bits != expected {

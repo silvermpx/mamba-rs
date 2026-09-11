@@ -434,69 +434,110 @@ mod live {
         Ok(iterations.clamp(1, MAX_ITERATIONS))
     }
 
+    /// The two timed arms of one pre-admission pair: the candidate route
+    /// and its prior comparator, each on its own context.
+    struct PairArms<'a, 'b> {
+        candidate_ctx: &'a GpuCtx,
+        candidate: &'a mut QualifiedPhysicalLaunch<'b>,
+        comparator_ctx: &'a GpuCtx,
+        comparator: &'a mut QualifiedPhysicalLaunch<'b>,
+    }
+
     fn measure_raw_pair(
-        candidate_ctx: &GpuCtx,
-        candidate: &mut QualifiedPhysicalLaunch<'_>,
-        comparator_ctx: &GpuCtx,
-        comparator: &mut QualifiedPhysicalLaunch<'_>,
+        arms: &mut PairArms<'_, '_>,
         path: Path,
         order: PairOrder,
-        candidate_iterations: usize,
-        comparator_iterations: usize,
+        iterations: (usize, usize),
     ) -> Result<[f64; 4], String> {
+        let (candidate_iterations, comparator_iterations) = iterations;
         match order {
             PairOrder::Abba => Ok([
-                measure_us(candidate_ctx, candidate, path, candidate_iterations)?,
-                measure_us(comparator_ctx, comparator, path, comparator_iterations)?,
-                measure_us(comparator_ctx, comparator, path, comparator_iterations)?,
-                measure_us(candidate_ctx, candidate, path, candidate_iterations)?,
+                measure_us(
+                    arms.candidate_ctx,
+                    arms.candidate,
+                    path,
+                    candidate_iterations,
+                )?,
+                measure_us(
+                    arms.comparator_ctx,
+                    arms.comparator,
+                    path,
+                    comparator_iterations,
+                )?,
+                measure_us(
+                    arms.comparator_ctx,
+                    arms.comparator,
+                    path,
+                    comparator_iterations,
+                )?,
+                measure_us(
+                    arms.candidate_ctx,
+                    arms.candidate,
+                    path,
+                    candidate_iterations,
+                )?,
             ]),
             PairOrder::Baab => Ok([
-                measure_us(comparator_ctx, comparator, path, comparator_iterations)?,
-                measure_us(candidate_ctx, candidate, path, candidate_iterations)?,
-                measure_us(candidate_ctx, candidate, path, candidate_iterations)?,
-                measure_us(comparator_ctx, comparator, path, comparator_iterations)?,
+                measure_us(
+                    arms.comparator_ctx,
+                    arms.comparator,
+                    path,
+                    comparator_iterations,
+                )?,
+                measure_us(
+                    arms.candidate_ctx,
+                    arms.candidate,
+                    path,
+                    candidate_iterations,
+                )?,
+                measure_us(
+                    arms.candidate_ctx,
+                    arms.candidate,
+                    path,
+                    candidate_iterations,
+                )?,
+                measure_us(
+                    arms.comparator_ctx,
+                    arms.comparator,
+                    path,
+                    comparator_iterations,
+                )?,
             ]),
         }
     }
 
     fn run_phase(
         case: Case,
-        candidate_ctx: &GpuCtx,
-        candidate: &mut QualifiedPhysicalLaunch<'_>,
-        comparator_ctx: &GpuCtx,
-        comparator: &mut QualifiedPhysicalLaunch<'_>,
+        arms: &mut PairArms<'_, '_>,
         path: Path,
         order: PairOrder,
         phase: &str,
         windows: usize,
         salt: u64,
     ) -> Result<PhaseResult, String> {
-        candidate.seed_f32_operands(candidate_ctx, salt)?;
-        comparator.seed_f32_operands(comparator_ctx, salt)?;
-        let expected_inputs = candidate.f32_operand_bits(candidate_ctx)?;
-        if comparator.f32_operand_bits(comparator_ctx)? != expected_inputs {
+        arms.candidate.seed_f32_operands(arms.candidate_ctx, salt)?;
+        arms.comparator
+            .seed_f32_operands(arms.comparator_ctx, salt)?;
+        let expected_inputs = arms.candidate.f32_operand_bits(arms.candidate_ctx)?;
+        if arms.comparator.f32_operand_bits(arms.comparator_ctx)? != expected_inputs {
             return Err(format!("{} timing inputs differ", case.name));
         }
 
-        let candidate_iterations = calibrate(candidate_ctx, candidate, path)?;
-        let comparator_iterations = calibrate(comparator_ctx, comparator, path)?;
-        candidate.seed_f32_operands(candidate_ctx, salt)?;
-        comparator.seed_f32_operands(comparator_ctx, salt)?;
+        let candidate_iterations = calibrate(arms.candidate_ctx, arms.candidate, path)?;
+        let comparator_iterations = calibrate(arms.comparator_ctx, arms.comparator, path)?;
+        arms.candidate.seed_f32_operands(arms.candidate_ctx, salt)?;
+        arms.comparator
+            .seed_f32_operands(arms.comparator_ctx, salt)?;
 
         let mut ratios = Vec::with_capacity(windows);
         let mut candidate_us = Vec::with_capacity(windows);
         let mut comparator_us = Vec::with_capacity(windows);
         for _ in 0..windows {
             let raw = measure_raw_pair(
-                candidate_ctx,
-                candidate,
-                comparator_ctx,
-                comparator,
+                arms,
                 path,
                 order,
-                candidate_iterations,
-                comparator_iterations,
+                (candidate_iterations, comparator_iterations),
             )?;
             let ratio = paired_ratio(order, raw)?;
             let (candidate_sample, comparator_sample) = match order {
@@ -508,13 +549,13 @@ mod live {
             ratios.push(ratio);
         }
 
-        if candidate.f32_operand_bits(candidate_ctx)? != expected_inputs
-            || comparator.f32_operand_bits(comparator_ctx)? != expected_inputs
+        if arms.candidate.f32_operand_bits(arms.candidate_ctx)? != expected_inputs
+            || arms.comparator.f32_operand_bits(arms.comparator_ctx)? != expected_inputs
         {
             return Err(format!("{} timed launch modified A or B", case.name));
         }
-        let candidate_guards = candidate.validate_red_zones(candidate_ctx)?;
-        let comparator_guards = comparator.validate_red_zones(comparator_ctx)?;
+        let candidate_guards = arms.candidate.validate_red_zones(arms.candidate_ctx)?;
+        let comparator_guards = arms.comparator.validate_red_zones(arms.comparator_ctx)?;
         if candidate_guards.allocation_count() < 3
             || comparator_guards.allocation_count() < 3
             || candidate_guards.element_count() == 0
@@ -660,15 +701,17 @@ mod live {
                 for order in [PairOrder::Abba, PairOrder::Baab] {
                     let screen = run_phase(
                         case,
-                        &candidate_ctx,
-                        &mut candidate,
-                        &comparator_ctx,
-                        &mut comparator,
+                        &mut PairArms {
+                            candidate_ctx: &candidate_ctx,
+                            candidate: &mut candidate,
+                            comparator_ctx: &comparator_ctx,
+                            comparator: &mut comparator,
+                        },
                         path,
                         order,
                         "retile_deep_screen_once3",
                         SCREEN_WINDOWS,
-                        0x89_7f_3330_u64 ^ index as u64,
+                        0x897f_3330_u64 ^ index as u64,
                     )?;
                     screens_pass &= phase_passed(&screen);
                     screen_ratios.push((
@@ -684,15 +727,17 @@ mod live {
                     for order in [PairOrder::Abba, PairOrder::Baab] {
                         let official = run_phase(
                             case,
-                            &candidate_ctx,
-                            &mut candidate,
-                            &comparator_ctx,
-                            &mut comparator,
+                            &mut PairArms {
+                                candidate_ctx: &candidate_ctx,
+                                candidate: &mut candidate,
+                                comparator_ctx: &comparator_ctx,
+                                comparator: &mut comparator,
+                            },
                             path,
                             order,
                             "retile_deep_official_once7",
                             OFFICIAL_WINDOWS,
-                            0x89_7f_3370_u64 ^ index as u64,
+                            0x897f_3370_u64 ^ index as u64,
                         )?;
                         officials_pass &= phase_passed(&official);
                         official_ratios.push((
@@ -794,15 +839,17 @@ mod live {
                 for order in [PairOrder::Abba, PairOrder::Baab] {
                     let screen = run_phase(
                         case,
-                        &candidate_ctx,
-                        &mut candidate,
-                        &comparator_ctx,
-                        &mut comparator,
+                        &mut PairArms {
+                            candidate_ctx: &candidate_ctx,
+                            candidate: &mut candidate,
+                            comparator_ctx: &comparator_ctx,
+                            comparator: &mut comparator,
+                        },
                         path,
                         order,
                         "production_screen_once3",
                         SCREEN_WINDOWS,
-                        0x89_7f_3230_u64 ^ index as u64,
+                        0x897f_3230_u64 ^ index as u64,
                     )?;
                     screens_pass &= phase_passed(&screen);
                 }
@@ -816,15 +863,17 @@ mod live {
                 for order in [PairOrder::Abba, PairOrder::Baab] {
                     let official = run_phase(
                         case,
-                        &candidate_ctx,
-                        &mut candidate,
-                        &comparator_ctx,
-                        &mut comparator,
+                        &mut PairArms {
+                            candidate_ctx: &candidate_ctx,
+                            candidate: &mut candidate,
+                            comparator_ctx: &comparator_ctx,
+                            comparator: &mut comparator,
+                        },
                         path,
                         order,
                         "production_official_once7",
                         OFFICIAL_WINDOWS,
-                        0x89_7f_3270_u64 ^ index as u64,
+                        0x897f_3270_u64 ^ index as u64,
                     )?;
                     if !phase_passed(&official) {
                         return Err(format!(
@@ -942,15 +991,17 @@ mod live {
                 for order in [PairOrder::Abba, PairOrder::Baab] {
                     let screen = run_phase(
                         case,
-                        &candidate_ctx,
-                        &mut candidate,
-                        &comparator_ctx,
-                        &mut comparator,
+                        &mut PairArms {
+                            candidate_ctx: &candidate_ctx,
+                            candidate: &mut candidate,
+                            comparator_ctx: &comparator_ctx,
+                            comparator: &mut comparator,
+                        },
                         path,
                         order,
                         "screen3",
                         SCREEN_WINDOWS,
-                        0x89_7f_3200_u64 ^ index as u64,
+                        0x897f_3200_u64 ^ index as u64,
                     )?;
                     screens_pass &= phase_passed(&screen);
                 }
@@ -961,15 +1012,17 @@ mod live {
                 for order in [PairOrder::Abba, PairOrder::Baab] {
                     let official = run_phase(
                         case,
-                        &candidate_ctx,
-                        &mut candidate,
-                        &comparator_ctx,
-                        &mut comparator,
+                        &mut PairArms {
+                            candidate_ctx: &candidate_ctx,
+                            candidate: &mut candidate,
+                            comparator_ctx: &comparator_ctx,
+                            comparator: &mut comparator,
+                        },
                         path,
                         order,
                         "official7",
                         OFFICIAL_WINDOWS,
-                        0x89_7f_3270_u64 ^ index as u64,
+                        0x897f_3270_u64 ^ index as u64,
                     )?;
                     if phase_passed(&official) {
                         official_rows += 1;

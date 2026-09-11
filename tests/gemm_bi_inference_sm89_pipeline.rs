@@ -462,34 +462,32 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                                 }
                             };
                             let picked = run().expect("hot-cell launch");
-                            if forced.is_none() {
-                                if m == hot_m && output_offset == 8 {
-                                    let expected = expected_ada_half_auto_v45(
-                                        ctx.kernels.compiler_identity().nvrtc_version,
-                                        dtype,
-                                        InferenceShape { m, k, n },
-                                        has_bias,
-                                    )
-                                    .expect("literal revision-45 hot-cell expectation");
-                                    assert_eq!(
-                                        picked, expected,
-                                        "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}"
-                                    );
-                                } else {
-                                    assert!(
-                                        !matches!(
-                                            picked,
-                                            CANDIDATE
-                                                | SWIZZLE_CANDIDATE
-                                                | S3_CANDIDATE
-                                                | D_FINALIST
-                                                | E_FINALIST
-                                        ),
-                                        "AUTO candidate escaped scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
-                                    );
-                                }
+                            if let Some(forced) = forced {
+                                assert_eq!(picked, forced);
+                            } else if m == hot_m && output_offset == 8 {
+                                let expected = expected_ada_half_auto_v45(
+                                    ctx.kernels.compiler_identity().nvrtc_version,
+                                    dtype,
+                                    InferenceShape { m, k, n },
+                                    has_bias,
+                                )
+                                .expect("literal revision-45 hot-cell expectation");
+                                assert_eq!(
+                                    picked, expected,
+                                    "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}"
+                                );
                             } else {
-                                assert_eq!(picked, forced.unwrap());
+                                assert!(
+                                    !matches!(
+                                        picked,
+                                        CANDIDATE
+                                            | SWIZZLE_CANDIDATE
+                                            | S3_CANDIDATE
+                                            | D_FINALIST
+                                            | E_FINALIST
+                                    ),
+                                    "AUTO candidate escaped scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
+                                );
                             }
                             assert!(
                                 raw_half(&ctx, &output) == expected,
