@@ -57,14 +57,18 @@ fn flatten(w: &MambaWeights) -> Vec<f32> {
     out
 }
 
-/// Which GEMM tier the run selects. Both ship; both must be deterministic.
+/// Which GEMM tier the run selects. All three ship; the two deterministic
+/// tiers must be bit-reproducible, and cuBLAS Fast is the comparator.
 #[derive(Clone, Copy, Debug)]
 enum GemmTier {
-    /// Crate default: cuBLAS GemmEx.
+    /// cuBLAS GemmEx in its fast mode.
     Cublas,
-    /// Batch-invariant custom kernels, scalar tier.
+    /// Deterministic custom kernels with the tensor-core permission off:
+    /// the scalar tier. The permission is on by default, so the scalar
+    /// tier has to be asked for.
     BatchInvariant,
-    /// Batch-invariant custom kernels, tensor-core tier (production).
+    /// Deterministic custom kernels with the tensor-core tier (the
+    /// production default).
     BatchInvariantTc,
 }
 
@@ -96,10 +100,13 @@ fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
             .expect("trainer");
     match tier {
         GemmTier::Cublas => trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap(),
-        GemmTier::BatchInvariant => trainer
-            .ctx()
-            .set_gemm_mode(GemmMode::Deterministic)
-            .unwrap(),
+        GemmTier::BatchInvariant => {
+            trainer
+                .ctx()
+                .set_gemm_mode(GemmMode::Deterministic)
+                .unwrap();
+            trainer.ctx().set_bi_tensor_cores(false);
+        }
         GemmTier::BatchInvariantTc => {
             trainer
                 .ctx()
