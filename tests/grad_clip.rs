@@ -246,8 +246,13 @@ fn clip_above_threshold_is_bit_identity() {
     }
 }
 
-/// Backward is linear in d_temporal, so clipping at c must equal running
-/// with d_temporal pre-scaled by the clip coefficient.
+/// Backward is linear in d_temporal, so the gradient clipped at c must
+/// equal the gradient of d_temporal pre-scaled by the clip coefficient, up
+/// to the rounding of two different fixed reduction orders. The weights
+/// after the optimizer step are held only to a fraction of the learning
+/// rate: AdamW's first update is g / (|g| + eps), which is not linear in g
+/// where a gradient element sits near zero, so a rounding-level difference
+/// in such an element moves its update by a visible fraction of lr.
 #[test]
 fn clip_below_threshold_equals_prescaled_d_temporal() {
     let cfg = test_cfg();
@@ -286,14 +291,20 @@ fn clip_below_threshold_equals_prescaled_d_temporal() {
     )
     .expect("clipped");
     clipped.forward(&input, &mut out).expect("clipped fwd");
-    let m = clipped
-        .backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(c))
+    clipped
+        .backward_step(
+            &d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )
         .expect("clipped bwd");
+    let raw_grad = download_grads(&clipped);
+    let m = clipped.apply_step(Some(c)).expect("clipped step");
     let reported = m.grad_norm.expect("norm") as f64;
     assert!(
         (reported - norm).abs() / norm < 1e-6,
         "reported norm must be PRE-clip: {reported} vs {norm}"
     );
+    let clipped_grad: Vec<f32> = raw_grad.iter().map(|&g| g * coef).collect();
 
     let scaled_dt: Vec<f32> = d_temporal.iter().map(|&v| v * coef).collect();
     let mut prescaled = MambaTrainer::new_full(
@@ -306,21 +317,54 @@ fn clip_below_threshold_equals_prescaled_d_temporal() {
     .expect("prescaled");
     prescaled.forward(&input, &mut out).expect("prescaled fwd");
     prescaled
-        .backward_step(&scaled_dt, BackwardOpts::default())
+        .backward_step(
+            &scaled_dt,
+            BackwardOpts::default().with_accumulate_only(true),
+        )
         .expect("prescaled bwd");
+    let prescaled_grad = download_grads(&prescaled);
+    prescaled.apply_step(None).expect("prescaled step");
 
-    let sa = flat_weights(&clipped.snapshot_master().expect("clipped"));
-    let sb = flat_weights(&prescaled.snapshot_master().expect("prescaled"));
+    // The gradients carry the claim. Elements near zero are compared
+    // against a floor tied to the gradient scale, since their own value
+    // is below the rounding noise of the reductions that produced them.
+    assert_eq!(clipped_grad.len(), prescaled_grad.len());
+    let scale = clipped_grad
+        .iter()
+        .chain(&prescaled_grad)
+        .fold(0.0f32, |acc, g| acc.max(g.abs()));
     let mut worst = 0.0f32;
-    for (x, y) in sa.iter().zip(sb.iter()) {
+    for (x, y) in clipped_grad.iter().zip(&prescaled_grad) {
         let d = (x - y).abs();
-        let denom = x.abs().max(y.abs()).max(1e-4);
+        let denom = x.abs().max(y.abs()).max(scale * 1e-2);
         worst = worst.max(d / denom);
     }
     assert!(
         worst < 1e-5,
-        "clip-at-c diverges from prescaled d_temporal: max_rel={worst:e}"
+        "clipped gradient diverges from the prescaled gradient: max_rel={worst:e}"
     );
+
+    let lr = session(batch, seq_len, input_dim).lr;
+    let sa = flat_weights(&clipped.snapshot_master().expect("clipped"));
+    let sb = flat_weights(&prescaled.snapshot_master().expect("prescaled"));
+    let worst_weight = sa
+        .iter()
+        .zip(&sb)
+        .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+    assert!(
+        worst_weight < lr * 1e-2,
+        "weights after the step diverge by more than a hundredth of lr: {worst_weight:e}"
+    );
+}
+
+fn download_grads(trainer: &MambaTrainer) -> Vec<f32> {
+    let arena = trainer.grad_arena();
+    let mut values = vec![0.0f32; arena.len()];
+    arena
+        .download(&trainer.ctx().stream, &mut values)
+        .expect("download gradients");
+    trainer.ctx().stream.synchronize().expect("synchronize");
+    values
 }
 
 #[test]
