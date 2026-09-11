@@ -25,7 +25,7 @@ pub struct Mamba3Kernels {
     /// kernels carry their own capacity guards.
     pub state_cap: usize,
 
-    // ── Sequential SSM (mamba3_ssd.cu) ──
+    // ── Sequential SSM (mamba3_siso.cu) ──
     pub m3_step_fwd: CudaFunction,
     pub m3_burnin_fwd: CudaFunction,
     pub m3_burnin_fwd_nosave: CudaFunction,
@@ -139,7 +139,7 @@ pub struct Mamba3Kernels {
     pub silu_gate_bwd_typed: TypedKernel,
     /// RMSNorm-gated output (half I/O, f32 weight/rms_vals).
     pub rmsnorm_gated_fwd_typed: TypedKernel,
-    /// M3 SSM step — shared with training, already templated in mamba3_ssd.cu.
+    /// M3 SSM step — shared with training, already templated in mamba3_siso.cu.
     pub m3_step_fwd_typed: TypedKernel,
     /// M3 burnin forward (training) — sequential T-loop SSM with activation
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
@@ -236,7 +236,7 @@ impl Mamba3Kernels {
             // Inline the prelude first so each source file's
             // `#include "_typed_prelude.cuh"` can be safely stripped below.
             include_str!("../../../kernels/_typed_prelude.cuh"),
-            include_str!("../../../kernels/mamba3_ssd.cu"),
+            include_str!("../../../kernels/mamba3_siso.cu"),
             include_str!("../../../kernels/mamba3_ops.cu"),
             include_str!("../../../kernels/mamba3_chunked.cu"),
             // Shared kernels needed by training pipeline

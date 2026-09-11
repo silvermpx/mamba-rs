@@ -14,7 +14,7 @@
 // Grid: (B, nh, 1), Block: (hd, 1, 1).
 // Each thread carries h_local[d_state] in registers (max ds=64).
 //
-// Key differences from Mamba-2 SSD (mamba2_ssd.cu):
+// Key differences from the Mamba-2 recurrence:
 // - Trapezoidal recurrence (3 terms: alpha*h + beta*v*k_prev + gamma*x*k_cur)
 //   vs Mamba-2 exponential (2 terms: da*h + delta*x*B)
 // - Separate k_state and v_state (delayed one step) vs none
@@ -22,8 +22,6 @@
 // - No ngroups indexing -- B/C already expanded to per-head by bias+RoPE ops
 // - No delta: discretization absorbed into alpha/beta/gamma
 //
-// Source: CPU reference: native/train/mamba2/forward_m3.rs (phase F5)
-//         T=1 step: native/model/mamba2.rs (mamba3_step_f32)
 // Paper: Lahoti et al. "Mamba-3: SISO" (ICLR 2026)
 //
 // O1 Warp Shuffle Optimization (sm_30+):

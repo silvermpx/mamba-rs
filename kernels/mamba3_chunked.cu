@@ -1,7 +1,7 @@
 // Mamba-3 SISO chunked parallel scan CUDA kernels.
 //
 // Replaces sequential T-loop with parallel intra-chunk matmul for Mamba-3
-// trapezoidal recurrence. Key difference from Mamba-2 chunked (mamba2_ssd.cu):
+// trapezoidal recurrence. Key difference from the Mamba-2 chunked form:
 // trapezoidal discretization with shifted_gamma/scale K-prescaling.
 //
 // Chunked forward reformulation:
@@ -13,12 +13,9 @@
 //
 // Then: Y = Q @ K_scaled^T * causal_decay @ V + state_contrib + (D + qk_dot) * V
 //
-// Source: CPU reference: native/train/mamba2/forward_m3.rs (chunked path)
-//         Triton reference: docs_rs/mamba2/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py
-//         Triton backward:  docs_rs/mamba2/mamba_ssm/ops/triton/mamba3/mamba3_siso_bwd.py
 // Paper: Lahoti et al. "Mamba-3: SISO" (ICLR 2026)
 //
-// Thread/grid conventions follow mamba2_ssd.cu and mamba3_ssd.cu.
+// Thread/grid conventions follow mamba3_siso.cu.
 // All kernels handle partial last chunk (T not multiple of chunk_size).
 
 // State-dimension capacity of the per-thread register arrays below.

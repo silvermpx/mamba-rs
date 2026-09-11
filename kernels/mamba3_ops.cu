@@ -1101,7 +1101,7 @@ extern "C" __global__ void rmsnorm_gated_backward(
 // - Coefficient/scalar tensors: f32
 //   dt, a_val, trap, alpha, beta, gamma, angles_raw, angle_cumsum,
 //   dt_bias, norm weights, rms stats
-// - Recurrent state: f32 (see mamba3_ssd.cu m3_step_fwd templated variant)
+// - Recurrent state: f32 (see mamba3_siso.cu m3_step_fwd templated variant)
 // - Residual stream: f32 (HF residual_in_fp32=True)
 //
 // Backward/training tensors (dd_*_raw, trap_raw saves) are not used in

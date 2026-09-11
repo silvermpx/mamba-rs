@@ -129,7 +129,7 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 
 | File | Kernels | Purpose |
 |------|---------|---------|
-| mamba3_ssd.cu | 5 | Sequential SSM forward/backward |
+| mamba3_siso.cu | 5 | Sequential SSM forward/backward |
 | mamba3_ops.cu | 19 | Split, BCNorm, RoPE, ABG, gating |
 | mamba3_chunked.cu | 15 | Chunked parallel scan (T>64) |
 | norms.cu | 3 | RMSNorm forward/backward |
