@@ -240,23 +240,23 @@ comparison.
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
-| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.79 | 1.09× | 2.43 | 2.50 |
-| d128, 2 layers, B=16, T=64 | bf16, tensor cores | 2.35 | 2.10 | 1.12× | 2.02 | 2.51 |
-| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.39 | 2.14 | 1.12× | 2.04 | 2.13 |
-| d256, 4 layers, B=16, T=128 | f32 | 12.52 | 12.08 | 1.04× | 9.87 | 10.18 |
-| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.68 | 8.51 | 1.14× | 8.07 | 10.42 |
-| d256, 4 layers, B=16, T=128 | f16, tensor cores | 10.13 | 8.65 | 1.17× | 8.19 | 8.81 |
-| d768, 4 layers, B=8, T=256 | f32 | 34.88 | 32.16 | 1.08× | 24.44 | 27.91 |
-| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.32 | 20.30 | 1.10× | 20.11 | 26.72 |
-| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.55 | 20.54 | 1.10× | 20.27 | 24.39 |
-| d1536, 2 layers, B=4, T=256 | f32 | 24.54 | 22.68 | 1.08× | 14.67 | 18.43 |
-| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.21 | 13.01 | 1.02× | 12.30 | 17.99 |
-| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.57 | 13.29 | 1.02× | 12.86 | 16.49 |
+| d128, 2 layers, B=16, T=64 | f32 | 3.03 | 2.64 | 1.15× | 2.28 | 2.35 |
+| d128, 2 layers, B=16, T=64 | bf16, tensor cores | 2.35 | 1.96 | 1.20× | 1.87 | 2.36 |
+| d128, 2 layers, B=16, T=64 | f16, tensor cores | 2.38 | 1.99 | 1.20× | 1.89 | 1.98 |
+| d256, 4 layers, B=16, T=128 | f32 | 12.45 | 11.46 | 1.09× | 9.25 | 9.85 |
+| d256, 4 layers, B=16, T=128 | bf16, tensor cores | 9.54 | 7.75 | 1.23× | 7.31 | 9.63 |
+| d256, 4 layers, B=16, T=128 | f16, tensor cores | 9.68 | 7.86 | 1.23× | 7.40 | 8.03 |
+| d768, 4 layers, B=8, T=256 | f32 | 34.64 | 31.35 | 1.10× | 23.67 | 27.33 |
+| d768, 4 layers, B=8, T=256 | bf16, tensor cores | 22.09 | 18.84 | 1.17× | 18.66 | 25.22 |
+| d768, 4 layers, B=8, T=256 | f16, tensor cores | 22.29 | 19.04 | 1.17× | 18.83 | 22.90 |
+| d1536, 2 layers, B=4, T=256 | f32 | 24.34 | 22.32 | 1.09× | 14.29 | 18.12 |
+| d1536, 2 layers, B=4, T=256 | bf16, tensor cores | 13.04 | 12.06 | 1.08× | 11.49 | 17.11 |
+| d1536, 2 layers, B=4, T=256 | f16, tensor cores | 13.38 | 12.35 | 1.08× | 11.80 | 15.46 |
 
-A training step spends most of its time in the scan and the other kernels
-this release did not change, so the whole-step gain is smaller than the
-kernel gain. Two settings that are new in 0.7.0 and off by default: with
-`MAMBA_RS_BI_F32_POLICY=tf32` the d768 f32 step drops from 32.2 to 26.9 ms
+The whole-step gain is the GEMM kernels and the Mamba kernel pass of this
+release together (the changelog's Performance section separates the two).
+Two settings that are new in 0.7.0 and off by default: with
+`MAMBA_RS_BI_F32_POLICY=tf32` the d768 f32 step drops from 31.4 to 26.2 ms
 (the only shape of the four with a measured deterministic TF32 kernel; the
 others keep the exact kernels and the same time), and the stream-K half
 policy does not change any of these four steps because their
@@ -276,51 +276,52 @@ bf16).
 
 | storage | batch | path | 0.6.9 µs/step | 0.7.0 µs/step | speedup |
 |---|---:|---|---:|---:|---:|
-| f32 | 1 | eager | 238.5 | 238.2 | 1.00× |
-| f32 | 1 | graph | 199.6 | 196.9 | 1.01× |
-| f32 | 4 | eager | 245.9 | 246.4 | 1.00× |
-| f32 | 4 | graph | 206.1 | 204.3 | 1.01× |
-| f32 | 16 | eager | 246.7 | 253.1 | 0.97× |
-| f32 | 16 | graph | 207.8 | 212.1 | 0.98× |
-| f32 | 64 | eager | 271.0 | 262.1 | 1.03× |
-| f32 | 64 | graph | 232.6 | 222.8 | 1.04× |
-| f32 | 128 | eager | 296.8 | 286.5 | 1.04× |
-| f32 | 128 | graph | 259.4 | 250.0 | 1.04× |
-| bf16 | 1 | eager | 124.1 | 127.2 | 0.98× |
-| bf16 | 1 | graph | 93.9 | 96.6 | 0.97× |
-| bf16 | 4 | eager | 128.8 | 129.6 | 0.99× |
-| bf16 | 4 | graph | 97.8 | 100.3 | 0.98× |
-| bf16 | 16 | eager | 132.5 | 134.0 | 0.99× |
-| bf16 | 16 | graph | 102.1 | 103.2 | 0.99× |
-| bf16 | 64 | eager | 146.4 | 147.4 | 0.99× |
-| bf16 | 64 | graph | 117.8 | 119.6 | 0.98× |
-| bf16 | 128 | eager | 197.5 | 176.3 | 1.12× |
-| bf16 | 128 | graph | 167.5 | 146.6 | 1.14× |
+| f32 | 1 | eager | 238.5 | 195.9 | 1.22× |
+| f32 | 1 | graph | 199.6 | 170.7 | 1.17× |
+| f32 | 4 | eager | 245.9 | 201.3 | 1.22× |
+| f32 | 4 | graph | 206.1 | 176.3 | 1.17× |
+| f32 | 16 | eager | 246.7 | 208.1 | 1.19× |
+| f32 | 16 | graph | 207.8 | 183.2 | 1.13× |
+| f32 | 64 | eager | 271.0 | 216.0 | 1.25× |
+| f32 | 64 | graph | 232.6 | 192.5 | 1.21× |
+| f32 | 128 | eager | 296.8 | 240.6 | 1.23× |
+| f32 | 128 | graph | 259.4 | 218.7 | 1.19× |
+| bf16 | 1 | eager | 124.1 | 113.7 | 1.09× |
+| bf16 | 1 | graph | 93.9 | 83.3 | 1.13× |
+| bf16 | 4 | eager | 128.8 | 110.9 | 1.16× |
+| bf16 | 4 | graph | 97.8 | 84.6 | 1.16× |
+| bf16 | 16 | eager | 132.5 | 116.2 | 1.14× |
+| bf16 | 16 | graph | 102.1 | 87.8 | 1.16× |
+| bf16 | 64 | eager | 146.4 | 126.4 | 1.16× |
+| bf16 | 64 | graph | 117.8 | 105.3 | 1.12× |
+| bf16 | 128 | eager | 197.5 | 156.2 | 1.26× |
+| bf16 | 128 | graph | 167.5 | 133.6 | 1.25× |
 
 The same step on the training family with exact f32 kernels, the one
 route both trees share exactly (the digests are identical here too):
 
 | batch | path | 0.6.9 µs/step | 0.7.0 µs/step | speedup |
 |---:|---|---:|---:|---:|
-| 1 | eager | 141.6 | 143.7 | 0.985× |
-| 1 | graph | 102.8 | 104.0 | 0.988× |
-| 4 | eager | 146.4 | 147.0 | 0.996× |
-| 4 | graph | 106.7 | 107.5 | 0.992× |
-| 16 | eager | 150.9 | 151.6 | 0.995× |
-| 16 | graph | 112.0 | 112.4 | 0.997× |
-| 64 | eager | 208.3 | 203.0 | 1.026× |
-| 64 | graph | 164.9 | 159.8 | 1.032× |
-| 128 | eager | 279.5 | 271.5 | 1.030× |
-| 128 | graph | 237.2 | 229.4 | 1.034× |
+| 1 | eager | 141.6 | 105.2 | 1.35× |
+| 1 | graph | 102.8 | 79.0 | 1.30× |
+| 4 | eager | 146.4 | 106.3 | 1.38× |
+| 4 | graph | 106.7 | 80.9 | 1.32× |
+| 16 | eager | 150.9 | 108.9 | 1.39× |
+| 16 | graph | 112.0 | 85.4 | 1.31× |
+| 64 | eager | 208.3 | 159.6 | 1.31× |
+| 64 | graph | 164.9 | 132.1 | 1.25× |
+| 128 | eager | 279.5 | 228.2 | 1.22× |
+| 128 | graph | 237.2 | 201.8 | 1.18× |
 
 A model this small spends its step on kernel launches rather than on
-arithmetic (about 15 launches for 100 to 140 µs), so the new GEMM kernels
-do not show; the whole-step numbers move only where the batch is large
-enough for the multiplication to matter. The first measurement of this
-step on the release tree was 45 µs per graph replay slower than 0.6.9 at
-every batch; that was host-side work in the replay validation (a launch
-set digest rebuilt on every replay), fixed in 0.7.0 before release, and
-the numbers above are after the fix.
+arithmetic, so the new GEMM kernels alone left both tables where 0.6.9
+had them (within 3 percent from batch 1 to 64). The gains above come from
+the Mamba kernel pass, which fused the decode step into seven kernels per
+layer instead of eleven on both families; the bit identity of the outputs
+was checked on both trees. The first measurement of this step on the
+release tree was 45 µs per graph replay slower than 0.6.9 at every batch;
+that was host-side work in the replay validation (a launch set digest
+rebuilt on every replay), fixed in 0.7.0 before release.
 
 
 

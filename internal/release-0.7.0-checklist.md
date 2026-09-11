@@ -329,8 +329,8 @@ Select their actual supported cases and prerequisites before executing them.
     kernels (eight nodes per layer), the narrow column sums issuing eight
     loads deep, the fused B/C norm on every f32 lane, the vectorized twins
     wired, the scan row loads through 16-byte lanes.
-  - [ ] Local, awaiting the GPU gate (`/root/gate-pass5.sh`) and a paired
-    A/B against `6bcd2fd5`: state loops bounded by the compiled capacity
+  - [x] Committed `737004b2..2f25d700` (gate-pass5 green, 145 ledger keys
+    identical to `cce73716`): state loops bounded by the compiled capacity
     (M1 sequential and step, M3 step and burn-in); the scan forwards
     handing their prefix through the warp with no store staging (four
     barriers per state and chunk instead of six, forward shared memory
@@ -349,16 +349,99 @@ Select their actual supported cases and prerequisites before executing them.
     elementwise multiply deleted); `mamba3_ssd.cu` renamed
     `mamba3_siso.cu` (the owner's word: SSM is Mamba-1, SSD Mamba-2, SISO
     Mamba-3).
+  - [x] Committed `df16226f..52519e1c` (gate-pass7 45/45, third ledger
+    161/161 against `cce73716`): the fold backward
+    with every accumulator in a register (the rolled lane loop had put
+    them in local memory; the previous batch's merged scans then cost
+    sixteen more registers and made the kernel 4 % slower), the two scans
+    one after the other with the warp-edge hand-offs rebuilt from the raw
+    warp totals on the scans' own barriers (four per state and lane), every
+    hand-off a warp-uniform slot read plus a per-lane select (a single-lane
+    branch was the whole f32 loss at one block per SM), the f32 kernel
+    staging three of its four lanes (44 KB, two blocks per SM, 232
+    registers, no spill) and the half kernels reloading their rows from
+    the tile (168 registers, no spill); the stage tile placed where the
+    launcher's byte count ends (`2f25d700` overran its dynamic shared
+    memory by 496 bytes); the rmsnorm backward register hold taken out
+    again (the norm block is never narrower than the row, so it bought
+    nothing and cost 6 %); `colsum_accumulate` fed from a staged 128-row
+    tile by 256 threads with the owning thread keeping the ascending
+    chain (17 launch sites on `grid_colsum`); the Mamba-3 decode step on
+    nine kernels per layer (step coefficients from dt and A on the step
+    kernel's first lane, the angle advance inside the bias+rope kernel);
+    the scan hash recorder printing one key per dtype. Isolated, Ada, B8
+    T1300 d384 (old `6bcd2fd5` to new): fold bf16 2.063 to 1.684 ms,
+    fold f32 3.761 to 2.795 ms, colsum 165/208/215 to 61 us at 16/384/768
+    columns; whole bf16 Mamba-1 step GPU time 8.4 % lower on the nsys
+    ledger before the f32 fold and colsum changes. Bits: three-dtype scan
+    hashes 35/35 and the full ledger 161/161 against `cce73716`; memcheck
+    and racecheck clean on the scan suites. Tried and dropped: eight-deep
+    loads in `reduce_sum_axis0` and `reduce_bias` (slower at 384 columns).
+  - [x] Committed `39c26eff`, `9d09359f` (gate-pass9 45/45, fifth ledger
+    161/161 against `cce73716`): the Mamba-1 state
+    loops leave at d_state (a plain context compiles the capacity 64, and
+    the guarded loops of the previous batch ran 64 iterations for sixteen
+    states: the d128 eager training forward 0.79 to 1.03 ms, now 0.68); the
+    Mamba-3 loops back on their runtime bound (the early exit moved the
+    target forward's digests, the bound bought nothing); the half dW/dX
+    launch reads the compute capability the kernels were bound with
+    instead of two driver queries per call. Paired measurement `cce73716`
+    against `52519e1c` (`/root/kernel-pass-ab2-20260911T043030Z`,
+    `scratchpad/ab-pass2`): Mamba-3 training at the production shape
+    1.47x bf16 and 1.42x f32, Mamba-1 training at the production shape
+    1.03x bf16 and 1.11x f32, Mamba-1 decode 1.16 to 1.33x, Mamba-3 decode
+    1.04x, the d768 bf16 step 1.08x; tables in the changelog and the
+    benchmark pages. 0.6.9 against the final tree on the release shapes
+    (`/root/set-c-069-*`): d768 bf16 22.09 to 18.84 ms (1.17x), the
+    changelog's whole-step table re-measured in one session. Found on the
+    way: the bf16 production step went 118.1 (`cce73716`) to 125.7 ms
+    (`6bcd2fd5`, the first batch) and back to 114.9 (final); the first
+    batch's cost on that shape was the fold backward itself: 1.75 ms per
+    launch at `cce73716`, 2.08 at `6bcd2fd5` after the vector row loads,
+    1.68 after the register rewrite, so against the tree before the pass
+    the bf16 fold is 4 % faster and the bf16 production step 3 %. Putting
+    the scalar loads back into the rewritten fold changes nothing in bf16
+    (1.677 against 1.684 ms) and costs 2.5 % in f32; the rewrite keeps the
+    vector loads.
   - [x] Paired measurement `cce73716` against `6bcd2fd5` on Ada
     (`scratchpad/ab-pass1`, parsers `setA/B/CD/EF.py`): Mamba-1 decode f32
     5-14 % faster (bf16 unchanged, its decode was already fused), Mamba-1
     training step unchanged at T=256, Mamba-3 training step 2-4.5 %
     faster, Mamba-3 prefill and decode unchanged.
-  - [ ] Next, bit-preserving: shed one group's delta/u/dy stage into
-    registers and pin the carveout so the f32 fold backward fits two
-    blocks per SM; two state dimensions per barrier group in the scan
-    forward; adt and dA_cumsum folded into the M3 fused chunk kernel; the
-    two M3 decode fusions now that the decode recorder exists.
+  - [ ] Next, bit-preserving: two state dimensions per barrier group in
+    the scan forward; adt and dA_cumsum folded into the M3 fused chunk
+    kernel; the Rule-B axis-0 reducers on a two-dimensional block; the
+    B/C norm on grouped rows; the conv items C5 to C8 of the research
+    sheet.
+  - [ ] GEMM cells below cuBLAS on Ada, researched (six read-only reports in
+    `scratchpad/kernel-research/gemm-*.md` of session 867e1007), for 0.7.x
+    and the owner's word; each carries files, lines, a bit tag and its
+    gate. Half TN at the classifier page (0.70x): the family ceiling is
+    ~141 TFLOP/s and the cell sits at 65 % wave utilisation (186 CTAs on
+    142 SMs); candidates are the register cap 128 to 168 (bit-preserving,
+    unblocks the `ldmatrix.x4.trans` B path already written), stream-K at
+    three CTAs per SM (bit-moving), a fused split-K S=3 like the TF32
+    family's (bit-moving). Small d128 cells (0.39x): one launch each,
+    4.3 us floor shared with cuBLAS, the rest serial reduction depth
+    (`M_red/64` stages on 8-16 CTAs); cuBLAS splits the reduction; our
+    fused split-K8 M32N32 TF32 kernel exists and is a selector row away
+    for the TF32 TN cells (bit-moving), the half body needs the port.
+    TF32 large shapes (0.63-0.82x): the NT N96 body lacks every mainloop
+    mechanism the TN body has (rebuild, bit-preserving); TN d768-in is a
+    wave-fit defect, the qualified `Sm89TnPreRnaM64N96S2V1` row fixes it
+    with no kernel; dense TF32 peak on this board is ~178 TFLOP/s and
+    cuBLAS runs at 40-55 % of it. Inference bf16-in f32-out (0.83x): the
+    f32-out ladder reaches only the portable `mma16.cu` kernels, the Ada
+    family is hard-wired to 16-bit output; the pair store guard at
+    `mma16.cu:273` costs half-sector writes (six tokens, bit-preserving),
+    templating the Ada family on the output type is the real fix. Deep
+    exact-f32 forward 4096x3072x1536 (0.90x vs 0.6.9): absent from
+    `NN_FIXED_COPYPLAN_SM89_CELLS`, one row (~1.45x on the cell; bit tag
+    to be decided by parity at the shape). Launch chain: one launch per
+    half cell already; the exact-f32 chain still has the split-K reducer
+    as a second launch (the TF32 lane fuses it, an in-tree model); the
+    two driver capability queries per half dW/dX call are gone
+    (`am-half-backward-capability`).
   - [ ] Owner decisions, each a new numeric route: pin the scan's FMA
     contraction (`__fmaf_rn`) so bit identity no longer rests on the
     compiler default; the d-group fold of dB/dC on the sequential route;

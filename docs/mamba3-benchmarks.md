@@ -24,6 +24,31 @@ and the RoPE rotation are one launch, and the per-layer residual round
 trip is gone. All of it is bit-identical to the previous release: the
 gradient digests and every parity suite match.
 
+## Training step — production shape, the 0.7.0 kernel pass (RTX 6000 Ada, CUDA 13.2)
+
+Same shape (d_model 384, 24 layers, B=8, T=1300), one board, the
+deterministic GEMMs of 0.7.0 in both columns; the pass kept every output
+bit-identical to the previous release under the digest suites (the
+chunked backward's pair kernel, the decode step, the prefill and whole
+training runs, recorded on both trees). Milliseconds per step, median of
+four mirrored runs:
+
+| tree | f32 | bf16 |
+|------|----:|-----:|
+| 0.7.0 before the pass | 262.0 | 231.1 |
+| 0.7.0 | 184.7 | 157.0 |
+
+Per kernel, per launch: the pair kernel of the chunked backward
+(`m3_dqkv`) 3.41 to 1.58 ms, its tiles padded to an odd stride so the
+sixteen-way bank conflict is gone and the pair-matrix triangle walked
+flat; the column sums over the batch that the backward launches twelve
+times per layer 165 to 215 µs down to 61 µs; the chunked lanes without
+their fill and restore copies. The decode step runs nine kernels per
+layer instead of eleven (the step kernel computes its coefficients from
+dt and A on its first lane, and the bias+rope kernel advances the rotary
+angles itself): 170.0 to 160.9 µs at batch 1 with graph replay on the
+d128 synthetic model, 1.06×.
+
 ## Training step — the earlier kernel pass (2x RTX 5090, CUDA 13.0)
 
 Same shape: 636 ms per step before that pass, 179.4 ms after (-72%). The

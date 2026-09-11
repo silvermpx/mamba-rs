@@ -67,6 +67,25 @@ is for contributors who change kernels; users do not need it.
 - Deleting launches is not automatically visible time in a scan-dominated
   chain; keep such fusions when they are bit-identical, and book the win as
   what was measured.
+- Registers before barriers. `ptxas -v` on the old and the new source is
+  the first filter and costs seconds: a stack frame with no spills is an
+  array indexed by the variable of a rolled loop, and merging two block
+  scans to halve the barriers can cost sixteen live registers and make
+  the kernel slower. Unroll the loop that indexes the accumulators, keep
+  the scans apart, and let the hand-off slots ride on the scans' own
+  barriers.
+- A kernel that runs one block per SM hides nothing. A branch one lane
+  walks alone (the edge lane reading a slot while thirty-one wait) cost
+  the f32 fold backward a whole gain that the same code gave the bf16
+  kernel at three blocks per SM; read the slot warp-uniformly and select
+  per lane. When the shared-memory tile is what holds occupancy at one
+  block, stage fewer lanes and read the rest from global memory into the
+  registers they were going to occupy anyway.
+- A column reduction with one thread per column is latency, not
+  bandwidth: a few hundred threads on a 142-SM board wait on eight loads
+  at a time. Stage a row tile through shared memory with a full block and
+  keep the ascending chain in one owning thread; the bits stay, the
+  memory pipeline widens.
 
 ## Bit discipline
 
@@ -90,6 +109,14 @@ is for contributors who change kernels; users do not need it.
 - A macro body in an NVRTC source dies silently when one line loses its
   backslash continuation; after the first non-continued line of a
   `#define`, the next line must not end with a backslash.
+- The kernel's shared-memory layout and the launcher's byte count are two
+  sources for one number; when one moves (a per-warp slot replacing a
+  per-thread row), the other must move in the same change, and the memory
+  checker on the hash suite is the test that says so.
+- The digest recorders are `#[ignore]` tests: run them with `--ignored`
+  and count the `HASH` lines in the log, since a run without the flag
+  exits green with nothing recorded. A recorder prints one key per
+  activation dtype whenever the kernel takes a different path per dtype.
 
 ## Admission
 

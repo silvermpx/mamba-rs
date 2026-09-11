@@ -56,6 +56,27 @@ Isolated ledger at 131.5 (x24-layer ms): scan fwd 10.7 / bwd ~20 plus
 fold partials, backward GEMMs 15.4 (dt_proj 3.5), conv dw 2.6 / dx
 1.5, dB/dC reducer ~2.5.
 
+## Training step — production shape, the 0.7.0 kernel pass (RTX 6000 Ada, CUDA 13.2)
+
+Same shape as above (d_model 384, 24 layers, B=8, T=1300, graph replay),
+one board, the deterministic GEMMs of 0.7.0 in both columns; the pass
+touched only the kernels around them and kept every output bit-identical
+to the previous release (the digest suites of the decode step, the scan
+forward and backward, the convolution and whole training runs were
+recorded on both trees and match). Milliseconds per step, median of four
+mirrored runs:
+
+| tree | bf16 (tensor cores) | f32 |
+|------|--------------------:|----:|
+| 0.7.0 before the pass | 118.1 | 227.4 |
+| 0.7.0 | 115.0 | 204.7 |
+
+Per kernel, per launch, at this shape: the fold backward 2.06 to 1.68 ms
+(bf16) and 3.76 to 2.79 ms (f32), the conv backward 286 to 245 µs (one
+kernel per tile, no pre-activation tape), the B/C reduction 222 to 206 µs,
+the conv burn-in forward 98 to 87 µs, the column sums over the batch 165
+to 215 µs down to 61 µs. The scan forward is unchanged at 0.81 ms.
+
 ## LLM Inference — state-spaces/mamba-*-hf (end-to-end, graph-captured)
 
 Production checkpoints loaded from HuggingFace, greedy decode, 100-token generation.

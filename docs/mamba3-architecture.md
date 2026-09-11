@@ -129,11 +129,14 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 
 | File | Kernels | Purpose |
 |------|---------|---------|
-| mamba3_siso.cu | 5 | Sequential SSM forward/backward |
+| mamba3_siso.cu | 5 | Sequential SSM forward/backward, the decode step |
 | mamba3_ops.cu | 19 | Split, BCNorm, RoPE, ABG, gating |
-| mamba3_chunked.cu | 15 | Chunked parallel scan (T>64) |
+| mamba3_chunked.cu | 16 | Chunked parallel scan (T>64) |
 | norms.cu | 3 | RMSNorm forward/backward |
-| elementwise.cu | 5 | Residual, fill, gather, vec ops |
+| elementwise.cu | 13 | Residual, fill, casts, gather, column sums, vec ops |
+
+Counted by kernel family; the typed variants (f32, bf16, f16) of a family
+share one row.
 
 ## Chunked scan and carried state (contract)
 
