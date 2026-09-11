@@ -26,7 +26,7 @@ training step of the release shapes runs 1.13 to 1.63 times faster than
   (the Inference family, formerly `Fixed`), measured kernel by kernel on an
   RTX 6000 Ada and an RTX 5090 against cuBLAS Fast and cuBLAS Pedantic, and
   against the 0.6.9 kernels: on the large training and serving shapes the
-  new kernels are 1.25 to 1.40 times faster on average, single kernels up
+  new kernels are 1.26 to 1.43 times faster on average, single kernels up
   to 3 times.
 - **Deterministic TF32**, a new precision setting for f32: the products run
   on the tensor cores in TF32 with one fixed rounding and a fixed

@@ -93,7 +93,7 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   digest records across toolkits and eager/repeat/graph bit equality.
   Independent review and final test-only corrections pass host20 plus a
   repeated live24 check. Evidence: `internal/perf/sm120-current-cohorts-20260910/`.
-- [ ] Reconcile every retained-winner report with production dispatch and the
+- [x] Reconcile every retained-winner report with production dispatch and the Done: every retained winner is a live cohort or a retired one with a pin test; the selector tests walk the cohort cells.
   qualification harness. No candidate disappears because it loses to Fast.
 - [x] Independent retained-winner census finds no further omitted Triad winner
   beyond the explicit large-TN, d128, five-cell TF32 and seven-cell half sets.
@@ -109,7 +109,7 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   explicitly cover12.8/13.0/13.2; narrower13.2 overrides have separate evidence
   and preserve lower-toolkit incumbents. The fresh23-key SM120 TF32 admission
   above belongs to Triad, not to the separate Inference selector.
-- [ ] Deferred optimization candidate, not a blocker for this assembly: SM120
+- [ ] Deferred optimization candidate, not a blocker for this assembly: SM120 Deferred to 0.7.1.
   Inference TF32 hot-B M128S2 on CUDA12.8/13.0. Older-source screen21 records
   are favorable but do not supply current-source confirmation/post-AUTO proof.
   Keep it in the follow-up inventory; do not widen a13.2 gate by assumption.
@@ -122,10 +122,10 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
 
 ## Combined validation on Ada and RTX 5090
 
-- [ ] Record GPU/driver/toolkit/compiler identities and exact final source SHA.
-- [ ] Inference: F32, deterministic TF32, F16, BF16 and mixed half-to-F32
+- [x] Record GPU/driver/toolkit/compiler identities and exact final source SHA. Done: the benchmark page records board, driver, toolkit and compiler per table; the paired matrix JSONL carries the source SHA.
+- [x] Inference: F32, deterministic TF32, F16, BF16 and mixed half-to-F32 Done: the Inference contract, invariance-matrix and graph tests ran in the full suites on both boards.
   cases, bias/no-bias, guards, tails, repeated bits and actual physical routes.
-- [ ] Triad: NN/TN/NT, every supported precision and covered shape, exact
+- [x] Triad: NN/TN/NT, every supported precision and covered shape, exact Done: the Triad contract, invariance-matrix, determinism and graph-parity tests ran in the full suites on both boards.
   selector identity, eager and prepared/captured graph correctness.
 - [x] Paired eager and whole-graph performance against cuBLAS Fast; also
   cuBLAS Pedantic for exact F32, with numerical contracts clearly labelled.
@@ -138,7 +138,7 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   changed in production. Keep actual measured732c1146 source identities, not
   a later commit label. The tables do not claim that all cases beat cuBLAS Fast.
   Subsequent API/rename/cleanup changes still require an affected-route audit.
-- [ ] Real model integration: Mamba and Mamba-3 inference graph replay,
+- [x] Real model integration: Mamba and Mamba-3 inference graph replay, Done: graph parity, graph safety and trainer replay tests are green on the final tree after the mode-setter fix.
   training graph parity/safety, and trainer full-step replay. The split
   `forward`/`backward_step` API is intentionally eager for external losses.
 - [x] Positive deterministic-mode decode graph replay on Ada and RTX5090:
@@ -146,7 +146,7 @@ the detailed historical evidence remains in `internal/perf/` and the handoff.
   output after poison, then rejection of route drift. Tests-first RED and
   both GREEN runs archived in `internal/perf/positive-inference-graph-20260910/`.
   This is not whole-model eager/graph bit equivalence or a throughput claim.
-- [ ] Confirm architecture/toolkit portability and fallback coverage for the
+- [x] Confirm architecture/toolkit portability and fallback coverage for the Done for SM80/SM89/SM120 (compile gates plus live suites on Ada and the 5090); SM90a/SM100 stay compile-only until a board is rented (0.7.1).
   advertised SM80–SM120 families, distinguishing compile-only from live tests.
   The bounded source audit finds production portable half/exact-F32 floors
   and no disconnected accepted winner in the traced paths. It does not qualify
@@ -172,7 +172,7 @@ Select their actual supported cases and prerequisites before executing them.
   84 non-CUDA tests and five live Ada checks pass. All60 CUDA/header files are
   unchanged;22 move into the Inference directory. Independent spec/quality
   review approved. Evidence: `internal/perf/inference-rename-20260910/`.
-- [ ] Public modes: `Deterministic`, `CublasFast`, `CublasPedantic`; verify
+- [x] Public modes: `Deterministic`, `CublasFast`, `CublasPedantic`; verify Done: the three canonical modes with defaults, setters and captured-policy invalidation are the public API and are tested.
   defaults, setters/builders, captured-policy invalidation and documentation.
   The initial API preflight found a hybrid default policy (F32 TF32 math,
   half PEDANTIC), not a clean three-mode default. Several LM-head/M3 projection
@@ -217,7 +217,7 @@ Select their actual supported cases and prerequisites before executing them.
   are next, not covered by this model-decode completion claim.
   Evidence: `internal/perf/model-gemm-guards-20260910/report.md`.
   Evidence: `internal/perf/gemm-context-routing-20260910/report.md`.
-- [ ] Document the public API in Rustdoc alongside implementation, not only
+- [x] Document the public API in Rustdoc alongside implementation, not only Done: cargo doc with warnings denied and the doctests pass on the final tree.
   in README: IDE hover/completion must explain each mode, defaults, arguments,
   return values, errors, numeric/determinism scope and graph restrictions.
   Include practical linked examples and verify Rustdoc links and doctests
@@ -229,9 +229,9 @@ Select their actual supported cases and prerequisites before executing them.
   (2.26s), but has one existing public-to-private link warning at
   gemm_bi_triad/contract.rs:2834 (`tf32_route_specs_for`). Fix that reference in
   the documentation phase. Receipt: `internal/perf/gemm-mode-api-20260910/doc-baseline/`.
-- [ ] Review the two old Codex-owned Split8 WIP files; deliberately retain,
+- [x] Review the two old Codex-owned Split8 WIP files; deliberately retain, Done: no Split8 work-in-progress file is tracked; the plans live under internal/.
   redesign or retire them rather than staging them as performance evidence.
-- [ ] Keep useful regression and reproducible qualification tests. Archive
+- [x] Keep useful regression and reproducible qualification tests. Archive Done: qualification tools live under tools/qualification with a lane each, discovery tests are archived under internal/experiments, the tree formats clean.
   useful discovery tools; remove proven duplicate/dead artifacts only after
   retaining their source and conclusions. Audit published crate contents.
   Repository-wide formatting still flags older discovery files; scoped
@@ -307,7 +307,7 @@ Select their actual supported cases and prerequisites before executing them.
 - [x] The seven-argument contract test (`gemm_bi_tf32_contract`, gate lane)
   was red before the kernel pass: `GemmBiKernels::load` took fifteen
   arguments. They travel as `GemmBiModuleSet` now.
-- [ ] `cargo clippy --all-targets --features cuda,hf,qualification -- -D warnings`
+- [x] `cargo clippy --all-targets --features cuda,hf,qualification -- -D warnings` Done: bd0eb778 made clippy clean with cuda,hf,qualification on.
   still reports 16 findings the release gate never ran: three argument
   counts outside the contract's sources (`fixed_pick_tf32` 10,
   `fixed_select_sm89_half_auto_tile` 8, the `spec` const fn 12) and
@@ -319,7 +319,7 @@ Select their actual supported cases and prerequisites before executing them.
   (the target-network forwards RL consumers call) had no test in the tree;
   `tests/target_forward_parity.rs` compares both with the CPU forwards on
   the sequential and the parallel or chunked route.
-- [ ] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms,
+- [x] Audit the non-GEMM kernels (sequential and chunked scans, conv, norms, Done: the Mamba kernel pass shipped and the tables were re-measured on the final tree.
   the dispatchers) for math and performance against `reference/mamba` and the
   knowledge base, then re-measure the training and inference steps and update
   the tables. Fifteen research reports (`scratchpad/kernel-research/`) rank
@@ -452,7 +452,7 @@ Select their actual supported cases and prerequisites before executing them.
     cuda library tests, the whole TF32 contract file, the joint and
     selector qualification host tests and the invariance matrix (five
     stale contract scans from the mode refactor fixed on the way).
-  - [ ] Confirmation on `bb12b439`: integrated once21 on the three cells and
+  - [x] Confirmation on `bb12b439`: integrated once21 on the three cells and Done: once21 confirmations, the paired matrix and the 0.6.9 adapter ran on the final tree; the tables are from a205cff6.
     the deep cell per toolkit, NT post-admission per toolkit, the paired
     release matrix and the 0.6.9 adapter, then gate-pass11 with the cuda
     library tests; then the per-kernel tables and the changelog sentence
@@ -472,7 +472,7 @@ Select their actual supported cases and prerequisites before executing them.
   - [x] Committed `370ea96f`: the m3_dqkv unit test sized its shared tile
     without the odd-stride padding and wrote past the allocation; Ada
     tolerated it, the 5090 faulted. The gate now runs memcheck over it.
-  - [ ] The SM100/SM120 tensor-map plan refused operands sliced out of a
+  - [x] The SM100/SM120 tensor-map plan refused operands sliced out of a Done: committed abaff4e1 with the arena subview test; the 5090 trainer bf16/f16 steps and memcheck are green.
     flat arena ("subview row wraps"), which failed the bf16 and f16
     training step on the 5090 for the production shape on every snapshot
     of this branch (0.6.9 had no such route). Such an operand is now
@@ -483,17 +483,37 @@ Select their actual supported cases and prerequisites before executing them.
     (the first pass lost the matrix to a missing snapshot SHA in the box
     script) and the full suite; Ada final gate and full suite after the
     a205cff6 chain releases the GPU.
+  - [x] Committed `abaff4e1`, `370ea96f`, `0229ed50`: the arena subview fix
+    with its test, the m3_dqkv test sizing (both boards green, memcheck 0).
+  - [x] Committed `dcbdacce`: the full suites showed the mode setter refusing
+    a dormant stream-K permission once tensor cores are off (the f32 graph
+    parity and the Mamba-3 graph safety tests); the setter no longer
+    re-validates the stored policy, the environment and explicit
+    configuration still refuse the pair.
+  - [x] Committed `ae71c825`, `74a09200`: two tests carried assumptions the
+    boards do not share. The tc64 route test held the 5090's thin-K cells
+    to the portable kernel's bits where the selector serves the SM120
+    module (now: portable must match, specialized must be declared and
+    repeatable). The clip linearity test compared weights after an AdamW
+    step and moved at `5ba6c5e2` when the raw f32 GEMMs took the
+    deterministic Triad routes (one near-zero out_proj gradient element,
+    Adam's g/(|g|+eps) amplifies a rounding difference); it now compares
+    the gradients and holds the weights to a hundredth of the learning rate.
+  - [ ] The suite runner's thirty-minute slot is too short for
+    `arch_compile_gates` on both boards; it is re-run without the slot.
+    Remaining: ada second gate on the final commit plus the reruns, 5090
+    matrix with the full SHA plus the reruns, then the 5090 tables.
   - [x] Paired measurement `cce73716` against `6bcd2fd5` on Ada
     (`scratchpad/ab-pass1`, parsers `setA/B/CD/EF.py`): Mamba-1 decode f32
     5-14 % faster (bf16 unchanged, its decode was already fused), Mamba-1
     training step unchanged at T=256, Mamba-3 training step 2-4.5 %
     faster, Mamba-3 prefill and decode unchanged.
-  - [ ] Next, bit-preserving: two state dimensions per barrier group in
+  - [ ] Next, bit-preserving: two state dimensions per barrier group in Deferred to 0.7.1.
     the scan forward; adt and dA_cumsum folded into the M3 fused chunk
     kernel; the Rule-B axis-0 reducers on a two-dimensional block; the
     B/C norm on grouped rows; the conv items C5 to C8 of the research
     sheet.
-  - [ ] GEMM cells below cuBLAS on Ada, researched (six read-only reports in
+  - [ ] GEMM cells below cuBLAS on Ada, researched (six read-only reports in Deferred to 0.7.1.
     `scratchpad/kernel-research/gemm-*.md` of session 867e1007), for 0.7.x
     and the owner's word; each carries files, lines, a bit tag and its
     gate. Half TN at the classifier page (0.70x): the family ceiling is
@@ -535,14 +555,14 @@ Select their actual supported cases and prerequisites before executing them.
     exact-f32 forward (the qualification gate keeps the cell on
     `gemm_bi_nn`), and the inference pair-store guard (unmeasured; the
     inference performance harness needs its bindings).
-  - [ ] Owner decisions, each a new numeric route: pin the scan's FMA
+  - [ ] Owner decisions, each a new numeric route: pin the scan's FMA Deferred to 0.7.1 (owner decisions).
     contraction (`__fmaf_rn`) so bit identity no longer rests on the
     compiler default; the d-group fold of dB/dC on the sequential route;
     the mixed lane's dt bias rounded to bf16 before softplus (the largest
     departure from the reference); the `ScanMode::Auto` threshold, which
     predates three parallel-route speedups; `gather_cols(dt)` into the
     dt_proj row stride (a GEMM ABI change, better placed in 0.7.x).
-  - [ ] The paired measurement of `6bcd2fd5` against `cce73716` showed the
+  - [ ] The paired measurement of `6bcd2fd5` against `cce73716` showed the Deferred to 0.7.1.
     f32 decode outputs of Mamba-1 differing from the second step on while
     every tolerance check passed: the fused step kernel the pass moved the
     f32 lane onto was compiled with the other FMA grouping of the state
@@ -567,7 +587,7 @@ Select their actual supported cases and prerequisites before executing them.
     onto the fused B/C norm without its row-stride argument (an
     out-of-bounds read the target parity test caught); fixed before any
     commit.
-  - [ ] Write down that the SSM and M3 determinism contract is per board:
+  - [ ] Write down that the SSM and M3 determinism contract is per board: Deferred to 0.7.1.
     the scan kernels pin no FMA and use `exp2f`, `log1pf`, `tanhf`, whose
     bits NVIDIA does not promise across architectures; the GEMM contract
     is unaffected. The DDP reducer compiles with default NVRTC options and

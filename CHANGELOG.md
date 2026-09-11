@@ -9,9 +9,9 @@ kernels unless you ask for cuBLAS by name. Every Mamba kernel around them
 (the scans, the convolution, the norms, the reductions, the decode steps)
 then went through a pass of its own, and two routes moved to their faster
 family. On an RTX 6000 Ada a training step of the release shapes is 1.13
-to 1.63 times faster than 0.6.9, the Mamba-3 production step 1.47 times
-faster than the tree before the Mamba pass, and the decode steps 1.1 to
-1.3 times faster; the numbers are summarised below and given in full,
+to 1.63 times faster than 0.6.9, the Mamba-3 production step 1.42 to
+1.59 times faster than the tree before the Mamba pass, and the decode
+steps 1.2 to 1.3 times faster; the numbers are summarised below and given in full,
 kernel by kernel, in [docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
 Model weights, checkpoints and the CPU paths are unchanged. GPU results
 change bit for bit compared with 0.6.9 because different kernels and, on
