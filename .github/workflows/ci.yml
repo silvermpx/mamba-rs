@@ -145,7 +145,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cuda-check
-      - run: cargo check --workspace --all-targets --features cuda
+      # The pregenerated CUDA 12.8 bindings, the same ones docs.rs renders
+      # with: the distribution toolkit on the runner is older than the
+      # driver API the tests and tools use.
+      - run: cargo check --workspace --all-targets --features cuda,cudarc/cuda-12080
       # The live-DDP surface (dist reducer, comm, watchdog wiring) only
       # compiles with the nccl feature; without this leg it would bit-rot
       # invisibly (cudarc's nccl bindings dlopen at runtime — no libnccl

@@ -22,6 +22,7 @@
 
 #![cfg(feature = "cuda")]
 
+#[cfg(feature = "hf")]
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 

@@ -23,7 +23,8 @@
 //!
 //! ## GEMM modes (CUDA)
 //!
-//! Every GPU context carries a [`mamba_ssm::gpu::GemmMode`]:
+//! Every GPU context carries a `GemmMode` (`mamba_ssm::gpu::GemmMode`, behind
+//! the `cuda` feature):
 //!
 //! - `Deterministic` (default): the crate's own fixed-reduction-order kernels
 //!   serve every GEMM that goes through the context; cuBLAS is never called

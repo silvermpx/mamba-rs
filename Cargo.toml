@@ -5,13 +5,11 @@ edition = "2024"
 rust-version = "1.97"
 authors = ["silvermpx"]
 description = "Mamba SSM and Mamba-3 SISO in Rust with optional CUDA acceleration: inference and training (BPTT through the SSM state, AdamW) on CPU and GPU, custom NVRTC-compiled kernels, CUDA Graph capture, f32 / bf16 / f16 storage, deterministic batch-invariant GEMMs by default with explicit cuBLAS Fast and Pedantic modes."
-homepage = "https://github.com/silvermpx/mamba-rs"
 documentation = "https://docs.rs/mamba-rs"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/silvermpx/mamba-rs"
 keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
 categories = ["science", "mathematics"]
-readme = "README.md"
 # Test and bench targets are declared explicitly below: a file dropped into
 # tests/ or benches/ does not become a target until it takes a lane in
 # qual/lanes.toml (tests/qual_lane_census.rs checks that the manifest, the
