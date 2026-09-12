@@ -720,7 +720,7 @@ pub fn gpu_forward_mamba3_layer(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_burnin_fwd);
+        let mut builder = ctx.stream.launch_builder(m3k.burnin_fwd_for_state(ds));
         builder.arg(&layer_ptrs.ssm_state);
         builder.arg(&layer_ptrs.k_state);
         builder.arg(&layer_ptrs.v_state);

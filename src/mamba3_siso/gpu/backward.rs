@@ -130,7 +130,7 @@ pub fn gpu_backward_mamba3_layer(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_backward_seq);
+        let mut builder = ctx.stream.launch_builder(m3k.backward_seq_for_state(ds));
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.k_prev_saved.inner());
         builder.arg(acts.v_prev_saved.inner());

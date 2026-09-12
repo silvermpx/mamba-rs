@@ -777,7 +777,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             shared_mem_bytes: 0,
         };
         let kernel = match dtype {
-            WeightDtype::F32 => &m3k.m3_burnin_fwd,
+            WeightDtype::F32 => m3k.burnin_fwd_for_state(ds),
             WeightDtype::Bf16 => &m3k.m3_burnin_fwd_typed_bf16,
             WeightDtype::F16 => &m3k.m3_burnin_fwd_typed_f16,
         };

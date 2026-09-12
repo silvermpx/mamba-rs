@@ -28,8 +28,15 @@ pub struct Mamba3Kernels {
     // ── Sequential SSM (mamba3_siso.cu) ──
     pub m3_step_fwd: CudaFunction,
     pub m3_burnin_fwd: CudaFunction,
+    /// The burn-in forward specialised on a state width, the twin of
+    /// [`Self::m3_backward_seq_by_state`].
+    pub m3_burnin_fwd_by_state: [(usize, CudaFunction); 4],
     pub m3_burnin_fwd_nosave: CudaFunction,
     pub m3_backward_seq: CudaFunction,
+    /// The backward scan specialised on a state width, so its state loops
+    /// carry a constant trip count. One per width the models here use; a
+    /// width with no entry runs the general `m3_backward_seq` above.
+    pub m3_backward_seq_by_state: [(usize, CudaFunction); 4],
     pub m3_reduce_d_d: CudaFunction,
 
     // ── Shared ops (mamba3_ops.cu) ──
@@ -218,6 +225,27 @@ impl Mamba3Kernels {
     /// larger `d_state` use [`Self::compile_with_state_cap`].
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
         Self::compile_with_state_cap(ctx, arch, 64)
+    }
+
+    /// The backward scan to launch for a model of this state width: the
+    /// specialisation when one exists, the general entry otherwise. The
+    /// two compute the same thing; the specialisation is faster because
+    /// its loop bounds are constants the compiler can unroll.
+    pub fn backward_seq_for_state(&self, d_state: usize) -> &CudaFunction {
+        self.m3_backward_seq_by_state
+            .iter()
+            .find(|(width, _)| *width == d_state)
+            .map(|(_, function)| function)
+            .unwrap_or(&self.m3_backward_seq)
+    }
+
+    /// The burn-in forward to launch for a model of this state width.
+    pub fn burnin_fwd_for_state(&self, d_state: usize) -> &CudaFunction {
+        self.m3_burnin_fwd_by_state
+            .iter()
+            .find(|(width, _)| *width == d_state)
+            .map(|(_, function)| function)
+            .unwrap_or(&self.m3_burnin_fwd)
     }
 
     /// Compile all Mamba-3 kernels. `state_cap` sizes the per-thread
@@ -430,8 +458,20 @@ impl Mamba3Kernels {
             // Sequential SSM
             m3_step_fwd: get("m3_step_fwd")?,
             m3_burnin_fwd: get("m3_burnin_fwd")?,
+            m3_burnin_fwd_by_state: [
+                (8, get("m3_burnin_fwd_ds8")?),
+                (16, get("m3_burnin_fwd_ds16")?),
+                (32, get("m3_burnin_fwd_ds32")?),
+                (64, get("m3_burnin_fwd_ds64")?),
+            ],
             m3_burnin_fwd_nosave: get("m3_burnin_fwd_nosave")?,
             m3_backward_seq: get("m3_backward_seq")?,
+            m3_backward_seq_by_state: [
+                (8, get("m3_backward_seq_ds8")?),
+                (16, get("m3_backward_seq_ds16")?),
+                (32, get("m3_backward_seq_ds32")?),
+                (64, get("m3_backward_seq_ds64")?),
+            ],
             m3_reduce_d_d: get("m3_reduce_d_D")?,
 
             // Shared ops

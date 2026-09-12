@@ -245,7 +245,11 @@ DEFINE_M3_STEP_FWD(f16,  __half,        from_f_f16)
 //     O5 transposed layout: index = b*(T+1)*nhd_ds + t*nhd_ds + n*d_inner + h*hd+p
 //   k_prev_saved[B * T * nh * ds] -- k_state entering each timestep
 //   v_prev_saved[B * T * nh * hd] -- v_state (= previous x) entering each timestep
-extern "C" __global__ void m3_burnin_fwd(
+// Same `DS` contract as the backward: a state width known at compile
+// time turns the state loops into constant trip counts, 0 keeps an
+// arbitrary width working.
+template <int DS>
+__device__ __forceinline__ void m3_burnin_fwd_tpl(
     // In/Out: persistent state (mutated)
     float* ssm_state,       // [B * nh * hd * ds]
     float* k_state,         // [B * nh * ds]
@@ -257,13 +261,13 @@ extern "C" __global__ void m3_burnin_fwd(
     float* k_prev_saved,    // [B * T * nh * ds]
     float* v_prev_saved,    // [B * T * nh * hd]
     // Inputs (pre-computed by shared ops, flat over T)
-    const float* x_flat,      // [B * T * d_inner]
-    const float* k_flat,      // [B * T * nh * ds]
-    const float* q_flat,      // [B * T * nh * ds]
-    const float* alpha_flat,  // [B * T * nh]
-    const float* beta_flat,   // [B * T * nh]
-    const float* gamma_flat,  // [B * T * nh]
-    const float* D,           // [nh]
+    const float* __restrict__ x_flat,      // [B * T * d_inner]
+    const float* __restrict__ k_flat,      // [B * T * nh * ds]
+    const float* __restrict__ q_flat,      // [B * T * nh * ds]
+    const float* __restrict__ alpha_flat,  // [B * T * nh]
+    const float* __restrict__ beta_flat,   // [B * T * nh]
+    const float* __restrict__ gamma_flat,  // [B * T * nh]
+    const float* __restrict__ D,           // [nh]
     int batch, int T, int nh, int hd, int ds
 ) {
     int b = blockIdx.x;
@@ -272,6 +276,7 @@ extern "C" __global__ void m3_burnin_fwd(
     if (b >= batch || h >= nh || p >= hd) return;
 
     int d_inner = nh * hd;
+    const int sw = (DS > 0) ? DS : ds;
     int nhd_ds = d_inner * ds;
 
     // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
@@ -281,7 +286,8 @@ extern "C" __global__ void m3_burnin_fwd(
     float h_local[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < sw; n++)
         h_local[n] = ssm_state[h_base + n];
 
     // O1: D[h] broadcast once before T loop
@@ -290,7 +296,8 @@ extern "C" __global__ void m3_burnin_fwd(
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // Save initial h at time 0 (O5 transposed layout)
-    for (int n = 0; n < ds; n++) {
+    #pragma unroll
+    for (int n = 0; n < sw; n++) {
         int hs_idx = n * d_inner + h * hd + p;
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];
     }
@@ -298,7 +305,8 @@ extern "C" __global__ void m3_burnin_fwd(
     for (int t = 0; t < T; t++) {
         // Save k_prev: only p=0 writes (k_state is per-head, shared across p)
         if (p == 0) {
-            for (int n = 0; n < ds; n++)
+            #pragma unroll
+            for (int n = 0; n < sw; n++)
                 k_prev_saved[(b * T + t) * nh * ds + h * ds + n] = k_state[b * nh * ds + h * ds + n];
         }
 
@@ -325,7 +333,8 @@ extern "C" __global__ void m3_burnin_fwd(
 
         float y_val = d_skip * x_val;
 
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < sw; n++) {
             // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
             if (p == 0) {
@@ -346,14 +355,16 @@ extern "C" __global__ void m3_burnin_fwd(
         y_out[x_idx] = y_val;
 
         // Save h AFTER step t (O5 transposed layout)
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < sw; n++) {
             int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p;
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];
         }
 
         // Update k_state: p=0 writes
         if (p == 0) {
-            for (int n = 0; n < ds; n++)
+            #pragma unroll
+            for (int n = 0; n < sw; n++)
                 k_state[b * nh * ds + h * ds + n] = k_flat[(b * T + t) * nh * ds + h * ds + n];
         }
 
@@ -362,9 +373,34 @@ extern "C" __global__ void m3_burnin_fwd(
     }
 
     // Write back final SSM state to persistent buffer
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < sw; n++)
         ssm_state[h_base + n] = h_local[n];
 }
+
+#define M3_BURNIN_FWD_ENTRY(NAME, DS_VALUE)                                  \
+extern "C" __global__ __launch_bounds__(32, 8)                               \
+void NAME(                                                                   \
+    float* __restrict__ ssm_state, float* __restrict__ k_state,              \
+    float* __restrict__ v_state, float* __restrict__ y_out,                  \
+    float* __restrict__ h_saved, float* __restrict__ k_prev_saved,           \
+    float* __restrict__ v_prev_saved,                                        \
+    const float* __restrict__ x_flat, const float* __restrict__ k_flat,      \
+    const float* __restrict__ q_flat, const float* __restrict__ alpha_flat,  \
+    const float* __restrict__ beta_flat, const float* __restrict__ gamma_flat,\
+    const float* __restrict__ D,                                             \
+    int batch, int T, int nh, int hd, int ds                                 \
+) {                                                                          \
+    m3_burnin_fwd_tpl<DS_VALUE>(                                             \
+        ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved,           \
+        v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat,         \
+        gamma_flat, D, batch, T, nh, hd, ds);                                \
+}
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd, 0)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds8, 8)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds16, 16)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds32, 32)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds64, 64)
 
 // ======================== BURN-IN FORWARD TYPED (bf16/f16) ========================
 //
@@ -592,20 +628,26 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 // From the forward recurrence:
 //   h[p,n] = alpha * h_prev[p,n] + beta * v_prev[p] * k_prev[n] + gamma * x[p] * k_cur[n]
 //   y[p] = sum_n(h[p,n] * q[n]) + D * x[p]
-extern "C" __global__ void m3_backward_seq(
+// `DS` is the state width when it is known at compile time and 0 when it
+// is not. A known width turns every state loop into a constant trip count,
+// which is what lets the compiler keep the state in registers instead of
+// re-reading it every step; the 0 instantiation keeps an arbitrary width
+// working at the original speed.
+template <int DS>
+__device__ __forceinline__ void m3_backward_seq_tpl(
     // Saved activations from forward
-    const float* h_saved,       // [B * (T+1) * nh * hd * ds] (O5 transposed)
-    const float* k_prev_saved,  // [B * T * nh * ds]
-    const float* v_prev_saved,  // [B * T * nh * hd]
-    const float* x_flat,        // [B * T * d_inner]
-    const float* k_flat,        // [B * T * nh * ds] (k_cur at each t)
-    const float* q_flat,        // [B * T * nh * ds] (q_cur at each t)
-    const float* alpha_flat,    // [B * T * nh]
-    const float* beta_flat,     // [B * T * nh]
-    const float* gamma_flat,    // [B * T * nh]
-    const float* D,             // [nh]
+    const float* __restrict__ h_saved,       // [B * (T+1) * nh * hd * ds] (O5 transposed)
+    const float* __restrict__ k_prev_saved,  // [B * T * nh * ds]
+    const float* __restrict__ v_prev_saved,  // [B * T * nh * hd]
+    const float* __restrict__ x_flat,        // [B * T * d_inner]
+    const float* __restrict__ k_flat,        // [B * T * nh * ds] (k_cur at each t)
+    const float* __restrict__ q_flat,        // [B * T * nh * ds] (q_cur at each t)
+    const float* __restrict__ alpha_flat,    // [B * T * nh]
+    const float* __restrict__ beta_flat,     // [B * T * nh]
+    const float* __restrict__ gamma_flat,    // [B * T * nh]
+    const float* __restrict__ D,             // [nh]
     // Incoming gradient
-    const float* d_y_flat,      // [B * T * d_inner]
+    const float* __restrict__ d_y_flat,      // [B * T * d_inner]
     // Output gradients
     float* __restrict__ d_x,         // [B * T * d_inner] (direct write per thread)
     float* __restrict__ d_k,         // [B * T * nh * ds] (lane-0 direct store per (b,t,h,n))
@@ -622,6 +664,7 @@ extern "C" __global__ void m3_backward_seq(
     if (b >= batch || h >= nh || p >= hd) return;
 
     int d_inner = nh * hd;
+    const int sw = (DS > 0) ? DS : ds;
     int nhd_ds = d_inner * ds;
 
     // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32).
@@ -636,14 +679,16 @@ extern "C" __global__ void m3_backward_seq(
     // d_h: BPTT hidden state gradient carried backward through time
     float d_h_reg[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < sw; n++)
         d_h_reg[n] = 0.0f;
 
     // d_k_carry: gradient for k_prev accumulated at timestep (t+1).
     // Flushed to d_k[t] at the start of processing timestep t.
     // Only lane p=0 accumulates (after warp reduce over p).
     float d_k_carry[MAMBA_RS_STATE_CAP];
-    for (int n = 0; n < ds; n++)
+    #pragma unroll
+    for (int n = 0; n < sw; n++)
         d_k_carry[n] = 0.0f;
 
     // d_v_carry: gradient for v_prev accumulated at timestep (t+1).
@@ -661,12 +706,14 @@ extern "C" __global__ void m3_backward_seq(
         // from current iteration adds to same slot, merge via local accumulator
         // `d_k_write[n]` flushed once per t (see after main n-loop).
         float d_k_write[MAMBA_RS_STATE_CAP];
-        for (int n = 0; n < ds; n++) d_k_write[n] = 0.0f;
+        #pragma unroll
+        for (int n = 0; n < sw; n++) d_k_write[n] = 0.0f;
         // --- Flush d_k_carry from previous iteration into local d_k_write ---
         // d_k_carry holds gradient for k_prev[t+1] = k_cur[t], so write to d_k[t].
         // Skip at first iteration (t == T-1): carry is zero.
         if (t < T - 1 && p == 0) {
-            for (int n = 0; n < ds; n++) {
+            #pragma unroll
+            for (int n = 0; n < sw; n++) {
                 d_k_write[n] += d_k_carry[n];
                 d_k_carry[n] = 0.0f;
             }
@@ -703,7 +750,8 @@ extern "C" __global__ void m3_backward_seq(
         float d_gamma_acc = 0.0f;
         float d_v_prev_acc = 0.0f;
 
-        for (int n = 0; n < ds; n++) {
+        #pragma unroll
+        for (int n = 0; n < sw; n++) {
             // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
             float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
             if (p == 0) {
@@ -725,8 +773,12 @@ extern "C" __global__ void m3_backward_seq(
             // d_q[n] = sum_p(d_y[p] * h_curr[p,n]): warp reduce over p.
             // lane 0 is unique writer for d_q[(b,t,h,n)] — direct store.
             float d_q_val = dy_val * h_curr_n;
-            for (int off = hd / 2; off > 0; off >>= 1)
-                d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);
+            #pragma unroll
+            for (int step = 0; step < 5; step++) {
+                int off = 16 >> step;
+                float carried = __shfl_down_sync(warp_mask, d_q_val, off, hd);
+                if (off < hd) d_q_val += carried;
+            }
             if (p == 0)
                 d_q[(b * T + t) * nh * ds + h * ds + n] = d_q_val;
 
@@ -747,8 +799,12 @@ extern "C" __global__ void m3_backward_seq(
 
             // d_k_prev[n] += dh * beta * v_prev  (sum over p -> warp reduce -> carry)
             float d_kp_val = dh_n * beta_h * v_prev;
-            for (int off = hd / 2; off > 0; off >>= 1)
-                d_kp_val += __shfl_down_sync(warp_mask, d_kp_val, off, hd);
+            #pragma unroll
+            for (int step = 0; step < 5; step++) {
+                int off = 16 >> step;
+                float carried = __shfl_down_sync(warp_mask, d_kp_val, off, hd);
+                if (off < hd) d_kp_val += carried;
+            }
             if (p == 0)
                 d_k_carry[n] += d_kp_val;
 
@@ -759,8 +815,12 @@ extern "C" __global__ void m3_backward_seq(
             // merge with d_k_write[n] (carry from t+1), flushed
             // once per-t after the n-loop.
             float d_kc_val = dh_n * gamma_h * x_val;
-            for (int off = hd / 2; off > 0; off >>= 1)
-                d_kc_val += __shfl_down_sync(warp_mask, d_kc_val, off, hd);
+            #pragma unroll
+            for (int step = 0; step < 5; step++) {
+                int off = 16 >> step;
+                float carried = __shfl_down_sync(warp_mask, d_kc_val, off, hd);
+                if (off < hd) d_kc_val += carried;
+            }
             if (p == 0)
                 d_k_write[n] += d_kc_val;
 
@@ -776,24 +836,37 @@ extern "C" __global__ void m3_backward_seq(
 
         // flush d_k for this timestep (single writer from lane 0).
         if (p == 0) {
-            for (int n = 0; n < ds; n++) {
+            #pragma unroll
+            for (int n = 0; n < sw; n++) {
                 d_k[(b * T + t) * nh * ds + h * ds + n] = d_k_write[n];
             }
         }
 
         // Warp reduce d_alpha, d_beta, d_gamma over p, then direct store from lane 0.
-        for (int off = hd / 2; off > 0; off >>= 1)
-            d_alpha_acc += __shfl_down_sync(warp_mask, d_alpha_acc, off, hd);
+        #pragma unroll
+        for (int step = 0; step < 5; step++) {
+            int off = 16 >> step;
+            float carried = __shfl_down_sync(warp_mask, d_alpha_acc, off, hd);
+            if (off < hd) d_alpha_acc += carried;
+        }
         if (p == 0)
             d_alpha[(b * T + t) * nh + h] = d_alpha_acc;
 
-        for (int off = hd / 2; off > 0; off >>= 1)
-            d_beta_acc += __shfl_down_sync(warp_mask, d_beta_acc, off, hd);
+        #pragma unroll
+        for (int step = 0; step < 5; step++) {
+            int off = 16 >> step;
+            float carried = __shfl_down_sync(warp_mask, d_beta_acc, off, hd);
+            if (off < hd) d_beta_acc += carried;
+        }
         if (p == 0)
             d_beta[(b * T + t) * nh + h] = d_beta_acc;
 
-        for (int off = hd / 2; off > 0; off >>= 1)
-            d_gamma_acc += __shfl_down_sync(warp_mask, d_gamma_acc, off, hd);
+        #pragma unroll
+        for (int step = 0; step < 5; step++) {
+            int off = 16 >> step;
+            float carried = __shfl_down_sync(warp_mask, d_gamma_acc, off, hd);
+            if (off < hd) d_gamma_acc += carried;
+        }
         if (p == 0)
             d_gamma[(b * T + t) * nh + h] = d_gamma_acc;
     }
@@ -805,6 +878,34 @@ extern "C" __global__ void m3_backward_seq(
     // Store per-thread d_D sum for later reduction by m3_reduce_d_D
     d_D_local[b * d_inner + h * hd + p] = sum_d_D;
 }
+
+// One entry per state width the models here use, plus a general entry for
+// any other width. The host picks by the model's own `d_state`.
+#define M3_BACKWARD_SEQ_ENTRY(NAME, DS_VALUE)                                \
+extern "C" __global__ __launch_bounds__(32, 8)                               \
+void NAME(                                                                   \
+    const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,\
+    const float* __restrict__ v_prev_saved, const float* __restrict__ x_flat,\
+    const float* __restrict__ k_flat, const float* __restrict__ q_flat,      \
+    const float* __restrict__ alpha_flat, const float* __restrict__ beta_flat,\
+    const float* __restrict__ gamma_flat, const float* __restrict__ D,       \
+    const float* __restrict__ d_y_flat,                                      \
+    float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,\
+    float* __restrict__ d_alpha, float* __restrict__ d_beta,                 \
+    float* __restrict__ d_gamma, float* __restrict__ d_D_local,              \
+    int batch, int T, int nh, int hd, int ds                                 \
+) {                                                                          \
+    m3_backward_seq_tpl<DS_VALUE>(                                           \
+        h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,         \
+        alpha_flat, beta_flat, gamma_flat, D, d_y_flat,                      \
+        d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local,                  \
+        batch, T, nh, hd, ds);                                               \
+}
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq, 0)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds8, 8)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds16, 16)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds32, 32)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds64, 64)
 
 // ======================== REDUCTION KERNELS ========================
 
