@@ -2,6 +2,8 @@
 //! forward kernels: `m3_preprocess_chunks`, `m3_chunk_state_fwd`,
 //! `m3_writeback_parallel_states`, `m3_chunk_scan_fwd`. Each typed variant is
 //! compared against its f32 oracle on identical random inputs.
+//! The fused preprocess/state path also has exact same-dtype comparisons
+//! against the unfused pair, including its intermediate outputs.
 //!
 //! The 2 scan-state kernels (`m3_dA_cumsum`, `m3_state_passing_fwd`) stay
 //! pure-f32 per the Tri Dao invariant (compounding O(T) prefix arithmetic
@@ -18,7 +20,8 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use mamba_rs::mamba_ssm::gpu::kernels::state_capacity;
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg};
 
 // Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
 // Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
@@ -348,6 +351,205 @@ fn m3_chunk_state_fwd_bf16() {
 #[test]
 fn m3_chunk_state_fwd_f16() {
     check_chunk_state_fwd(WeightDtype::F16);
+}
+
+#[test]
+fn m3_chunk_pre_state_fused_matches_unfused_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    // The hd=40 shape gives each fused thread multiple state quads to own.
+    let shapes: [(usize, usize, usize, usize, usize, usize); 6] = [
+        (2, 1, 3, 5, 4, 32),
+        (1, 13, 2, 7, 8, 64),
+        (2, 64, 3, 16, 16, 64),
+        (1, 65, 3, 5, 32, 32),
+        (2, 129, 2, 40, 4, 32),
+        (1, 13, 2, 3, 64, 32),
+    ];
+    for cap in [16, 32, 64] {
+        let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
+            .unwrap();
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            for (batch, t, nh, hd, ds, cs) in shapes {
+                let cap = m3k.state_cap;
+                // Match production's tight capacity, and retain the wider-module
+                // oracle coverage for every shape supported by the default cap.
+                if ds > cap || (cap != 64 && state_capacity(ds).unwrap() != cap) {
+                    continue;
+                }
+                let label =
+                    format!("{dtype:?} cap={cap} B={batch} T={t} nh={nh} hd={hd} ds={ds} cs={cs}");
+                let nc = t.div_ceil(cs);
+                let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
+                    .unwrap_or_else(|| panic!("{label}: fused launch must be supported"));
+                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+                assert!(ds <= m3k.state_cap, "{label}: state capacity");
+                for cfg in [&fused_cfg, &state_cfg] {
+                    let (bx, by, bz) = cfg.block_dim;
+                    assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
+                    assert!(cfg.shared_mem_bytes <= 48 * 1024, "{label}: shared memory");
+                }
+                let th_n = batch * t * nh;
+                let ks_n = th_n * ds;
+                let states_n = batch * nc * nh * hd * ds;
+                // Both arms consume the same typed inputs. The unfused arm
+                // materializes K_scaled in its activation dtype before the fold.
+                let k = upload_typed(&ctx, &det_rand(ks_n, 0x8C41), dtype);
+                let q = upload_typed(&ctx, &det_rand(ks_n, 0x8C42), dtype);
+                let x = upload_typed(&ctx, &det_rand(th_n * hd, 0x8C43), dtype);
+                let dt_vals: Vec<f32> = det_rand(th_n, 0x8C44)
+                    .into_iter()
+                    .map(|v| 0.01 + v.abs() * 0.4)
+                    .collect();
+                let trap_vals: Vec<f32> = det_rand(th_n, 0x8C45)
+                    .into_iter()
+                    .map(|v| 0.5 + v * 0.9)
+                    .collect();
+                let dt = upload_f32(&ctx, &dt_vals);
+                let trap = upload_f32(&ctx, &trap_vals);
+                // Poison padding so the endpoint must use the actual chunk length.
+                let mut da_vals = vec![f32::NAN; batch * nc * nh * cs];
+                for b in 0..batch {
+                    for chunk in 0..nc {
+                        for h in 0..nh {
+                            let base = ((b * nc + chunk) * nh + h) * cs;
+                            let chunk_len = cs.min(t - chunk * cs);
+                            let mut sum = 0.0f32;
+                            for tl in 0..chunk_len {
+                                sum -= 0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32;
+                                // Earlier timesteps underflow after the midpoint
+                                // drop; later timesteps still have ordinary decay.
+                                if chunk_len >= 4 && tl == chunk_len / 2 {
+                                    sum -= 160.0;
+                                }
+                                da_vals[base + tl] = sum;
+                            }
+                            if chunk_len >= 3 {
+                                // The penultimate value deliberately makes the
+                                // endpoint difference positive, exercising fminf.
+                                da_vals[base + chunk_len - 2] =
+                                    da_vals[base + chunk_len - 1] - 0.125;
+                            }
+                        }
+                    }
+                }
+                let da = upload_f32(&ctx, &da_vals);
+                let dims = [batch, t, nh, hd, ds, cs].map(|v| v as i32);
+                let pre_dims = [dims[0], dims[1], dims[2], dims[4], dims[5]];
+                let pre_cfg = LaunchConfig {
+                    grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                    block_dim: (cs as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let run = |fused: bool, save_scale: bool, save_gamma: bool| {
+                    // Independent, differently poisoned allocations expose missing
+                    // writes even if both kernels skip the same output element.
+                    let poison = if fused { -8192.0 } else { 8192.0 };
+                    let ks = upload_typed(&ctx, &vec![poison; ks_n], dtype);
+                    let [qk, scale, gamma, states] = [th_n, th_n, th_n, states_n]
+                        .map(|len| upload_f32(&ctx, &vec![poison; len]));
+                    let scale_ptr = if save_scale { scale.cached_ptr() } else { 0 };
+                    let gamma_ptr = if save_gamma { gamma.cached_ptr() } else { 0 };
+                    if fused {
+                        let ptrs = [
+                            ks.cached_ptr(),
+                            qk.cached_ptr(),
+                            scale_ptr,
+                            gamma_ptr,
+                            states.cached_ptr(),
+                            k.cached_ptr(),
+                            q.cached_ptr(),
+                            dt.cached_ptr(),
+                            trap.cached_ptr(),
+                            x.cached_ptr(),
+                            da.cached_ptr(),
+                        ];
+                        let mut bld = ctx
+                            .stream
+                            .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for dim in &dims {
+                            bld.arg(dim);
+                        }
+                        unsafe { bld.launch(fused_cfg) }.unwrap();
+                    } else {
+                        let ptrs = [
+                            ks.cached_ptr(),
+                            qk.cached_ptr(),
+                            scale_ptr,
+                            gamma_ptr,
+                            k.cached_ptr(),
+                            q.cached_ptr(),
+                            dt.cached_ptr(),
+                            trap.cached_ptr(),
+                        ];
+                        let mut bld = ctx
+                            .stream
+                            .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for dim in &pre_dims {
+                            bld.arg(dim);
+                        }
+                        unsafe { bld.launch(pre_cfg) }.unwrap();
+                        let ptrs = [
+                            states.cached_ptr(),
+                            x.cached_ptr(),
+                            ks.cached_ptr(),
+                            da.cached_ptr(),
+                        ];
+                        let mut bld = ctx
+                            .stream
+                            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for dim in &dims {
+                            bld.arg(dim);
+                        }
+                        unsafe { bld.launch(state_cfg) }.unwrap();
+                    }
+                    ctx.stream.synchronize().unwrap();
+                    [
+                        download_typed(&ctx, &ks),
+                        download_f32(&ctx, &qk, th_n),
+                        download_f32(&ctx, &scale, th_n),
+                        download_f32(&ctx, &gamma, th_n),
+                        download_f32(&ctx, &states, states_n),
+                    ]
+                };
+                let reference = run(false, true, true);
+                let names = ["K_scaled", "qk_dot", "scale", "gamma", "chunk_states"];
+                for (save_scale, save_gamma) in
+                    [(true, true), (false, true), (true, false), (false, false)]
+                {
+                    let actual = run(true, save_scale, save_gamma);
+                    for (out, ((got, want), name)) in
+                        actual.iter().zip(&reference).zip(names).enumerate()
+                    {
+                        assert_eq!(got.len(), want.len(), "{label}: {name} length");
+                        for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
+                            let want = if (out == 2 && !save_scale) || (out == 3 && !save_gamma) {
+                                -8192.0f32
+                            } else {
+                                assert!(want.is_finite(), "{label}: {name}[{i}] oracle nonfinite");
+                                want
+                            };
+                            // Widening finite half values is exact, including signed zero.
+                            assert_eq!(
+                                got.to_bits(),
+                                want.to_bits(),
+                                "{label}: {name}[{i}] save_scale={save_scale} save_gamma={save_gamma}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─── m3_writeback_parallel_states ──────────────────────────────────────

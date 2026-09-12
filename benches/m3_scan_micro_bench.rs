@@ -46,7 +46,7 @@ fn scan_trio_time_and_hash() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
-    let m3k = Mamba3Kernels::compile(dev.context(), arch).expect("m3 kernels");
+    let m3k = Mamba3Kernels::compile_with_state_cap(dev.context(), arch, ds).expect("m3 kernels");
     let st = &ctx.stream;
 
     let x = GpuBuffer::from_cpu(st, &det(batch * t * d_inner, 1)).unwrap();

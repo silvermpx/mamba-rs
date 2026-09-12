@@ -2,7 +2,7 @@
 //! (T=4621, 24 layers, d_model=384 — a document-page classify serve
 //! shape). Run manually, release build:
 //!
-//! `cargo test --features cuda,hf,gemm-blas --release --test m3_prefill_bench -- --ignored --nocapture`
+//! `cargo test --features cuda,hf,gemm-blas,qualification --release --test m3_prefill_bench m3_prefill_latency_at_serve_shape -- --exact --ignored --nocapture --test-threads=1`
 
 #![cfg(feature = "cuda")]
 
@@ -49,6 +49,14 @@ fn m3_prefill_latency_at_serve_shape() {
     w.input_proj_b.clear();
 
     let mut bb = GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::F32).unwrap();
+    eprintln!(
+        "prefill route: mode={:?} family={:?} route={:?} tensor_cores={} f32_policy={:?}",
+        bb.ctx().gemm_mode(),
+        bb.ctx().bi_gemm_family(),
+        bb.ctx().gemm_route(),
+        bb.ctx().bi_tensor_cores(),
+        bb.ctx().f32_triad_policy(),
+    );
     let stream = bb.stream().clone();
     let mut gpu_input = GpuBuffer::zeros(&stream, t * dm).unwrap();
     stream.synchronize().unwrap();
