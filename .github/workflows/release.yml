@@ -92,14 +92,14 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          CARGO_VERSION="v$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].version')"
+          CARGO_VERSION="v$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "mamba-rs") | .version')"
           if [ "$CARGO_VERSION" != "$TAG" ]; then
             echo "Tag $TAG does not match Cargo.toml version $CARGO_VERSION"
             exit 1
           fi
 
       - name: Publish
-        run: cargo publish
+        run: cargo publish -p mamba-rs
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
