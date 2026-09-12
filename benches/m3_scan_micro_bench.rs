@@ -619,7 +619,6 @@ fn coeff_chain_time_and_hash() {
     println!("abg         {:8.1} us", time(&abg));
 }
 
-
 // The sequential target burn-in at the serve shape: wall time plus an FNV
 // hash of everything it writes. This lane has no ledger of its own, so a
 // scheduling or occupancy change could move its bits with nothing to say
