@@ -619,6 +619,100 @@ fn coeff_chain_time_and_hash() {
     println!("abg         {:8.1} us", time(&abg));
 }
 
+
+// The sequential target burn-in at the serve shape: wall time plus an FNV
+// hash of everything it writes. This lane has no ledger of its own, so a
+// scheduling or occupancy change could move its bits with nothing to say
+// so; the chunk trio above has had one since the 0.6 pass and this gives
+// the sequential twin the same footing. The serve prefill does NOT run
+// here - it takes the chunked pipeline - so the number is the burn-in's
+// own cost, not a prefill wall.
+fn sequential_prefill_time_and_hash() {
+    let batch = 1usize;
+    let t = 4621usize;
+    let nh = 48usize;
+    let hd = 16usize;
+    let ds = 16usize;
+    let d_inner = nh * hd;
+
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+    let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
+    let m3k = Mamba3Kernels::compile(dev.context(), arch).expect("m3 kernels");
+    let st = &ctx.stream;
+
+    let x = GpuBuffer::from_cpu(st, &det(batch * t * d_inner, 11)).unwrap();
+    let k = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 12)).unwrap();
+    let q = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 13)).unwrap();
+    let alpha = GpuBuffer::from_cpu(st, &det(batch * t * nh, 14)).unwrap();
+    let beta = GpuBuffer::from_cpu(st, &det(batch * t * nh, 15)).unwrap();
+    let gamma = GpuBuffer::from_cpu(st, &det(batch * t * nh, 16)).unwrap();
+    let d_skip = GpuBuffer::from_cpu(st, &det(nh, 17)).unwrap();
+
+    let ssm_state = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
+    let k_state = GpuBuffer::zeros(st, batch * nh * ds).unwrap();
+    let v_state = GpuBuffer::zeros(st, batch * nh * hd).unwrap();
+    let y_out = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
+
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (batch as u32, nh as u32, 1),
+        block_dim: (hd as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (batch_i, t_i, nh_i, hd_i, ds_i) =
+        (batch as i32, t as i32, nh as i32, hd as i32, ds as i32);
+    let prefill = || {
+        let mut b = st.launch_builder(&m3k.m3_burnin_fwd_nosave);
+        b.arg(ssm_state.inner());
+        b.arg(k_state.inner());
+        b.arg(v_state.inner());
+        b.arg(y_out.inner());
+        b.arg(x.inner());
+        b.arg(k.inner());
+        b.arg(q.inner());
+        b.arg(alpha.inner());
+        b.arg(beta.inner());
+        b.arg(gamma.inner());
+        b.arg(d_skip.inner());
+        b.arg(&batch_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+
+    let iters = 20usize;
+    let time = |f: &dyn Fn()| -> f64 {
+        f();
+        ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        ctx.stream.synchronize().unwrap();
+        t0.elapsed().as_secs_f64() * 1e6 / iters as f64
+    };
+    let wall = time(&prefill);
+
+    let mut y_h = vec![0.0f32; batch * t * d_inner];
+    y_out.download(st, &mut y_h).unwrap();
+    let mut ssm_h = vec![0.0f32; batch * nh * hd * ds];
+    ssm_state.download(st, &mut ssm_h).unwrap();
+    let mut k_h = vec![0.0f32; batch * nh * ds];
+    k_state.download(st, &mut k_h).unwrap();
+    let mut v_h = vec![0.0f32; batch * nh * hd];
+    v_state.download(st, &mut v_h).unwrap();
+    println!(
+        "PREFILL HASH y={:016x} ssm={:016x} k={:016x} v={:016x}",
+        fnv(&y_h),
+        fnv(&ssm_h),
+        fnv(&k_h),
+        fnv(&v_h)
+    );
+    println!("prefill_seq {wall:8.1} us");
+}
+
 // Run every instrument, or only the ones named on the command line:
 // `cargo bench --bench <target> --features cuda -- <name> [<name> ...]`.
 fn main() {
@@ -629,5 +723,8 @@ fn main() {
     }
     if run("coeff_chain_time_and_hash") {
         coeff_chain_time_and_hash();
+    }
+    if run("sequential_prefill_time_and_hash") {
+        sequential_prefill_time_and_hash();
     }
 }

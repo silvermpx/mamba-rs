@@ -38,3 +38,6 @@ out/
 .idea/
 *.iml
 reference/
+
+# Working notes for a change in flight; never part of the package.
+scratchpad/
