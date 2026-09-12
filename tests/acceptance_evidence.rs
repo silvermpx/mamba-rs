@@ -4,9 +4,9 @@
 #[path = "common/evidence.rs"]
 mod evidence;
 
-use evidence::{
-    append_open_options, record, record_to_path, require_opened_regular, write_record_once,
-};
+#[cfg(unix)]
+use evidence::{append_open_options, require_opened_regular};
+use evidence::{record, record_to_path, write_record_once};
 use std::ffi::OsStr;
 
 #[test]

@@ -153,7 +153,7 @@ jobs:
       # compiles with the nccl feature; without this leg it would bit-rot
       # invisibly (cudarc's nccl bindings dlopen at runtime — no libnccl
       # needed to type-check).
-      - run: cargo check --workspace --all-targets --features cuda,hf,gemm-blas,nccl
+      - run: cargo check --workspace --all-targets --features cuda,hf,gemm-blas,nccl,cudarc/cuda-12080
 
   publish-check:
     name: Publish dry-run
