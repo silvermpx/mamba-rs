@@ -773,11 +773,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let kernel = match dtype {
-            WeightDtype::F32 => m3k.burnin_fwd_for_state(ds),
-            WeightDtype::Bf16 => &m3k.m3_burnin_fwd_typed_bf16,
-            WeightDtype::F16 => &m3k.m3_burnin_fwd_typed_f16,
-        };
+        let kernel = m3k.burnin_fwd_typed_for_state(dtype, ds);
         let mut bld = ctx.stream.launch_builder(kernel);
         bld.arg(&ssm_state);
         bld.arg(&k_state);

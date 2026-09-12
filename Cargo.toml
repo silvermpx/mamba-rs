@@ -513,6 +513,11 @@ path = "tests/m3_bcnorm_exact.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m3_burnin_exact"
+path = "tests/m3_burnin_exact.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m3_bf16_parity"
 path = "tests/m3_bf16_parity.rs"
 required-features = ["cuda"]

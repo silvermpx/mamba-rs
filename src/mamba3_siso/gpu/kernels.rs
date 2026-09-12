@@ -4,6 +4,7 @@
 //! the same verified artifact format as the Mamba-1 registry.
 //! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
+use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
 use cudarc::driver::{CudaContext, CudaFunction};
 use std::sync::Arc;
@@ -151,6 +152,7 @@ pub struct Mamba3Kernels {
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
     pub m3_burnin_fwd_typed_bf16: CudaFunction,
     pub m3_burnin_fwd_typed_f16: CudaFunction,
+    burnin_fwd_typed_by_state: Option<HalfKernel>,
 
     // -- Typed M3 sequential backward kernels --
     /// RmsNorm over B/C groups, typed dy → typed d_B; f32 rms + weight +
@@ -220,8 +222,7 @@ impl Mamba3Kernels {
         self.artifact_identity
     }
 
-    /// Compile all 47 Mamba-3 CUDA kernels from source. Takes ~100-200ms.
-    /// Compile with the default state capacity of 64. Models with a
+    /// Compile Mamba-3 kernels with the default state capacity of 64. Models with a
     /// larger `d_state` use [`Self::compile_with_state_cap`].
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
         Self::compile_with_state_cap(ctx, arch, 64)
@@ -246,6 +247,29 @@ impl Mamba3Kernels {
             .find(|(width, _)| *width == d_state)
             .map(|(_, function)| function)
             .unwrap_or(&self.m3_burnin_fwd)
+    }
+
+    /// Select the sequential training forward kernel for an activation dtype
+    /// and state width. Persistent state and backward saves remain FP32.
+    ///
+    /// BF16/F16 use constant-width loops on qualified Ada compiler targets;
+    /// other devices, compilers and widths retain the general typed kernel.
+    /// F32 uses the existing F32 state-width selector.
+    pub fn burnin_fwd_typed_for_state(&self, dtype: WeightDtype, d_state: usize) -> &CudaFunction {
+        if dtype == WeightDtype::F32 {
+            return self.burnin_fwd_for_state(d_state);
+        }
+        if matches!(d_state, 8 | 16 | 32 | 64)
+            && d_state <= self.state_cap
+            && let Some(kernels) = &self.burnin_fwd_typed_by_state
+        {
+            return kernels.get(dtype);
+        }
+        match dtype {
+            WeightDtype::Bf16 => &self.m3_burnin_fwd_typed_bf16,
+            WeightDtype::F16 => &self.m3_burnin_fwd_typed_f16,
+            WeightDtype::F32 => unreachable!("F32 uses its own selector"),
+        }
     }
 
     /// Compile all Mamba-3 kernels. `state_cap` sizes the per-thread
@@ -450,7 +474,27 @@ impl Mamba3Kernels {
                 .map_err(|e| format!("M3 kernel '{name}' not found: {e:?}"))
         };
 
+        // PTX targeting Ada can also run on newer devices. Admission checks
+        // the actual device because preserving a compiler's FMA graph alone
+        // does not establish compatibility with another device's released bits.
+        let burnin_fwd_typed_by_state = if ctx
+            .compute_capability()
+            .map_err(|error| format!("M3 device capability: {error:?}"))?
+            == (8, 9)
+            && matches!(arch, "sm_89" | "compute_89")
+            && matches!((nv_major, nv_minor), (12, 8) | (13, 0) | (13, 2))
+            && matches!(state_cap, 16 | 32 | 64)
+        {
+            Some(HalfKernel {
+                bf16: get("m3_burnin_fwd_bf16_by_state")?,
+                f16: get("m3_burnin_fwd_f16_by_state")?,
+            })
+        } else {
+            None
+        };
+
         let kernels = Self {
+            burnin_fwd_typed_by_state,
             module_identity,
             state_cap,
             compiler_identity,
