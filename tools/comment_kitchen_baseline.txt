@@ -1,25 +1,23 @@
 kernels/conv1d.cu	// containing t = T-1 writes the carry-out state.
 kernels/conv1d.cu	// nothing). Only the tile containing t = T-1 writes the carry-out state,
-kernels/gemm_bi_fixed/mma16.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
-kernels/gemm_bi_triad.cu	// IEEE 754-2008 §5.4.1 fma is single-rounding vs FMUL+FADD two-rounds.
-kernels/gemm_bi_triad.cu	// Source: NVIDIA CUDA C++ Programming Guide §8.7.2 "Matrix Transpose".
-kernels/gemm_bi_triad.cu	// fuse to `__fmaf_rn(α, Σ, bias)` even though IEEE 754-2008 §5.4.1 says
-kernels/gemm_bi_triad.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
-kernels/gemm_bi_triad.cu	// §5.4.1, fused single-round vs separate FMUL+FADD differs ≤ 1 ULP
+kernels/gemm_bi_inference/mma16.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
+kernels/gemm_bi_triad/scalar.cu	// IEEE 754-2008 §5.4.1 fma is single-rounding vs FMUL+FADD two-rounds.
+kernels/gemm_bi_triad/scalar.cu	// Source: NVIDIA CUDA C++ Programming Guide §8.7.2 "Matrix Transpose".
+kernels/gemm_bi_triad/scalar.cu	// fuse to `__fmaf_rn(α, Σ, bias)` even though IEEE 754-2008 §5.4.1 says
+kernels/gemm_bi_triad/scalar.cu	// §5.4.1, fused single-round vs separate FMUL+FADD differs ≤ 1 ULP
+kernels/gemm_bi_triad/sm80.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
 kernels/mamba3_chunked.cu	// K state:   extract last timestep (T-1) from k_flat[B * T * nh * ds]
 kernels/mamba3_chunked.cu	// V state:   extract last timestep (T-1) from x_flat[B * T * d_inner]
-kernels/mamba3_ssd.cu	// Carry flush timing (reverse loop, processing t = T-1, T-2, ..., 0):
-kernels/mamba3_ssd.cu	// Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
-kernels/mamba3_ssd.cu	// Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
-kernels/mamba3_ssd.cu	// Skip at first iteration (t == T-1): carry is zero.
+kernels/mamba3_siso.cu	// Carry flush timing (reverse loop, processing t = T-1, T-2, ..., 0):
+kernels/mamba3_siso.cu	// Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+kernels/mamba3_siso.cu	// Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+kernels/mamba3_siso.cu	// Skip at first iteration (t == T-1): carry is zero.
 kernels/mamba_ssm_parallel.cu	//         intra-thread: pair[i].a = da[i+1] for i < NITEMS-1
 kernels/mamba_ssm_parallel.cu	// Step 4: threads in warp < NWARPS-1 compose with the NEXT warp's postfix.
 kernels/norms.cu	// Grid: (batch, 1, 1). Block: (min(next_power_of_2(dim), 1024), 1, 1).
 tests/hf_full_cycle.rs	// ========== PHASE 1: baseline inference ==========
 tests/hf_full_cycle.rs	// ========== PHASE 2: train ==========
 tests/hf_full_cycle.rs	// ========== PHASE 3: post-training inference ==========
-tests/memory_footprint.rs	//! Constructs the bf16 trainer at the doc-101 classifier center shape
-tests/prefill.rs	/// extrapolation — the first measured numbers for the doc-101 serve tier.
 xtask/src/comments.rs	// "R3 audit", "audit P1", "lens 23", "H4 R2", "(A4)" as a bare "A4".
 xtask/src/comments.rs	// "W2b": a wave with a letter suffix; "B4.4": a batch with a dot.
 xtask/src/comments.rs	/// `FIX-GATE-1`, `PLACE-POOL-1`, `R2-07`, `PR-3.5`: uppercase segments

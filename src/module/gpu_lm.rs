@@ -138,7 +138,7 @@ impl GpuMambaLM {
 }
 
 impl GpuMambaLM {
-    /// Load an HF model with f32 storage, batch 1, and env-selected GEMMs.
+    /// Load an HF model with f32 storage, a batch of one, and env-selected GEMMs.
     ///
     /// Missing selectors use Deterministic + Inference; invalid or conflicting
     /// selectors are errors. Use [`Self::from_hf_with_mode`] for an explicit
@@ -149,7 +149,7 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
     }
 
-    /// Load an HF model with f32 storage, batch 1, and an explicit GEMM mode.
+    /// Load an HF model with f32 storage, a batch of one, and an explicit GEMM mode.
     ///
     /// GEMM mode, custom precision/tensor-core controls, and family selectors
     /// in the environment are ignored. `MAMBA_RS_ARCH_RUNG` remains the
@@ -178,7 +178,7 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, dtype, 1)
     }
 
-    /// Load an HF model with explicit storage dtype and GEMM mode, batch 1.
+    /// Load an HF model with explicit storage dtype and GEMM mode, a batch of one.
     ///
     /// Storage precision and GEMM execution are independent. The explicit
     /// lane ignores GEMM mode, custom precision/tensor-core controls, and
