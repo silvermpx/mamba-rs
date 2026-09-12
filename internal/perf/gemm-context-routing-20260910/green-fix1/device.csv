@@ -1,2 +1,0 @@
-uuid, name, driver_version, utilization.gpu [%], memory.used [MiB], memory.free [MiB]
-GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 595.45.04, 0 %, 48 MiB, 48463 MiB

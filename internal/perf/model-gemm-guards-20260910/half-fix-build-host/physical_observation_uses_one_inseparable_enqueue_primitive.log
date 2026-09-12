@@ -1,6 +1,0 @@
-
-running 1 test
-test physical_observation_uses_one_inseparable_enqueue_primitive ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.14s
-

@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-release-sm120.J6z6IG)
-    Finished `release` profile [optimized] target(s) in 0.86s
-  Executable tests/training_graph_parity.rs (/root/target-sm120-final-sweep-cuda132/release/deps/training_graph_parity-7969458a9d0e0593)

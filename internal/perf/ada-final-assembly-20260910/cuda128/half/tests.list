@@ -1,5 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.08s
-     Running tests/gemm_bi_sm89_half_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda128-20260910/release/deps/gemm_bi_sm89_half_selector_qualification-ec220e1347055be9)
-sm89_half_actual_auto_qualification: test
-
-1 test, 0 benchmarks

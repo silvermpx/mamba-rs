@@ -1,7 +1,0 @@
-{
-  "complete": true,
-  "release_error": "RELEASE is not quiet",
-  "source_count": 368,
-  "binary": "/root/target-ada-exact-toolkit-auto-triad-two-cell-ncu1-cuda132-20260907/release/deps/gemm_bi_performance_matrix-15e772a3a3d63b19",
-  "binary_sha": "cf38911f01f3e194834567f35fd1785a5353a14c83b3519572378343e9fef72f"
-}

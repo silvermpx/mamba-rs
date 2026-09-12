@@ -1,6 +1,0 @@
-utc=2026-09-06T13:19:24Z
-source_base_git=318b3fbd09c8fe0bfac7eaabefdec2bba457f212
-816797b32593bfd7b7f20a909b7c6815ce99269ab37c64bc257154ff5fb5c5ac  src/mamba_ssm/gpu/gemm_bi_fixed.rs
-fa6185f7921c9e0cfe2fb2368e17e215a5ddc5c49e9c406d65704eba793b0b98  tests/gemm_bi_fixed_performance.rs
-304878d56142fb5e1a94049f35b0d7e07ab86c7eb6a306c1ebc6a3de90229813  /root/target-ada-dispatch-review-gxJWgz/release/deps/gemm_bi_fixed_performance-fd5155b4b71de901
-NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 595.45.04, 8.9, 90 MiB, 0 %, 0 %, P5, 1800 MHz, 48

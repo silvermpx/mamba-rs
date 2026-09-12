@@ -1,5 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
-    Finished `release` profile [optimized] target(s) in 45.82s
-  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/gemm_bi_fixed_correctness-ed3d310275acf4d8)
-  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6)
-  Executable tests/gemm_bi_fixed_sm89_pipeline.rs (/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-b0f5bf9e4d3ccd0f)

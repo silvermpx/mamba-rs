@@ -1,3 +1,0 @@
-feature=cuda,cudarc/cuda-12080
-eb47dcdc1a38f6bb0faa81e4cd07650fe7791c9583000179c74d22e9b200b225  /root/target-ada-rna-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe
-4c293e504d71242089adc382241254ed11df98b31a56d9ce24b4d4e71a10d87e  /root/target-ada-rna-cuda128-20260906/release/deps/gemm_bi_fixed_performance-e01d837be76567b7

@@ -1,2 +1,0 @@
-G06 nn_d128_in_proj gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3
-G09 tn_d128_out_proj gemm_bi_tn_sm80_mma_tf32_v1_m16n16_bk32_s4

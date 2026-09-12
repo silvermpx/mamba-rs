@@ -1,9 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-auto-20260906)
-    Finished `release` profile [optimized] target(s) in 4.89s
-     Running tests/arch_compile_gates.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/arch_compile_gates-4a95865368ee0138)
-
-running 1 test
-test fixed_sm120_tf32_pair_store_production_source_contract ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.00s
-

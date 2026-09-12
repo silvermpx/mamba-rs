@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-sm120-g10.aGeGzG)
-    Finished `release` profile [optimized] target(s) in 46.23s
-  Executable tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda130/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)

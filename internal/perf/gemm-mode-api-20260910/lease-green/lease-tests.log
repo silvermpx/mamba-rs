@@ -1,7 +1,0 @@
-
-running 2 tests
-test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::qualification_policy_guard_preserves_mode_setup_error ... ok
-test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::qualification_policy_guard_restores_every_setting_after_error ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 789 filtered out; finished in 0.00s
-

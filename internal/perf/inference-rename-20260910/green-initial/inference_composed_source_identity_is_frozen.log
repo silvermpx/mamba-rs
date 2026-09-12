@@ -1,6 +1,0 @@
-
-running 1 test
-test mamba_ssm::gpu::gemm_bi_triad::modules::tests::inference_composed_source_identity_is_frozen ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 778 filtered out; finished in 0.01s
-

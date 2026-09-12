@@ -1,1 +1,0 @@
-/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_scalar_tn_copyplan_d768_in_discovery-60ff73c0b23dbbf5 cuda_suite::ada_f32_tn_copyplan_d768_in_discovery_once7 --ignored --exact --nocapture

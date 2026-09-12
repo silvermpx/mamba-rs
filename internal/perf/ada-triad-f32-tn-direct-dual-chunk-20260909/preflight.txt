@@ -1,6 +1,0 @@
-Immediate external preflight before the GPU launch:
-NVIDIA RTX 6000 Ada Generation, total=49140 MiB, used=48 MiB, free=48463 MiB, gpu_util=0%, memory_util=0%
-
-The raw log preserves the in-harness five-sample pre-context, timed-cohort and
-post-context gates. No user process was stopped or unloaded. The candidate's
-estimated private allocation was about 162 MiB, well below available VRAM.

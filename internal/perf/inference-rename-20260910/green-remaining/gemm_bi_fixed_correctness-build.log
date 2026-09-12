@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-inference-rename-green-complete.eB6zX5)
-    Finished `release` profile [optimized] target(s) in 1.22s
-  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_fixed_correctness-2d0c2176ddab5656)

@@ -1,7 +1,0 @@
-date 2026-09-10T20:00:52Z
-NVIDIA RTX 6000 Ada Generation, 595.45.04, GPU-d1edd7be-e88d-aed6-047d-622163306f0e
-Build cuda_13.2.r13.2/compiler.37434383_0
-old m1_inference_family_baseline b9df38f86e8b9fd21affcb8c493a7b418f00eab19599235cc89e2e6392966a5b
-new m1_inference_family_baseline c3cc12081a254adc13cad196e70c810fffc417c2d9b310a84324101fc4a2da0f
-74a5c5a4f2653db341eb0298a427ee488530b0222f7cb2211cd527ba636cfc3e  /root/mamba-rs-main-d8f2efbe/target/release/examples/m1_inference_family_baseline
-0d2746865b049c72a98e77eb48af7a4c38d0fa843a99002978cdf5a59476213a  /root/mamba-rs-new-c65c1c85/target/release/examples/m1_inference_family_baseline

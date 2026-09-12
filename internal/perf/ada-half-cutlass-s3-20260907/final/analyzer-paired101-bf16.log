@@ -1,4 +1,0 @@
-{"record":"raw_recomputed_comparison","comparison":"production","p50":0.9649688889683591,"p95":0.9964128333472694,"windows":101}
-{"record":"raw_recomputed_comparison","comparison":"control","p50":1.3251098922007336,"p95":1.3720231426368923,"windows":101}
-{"record":"raw_recomputed_comparison","comparison":"cublas","p50":1.2675286941446096,"p95":1.2908570510835056,"windows":101}
-{"verdict":"PASS","dtype":"bf16","candidate_over_production_p50":0.9649688889683591,"candidate_over_production_p95":0.9964128333472694,"candidate_over_cublas_p50":1.2675286941446096,"candidate_over_cublas_p95":1.2908570510835056,"production_over_cublas_control_p50":1.3251098922007336,"production_over_cublas_control_p95":1.3720231426368923}

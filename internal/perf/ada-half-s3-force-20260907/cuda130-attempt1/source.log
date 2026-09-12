@@ -1,9 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.07s
-     Running tests/arch_compile_gates.rs (/root/target-ada-half-s3-force-cuda130-20260907/release/deps/arch_compile_gates-26d913251d4706ac)
-
-running 2 tests
-test fixed_sm89_half_s3_production_source_contract ... ok
-test fixed_sm89_half_swizzle_production_source_and_layout_contract ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.00s
-

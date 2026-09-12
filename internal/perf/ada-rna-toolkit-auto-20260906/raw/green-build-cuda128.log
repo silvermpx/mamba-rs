@@ -1,9 +1,0 @@
-SOURCE_MANIFEST_SHA256=0f8762c1dada48707d404a39ba1357b3b5d65e8c11f198998f27e9b84281e483
-COMMAND=cargo test --release --features cuda,cudarc/cuda-12080 --lib --test gemm_bi_fixed_correctness --test gemm_bi_fixed_performance --test gemm_bi_tf32_cohort_binding --no-run
-   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-toolkit-auto-20260906)
-    Finished `release` profile [optimized] target(s) in 52.43s
-  Executable unittests src/lib.rs (/root/target-ada-rna-auto-cuda128-20260906/release/deps/mamba_rs-a52898eca32cfbbe)
-  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe)
-  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_performance-e01d837be76567b7)
-  Executable tests/gemm_bi_tf32_cohort_binding.rs (/root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_tf32_cohort_binding-a5eea3bfc064b5b2)
-EXIT=0

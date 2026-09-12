@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-gemm-mode-green-fix1.VbR42J)
-    Finished `release` profile [optimized] target(s) in 38.62s
-  Executable tests/gemm_mode_api.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_mode_api-85b69e13d5fdfb96)

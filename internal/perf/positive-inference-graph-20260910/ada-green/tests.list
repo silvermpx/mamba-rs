@@ -1,5 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.08s
-     Running tests/inference_graph_route.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/inference_graph_route-a9a7a6afbdbb01a1)
-decode_graphs_reject_complete_route_drift: test
-
-1 test, 0 benchmarks

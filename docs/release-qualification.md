@@ -13,8 +13,8 @@ off) and takes exactly one lane in `qual/lanes.toml`. The host-side check
 `tests/qual_lane_census.rs` runs in CI and fails when a declared target has
 no lane, a gate file hides an ignored arm, a bench is not harness-free under
 `benches/`, a qualification tool is not under `tools/qualification/` behind
-the `qualification` feature, or anything under `internal/` is reachable
-from the manifest.
+the `qualification` feature, or anything outside the declared source,
+test, bench and tool directories is reachable from the manifest.
 
 | lane | what | how it runs |
 |---|---|---|
@@ -25,8 +25,8 @@ from the manifest.
 | bench | timing instruments under `benches/`, no verdict | `cargo bench --features cuda --bench <name> [-- <instrument>]` |
 | qualification | hardware, toolkit and inventory instruments under `tools/qualification/` | `cargo test --release --features "cuda hf qualification" --test <name> -- --ignored`, one per board and toolkit |
 
-Kernel-candidate stands, scouts and diagnostics live under
-`internal/experiments/` with an index of their origin; they are outside the
+Kernel-candidate stands, scouts and diagnostics are kept in the
+maintainers' archive with an index of their origin; they are outside the
 crate and its targets.
 
 ## Evidence
@@ -65,8 +65,8 @@ the window count and aggregation. Boards are reported separately.
 4. The qualification tools that back the published tables, one per board
    and toolkit (`qual/run.sh qualification` lists them), with raw logs kept.
 5. Package: `cargo package --allow-dirty --no-verify`, extract the `.crate`
-   into a fresh directory and inspect it directly: no `internal/`, archive
-   or local tooling material; every declared target path and fixture
+   into a fresh directory and inspect it directly: no archive or local
+   tooling material; every declared target path and fixture
    present; `cargo test --lib --no-default-features --no-run` and
    `cargo test --no-default-features` pass offline inside the extracted
    tree; one qualification tool and one bench build from it.

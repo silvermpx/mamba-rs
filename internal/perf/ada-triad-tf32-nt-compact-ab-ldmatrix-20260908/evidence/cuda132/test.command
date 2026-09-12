@@ -1,1 +1,0 @@
-/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-fa0042152294a197 cuda_suite::ada_tf32_nt_compact_ab_ldmatrix_d768_in_discovery_once7 --ignored --exact --nocapture

@@ -1,5 +1,0 @@
-2026-09-09 Ada preflight immediately before the measured launch
-NVIDIA RTX 6000 Ada Generation, SM89, 142 SMs, CUDA 13.2, 49140 MiB total, 48 MiB used, 48463 MiB free, 0% compute, 0% memory
-In-harness pre-context quiet gate: 5 samples, 0% compute, 0% memory, 48 MiB used, 1800 MHz, 39 C, P5
-In-harness cohort quiet gate: 5 samples, 0% compute, 0% memory, 534 MiB used, 1800 MHz, 41 C, P2
-Post-cohort quiet gate: 5 samples, 0% compute, 0% memory, 554 MiB used, 1800 MHz, 41 C, P2

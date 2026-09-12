@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-tf32-final-assembly.l2QJgB)
-    Finished `release` profile [optimized] target(s) in 39.44s
-  Executable tests/gemm_bi_sm89_tf32_joint_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_sm89_tf32_joint_selector_qualification-636cb5c3927f86e5)

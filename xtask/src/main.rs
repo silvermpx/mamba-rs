@@ -56,12 +56,9 @@ fn main() -> std::process::ExitCode {
         .unwrap_or("gate");
     let root = workspace_root();
     let result = match verb {
-        "gate" | "comments" => comments::run(
-            &root,
-            COMMENT_SCANS,
-            &root.join(COMMENT_BASELINE),
-            update,
-        ),
+        "gate" | "comments" => {
+            comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update)
+        }
         other => Err(format!(
             "unknown rule: {other}\nusage: cargo run -q -p xtask -- [gate | comments] [--update-baseline]"
         )),

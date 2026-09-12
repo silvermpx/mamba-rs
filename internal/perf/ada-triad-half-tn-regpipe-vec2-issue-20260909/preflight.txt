@@ -1,6 +1,0 @@
-2026-09-09 Ada F16 TN issue-order launch preflight
-Target: NVIDIA RTX 6000 Ada Generation, SM89, 142 SMs, CUDA 13.2
-In-harness pre-context quiet gate: 5 samples, 0% compute, 0% memory, 48 MiB used
-In-harness cohort quiet gate: 5 samples, 0% compute, 0% memory, 534 MiB used
-Post-cohort quiet gate: 5 samples, 0% compute, 0% memory, 578 MiB used
-Result: exact/resources PASS; once3 retained gate FAIL; once7/Fast not launched

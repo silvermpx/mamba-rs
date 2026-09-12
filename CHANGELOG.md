@@ -410,13 +410,12 @@ parts and CC 12.1) get their own measured kernels in later releases.
 - The test tree is declared explicitly: 108 regression targets under
   `tests/`, 15 benches under `benches/` with their own `main`, and 46
   hardware and toolkit instruments under `tools/qualification/` behind the
-  non-default `qualification` feature. Kernel-candidate experiments moved
-  to `internal/experiments/` outside the crate; `internal/` is excluded
-  from the package. `qual/lanes.toml` gives every target a lane and a host
-  test keeps the manifest and the lanes in step.
+  non-default `qualification` feature. Kernel-candidate experiments left
+  the crate for the maintainers' archive. `qual/lanes.toml` gives every
+  target a lane and a host test keeps the manifest and the lanes in step.
 - The qualification runs behind the numbers on this page, with their raw
-  records, verification scripts and device identities, live under
-  `internal/perf/`.
+  records, verification scripts and device identities, are kept in the
+  maintainers' measurement archive, one packet per run.
 
 ## 0.6.9 (2026-08-26)
 

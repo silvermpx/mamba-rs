@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-final-inference.m6I1qh)
-    Finished `release` profile [optimized] target(s) in 11.05s
-  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_fixed_performance-e4e4fb80919573d9)

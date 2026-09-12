@@ -1,8 +1,5 @@
-### Local-only notes and scratch work (never commit) ###
-/internal/*
-!/internal/experiments/
-/internal/experiments/*
-!/internal/experiments/release-0.7.0-archive/
+### Local-only notes and measurement archives (never commit) ###
+/internal/
 
 ### IntelliJ IDEA ###
 out/
@@ -40,7 +37,4 @@ out/
 /target
 .idea/
 *.iml
-docs/plans/
-docs/superpowers/
-CLAUDE.md
 reference/

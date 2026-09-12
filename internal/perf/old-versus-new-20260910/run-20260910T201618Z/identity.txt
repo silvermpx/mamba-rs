@@ -1,7 +1,0 @@
-date 2026-09-10T20:16:19Z
-NVIDIA RTX 6000 Ada Generation, 595.45.04, GPU-d1edd7be-e88d-aed6-047d-622163306f0e
-Build cuda_13.2.r13.2/compiler.37434383_0
-old gemm_kernel_old_vs_new 1e91ea38453a2121db39eb1d4e87c60023e3494f13b351d411dc587b0153b984
-new gemm_kernel_old_vs_new 2f5d6c1fbb457b315f08f92203bff3d1c392d7d4ba27fdbad9a442de0875ab27
-beb4cd34a8989899c0215f3c131aa4ed78ea07cbaa68b6f99b46533f8aa75461  /root/mamba-rs-main-d8f2efbe/target/release/examples/gemm_kernel_old_vs_new
-8a2061a5e47a4f38bdd67f401fd8b3c95e579c6c6b508697b6971d66728e6f4f  /root/mamba-rs-new-c65c1c85/target/release/examples/gemm_kernel_old_vs_new

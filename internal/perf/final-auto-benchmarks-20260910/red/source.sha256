@@ -1,2 +1,0 @@
-3d305cf773b83c90af1064d91fd41d73ea86c4e06986354e352f10e814c0825e  tests/gemm_bi_performance_matrix.rs
-47964a4284d39330269e19fdd0b0b961d9a01d0032cb8bc6432b27574690e1f2  tests/gemm_bi_sm120_tf32_selector_qualification.rs

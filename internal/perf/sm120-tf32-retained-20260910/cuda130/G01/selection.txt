@@ -1,1 +1,0 @@
-G01 nn_d768_in_proj,nn_large_deep gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2

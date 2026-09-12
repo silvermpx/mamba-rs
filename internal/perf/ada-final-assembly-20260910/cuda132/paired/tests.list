@@ -1,8 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.08s
-     Running tests/gemm_bi_tf32_joint_cohort_binding.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_bi_tf32_joint_cohort_binding-4674ffac44451334)
-live::sm89_portable_identity_inventory: test
-live::sm89_tf32_joint_qualifies_winning_cells_once3_then_once7: test
-live::sm89_tf32_joint_two_new_production_bodies_once3_then_once7: test
-paired_ratio_and_nearest_rank_are_order_unambiguous: test
-
-4 tests, 0 benchmarks

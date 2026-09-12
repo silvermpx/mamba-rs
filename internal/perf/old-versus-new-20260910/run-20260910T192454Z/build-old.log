@@ -1,5 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-rs-main-d8f2efbe)
-    Finished `release` profile [optimized] target(s) in 0.45s
-   Compiling mamba-rs v0.6.9 (/root/mamba-rs-main-d8f2efbe)
-    Finished `release` profile [optimized] target(s) in 0.57s
-  Executable tests/gemm_bi_determinism.rs (target/release/deps/gemm_bi_determinism-2e30afbe0b1e22b7)

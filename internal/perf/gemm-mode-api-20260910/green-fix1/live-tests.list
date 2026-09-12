@@ -1,4 +1,0 @@
-gpu_mode_change_is_rejected_during_route_recording: test
-gpu_mode_change_rejects_capture_but_allows_same_mode_noop: test
-
-2 tests, 0 benchmarks

@@ -1,5 +1,0 @@
-2026-09-06T17:52:42+02:00
-0, NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 8.9, 595.45.04, P5, 0 %, 0 %, 90 MiB, 49140 MiB, 56, 1800 MHz, 810 MHz, 45.03 W, 300.00 W, 300.00 W
-global_cuda=/usr/local/cuda-13.2
-performance_executable=fff28eb3aef0ba4375ac0583cde0927af734410623f51904941fc40bddb7413b  /root/target-ada-rna-cuda130-20260906/release/deps/gemm_bi_fixed_performance-28fdf8ce2728ddd5
-cache_stat=drwx------ 700 root:root /root/mamba-kcache-ada-rna-cuda130-20260906

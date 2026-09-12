@@ -1,6 +1,0 @@
-Ada F16 TN full-tile staging launch preflight
-Target: NVIDIA RTX 6000 Ada Generation, SM89, 142 SMs, CUDA 13.2
-External immediate gate: five samples at 48 MiB used, 48,463 MiB free, 0% compute, 0% memory, no compute processes
-In-harness pre-context gate: five samples at 48 MiB used, 0% compute, 0% memory
-In-harness cohort gate: five samples at 534 MiB used, 0% compute, 0% memory
-Post-cohort gate: five samples at 578 MiB used, 0% compute, 0% memory

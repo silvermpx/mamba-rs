@@ -1,7 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-auto-20260906)
-    Finished `release` profile [optimized] target(s) in 49.25s
-  Executable unittests src/lib.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/mamba_rs-87c2fddad15adab2)
-  Executable tests/arch_compile_gates.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/arch_compile_gates-4a95865368ee0138)
-  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/gemm_bi_fixed_correctness-7860b14bbe37841d)
-  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
-  Executable tests/gemm_bi_tf32_cohort_binding.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/gemm_bi_tf32_cohort_binding-c96a6105c026b3ba)

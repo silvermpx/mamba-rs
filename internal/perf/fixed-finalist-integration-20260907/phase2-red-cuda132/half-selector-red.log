@@ -1,7 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.07s
-     Running unittests src/lib.rs (/root/target-ada-exact-toolkit-auto-finalistphase2red1-cuda132-20260907/release/deps/mamba_rs-029e0500e5246408)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 695 filtered out; finished in 0.00s
-

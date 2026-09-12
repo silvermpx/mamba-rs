@@ -1,9 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.09s
-     Running tests/m3_training_graph_parity.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/m3_training_graph_parity-ed5e582997948112)
-
-running 1 test
-test m3_training_graph_bf16_multi_replay_matches_eager ... M3 5-step eager-vs-graph max_err = 0.000e0
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 5.09s
-

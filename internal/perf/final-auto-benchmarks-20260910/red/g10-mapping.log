@@ -1,9 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-sm120-reachability-fix1.Djr8r8)
-    Finished `release` profile [optimized] target(s) in 1.95s
-     Running tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda130-20260910/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)
-
-running 1 test
-test tn_m8192_k128_n128_maps_to_exact_tn_key ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
-

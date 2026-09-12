@@ -1,7 +1,7 @@
 # The one gate. `make ci-fast` is what the pre-push hook runs and what
 # CI runs: format, clippy with warnings as errors, the repository's own
 # lints (xtask), and the dependency audit. `make check` adds the CPU
-# test tier. GPU tiers run on a CUDA box (see CLAUDE.md), never here.
+# test tier. GPU tiers run on a CUDA box (see docs/release-qualification.md), never here.
 .PHONY: ci-fast check fmt fmt-check clippy lint deny test baseline install-hooks
 
 ci-fast: fmt-check clippy lint deny

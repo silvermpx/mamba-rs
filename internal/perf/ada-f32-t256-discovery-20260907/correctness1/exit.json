@@ -1,1 +1,0 @@
-{"command": ["/root/target-ada-exact-toolkit-auto-f32t256d1-cuda132-20260907/release/deps/gemm_bi_fixed_f32_t256_discovery-affc2122f2c3c086", "f32_t256_small_bits_prefix_tail_and_resources", "--exact", "--ignored", "--nocapture", "--test-threads=1"], "exit": 101}

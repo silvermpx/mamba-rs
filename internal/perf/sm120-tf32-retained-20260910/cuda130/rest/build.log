@@ -1,2 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.11s
-  Executable tests/gemm_bi_sm120_tf32_selector_qualification.rs (/root/target-sm120-final-sweep-cuda130/release/deps/gemm_bi_sm120_tf32_selector_qualification-d81eb6d705cb05cc)

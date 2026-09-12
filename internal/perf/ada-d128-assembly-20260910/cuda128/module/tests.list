@@ -1,5 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.09s
-     Running tests/gemm_bi_sm89_exact_f32_d128_module_qualification.rs (/root/target-ada-finalist-aldmatrix-cuda128-20260910/release/deps/gemm_bi_sm89_exact_f32_d128_module_qualification-beb4433fd3dde5bd)
-sm89_exact_f32_d128_module_abi_and_resources_qualify: test
-
-1 test, 0 benchmarks

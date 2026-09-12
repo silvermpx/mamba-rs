@@ -1,5 +1,0 @@
-COMMAND: supported nvidia-smi fields plus read-only CUDA Driver attributes
-2026/09/06 21:55:03.853, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 1800 MHz, 810 MHz, 40.08 W, 39, P5, Default
-DRIVER_CC_SM_COUNT=8.9,142
-ACTIVE_COMPUTE_APPS
-CORRECTED_TELEMETRY_EXIT=0

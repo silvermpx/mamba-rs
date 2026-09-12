@@ -1,3 +1,0 @@
-COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-12080", "--lib", "--", "--nocapture", "--test-threads=1"]
-COMMAND_EXIT library.log 101
-LIBRARY_RESULT {"exit": 101, "toolkit": "12.8"}

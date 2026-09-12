@@ -1,4 +1,0 @@
-{"schema":"AdaHalfCutlassS3V1","record":"ptxas_resources","dtype":"f16","physical_symbol":"ada_half_cutlass_s3_f16","stack_bytes":0,"spill_store_bytes":0,"spill_load_bytes":0,"registers":178}
-{"schema":"AdaHalfCutlassS3V1","record":"ptxas_resources","dtype":"bf16","physical_symbol":"ada_half_cutlass_s3_bf16","stack_bytes":0,"spill_store_bytes":0,"spill_load_bytes":0,"registers":178}
-{"schema":"AdaHalfCutlassS3V1","record":"ptxas_resources","dtype":"f16","physical_symbol":"gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16","stack_bytes":0,"spill_store_bytes":0,"spill_load_bytes":0,"registers":182}
-{"schema":"AdaHalfCutlassS3V1","record":"ptxas_resources","dtype":"bf16","physical_symbol":"gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16","stack_bytes":0,"spill_store_bytes":0,"spill_load_bytes":0,"registers":182}

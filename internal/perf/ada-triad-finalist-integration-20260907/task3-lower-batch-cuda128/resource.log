@@ -1,8 +1,0 @@
-
-running 1 test
-{"kind":"sm89_nt_finalist_resources","symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","registers":125,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"launch_threads":256,"max_threads":256,"occupancy":2,"required_occupancy":2,"target":"sm_89","nvrtc":[12,8],"nvrtc_library_known":true,"source_digest":"d20cb39f390ef45181be94e4bd7baeb51548c0e6efac64bad72aae71a889e3ce","invocation_digest":"9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36","header_manifest_digest":"0b773565ea23bca8cd8ce536c453a19f0bc12064c6b714fc57bb0202a2880a90","compile_key":"9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36","artifact_digest":"3529da262f189d20fef9a190d50eb9bb358752aa59cf116ba6395e5ac9dc31e5","driver_api":13020,"driver_build_sources":7,"driver_build_digest":"d1edc5a5bc3e10a2688e21568dccbde5e280dc39144dd81e853843ca98b2d0e1"}
-{"kind":"sm89_nt_finalist_k0_revisions","zero_digest":"731c3bc544994cf1d3e7624a9f0ced408627158df4980b478b702d4edb1948ce","exceptional_digest":"2f2e6fa26372128487bbcc3a38fb619facd954b906126303fa35619fc62d5c71","finalist_revision":1,"portable_revision":45,"shared_route_revision":45}
-test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm89_nt_compact_finalist_resources_k0_and_live_revisions ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 709 filtered out; finished in 4.02s
-

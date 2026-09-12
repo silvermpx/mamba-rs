@@ -1,8 +1,0 @@
-{"phase": "PRE", "utc": "2026-09-07T03:06:04Z", "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n", "gpu_stderr": "", "gpu_exit": 0, "apps": "", "apps_stderr": "", "apps_exit": 0}
-COMMAND ["/root/target-ada-half-s3-paired-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0", "--ignored", "--exact", "fixed_ada_half_s3_auto_fast_paired", "--nocapture", "--test-threads=1"]
-COMMAND_EXIT test.log 0
-{"phase": "POST", "utc": "2026-09-07T03:07:44Z", "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 9 %, 1 %\n", "gpu_stderr": "", "gpu_exit": 0, "apps": "", "apps_stderr": "", "apps_exit": 0}
-RUN_RESULT {"test_exit": 0, "post_exit": 0, "toolkit": "12.8", "windows": 1, "dtypes": "bf16,f16", "binary_sha": "574c43f5cd1de38151a09d7604848924537c597e94e57c130e531aa7ebd7c138", "source_sha": "b57b825a8a3bdfc7548f55c7837244f9b02ecd7139c2d88749f5baab49ac7a1d", "test_log_sha": "d5d182954b38f54d5be629e20f2aaac2c4a1812d2c87cc79c1adaa5d1583c9ee", "cache_files": {"/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54", "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-57c3e4f2177104f137d432f19398a4a36799aca4c264634a1ab25d17dbf422ba.bin": "9af16b658fb81643b962b03da53f391d7b99e614d293195def7716d59ece401a", "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9"}}
-WRAPPER_COMPLETE
-WRAPPER_EXIT=0
-OUTER_SSH_EXIT=0

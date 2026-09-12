@@ -1,7 +1,0 @@
-2026-09-07T02:48:19Z
-uuid, name, compute_cap, driver_version, utilization.gpu [%], memory.used [MiB], pstate, power.draw [W]
-GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 595.45.04, 0 %, 74 MiB, P5, 40.30 W
-EXIT_gpu_identity=0
-COMPUTE_APPS=
-EXIT_noapps=0
-2026-09-07T02:48:19Z

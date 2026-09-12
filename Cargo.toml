@@ -24,11 +24,8 @@ autobenches = false
 # in the repository only.
 exclude = [
     "internal/",
-    ".superpowers/",
     ".flotilla.toml",
     ".idea/",
-    "AGENTS.md",
-    "task-14-staged-tdd.md",
 ]
 
 # docs.rs builds have no CUDA toolkit. An explicit cudarc version

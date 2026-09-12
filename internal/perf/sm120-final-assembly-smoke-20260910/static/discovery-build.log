@@ -1,4 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-triad-final-assembly.m1C7bi)
-    Finished `release` profile [optimized] target(s) in 3.42s
-  Executable tests/gemm_bi_tf32_nt_compact_xor.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_tf32_nt_compact_xor-8d8246563b7b569a)
-  Executable tests/gemm_bi_tf32_tn_pre_rna_m64n96_s2_prism_discovery.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_tf32_tn_pre_rna_m64n96_s2_prism_discovery-7d03de993012f395)

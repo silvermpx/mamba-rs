@@ -2689,7 +2689,7 @@ fn fixed_pick_tf32(
     // candidate-first/incumbent-first cohorts (worst paired p95 0.978250),
     // with identical output bits and physical graph identity. This is scoped
     // to the measured RTX 6000 Ada / known NVRTC13.2 stack:
-    // internal/perf/fixed-tf32-all6-ada-20260906/c-m64s2-confirm101.log
+    // measurement archive packet fixed-tf32-all6-ada-20260906/c-m64s2-confirm101.log
     // SHA256 908b0ffd1fd1e5127b51d7e440d530080a6bd07d985e2aa93720f095accd926a.
     if !sm120_tma
         && compute_capability == (8, 9)
@@ -2709,7 +2709,7 @@ fn fixed_pick_tf32(
                 // A0/A1 M128S2 beat prior AUTO and FAST_TF32 in all four
                 // 101-window eager/graph AFV/VFA cohorts (worst current p95
                 // 0.955694 / 0.953945). Measured aligned, known NVRTC13.2:
-                // internal/perf/sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
+                // measurement archive packet sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
                 // fixed-internal-winners-confirm101-cuda13.2-tf32-a01-v1.log
                 // SHA256 71d1f97f3733997b63e6463cb88686bd4b996b5eafa8442bcb8136c623b68faf.
                 (4621, 384, 1928, _) if output_aligned && nvrtc_library_known => {
@@ -2719,7 +2719,7 @@ fn fixed_pick_tf32(
                 // Both D bias rows beat incumbent ProducerWarp in all four
                 // 101-window eager/graph, AFV/VFA cohorts. D1 also beats FAST;
                 // D0 is an internal-only win; both measured C pointers are
-                // 8-byte aligned. Evidence under internal/perf/
+                // 8-byte aligned. Evidence in the measurement archive, packet
                 // sm120-fixed-tf32-pair-store-force-20260906/:
                 // d0-confirm101-v1.log SHA256
                 // 7adbbd340a0aefbebbf8608c5f65f03bb54ca0e668f00ff1199ba495c805866c;
@@ -3380,7 +3380,7 @@ fn fixed_pick_sm120_f32out(
         // The deep wide projection sits past the band the generic comparator
         // was fitted on (k up to 2304); there it extrapolates to the 128x128
         // tile at 228 us where this tile measures 178 us
-        // (internal/perf/sm120-half-tiles-20260903).
+        // (measurement archive, packet sm120-half-tiles-20260903).
         (4096, 3072, 1536) => Some(InferenceSm120HalfTile::M64N128Bk64S2),
         _ => fallback,
     }
@@ -4354,11 +4354,11 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: InferenceTile) -> Result<(), String>
 
 // Production NVRTC12.8/13.0/13.2 on 142-SM Ada, A-E and both bias states.
 // The complete force corpus is qualified in
-// internal/perf/ada-rna-full-toolkit-qualification-20260906/. The paired101
-// logs are internal/perf/ada-rna-toolkit-census-20260906/cuda-{12.8,13.0}/
+// measurement archive packet ada-rna-full-toolkit-qualification-20260906/. The paired101
+// logs are measurement archive packet ada-rna-toolkit-census-20260906/cuda-{12.8,13.0}/
 // timing101.log (SHA256 955f252909c94607e359e2a2eeb47e9744f76c41a8f2fac128ef338a80e15dcb
 // and d687caefea0b6c85a378f99230b4ee7f44c55a40e7ac6bfe1980f9967d3b0a37)
-// and internal/perf/ada-rna-wide-auto-20260906/
+// and measurement archive packet ada-rna-wide-auto-20260906/
 // confirm101-old-m64-vs-auto-rna-final.log (SHA256
 // 3dbb8754b651706d67c83ab1f96fb26ed66a63bc161e8ced015f36ef50831f46).
 // RNA wins all ten internal p50/p95 cohorts on each toolkit; FAST wins are
@@ -5051,7 +5051,7 @@ fn fixed_sm120_sliced_auto_eligible(
 // bridge retained exact scalar-FMA bits and beat both the prior copy-plan and
 // CUBLAS_COMPUTE_32F_PEDANTIC in all eager/graph ABBA/BAAB cohorts at 101
 // windows. Worst paired p95: 0.894265 versus copy-plan, 0.909778 versus
-// cuBLAS. Evidence: internal/perf/sm120-fixed-tma-fma-b0-20260906/
+// cuBLAS. Evidence: measurement archive packet sm120-fixed-tma-fma-b0-20260906/
 // sm120-fixed-auto-b0-post101-v1.log, SHA256
 // 20245b1fe378434130f0e74bdfe3117790506afccf34224c27fd516bdf480932.
 // B1 has a separate post-dot-bias admission below.
@@ -5084,7 +5084,7 @@ fn fixed_sm120_tma_fma_b0_auto_eligible(
 // M64xN128 one-split route retained exact Fixed bits and won all eager/graph
 // ABBA/BAAB cohorts at 101 windows. Before promotion its worst paired p95 was
 // 0.953899 versus prior AUTO and 0.881677 versus PEDANTIC cuBLAS; evidence:
-// internal/perf/sm120-fixed-tma-fma-a0-20260906/
+// measurement archive packet sm120-fixed-tma-fma-a0-20260906/
 // sm120-fixed-fma-a0-m64n128-admission101-v1.log, SHA256
 // 7a8a46e2eee45109d2d670bd73f62a66fbbc2a28f8b92b474c4cfcb2a27e53f2.
 // Post-AUTO worst p95 was 0.895330 versus Legacy and 0.880051 versus
@@ -5122,7 +5122,7 @@ fn fixed_sm120_tma_fma_a0_auto_eligible(
 // every eager/graph ABBA/BAAB cohort at 101 windows. Before promotion its
 // worst paired p95 was 0.978964 versus prior AUTO, 0.917294 versus Legacy,
 // and 0.765625 versus PEDANTIC cuBLAS; evidence:
-// internal/perf/sm120-fixed-tma-fma-a1-postbias-20260906/
+// measurement archive packet sm120-fixed-tma-fma-a1-postbias-20260906/
 // sm120-fixed-fma-a1-postbias-m128-admission101-v1.log, SHA256
 // 8887b5a16c246a07d55a47a3b442642bbb53d53ec75565098e9acff6f53ac7f4.
 // Post-AUTO worst p95 was 0.914063 versus Legacy and 0.765326 versus
@@ -5183,7 +5183,7 @@ fn fixed_sm120_tma_fma_bc1_auto_tile(
     // Independent 101-window eager/graph AFV/VFA confirmations, all exact
     // AUTO bits. B1 worst current p95 0.913542, PEDANTIC 0.856601; C1 worst
     // current p95 0.936753, but PEDANTIC 1.042524 (internal-only win).
-    // internal/perf/sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
+    // measurement archive packet sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
     // fixed-internal-winners-confirm101-cuda13.2-f32_exact-b1-v1.log SHA256
     // 59131d6904855513ce50aff4bcf3c7a1e35243cef71416fd465a5b0c102f9796;
     // fixed-internal-winners-confirm101-cuda13.2-f32_exact-c1-v1.log SHA256
@@ -5300,7 +5300,7 @@ fn fixed_sm120_tma_fma_force_eligible(
 // 62c96372caf6ea8fa6020299d266fb8303c99674d1ca927f1faa4ae91b45249d.
 // D0/D1 additionally qualified by 101-window confirmation; candidate/current
 // worst p95 ratios: D0 0.830458925, D1 0.819282926. Evidence under
-// internal/perf/sm120-fixed-e0-copyplan-t256-20260906/:
+// measurement archive packet sm120-fixed-e0-copyplan-t256-20260906/:
 // d0-current-copyplan-fast-confirm101-v1.log, SHA256
 // de1144e0a91626fe254fe89dde92f8ca956ecedb52aec109bbdca046b91812bb;
 // d1-current-copyplan-fast-confirm101-v1.log, SHA256

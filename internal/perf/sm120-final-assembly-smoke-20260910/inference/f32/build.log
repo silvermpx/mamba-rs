@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-triad-final-assembly.m1C7bi)
-    Finished `release` profile [optimized] target(s) in 1.37s
-  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_fixed_correctness-2d0c2176ddab5656)

@@ -1,4 +1,0 @@
-2026-09-09 Ada preflight immediately before the measured launch
-NVIDIA RTX 6000 Ada Generation, 49140 MiB total, 48 MiB used, 48463 MiB free, 0% compute, 0% memory
-In-harness pre-context, retained and Fast cohort quiet gates: PASS; exact sample stream is preserved in raw.log
-No external process was stopped or unloaded

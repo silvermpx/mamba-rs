@@ -1,6 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 0.12s
-     Running tests/gemm_bi_fixed_bridge.rs (/root/target-sm120-final-sweep-cuda132/release/deps/gemm_bi_fixed_bridge-bb79c566f5a4b178)
-bridge_fixed_ladder_bit_identical_to_triad: test
-misaligned_subview_matches_aligned_bits: test
-
-2 tests, 0 benchmarks

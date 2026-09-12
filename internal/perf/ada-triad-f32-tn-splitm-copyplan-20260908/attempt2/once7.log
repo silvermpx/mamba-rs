@@ -1,6 +1,0 @@
-
-running 1 test
-test splitm_cuda_suite::ada_f32_tn_splitm_copyplan_d768_in_discovery_once7 ... ignored, Ada CUDA13.2 discovery: exact F32 TN d768-in four-node Split-M reuse
-
-test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 26 filtered out; finished in 0.00s
-

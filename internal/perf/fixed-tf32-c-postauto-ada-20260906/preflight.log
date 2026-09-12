@@ -1,6 +1,0 @@
-2026-09-06T13:35:34Z
-NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 8.9, 0 %, 90 MiB
-Build cuda_13.2.r13.2/compiler.37434383_0
-08b8f80099039c5423c65c7773ba85c59fc3a23b6780b5bbbae8e2ae5fae9a8f  /root/target-ada-dispatch-review-gxJWgz/release/deps/gemm_bi_fixed_performance-429f558dd590762a
-1b94503c739b821a9e98d711fcd4377106e70a05e08bf3b9572f03ce805d6ce6  /root/mamba-ada-dispatch-review-gxJWgz/src/mamba_ssm/gpu/gemm_bi_fixed.rs
-9536831c617098f5a105b60c9e1a0bbdb6c8b0690584f94ba6cd99d8c2387083  /root/mamba-ada-dispatch-review-gxJWgz/tests/gemm_bi_fixed_performance.rs

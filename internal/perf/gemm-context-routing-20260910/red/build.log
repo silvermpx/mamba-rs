@@ -1,3 +1,0 @@
-   Compiling mamba-rs v0.6.9 (/root/mamba-context-routing-red.XyYIUF)
-    Finished `release` profile [optimized] target(s) in 53.26s
-  Executable tests/gemm_context_routing.rs (/root/target-ada-finalist-aldmatrix-cuda132-20260910/release/deps/gemm_context_routing-a609d3c84e10d4bf)

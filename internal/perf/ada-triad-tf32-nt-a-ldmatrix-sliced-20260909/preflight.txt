@@ -1,5 +1,0 @@
-2026-09-09 Ada preflight immediately before launch
-NVIDIA RTX 6000 Ada Generation, 49140 MiB total, 48 MiB used, 48463 MiB free, 0% compute, 0% memory
-In-harness pre-context quiet gate: 5 samples, 0% compute, 0% memory, 48 MiB used
-Scout/qualification quiet gates: 5 samples each, 0% compute, 0% memory, 598 MiB used
-Post-cohort quiet gate: 5 samples, 0% compute, 0% memory, 598 MiB used
