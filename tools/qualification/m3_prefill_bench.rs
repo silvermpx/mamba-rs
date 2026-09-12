@@ -27,6 +27,43 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
         .collect()
 }
 
+fn training_dtypes(value: Option<&str>) -> Result<&'static [WeightDtype], String> {
+    match value {
+        None => Ok(&[WeightDtype::F32, WeightDtype::Bf16]),
+        Some("all") => Ok(&[WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16]),
+        Some("f32") => Ok(&[WeightDtype::F32]),
+        Some("bf16") => Ok(&[WeightDtype::Bf16]),
+        Some("f16") => Ok(&[WeightDtype::F16]),
+        Some(value) => Err(format!("unknown MAMBA_RS_BENCH_DTYPE={value:?}")),
+    }
+}
+
+#[test]
+fn training_dtype_filter_selects_only_the_requested_lane() {
+    for (name, dtype) in [
+        ("f32", WeightDtype::F32),
+        ("bf16", WeightDtype::Bf16),
+        ("f16", WeightDtype::F16),
+    ] {
+        assert_eq!(training_dtypes(Some(name)).unwrap(), [dtype]);
+    }
+    assert_eq!(
+        training_dtypes(None).unwrap(),
+        [WeightDtype::F32, WeightDtype::Bf16],
+    );
+    assert_eq!(
+        training_dtypes(Some("all")).unwrap(),
+        [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16],
+    );
+}
+
+#[test]
+fn training_dtype_filter_rejects_a_misspelled_lane() {
+    for value in ["", "bf61", "tf32", "f16,bf16"] {
+        assert!(training_dtypes(Some(value)).is_err(), "{value}");
+    }
+}
+
 #[test]
 #[ignore]
 fn m3_prefill_latency_at_serve_shape() {
@@ -87,6 +124,9 @@ fn m3_prefill_latency_at_serve_shape() {
 
 /// Training step latency at a multi-chunk shape (the chunked backward is
 /// the target). Run manually, release build.
+/// `MAMBA_RS_BENCH_DTYPE=f32|bf16|f16|all` selects lanes; unset retains F32/BF16.
+/// `MAMBA_RS_BENCH_B`, `MAMBA_RS_BENCH_T` and `MAMBA_RS_BENCH_ITERS` override
+/// batch, sequence length and timed steps; defaults are 1, 256 and 20.
 #[test]
 #[ignore]
 fn m3_train_step_at_multichunk_shape() {
@@ -118,9 +158,15 @@ fn m3_train_step_at_multichunk_shape() {
         }
     };
     let (batch, seq_len) = (get("MAMBA_RS_BENCH_B", 1), get("MAMBA_RS_BENCH_T", 256));
+    let iters = get("MAMBA_RS_BENCH_ITERS", 20);
+    assert!(
+        batch > 0 && seq_len > 0 && iters > 0,
+        "benchmark dimensions and iterations must be positive"
+    );
     let n = batch * seq_len * cfg.d_model;
 
-    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+    let requested_dtype = std::env::var("MAMBA_RS_BENCH_DTYPE").ok();
+    for &dtype in training_dtypes(requested_dtype.as_deref()).unwrap() {
         // The f32 forward always runs the input-projection GEMM (eye
         // weights = identity semantics); the mixed pipeline wants the
         // identity branch (cleared weights).
@@ -137,16 +183,32 @@ fn m3_train_step_at_multichunk_shape() {
         }
         let mut tr =
             Mamba3Trainer::new_with_dtype(0, &w, cfg, cfg.d_model, batch, seq_len, dtype).unwrap();
+        eprintln!(
+            "train route: dtype={dtype:?} scan={:?} parallel={} mode={:?} family={:?} route={:?} tensor_cores_allowed={} f32_policy={:?} B={batch} T={seq_len} layers={} state_cap={} iters={iters}",
+            cfg.scan_mode,
+            cfg.train_use_parallel_scan(),
+            tr.ctx().gemm_mode(),
+            tr.ctx().bi_gemm_family(),
+            tr.ctx().gemm_route(),
+            tr.ctx().bi_tensor_cores(),
+            tr.ctx().f32_triad_policy(),
+            cfg.n_layers,
+            mamba_rs::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state).unwrap(),
+        );
         let input = det(n, 0x91);
         let d_temporal = det(n, 0x92);
         for _ in 0..3 {
             tr.step(&input, &d_temporal).unwrap();
         }
         tr.ctx().stream.synchronize().unwrap();
-        let iters = 20usize;
+        let mut eager_skips = 0usize;
+        let mut eager_scale = None;
         let t0 = Instant::now();
         for _ in 0..iters {
-            tr.step(&input, &d_temporal).unwrap();
+            let metrics = tr.step(&input, &d_temporal).unwrap();
+            assert!(!metrics.graph_replayed, "eager window replayed a graph");
+            eager_skips += usize::from(metrics.overflow_skipped == Some(true));
+            eager_scale = metrics.loss_scale;
         }
         // Without the sync both loops read host enqueue time, not the
         // step wall — the device may still be several steps behind.
@@ -157,6 +219,9 @@ fn m3_train_step_at_multichunk_shape() {
             cfg.n_layers,
             1e3 * dt / iters as f64
         );
+        eprintln!(
+            "train metrics {dtype:?} eager skipped={eager_skips}/{iters} last_used_loss_scale={eager_scale:?}"
+        );
         // Graph arm too: the M1 table is graph-mode; an eager-only M3
         // number was never comparable with it.
         tr.capture_graph().unwrap();
@@ -164,9 +229,14 @@ fn m3_train_step_at_multichunk_shape() {
             tr.step(&input, &d_temporal).unwrap();
         }
         tr.ctx().stream.synchronize().unwrap();
+        let mut graph_skips = 0usize;
+        let mut graph_scale = None;
         let t1 = Instant::now();
         for _ in 0..iters {
-            tr.step(&input, &d_temporal).unwrap();
+            let metrics = tr.step(&input, &d_temporal).unwrap();
+            assert!(metrics.graph_replayed, "graph window used eager execution");
+            graph_skips += usize::from(metrics.overflow_skipped == Some(true));
+            graph_scale = metrics.loss_scale;
         }
         tr.ctx().stream.synchronize().unwrap();
         let dt = t1.elapsed().as_secs_f64();
@@ -174,6 +244,9 @@ fn m3_train_step_at_multichunk_shape() {
             "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step (graph)",
             cfg.n_layers,
             1e3 * dt / iters as f64
+        );
+        eprintln!(
+            "train metrics {dtype:?} graph skipped={graph_skips}/{iters} last_used_loss_scale={graph_scale:?}"
         );
     }
 }

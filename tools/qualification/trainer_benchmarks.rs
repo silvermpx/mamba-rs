@@ -119,6 +119,18 @@ fn run_lm_shape(
         eprintln!("note: MAMBA_RS_BENCH_IEEE_F32=1 - f32 GEMMs run exact cuBLAS");
     }
 
+    eprintln!(
+        "train route: dtype={dtype:?} scan={:?} parallel={} mode={:?} family={:?} route={:?} tensor_cores_allowed={} f32_policy={:?} B={batch} T={seq_len} layers={}",
+        cfg.scan_mode,
+        cfg.scan_mode.use_parallel(seq_len, cfg.d_state),
+        trainer.ctx().gemm_mode(),
+        trainer.ctx().bi_gemm_family(),
+        trainer.ctx().gemm_route(),
+        trainer.ctx().bi_tensor_cores(),
+        trainer.ctx().f32_triad_policy(),
+        cfg.n_layers,
+    );
+
     // Inputs are pre-generated OUTSIDE every timed region: the previous
     // version ran a serial 98k-iteration host RNG + two Vec collects
     // INSIDE both timers, polluting the eager/graph ratio.
