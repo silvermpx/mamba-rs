@@ -1005,3 +1005,8 @@ required-features = ["qualification", "cuda"]
 name = "trainer_benchmarks"
 path = "tools/qualification/trainer_benchmarks.rs"
 required-features = ["qualification", "cuda"]
+
+# The gate crate (`make ci-fast`, the pre-push hook, CI) lives beside the
+# package; it is never published.
+[workspace]
+members = ["xtask"]

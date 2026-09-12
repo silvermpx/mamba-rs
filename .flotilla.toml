@@ -1,2 +1,33 @@
 schema = 1
-provision = ["brew:cargo-deny", "brew:cargo-flotilla"]
+# Frozen workspace identity: folds the worktree pools into the main one.
+ident = "mamba-rs-915fb0b19265"
+# Mac-only; cargo deny stays narrow.
+provision = ["brew:cargo-deny"]
+
+[classes]
+# Installs into this checkout's .git; a worker's copy is not the one that pushes.
+local = ["make install-hooks"]
+# Every command may run on ANY worker unless a pin names the hardware
+# fact that keeps it on one kind of box (flotilla docs/20, 2026-09-07).
+# A featureless `cargo test` (15 CPU files; 87 of 102 are whole-file
+# cfg(feature = "cuda") and compile to nothing) is graded on
+# ubuntu + macos + windows by this repo's own CI - so it is not pinned.
+#
+# The acceptance/probe/sweep TSVs are written by the run; evidence.rs
+# swallows a failed open, so a remote run would report success having
+# written nothing that comes back.
+local_env = ["MAMBA_RS_ACCEPTANCE_TSV", "MAMBA_RS_PROBE_TSV", "MAMBA_RS_SWEEP_TSV"]
+# PIN linux: the cuda tier TYPE-CHECKS with nvcc alone (ci.yml does it
+# on a GPU-less runner). Flag-bearing entries match positionally - spell
+# the invocation as pinned.
+linux = ["cargo check --features cuda", "cargo clippy --features cuda"]
+# PIN gpu: the cuda tests execute kernels on the one device (two jobs on
+# it kill each other's capture - the worker's single repo slot serializes
+# them). Implies requires nvidia-smi.
+gpu = ["cargo test --features cuda"]
+# PIN macos: the Accelerate BLAS backend links an Apple framework
+# (src/ops/blas.rs). Dormant today; the pin is the fact.
+macos = ["cargo check --features accelerate", "cargo test --features accelerate"]
+[classes.requires]
+"cargo check --features cuda" = ["nvcc"]
+"cargo clippy --features cuda" = ["nvcc"]

@@ -1,0 +1,8 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The repository's own gate: lints the toolchain cannot express, run by make ci-fast, the pre-push hook and CI alike."
+
+[dependencies]

@@ -78,10 +78,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
+  comments:
+    name: Comment gate (xtask)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run -q --locked -p xtask -- gate
+
   basics:
     name: Gate
     runs-on: ubuntu-latest
-    needs: [lockfile, fmt, clippy, docs, msrv, deny]
+    needs: [lockfile, fmt, clippy, docs, msrv, deny, comments]
     steps:
       - run: exit 0
 
