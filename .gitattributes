@@ -1,0 +1,4 @@
+# The kernel sources, their headers, the retained fragments and the
+# receipts are embedded and hashed at build time; a checkout that
+# rewrote their line endings would change every module digest.
+* text=auto eol=lf
