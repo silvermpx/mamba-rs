@@ -29,6 +29,7 @@ use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use crate::mamba3_siso::config::Mamba3Config;
+use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 
@@ -399,11 +400,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let n_i = bt as i32;
         let ng_i = ng as i32;
         let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * ng) as u32, 2, 1),
-            block_dim: (ds as u32, 1, 1),
-            shared_mem_bytes: ds as u32 * 4,
-        };
+        let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
         // Kernel signature (grouped by type, NOT interleaved B/C):
         //   B_normed, C_normed, B_rms, C_rms, B_raw, C_raw, B_weight, C_weight
         let mut bld = ctx

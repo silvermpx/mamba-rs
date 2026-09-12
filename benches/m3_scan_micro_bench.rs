@@ -9,7 +9,7 @@ use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg};
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg, chunk_scan_cfg};
 use std::time::Instant;
 
 fn det(n: usize, seed: u64) -> Vec<f32> {
@@ -467,11 +467,7 @@ fn coeff_chain_time_and_hash() {
         let cr = c_raw.cached_ptr();
         let bw = bnw.cached_ptr();
         let cw = cnw.cached_ptr();
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * ng) as u32, 2, 1),
-            block_dim: (ds as u32, 1, 1),
-            shared_mem_bytes: ds as u32 * 4,
-        };
+        let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
         let mut b = ctx
             .stream
             .launch_builder(m3k.bcnorm_fwd_bc_typed.get(dt_ty));

@@ -1137,9 +1137,9 @@ DEFINE_M3_SPLIT(f16,  __half,        from_f_f16)
 
 // ------- bcnorm_fwd_bc fused (B + C in one launch) -------
 // Per-(sample, group) RMSNorm of B and C in one launch: gridDim.y picks
-// the operand. One kernel launch per layer instead of two
-// per step (~3-5 µs each on Ada). Identical math to two sequential bcnorm
-// calls; tested via finite-diff parity with the unfused path.
+// the operand. Short rows share full warps while retaining the original
+// descending reduction tree and the rounded square at its input. Launch
+// dimensions must come from bcnorm_fwd_bc_cfg for the packed row mapping.
 #define DEFINE_BCNORM_FWD_BC(SUFFIX, T_ACT, FROM_F)                            \
 extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              \
     T_ACT* __restrict__ B_normed,                                               \
@@ -1155,6 +1155,34 @@ extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              
     int src_stride /* row stride of B_raw/C_raw; ng*ds when dense, the    */    \
                    /* projection row width when reading proj in place     */    \
 ) {                                                                             \
+    if (ds <= 32) {                                                            \
+        const int width = blockDim.x;                                          \
+        const int row = blockIdx.x * blockDim.y + threadIdx.y;                  \
+        const int d = threadIdx.x;                                             \
+        const bool active = row < N * ng && d < ds;                            \
+        const T_ACT* raw = (blockIdx.y == 0) ? B_raw : C_raw;                  \
+        T_ACT* normed = (blockIdx.y == 0) ? B_normed : C_normed;               \
+        float* rms_out = (blockIdx.y == 0) ? B_rms : C_rms;                    \
+        const float* weight = (blockIdx.y == 0) ? B_weight : C_weight;         \
+        const long long src = (long long)(row / ng) * src_stride               \
+                              + (long long)(row % ng) * ds;                   \
+        const float val = active ? to_f(raw[src + d]) : 0.0f;                  \
+        /* Preserve the rounded square that the shared store materialized. */ \
+        float sum = __fmul_rn(val, val);                                       \
+        for (int stride = width >> 1; stride > 0; stride >>= 1) {               \
+            const float rhs = __shfl_down_sync(0xffffffffu, sum, stride, width); \
+            if (d < stride && (d + stride) < ds) sum += rhs;                    \
+        }                                                                       \
+        sum = __shfl_sync(0xffffffffu, sum, 0, width);                          \
+        /* Padded rows and lanes must participate in every shuffle above. */  \
+        if (!active) return;                                                   \
+        float rms = sqrtf(sum / (float)ds + eps);                              \
+        if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                         \
+        if (d == 0) rms_out[row] = rms;                                        \
+        float inv_rms = 1.0f / rms;                                             \
+        normed[row * ds + d] = FROM_F(val * inv_rms * weight[d]);               \
+        return;                                                                \
+    }                                                                           \
     /* gridDim.y == 2: 0 -> B path, 1 -> C path */                              \
     int which = blockIdx.y;                                                     \
     int block_id = blockIdx.x;                                                  \

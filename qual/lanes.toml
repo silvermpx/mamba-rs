@@ -135,6 +135,7 @@
 "m1_state_capacity_bench" = "bench"
 "m1_test_correctness" = "gate"
 "m3_backward_mixed_parity" = "gate"
+"m3_bcnorm_exact" = "gate"
 "m3_bf16_parity" = "contract"
 "m3_chunked_fwd_unit_parity" = "gate"
 "m3_cpu_benchmark" = "bench"

@@ -701,16 +701,37 @@ impl Mamba3Kernels {
     }
 }
 
-/// Launch geometry for the chunk-scan forward: the cooperative kernel (one
-/// head per 128-thread block, triangle tile + staged operands in dynamic
-/// smem) whenever its smem total fits the 48 KB default budget; wider
-/// shapes keep the original two-head static-tile kernel. Returns
-/// `(use_coop, cfg)` - the argument list is identical for both kernels.
-/// Launch geometry for m3_chunk_state_fwd (single source - the kernel
-/// derives its thread layout from blockDim, so every call site MUST use
-/// this). Quad layout (hd, ds/4, heads_per_block) when ds % 4 == 0: one
-/// thread owns four ascending-t chains, 4x the resident warps of the
-/// legacy (hd, 2) layout - pure latency hiding, bit-identical work.
+/// Launch geometry for the fused B/C normalization kernels.
+///
+/// `rows` is batch-times-sequence-times-groups. Short state vectors share
+/// full warps; larger vectors retain one row per block and the shared tree.
+/// Use this configuration for every `bcnorm_fwd_bc_*` entry: its row mapping
+/// depends on both block dimensions. Both arguments must be nonzero.
+pub fn bcnorm_fwd_bc_cfg(rows: usize, d_state: usize) -> cudarc::driver::LaunchConfig {
+    assert!(rows > 0 && d_state > 0);
+    if d_state <= 32 {
+        let width = d_state.next_power_of_two();
+        let threads = if rows < 128 { 32 } else { 256 };
+        let rows_per_block = threads / width;
+        cudarc::driver::LaunchConfig {
+            grid_dim: (rows.div_ceil(rows_per_block) as u32, 2, 1),
+            block_dim: (width as u32, rows_per_block as u32, 1),
+            shared_mem_bytes: 0,
+        }
+    } else {
+        cudarc::driver::LaunchConfig {
+            grid_dim: (rows as u32, 2, 1),
+            block_dim: (d_state as u32, 1, 1),
+            shared_mem_bytes: (d_state * 4) as u32,
+        }
+    }
+}
+
+/// Launch geometry for `m3_chunk_state_fwd`.
+///
+/// The kernel derives its thread layout from this block shape. When the
+/// shared tile fits and `ds` is divisible by four, each thread owns four
+/// ascending-timestep accumulation chains; other shapes use the scalar layout.
 pub fn chunk_state_cfg(
     batch: usize,
     n_chunks: usize,
@@ -763,6 +784,9 @@ pub fn chunk_fused_cfg(
     })
 }
 
+/// Select the cooperative chunk scan when its shared tile fits the default
+/// 48 KiB budget. Wider shapes keep the two-head static-tile kernel.
+/// Returns `(use_coop, config)`; both kernels take the same arguments.
 pub fn chunk_scan_cfg(
     batch: usize,
     n_chunks: usize,

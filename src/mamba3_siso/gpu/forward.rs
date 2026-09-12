@@ -13,7 +13,7 @@
 //!
 //! For mixed-precision (bf16/f16) forward see [`super::forward_mixed`].
 
-use super::kernels::Mamba3Kernels;
+use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::state::{
     CHUNK_SIZE, GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, GpuMamba3StateBufs,
     GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
@@ -409,11 +409,7 @@ pub fn gpu_forward_mamba3_layer(
         let n_i = bt as i32;
         let ng_i = ng as i32;
         let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * ng) as u32, 2, 1),
-            block_dim: (ds as u32, 1, 1),
-            shared_mem_bytes: ds as u32 * 4,
-        };
+        let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
         let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
         builder.arg(acts.b_normed.inner_mut());
         builder.arg(acts.c_normed.inner_mut());
@@ -1032,11 +1028,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             // BCNorm of B and C in one launch (grid y picks the operand).
             let bn_ptr = lw.b_norm_weight.raw_ptr(&ctx.stream);
             let cn_ptr = lw.c_norm_weight.raw_ptr(&ctx.stream);
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((bt * ng) as u32, 2, 1),
-                block_dim: (ds as u32, 1, 1),
-                shared_mem_bytes: ds as u32 * 4,
-            };
+            let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
             let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
             builder.arg(tgt.b_normed.inner_mut());
             builder.arg(tgt.c_normed.inner_mut());

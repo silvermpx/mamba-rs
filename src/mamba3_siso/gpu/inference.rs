@@ -12,7 +12,7 @@
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026.
 
-use super::kernels::Mamba3Kernels;
+use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::weights::GpuMamba3WeightsInf;
 use crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -759,11 +759,7 @@ impl Mamba3GpuInferenceEngine {
         // F4a: BCNorm forward, B and C in one launch (grid.y selects the
         // tensor; per-element math identical to two sequential calls).
         {
-            let grid = cudarc::driver::LaunchConfig {
-                grid_dim: ((b * ng) as u32, 2, 1),
-                block_dim: (ds as u32, 1, 1),
-                shared_mem_bytes: (ds * 4) as u32,
-            };
+            let grid = bcnorm_fwd_bc_cfg(b * ng, ds);
             let mut builder = self
                 .ctx
                 .stream
@@ -1390,11 +1386,7 @@ impl Mamba3GpuInferenceMixed {
             // F4a: bcnorm typed — fused B+C in single launch (gridDim.y=2
             // selects the B or C path).
             {
-                let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: ((b * ng) as u32, 2, 1),
-                    block_dim: (ds as u32, 1, 1),
-                    shared_mem_bytes: (ds * 4) as u32,
-                };
+                let grid = bcnorm_fwd_bc_cfg(b * ng, ds);
                 let bn_ptr = scratch.b_normed.cached_ptr();
                 let cn_ptr = scratch.c_normed.cached_ptr();
                 let br_ptr = scratch.b_rms.cached_ptr();

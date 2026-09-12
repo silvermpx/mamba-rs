@@ -20,7 +20,7 @@
 //! that is what makes prefill-vs-training-forward parity testable at the
 //! bit level on the same device.
 
-use super::kernels::Mamba3Kernels;
+use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::state::{
     CUptr, GpuMamba3Dims, GpuMamba3StateBufs, GpuMamba3TargetScratch, Mamba3PrefillTypedScratch,
 };
@@ -540,11 +540,7 @@ impl Mamba3Prefill {
             // (one launch, grid.y = 2), exactly the trainer's F4a/b.
             if let Some(ts) = typed.as_deref_mut() {
                 let n_i = bt as i32;
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((bt * ng) as u32, 2, 1),
-                    block_dim: (ds as u32, 1, 1),
-                    shared_mem_bytes: ds as u32 * 4,
-                };
+                let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
                 let eps: f32 = dims.rms_norm_eps;
                 let bn = ts.b_normed.cached_ptr();
                 let cn = ts.c_normed.cached_ptr();
@@ -577,11 +573,7 @@ impl Mamba3Prefill {
             } else {
                 // BCNorm of B and C in one launch (grid y picks the operand).
                 let n_i = bt as i32;
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((bt * ng) as u32, 2, 1),
-                    block_dim: (ds as u32, 1, 1),
-                    shared_mem_bytes: ds as u32 * 4,
-                };
+                let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
                 let eps: f32 = dims.rms_norm_eps;
                 let bnw = lw.b_norm_weight;
                 let cnw = lw.c_norm_weight;
