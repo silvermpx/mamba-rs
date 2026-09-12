@@ -13,6 +13,37 @@ history; the current kernel comparisons against cuBLAS are in
 > For end-to-end LLM inference benchmarks against production weights,
 > see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+
+## 0.7.1 — the sequential scan
+
+RTX 6000 Ada, CUDA 13.2. The sequential lane only; the chunked lane and
+every GEMM route are unchanged and their 0.7.0 tables stand.
+
+Forward and backward of one layer, batch 64, eight heads of 32 over a
+16-wide state, timed on the same buffers in one run:
+
+| sequence | 0.7.0 | 0.7.1 | faster by |
+|---|---:|---:|---:|
+| T = 48 | 709 us | 178 us | 3.98x |
+| T = 390 | 6969 us | 1918 us | 3.63x |
+| T = 1440 | 25813 us | 7270 us | 3.55x |
+
+A four-layer training step at the crate's default shape (d_model 128,
+16 heads of 16, state 16, batch 1, T 32), from `m3_gpu_benchmark`:
+
+| | 0.7.0 | 0.7.1 | faster by |
+|---|---:|---:|---:|
+| forward | 891.1 us | 701.4 us | 1.27x |
+| backward | 1704.6 us | 645.5 us | 2.64x |
+| forward and backward | 2595.7 us | 1346.8 us | 1.93x |
+
+Decode is unchanged: the decode step keeps its 0.7.0 kernel, so the T=1
+figures on that page stand as measured.
+
+Bits: the 161-key bit ledger of the two trees, recorded on this board and
+toolkit, is identical key for key.
+
+
 ## Training step — production shape (2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, graph replay, one GPU of the

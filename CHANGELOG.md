@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.7.1 (unreleased)
+
+**The Mamba-3 sequential scan runs three to four times faster.** No numeric
+change: the bit ledgers of 0.7.0 and this tree were recorded on the same
+board and toolkit and every one of the 161 keys matched.
+
+### Performance
+
+The sequential scan was the slowest lane in the crate by a wide margin.
+Measured against the same recurrence in another tree on an RTX 6000 Ada it
+lost 2.3 to 5.2 times at the geometries this crate itself ships. The gap
+was not the algorithm: the kernels are the same math with the same launch
+shape, the same warp shuffles and the same global traffic. It was three
+mechanical things. The entries carried no launch bounds, so the compiler
+sized occupancy for a block it could not see was one warp. Only the output
+pointers promised no aliasing, so every input was re-read through the
+general path. And every loop over the state width and every warp reduction
+was bounded by a runtime value, so nothing unrolled and the state lived in
+local memory instead of registers - by the language rule, not by pressure:
+an array indexed by the variable of a rolled loop cannot be kept in
+registers at any capacity.
+
+The state width is known when the module is built, because the module is
+compiled per model. The scan body is now a template on that width,
+instantiated for the widths these models use, with the runtime-width body
+kept as the general entry so any other `d_state` still runs; the host
+picks by the model's own width. The warp reductions walk five constant
+offsets under a predicate instead of a runtime-bounded halving loop, which
+keeps the same offsets in the same order for every head dimension up to a
+warp.
+
+The training forward and backward take this; the decode step and the
+target-network burn-in do not, and the reason is in the verification
+section below.
+
+Forward and backward per layer, batch 64, eight heads of 32 over a 16-wide
+state (RTX 6000 Ada, CUDA 13.2):
+
+| sequence | 0.7.0 | 0.7.1 |
+|---|---:|---:|
+| T = 48 | 709 us | 178 us |
+| T = 390 | 6969 us | 1918 us |
+| T = 1440 | 25813 us | 7270 us |
+
+A four-layer training step at the default shape, measured by this crate's
+own `m3_gpu_benchmark` on the same board:
+
+| | 0.7.0 | 0.7.1 |
+|---|---:|---:|
+| forward | 891 us | 701 us |
+| backward | 1705 us | 646 us |
+| forward and backward | 2596 us | 1347 us |
+
+### Added
+
+`m3_scan_micro_bench` gained a `sequential_prefill_time_and_hash`
+instrument: the sequential target burn-in at the serve shape, timed the
+same way the chunk trio is, printing a hash of its output and of all three
+carried states. The chunk kernels have had that footing since the 0.6
+pass; the sequential lane had none, and it is the lane most exposed to a
+scheduling change moving its bits.
+
+### Measurements and verification
+
+Every kernel entry this release touches is covered by the bit ledger, and
+the ledger is the acceptance: the digest suites of 0.7.0 and of this tree
+were run on the same board and toolkit and diffed line by line. 161 keys,
+161 identical, none missing.
+
+The decode step and the target burn-in were ported the same way and put
+back. The decode step moved its own digest, and the new instrument showed
+the burn-in moving its output hash while running three and a half times
+faster. Neither is an error: the three transforms are only numerically
+neutral while the compiler happens to contract the same multiply-adds, and
+launch bounds change the register budget the contraction decision is made
+against. The two kernels that kept their bits kept them by that accident,
+not by construction - which is the case for pinning the scan's
+contraction explicitly, an item this release does not take.
+
 ## 0.7.0 (2026-09-12)
 
 **A big performance release.** The deterministic GEMM kernels that
