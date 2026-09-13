@@ -962,6 +962,11 @@ path = "tools/qualification/m3_prefill_bench.rs"
 required-features = ["qualification", "cuda"]
 
 [[test]]
+name = "m3_transport_qualification"
+path = "tools/qualification/m3_transport_qualification.rs"
+required-features = ["qualification", "cuda"]
+
+[[test]]
 name = "memory_footprint"
 path = "tools/qualification/memory_footprint.rs"
 required-features = ["qualification", "cuda"]

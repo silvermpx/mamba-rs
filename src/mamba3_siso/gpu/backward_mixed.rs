@@ -479,7 +479,8 @@ fn gpu_backward_mamba3_layer_mixed(
             block_dim: (hd as u32, t_split, 1),
             shared_mem_bytes: smem as u32,
         };
-        let mut builder = ctx.stream.launch_builder(m3k.m3_dqkv_typed.get(dtype));
+        let dqkv = m3k.dqkv_for_shape(dtype, ds, hd, cs_u, dims.seq_len, use_pair_mats == 1);
+        let mut builder = ctx.stream.launch_builder(dqkv);
         builder.arg(sc.d_q.inner_mut()); // dQ_mid
         builder.arg(sc.d_k.inner_mut()); // dK_mid
         builder.arg(sc.d_x.inner_mut()); // dV
@@ -546,11 +547,12 @@ fn gpu_backward_mamba3_layer_mixed(
     // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
     {
         let na_i = na as i32;
-        // Six [CS][ds] staging tiles (4 inputs + 2 outputs) for the
-        // coalesced I/O path; values identical, bits identical.
+        // The selected route owns its staging-tile count. The retained
+        // half transport uses four; the legacy path uses six.
         // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
         // limit — fall back to the direct-global path (staging = 0).
-        let dqkt_smem = 6 * cs_u * ds * 4;
+        let (dqktheta, dqkt_tiles) = m3k.dqktheta_for_shape(dtype, ds, cs_u, na);
+        let dqkt_smem = dqkt_tiles * cs_u * ds * 4;
         let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
         let cfg = LaunchConfig {
             grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
@@ -561,7 +563,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 0
             },
         };
-        let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta_typed.get(dtype));
+        let mut builder = ctx.stream.launch_builder(dqktheta);
         builder.arg(sc.d_c_pre_rope.inner_mut());
         builder.arg(sc.d_b_pre_rope.inner_mut());
         builder.arg(sc.d_angle_cumsum.inner_mut());
@@ -658,47 +660,33 @@ fn gpu_backward_mamba3_layer_mixed(
             builder.arg(&t);
             builder.arg(&nh_i);
             builder.arg(&na_i);
-            let grid = LaunchConfig {
-                grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-                block_dim: (256.min((nh * na) as u32), 1, 1),
-                shared_mem_bytes: 0,
-            };
+            let grid = m3k.angle_backward_cfg(dims.batch, dims.seq_len, nh, na);
             unsafe { builder.launch(grid) }
                 .map_err(|e| format!("m3_angle_dt_bwd_seq mixed stage1: {:?}", e))?;
         }
         // Stage 2a: reduce nh → d_angles_raw[B*T*na]
         {
-            let block_dim = (nh as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 0;
-            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            let (reduction, cfg) = m3k.axis0_reduction(nh, bt * na);
+            let mut builder = ctx.stream.launch_builder(reduction);
             builder.arg(sc.d_angles_raw.inner_mut());
             builder.arg(&contrib_angles_ptr);
             builder.arg(&nh_i);
             builder.arg(&btna);
             builder.arg(&accumulate_i);
-            let cfg = LaunchConfig {
-                grid_dim: ((bt * na) as u32, 1, 1),
-                block_dim: (block_dim, 1, 1),
-                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-            };
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("angle_dt_bwd mixed reduce angles: {:?}", e))?;
         }
         // Stage 2b: reduce na → d_dt_angle[B*T*nh]
         {
-            let block_dim = (na as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 0;
-            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            let (reduction, cfg) = m3k.axis0_reduction(na, bt * nh);
+            let mut builder = ctx.stream.launch_builder(reduction);
             builder.arg(sc.d_dt_angle.inner_mut());
             builder.arg(&contrib_dt_ptr);
             builder.arg(&na_i);
             builder.arg(&btnh);
             builder.arg(&accumulate_i);
-            let cfg = LaunchConfig {
-                grid_dim: ((bt * nh) as u32, 1, 1),
-                block_dim: (block_dim, 1, 1),
-                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-            };
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("angle_dt_bwd mixed reduce dt: {:?}", e))?;
         }

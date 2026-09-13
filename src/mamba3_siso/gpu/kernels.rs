@@ -4,6 +4,7 @@
 //! the same verified artifact format as the Mamba-1 registry.
 //! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
+use super::transport::{TransportAdmission, TransportKernels, transport_environment_admitted};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
 use cudarc::driver::{CudaContext, CudaFunction};
@@ -25,6 +26,7 @@ pub struct Mamba3Kernels {
     /// launch-path asserts additionally compare against it, and the
     /// kernels carry their own capacity guards.
     pub state_cap: usize,
+    pub(super) transport: TransportKernels,
 
     // ── Sequential SSM (mamba3_siso.cu) ──
     pub m3_step_fwd: CudaFunction,
@@ -477,10 +479,16 @@ impl Mamba3Kernels {
         // PTX targeting Ada can also run on newer devices. Admission checks
         // the actual device because preserving a compiler's FMA graph alone
         // does not establish compatibility with another device's released bits.
-        let burnin_fwd_typed_by_state = if ctx
+        let actual_device = ctx
             .compute_capability()
-            .map_err(|error| format!("M3 device capability: {error:?}"))?
-            == (8, 9)
+            .map_err(|error| format!("M3 device capability: {error:?}"))?;
+        let transport_admission = TransportAdmission::new(
+            transport_environment_admitted(actual_device, arch, (nv_major, nv_minor)),
+            state_cap,
+        );
+        let transport = TransportKernels::load(transport_admission, get)?;
+
+        let burnin_fwd_typed_by_state = if actual_device == (8, 9)
             && matches!(arch, "sm_89" | "compute_89")
             && matches!((nv_major, nv_minor), (12, 8) | (13, 0) | (13, 2))
             && matches!(state_cap, 16 | 32 | 64)
@@ -494,6 +502,7 @@ impl Mamba3Kernels {
         };
 
         let kernels = Self {
+            transport,
             burnin_fwd_typed_by_state,
             module_identity,
             state_cap,
@@ -735,6 +744,14 @@ impl Mamba3Kernels {
                     FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                     budget,
                 );
+            }
+            if let Some(transport) = &kernels.transport.dqkv {
+                for f in [&transport.f32, &transport.bf16, &transport.f16] {
+                    let _ = f.set_attribute(
+                        FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        budget,
+                    );
+                }
             }
         }
         Ok(kernels)

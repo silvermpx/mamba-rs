@@ -12,6 +12,7 @@ use super::weights::{
 };
 use crate::mamba_ssm::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 
@@ -352,7 +353,15 @@ pub fn gpu_backward_mamba3_layer(
                 block_dim: (hd as u32, t_split, 1),
                 shared_mem_bytes: smem as u32,
             };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_dqkv);
+            let dqkv = m3k.dqkv_for_shape(
+                WeightDtype::F32,
+                ds,
+                hd,
+                cs_u,
+                dims.seq_len,
+                use_pair_mats == 1,
+            );
+            let mut builder = ctx.stream.launch_builder(dqkv);
             builder.arg(scratch.d_q.inner_mut());
             builder.arg(scratch.d_k.inner_mut());
             builder.arg(scratch.d_x.inner_mut());
@@ -531,47 +540,33 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&t_i);
             builder.arg(&nh_i);
             builder.arg(&na_i);
-            let grid = cudarc::driver::LaunchConfig {
-                grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-                block_dim: (256.min((nh * na) as u32), 1, 1),
-                shared_mem_bytes: 0,
-            };
+            let grid = m3k.angle_backward_cfg(dims.batch, dims.seq_len, nh, na);
             unsafe { builder.launch(grid) }
                 .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
         }
         // Stage 2a: reduce nh → d_angles_raw[B*T*na]
         {
-            let block_dim = (nh as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 0;
-            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            let (reduction, cfg) = m3k.axis0_reduction(nh, bt * na);
+            let mut builder = ctx.stream.launch_builder(reduction);
             builder.arg(scratch.d_angles_raw.inner_mut());
             builder.arg(&contrib_angles_ptr);
             builder.arg(&nh_i);
             builder.arg(&btna);
             builder.arg(&accumulate_i);
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((bt * na) as u32, 1, 1),
-                block_dim: (block_dim, 1, 1),
-                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-            };
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("angle_dt_bwd B5a reduce angles: {:?}", e))?;
         }
         // Stage 2b: reduce na → d_dt_angle[B*T*nh]
         {
-            let block_dim = (na as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 0;
-            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            let (reduction, cfg) = m3k.axis0_reduction(na, bt * nh);
+            let mut builder = ctx.stream.launch_builder(reduction);
             builder.arg(scratch.d_dt_angle.inner_mut());
             builder.arg(&contrib_dt_ptr);
             builder.arg(&na_i);
             builder.arg(&btnh);
             builder.arg(&accumulate_i);
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((bt * nh) as u32, 1, 1),
-                block_dim: (block_dim, 1, 1),
-                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-            };
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("angle_dt_bwd B5a reduce dt: {:?}", e))?;
         }
