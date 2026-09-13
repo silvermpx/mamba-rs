@@ -2,6 +2,8 @@
 
 #[path = "../../tests/common/gpu_quiet.rs"]
 mod gpu_quiet;
+#[path = "support/production_auto_cohort.rs"]
+mod production_auto_cohort;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_int, c_void};
@@ -36,6 +38,10 @@ use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, FramedSha256, GemmRouteIdentity, ModuleKind, PhysicalLaunchKind, PolicyDtype,
     ResolvedGemmOp, digest_hex,
+};
+use production_auto_cohort::{
+    ProductionAutoInventory, render_cohort_fragment, state_capacity_from_env,
+    validate_completion_counts,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -3911,6 +3917,19 @@ fn final_auto_cell_inventory() -> Vec<Cell> {
         .collect()
 }
 
+fn next_auto_cell_inventory() -> Vec<Cell> {
+    let mut cells = final_auto_cell_inventory();
+    cells.extend(build_cells().into_iter().filter(|cell| {
+        matches!(
+            cell.route,
+            Route::F32Policy {
+                policy: F32TriadPolicy::ExactScalarFmaV1,
+            }
+        ) && matches!(cell.shape.name, "underfill" | "large_deep")
+    }));
+    cells
+}
+
 fn select_final_auto_cells(cells: &[Cell], filter: Option<&str>) -> Result<Vec<Cell>, String> {
     let requested = filter
         .map(|value| parse_qualification_cell_ids(value, cells))
@@ -5271,6 +5290,9 @@ impl FinalAutoJsonlSink {
             windows,
             full_inventory,
             source_sha,
+            inventory,
+            state_capacity,
+            cublas_workspace_bytes,
         } = report;
         if self.records != expected_records {
             return Err(format!(
@@ -5278,20 +5300,22 @@ impl FinalAutoJsonlSink {
                 self.records
             ));
         }
-        if full_inventory
-            && (selected_cells != 66 || selected_views != 81 || expected_records != 324)
-        {
-            return Err(format!(
-                "full final AUTO inventory changed: cells={selected_cells}, views={selected_views}, records={expected_records}"
-            ));
+        if full_inventory {
+            validate_completion_counts(
+                inventory,
+                selected_cells,
+                selected_views,
+                expected_records,
+            )?;
         }
         let cohort_digest = format!("{:x}", self.digest.clone().finalize());
+        let cohort = render_cohort_fragment(inventory, state_capacity, cublas_workspace_bytes);
         self.write(format!(
             concat!(
                 "{{\"schema\":\"MambaBiFinalProductionAutoCompletionV1\",",
                 "\"scope\":\"performance_only\",\"source_git_sha\":\"{}\",",
                 "\"gpu_uuid\":\"{}\",\"cc\":\"{}.{}\",\"multiprocessors\":{},",
-                "\"full_inventory\":{},\"cells\":{},\"comparator_views\":{},",
+                "{},\"full_inventory\":{},\"cells\":{},\"comparator_views\":{},",
                 "\"paths\":2,\"orders\":2,\"records\":{},\"windows_per_order\":{},",
                 "\"total_jsonl_records\":{},\"cohort_digest\":\"{}\",",
                 "\"decision\":\"descriptive_performance_only_no_admission\"}}"
@@ -5301,6 +5325,7 @@ impl FinalAutoJsonlSink {
             device.compute_capability.0,
             device.compute_capability.1,
             device.multiprocessor_count(),
+            cohort,
             full_inventory,
             selected_cells,
             selected_views,
@@ -5500,6 +5525,9 @@ struct FinalAutoReport<'a> {
     windows: usize,
     full_inventory: bool,
     source_sha: &'a str,
+    inventory: ProductionAutoInventory,
+    state_capacity: usize,
+    cublas_workspace_bytes: usize,
 }
 
 /// The contexts and facts one final AUTO run shares across every cell.
@@ -5511,6 +5539,7 @@ struct FinalAutoRun<'a> {
     source_sha: &'a str,
     variant: &'a str,
     windows: usize,
+    inventory: ProductionAutoInventory,
 }
 
 /// One timed path and order with its calibrated iteration counts.
@@ -5635,7 +5664,8 @@ fn render_final_auto_identity(identity: &GemmRouteIdentity) -> String {
             "\"nvrtc_library_known\":{},\"artifact_module_count\":{},",
             "\"artifact_set_digest\":\"{}\",\"policy_revision\":{},",
             "\"policy_hash\":\"{}\",\"tuning_table_revision\":{},",
-            "\"schedule_set_revision\":{},\"driver_api_version\":{},",
+            "\"schedule_set_revision\":{},\"state_capacity\":{},",
+            "\"driver_api_version\":{},",
             "\"driver_build_sources\":{},\"driver_build_digest\":\"{}\""
         ),
         digest_hex(&compiler.source_digest),
@@ -5652,6 +5682,7 @@ fn render_final_auto_identity(identity: &GemmRouteIdentity) -> String {
         digest_hex(&identity.policy_hash),
         identity.tuning_table_revision,
         identity.schedule_set_revision,
+        identity.state_capacity,
         identity.device.driver.api_version,
         identity.device.driver.build_sources,
         digest_hex(&identity.device.driver.build_digest),
@@ -5668,6 +5699,7 @@ fn emit_final_auto_record(
         quiet_gpu,
         source_sha,
         variant,
+        inventory,
         ..
     } = *run;
     let FinalAutoRecord {
@@ -5694,7 +5726,8 @@ fn emit_final_auto_record(
         concat!(
             "{{\"schema\":\"MambaBiFinalProductionAutoPairV1\",",
             "\"scope\":\"performance_only\",\"call_scope\":\"production_auto\",",
-            "\"source_git_sha\":\"{}\",\"variant\":\"{}\",\"gpu_uuid\":\"{}\",",
+            "\"source_git_sha\":\"{}\",\"variant\":\"{}\",\"inventory\":\"{}\",",
+            "\"cublas_workspace_bytes\":{},\"gpu_uuid\":\"{}\",",
             "\"cc\":\"{}.{}\",\"cell_id\":\"{}\",\"op\":\"{}\",",
             "\"shape\":\"{}\",\"m\":{},\"k\":{},\"n\":{},",
             "\"alpha\":1,\"beta\":{},\"bias\":false,",
@@ -5714,6 +5747,8 @@ fn emit_final_auto_record(
         ),
         source_sha,
         escape_json_string(variant),
+        inventory.label(),
+        ctx._blas_workspace.len(),
         quiet_gpu.uuid,
         cc.0,
         cc.1,
@@ -8690,9 +8725,10 @@ fn gemm_bi_cublas_performance_denominators() {
     }
 }
 
-#[test]
-#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits paired production AUTO/cuBLAS evidence"]
-fn gemm_bi_production_auto_paired_cublas_release_matrix() {
+fn run_gemm_bi_production_auto_paired_cublas(
+    inventory_kind: ProductionAutoInventory,
+    inventory: Vec<Cell>,
+) {
     let _suite_guard = performance_suite_lock()
         .lock()
         .expect("lock serialized performance suite");
@@ -8721,18 +8757,19 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("read {QUALIFICATION_CELL_IDS_ENV}: {error}"),
     };
-    let inventory = final_auto_cell_inventory();
-    assert_eq!(inventory.len(), 66, "final AUTO cell inventory");
-    assert_eq!(
+    validate_completion_counts(
+        inventory_kind,
+        inventory.len(),
         final_auto_comparator_view_count(&inventory),
-        81,
-        "final AUTO comparator inventory"
-    );
+        final_auto_expected_record_count(&inventory),
+    )
+    .expect("validate named final AUTO inventory");
     let cells = select_final_auto_cells(&inventory, filter.as_deref())
         .expect("select strict final AUTO cells");
     let selected_views = final_auto_comparator_view_count(&cells);
     let expected_records = final_auto_expected_record_count(&cells);
     let full_inventory = filter.is_none();
+    let state_capacity = state_capacity_from_env().expect("parse final AUTO state capacity");
 
     let mut sink = FinalAutoJsonlSink::create_from_env().expect("new final AUTO evidence file");
     let quiet_gpu = QuietGpu::for_cuda_ordinal(0).expect("resolve CUDA device 0 UUID");
@@ -8741,8 +8778,26 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
         .expect("exclusive CUDA device 0 before context creation");
     let device = GpuDevice::new(0).expect("open final AUTO CUDA device");
     validate_final_auto_device(&device).expect("admit exact final AUTO board class");
-    let auto_ctx = GpuCtx::new(&device).expect("create final AUTO production context");
-    let vendor_ctx = GpuCtx::new(&device).expect("create final AUTO vendor context");
+    let auto_ctx = GpuCtx::new_with_state_cap(&device, state_capacity)
+        .expect("create final AUTO production context");
+    let vendor_ctx = GpuCtx::new_with_state_cap(&device, state_capacity)
+        .expect("create final AUTO vendor context");
+    assert_eq!(
+        auto_ctx.state_cap(),
+        vendor_ctx.state_cap(),
+        "final AUTO contexts disagree on state capacity"
+    );
+    assert_eq!(
+        auto_ctx.state_cap(),
+        state_capacity,
+        "final AUTO context ignored requested state capacity"
+    );
+    assert_eq!(
+        auto_ctx._blas_workspace.len(),
+        vendor_ctx._blas_workspace.len(),
+        "final AUTO contexts disagree on cuBLAS workspace size"
+    );
+    let cublas_workspace_bytes = auto_ctx._blas_workspace.len();
     auto_ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     auto_ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     auto_ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
@@ -8763,6 +8818,7 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
                 source_sha,
                 variant: &variant,
                 windows,
+                inventory: inventory_kind,
             },
             cell,
             &mut sink,
@@ -8778,11 +8834,32 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
             windows,
             full_inventory,
             source_sha,
+            inventory: inventory_kind,
+            state_capacity: auto_ctx.state_cap(),
+            cublas_workspace_bytes,
         },
         &quiet_gpu,
         &device,
     )
     .expect("complete final AUTO evidence");
+}
+
+#[test]
+#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits paired production AUTO/cuBLAS evidence"]
+fn gemm_bi_production_auto_paired_cublas_release_matrix() {
+    run_gemm_bi_production_auto_paired_cublas(
+        ProductionAutoInventory::Release070,
+        final_auto_cell_inventory(),
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits the paired production AUTO/cuBLAS outlier screen"]
+fn gemm_bi_production_auto_paired_cublas_outlier_matrix() {
+    run_gemm_bi_production_auto_paired_cublas(
+        ProductionAutoInventory::Outliers071,
+        next_auto_cell_inventory(),
+    );
 }
 
 #[test]
@@ -10067,6 +10144,50 @@ fn final_auto_inventory_is_the_exact_66_cell_release_set() {
     }
     assert!(!ids.contains("f32_policy_exact/nn/underfill/contiguous"));
     assert!(!ids.contains("bf16_policy_scalar/nn/d128_in_proj/contiguous"));
+}
+
+#[test]
+fn next_auto_inventory_adds_the_exact_six_outlier_cells() {
+    let cells = next_auto_cell_inventory();
+    let ids = cells.iter().copied().map(cell_id).collect::<BTreeSet<_>>();
+    let added = [
+        "f32_policy_exact/nn/underfill/contiguous",
+        "f32_policy_exact/nt/underfill/contiguous",
+        "f32_policy_exact/tn/underfill/contiguous",
+        "f32_policy_exact/nn/large_deep/contiguous",
+        "f32_policy_exact/nt/large_deep/contiguous",
+        "f32_policy_exact/tn/large_deep/contiguous",
+    ];
+
+    assert_eq!(cells.len(), 72);
+    assert_eq!(ids.len(), 72);
+    for required in added {
+        assert!(
+            ids.contains(required),
+            "missing outlier AUTO cell {required}"
+        );
+    }
+    assert_eq!(final_auto_comparator_view_count(&cells), 93);
+    assert_eq!(final_auto_expected_record_count(&cells), 372);
+}
+
+#[test]
+fn production_auto_completion_validation_distinguishes_inventories() {
+    use production_auto_cohort::{ProductionAutoInventory, validate_completion_counts};
+
+    assert!(validate_completion_counts(ProductionAutoInventory::Release070, 66, 81, 324).is_ok());
+    assert!(validate_completion_counts(ProductionAutoInventory::Outliers071, 72, 93, 372).is_ok());
+    for invalid in [
+        (ProductionAutoInventory::Release070, 72, 93, 372),
+        (ProductionAutoInventory::Outliers071, 66, 81, 324),
+        (ProductionAutoInventory::Release070, 66, 81, 323),
+        (ProductionAutoInventory::Outliers071, 72, 92, 372),
+    ] {
+        assert!(
+            validate_completion_counts(invalid.0, invalid.1, invalid.2, invalid.3).is_err(),
+            "accepted mismatched production AUTO completion"
+        );
+    }
 }
 
 #[test]

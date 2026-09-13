@@ -1,5 +1,10 @@
 #![cfg(feature = "cuda")]
 
+#[path = "../../tests/common/gpu_quiet.rs"]
+mod gpu_quiet;
+#[path = "support/production_auto_cohort.rs"]
+mod production_auto_cohort;
+
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
@@ -9,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
+use gpu_quiet::QuietGpu;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -30,6 +36,9 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ModuleKind, ResolvedGemmOp, TUNING_TABLE_REVISION, digest_hex,
+};
+use production_auto_cohort::{
+    ProductionAutoInventory, render_cohort_fragment, state_capacity_from_env,
 };
 use sha2::{Digest, Sha256};
 
@@ -11886,6 +11895,83 @@ fn fixed_production_auto_ratio_samples(
         .collect()
 }
 
+#[test]
+fn production_auto_state_capacity_parser_is_strict() {
+    use std::ffi::OsStr;
+
+    assert_eq!(production_auto_cohort::parse_state_capacity(None), Ok(64));
+    assert_eq!(
+        production_auto_cohort::parse_state_capacity(Some(OsStr::new("16"))),
+        Ok(16)
+    );
+    assert_eq!(
+        production_auto_cohort::parse_state_capacity(Some(OsStr::new("64"))),
+        Ok(64)
+    );
+    for invalid in ["", "016", "32", " 16", "64 ", "16\n"] {
+        assert!(
+            production_auto_cohort::parse_state_capacity(Some(OsStr::new(invalid))).is_err(),
+            "accepted invalid state capacity {invalid:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn production_auto_state_capacity_parser_rejects_non_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    assert!(
+        production_auto_cohort::parse_state_capacity(Some(OsStr::from_bytes(&[b'1', 0xff])))
+            .is_err()
+    );
+}
+
+#[test]
+fn production_auto_cohort_fragment_is_valid_json_with_actual_resources() {
+    let fragment = production_auto_cohort::render_cohort_fragment(
+        production_auto_cohort::ProductionAutoInventory::Release070,
+        16,
+        12_345,
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&format!("{{{fragment}}}")).expect("valid cohort JSON fragment");
+
+    assert_eq!(parsed["inventory"], "release_070");
+    assert_eq!(parsed["state_capacity"], 16);
+    assert_eq!(parsed["cublas_workspace_bytes"], 12_345);
+
+    let outlier_fragment = production_auto_cohort::render_cohort_fragment(
+        production_auto_cohort::ProductionAutoInventory::Outliers071,
+        64,
+        8_192,
+    );
+    let outlier: serde_json::Value = serde_json::from_str(&format!("{{{outlier_fragment}}}"))
+        .expect("valid outlier cohort JSON fragment");
+    assert_eq!(outlier["inventory"], "outliers_071");
+    assert_eq!(outlier["state_capacity"], 64);
+    assert_eq!(outlier["cublas_workspace_bytes"], 8_192);
+    assert!(
+        production_auto_cohort::validate_completion_counts(
+            production_auto_cohort::ProductionAutoInventory::Release070,
+            66,
+            81,
+            324,
+        )
+        .is_ok()
+    );
+    assert!(
+        production_auto_cohort::validate_completion_counts(
+            production_auto_cohort::ProductionAutoInventory::Outliers071,
+            72,
+            93,
+            372,
+        )
+        .is_ok()
+    );
+}
+
 fn fixed_production_auto_inventory_has_exact_symbol(inventory: &str, expected: &str) -> bool {
     inventory.contains(&format!(
         "\"symbol\":\"{}\"",
@@ -14416,6 +14502,11 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
         (1..=10_001).contains(&windows),
         "explicit vendor windows must be in 1..=10001"
     );
+    let state_capacity = state_capacity_from_env().expect("parse production AUTO state capacity");
+    let quiet_gpu = QuietGpu::for_cuda_ordinal(0).expect("resolve CUDA device 0 UUID");
+    let _pre_context = quiet_gpu
+        .require_pre_context("inference-production-auto/pre-context")
+        .expect("exclusive CUDA device 0 before context creation");
     fixed_sm120_tf32_bd_environment_preflight("explicit vendor AUTO/vendor")
         .expect("explicit vendor AUTO/vendor preflight");
     let requested_cc = match std::env::var("MAMBA_FIXED_VENDOR_EXACT_CC") {
@@ -14433,7 +14524,18 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
         ),
         "explicit vendor final evidence supports only CC8.9/142SM or CC12.0/170SM"
     );
-    let ctx = GpuCtx::new(&device).expect("explicit vendor GPU context");
+    let ctx =
+        GpuCtx::new_with_state_cap(&device, state_capacity).expect("explicit vendor GPU context");
+    assert_eq!(
+        ctx.state_cap(),
+        state_capacity,
+        "production AUTO context ignored requested state capacity"
+    );
+    let cohort = render_cohort_fragment(
+        ProductionAutoInventory::Release070,
+        ctx.state_cap(),
+        ctx._blas_workspace.len(),
+    );
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(
         compiler.nvrtc_version,
@@ -14459,7 +14561,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
         .expect("LD_LIBRARY_PATH must identify loaded CUDA libraries");
     let device_metadata = format!(
         concat!(
-            "\"git_sha\":\"{}\",\"gpu_uuid\":\"{}\",{},",
+            "\"git_sha\":\"{}\",\"gpu_uuid\":\"{}\",{}, {},",
             "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],",
             "\"compiler_target\":\"{:?}\",\"cuda_home\":\"{}\",",
             "\"ld_library_path\":\"{}\",\"fixed_source_digest\":\"{}\",",
@@ -14471,6 +14573,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
         fixed_sm120_tf32_bd_json_escape(&git_sha),
         fixed_sm120_tf32_bd_json_escape(&gpu_uuid),
         fixed_production_auto_tuning_metadata(),
+        cohort,
         device.compute_capability.0,
         device.compute_capability.1,
         device.multiprocessor_count(),
@@ -14697,12 +14800,35 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     ctx.stream
                         .synchronize()
                         .expect("production AUTO/vendor path warmup");
-                    let auto_iterations =
-                        fixed_auto_vendor_iterations(fixed_ada_event_window_us(&ctx, 16, auto_run));
-                    let vendor_iterations = fixed_auto_vendor_iterations(
-                        fixed_ada_event_window_us(&ctx, 16, vendor_run),
-                    );
+                    let mut iterations = None;
                     for auto_first in [true, false] {
+                        let order = if auto_first {
+                            "auto_then_vendor"
+                        } else {
+                            "vendor_then_auto"
+                        };
+                        let cohort_label = format!(
+                            "inference-production-auto/{}/{}/bias={}/{path}/{order}",
+                            row_spec.name, cell.label, has_bias
+                        );
+                        let quiet_preflight = quiet_gpu
+                            .require_cohort(&cohort_label)
+                            .expect("quiet GPU before production AUTO cohort");
+                        let (auto_iterations, vendor_iterations) = match iterations {
+                            Some(iterations) => iterations,
+                            None => {
+                                let calibrated = (
+                                    fixed_auto_vendor_iterations(fixed_ada_event_window_us(
+                                        &ctx, 16, auto_run,
+                                    )),
+                                    fixed_auto_vendor_iterations(fixed_ada_event_window_us(
+                                        &ctx, 16, vendor_run,
+                                    )),
+                                );
+                                iterations = Some(calibrated);
+                                calibrated
+                            }
+                        };
                         let mut auto_samples = Vec::with_capacity(windows);
                         let mut vendor_samples = Vec::with_capacity(windows);
                         for _ in 0..windows {
@@ -14735,6 +14861,12 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                             vendor_raw,
                             "explicit vendor post-timing bits changed"
                         );
+                        ctx.stream
+                            .synchronize()
+                            .expect("complete production AUTO paired timing");
+                        let quiet_postflight = quiet_gpu
+                            .verify_post_cohort(&cohort_label)
+                            .expect("quiet GPU after production AUTO cohort");
                         let mut auto_sorted = auto_samples.clone();
                         let mut vendor_sorted = vendor_samples.clone();
                         let mut ratio_sorted = ratios.clone();
@@ -14761,7 +14893,8 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                                 "\"vendor_p50_us\":{},\"vendor_p95_us\":{},",
                                 "\"auto_over_vendor_p50\":{},\"auto_over_vendor_p95\":{},",
                                 "\"auto_samples_us\":{:?},\"vendor_samples_us\":{:?},",
-                                "\"auto_over_vendor_samples\":{:?}}}"
+                                "\"auto_over_vendor_samples\":{:?},",
+                                "\"quiet_preflight\":\"{}\",\"quiet_postflight\":\"{}\"}}"
                             ),
                             device_metadata,
                             row_spec.name,
@@ -14782,11 +14915,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                             row_spec.vendor_compute,
                             auto_error,
                             vendor_error,
-                            if auto_first {
-                                "auto_then_vendor"
-                            } else {
-                                "vendor_then_auto"
-                            },
+                            order,
                             windows,
                             auto_iterations,
                             vendor_iterations,
@@ -14799,6 +14928,8 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                             auto_samples,
                             vendor_samples,
                             ratios,
+                            fixed_sm120_tf32_bd_json_escape(&quiet_preflight),
+                            fixed_sm120_tf32_bd_json_escape(&quiet_postflight),
                         );
                         records += 1;
                     }
