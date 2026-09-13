@@ -614,13 +614,22 @@ fn scalar_group_m_option(arch: &str) -> String {
 
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
     validate_module_target(request.module_kind, request.arch)?;
-    let combined = compose_module_source_for(request.module_kind, request.arch)?;
+    let nvrtc = nvrtc_version();
+    let mut combined = compose_module_source_for(request.module_kind, request.arch)?;
+    if request.module_kind == ModuleKind::Fixed {
+        combined = super::super::fold_transport::compose_fixed_source(
+            combined,
+            request.ctx.compute_capability().ok(),
+            request.arch,
+            request.state_cap,
+            nvrtc,
+        )?;
+    }
     if request.module_kind == ModuleKind::TriadScalar
         && !combined.contains(&format!("#ifndef {SCALAR_GROUP_M_MACRO}"))
     {
         return Err("scalar L2 swizzle macro is missing from the composed source".into());
     }
-    let nvrtc = nvrtc_version();
     let mut option_strings = vec![
         "--fmad=true".to_string(),
         "--extra-device-vectorization".to_string(),

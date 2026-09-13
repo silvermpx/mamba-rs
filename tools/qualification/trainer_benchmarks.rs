@@ -150,10 +150,15 @@ fn run_lm_shape(
         .map_err(|e| format!("sync: {e:?}"))?;
 
     // Eager timing
+    let mut eager_skips = 0usize;
+    let mut eager_scale = None;
     let t0 = Instant::now();
     for s in 0..STEPS_EAGER {
         let (a, b) = &ring[s % ring.len()];
-        trainer.step(a, b)?;
+        let metrics = trainer.step(a, b)?;
+        assert!(!metrics.graph_replayed, "eager window replayed a graph");
+        eager_skips += usize::from(metrics.overflow_skipped == Some(true));
+        eager_scale = metrics.loss_scale;
     }
     trainer
         .ctx()
@@ -161,15 +166,22 @@ fn run_lm_shape(
         .synchronize()
         .map_err(|e| format!("sync: {e:?}"))?;
     let eager_ms = t0.elapsed().as_secs_f64() * 1000.0 / STEPS_EAGER as f64;
+    eprintln!(
+        "train metrics {dtype:?} eager skipped={eager_skips}/{STEPS_EAGER} last_used_loss_scale={eager_scale:?}"
+    );
 
     // Capture + graph timing
     trainer.capture_graph()?;
     assert!(trainer.has_graph());
+    let mut graph_skips = 0usize;
+    let mut graph_scale = None;
     let t1 = Instant::now();
     for s in 0..STEPS_GRAPH {
         let (a, b) = &ring[s % ring.len()];
         let m = trainer.step(a, b)?;
         assert!(m.graph_replayed);
+        graph_skips += usize::from(m.overflow_skipped == Some(true));
+        graph_scale = m.loss_scale;
     }
     trainer
         .ctx()
@@ -177,6 +189,9 @@ fn run_lm_shape(
         .synchronize()
         .map_err(|e| format!("sync: {e:?}"))?;
     let graph_ms = t1.elapsed().as_secs_f64() * 1000.0 / STEPS_GRAPH as f64;
+    eprintln!(
+        "train metrics {dtype:?} graph skipped={graph_skips}/{STEPS_GRAPH} last_used_loss_scale={graph_scale:?}"
+    );
 
     // Self-describing measurement: the GEMM tier rides TWO env flags
     // (MAMBA_RS_BATCH_INVARIANT and MAMBA_RS_BI_TENSOR_CORES on top of

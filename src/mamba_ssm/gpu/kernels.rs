@@ -331,6 +331,8 @@ pub struct MambaKernels {
     /// d_inner is divisible by the group size; f32 staging needs the
     /// MAX_DYNAMIC_SHARED opt-in (~65 KB).
     pub ssm_parallel_bwd_fold_typed: TypedKernel,
+    ssm_parallel_bwd_fold_short_typed: Option<HalfKernel>,
+    ssm_parallel_bwd_fold_staged_typed: Option<HalfKernel>,
 
     // -- AMP loss scaler helpers --
     /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
@@ -955,6 +957,12 @@ impl MambaKernels {
             )
         };
         let compiler_identity = fixed.compiler_identity;
+        let fold_transport_admitted = super::fold_transport::compiler_admitted(
+            device_cc,
+            arch,
+            state_cap,
+            compiler_identity.nvrtc_version,
+        );
         let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
         let (fixed_sm89_half_swizzle, fixed_sm89_half_swizzle_rejection) =
@@ -1316,6 +1324,22 @@ impl MambaKernels {
                 }
                 k
             },
+            ssm_parallel_bwd_fold_short_typed: if fold_transport_admitted {
+                Some(load_half_dynsmem(
+                    "ssm_parallel_scan_bwd_fold_short",
+                    67_584,
+                )?)
+            } else {
+                None
+            },
+            ssm_parallel_bwd_fold_staged_typed: if fold_transport_admitted {
+                Some(load_half_dynsmem(
+                    "ssm_parallel_scan_bwd_fold_staged",
+                    67_584,
+                )?)
+            } else {
+                None
+            },
 
             // AMP loss scaler
             check_inf_nan_f32: get("check_inf_nan_f32")?,
@@ -1523,6 +1547,28 @@ impl MambaKernels {
     /// embedded [`GemmBiKernels`] aggregate.
     pub fn compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.compiler_identity
+    }
+
+    pub fn ssm_parallel_bwd_fold_for_shape(
+        &self,
+        dtype: WeightDtype,
+        batch: usize,
+        time: usize,
+        inner: usize,
+        state: usize,
+    ) -> &CudaFunction {
+        let legacy = self.ssm_parallel_bwd_fold_typed.get(dtype);
+        match super::fold_transport::route_for_shape(dtype, batch, time, inner, state) {
+            super::fold_transport::FoldRoute::Short => self
+                .ssm_parallel_bwd_fold_short_typed
+                .as_ref()
+                .map_or(legacy, |kernel| kernel.get(dtype)),
+            super::fold_transport::FoldRoute::Staged => self
+                .ssm_parallel_bwd_fold_staged_typed
+                .as_ref()
+                .map_or(legacy, |kernel| kernel.get(dtype)),
+            super::fold_transport::FoldRoute::Legacy => legacy,
+        }
     }
 
     pub(crate) fn specialized_compiler_identity(

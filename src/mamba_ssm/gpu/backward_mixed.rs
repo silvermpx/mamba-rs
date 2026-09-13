@@ -286,7 +286,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                     .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
             }
             let mut bld = ctx.stream.launch_builder(if use_fold {
-                k.ssm_parallel_bwd_fold_typed.get(dtype)
+                k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
             } else {
                 k.ssm_parallel_bwd_typed.get(dtype)
             });

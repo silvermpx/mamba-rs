@@ -150,6 +150,7 @@
 "m3_mixed_train_smoke" = "gate"
 "m3_prefill_bench" = "qualification"
 "m3_transport_qualification" = "qualification"
+"m1_fold_transport_qualification" = "qualification"
 "m3_prefill_full_parity" = "gate"
 "m3_prefill_typed_parity" = "gate"
 "m3_scan_micro_bench" = "bench"

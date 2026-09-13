@@ -165,7 +165,7 @@ fn m1_scan_bwd_output_hashes() {
             d_a_log_local.zero(&ctx.stream).unwrap();
             ctx.stream.synchronize().unwrap();
             let mut bld = ctx.stream.launch_builder(if fold {
-                k.ssm_parallel_bwd_fold_typed.get(dtype)
+                k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
             } else {
                 k.ssm_parallel_bwd_typed.get(dtype)
             });
