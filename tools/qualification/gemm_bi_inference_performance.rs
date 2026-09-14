@@ -1,5 +1,7 @@
 #![cfg(feature = "cuda")]
 
+#[path = "support/combined_gemm_acceptance.rs"]
+mod combined_gemm_acceptance;
 #[path = "../../tests/common/gpu_quiet.rs"]
 mod gpu_quiet;
 #[path = "support/production_auto_cohort.rs"]
@@ -13756,51 +13758,19 @@ fn fixed_explicit_vendor_graph_inventory(
     bias_symbol: Option<&str>,
 ) -> String {
     use cudarc::driver::sys;
-    let mut count = 0;
-    assert_eq!(
-        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
-        sys::CUresult::CUDA_SUCCESS,
-        "{label} graph node count"
-    );
-    assert!(count > 0, "{label} captured no work");
-    let mut nodes = vec![std::ptr::null_mut(); count];
-    assert_eq!(
-        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut count) },
-        sys::CUresult::CUDA_SUCCESS,
-        "{label} graph node inventory"
-    );
+    let observed = combined_gemm_acceptance::read_driver_graph(graph)
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+    let count = observed.count;
     let mut kernels = Vec::new();
-    let mut non_kernel_nodes = 0;
+    let non_kernel_nodes = observed.non_kernel_nodes;
+    assert!(
+        non_kernel_nodes == 0 || (ada_descriptor.is_none() && auto_descriptor.is_none()),
+        "{label} pipeline captured non-kernel work"
+    );
     let mut bias_count = 0;
-    for node in nodes {
-        let mut kind = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
-        assert_eq!(
-            unsafe { sys::cuGraphNodeGetType(node, &mut kind) },
-            sys::CUresult::CUDA_SUCCESS
-        );
-        if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
-            assert!(
-                ada_descriptor.is_none() && auto_descriptor.is_none(),
-                "{label} pipeline captured non-kernel work"
-            );
-            non_kernel_nodes += 1;
-            continue;
-        }
-        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
-        assert_eq!(
-            unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) },
-            sys::CUresult::CUDA_SUCCESS,
-            "{label} graph kernel parameters"
-        );
-        let mut name = std::ptr::null();
-        assert_eq!(
-            unsafe { sys::cuFuncGetName(&mut name, params.func) },
-            sys::CUresult::CUDA_SUCCESS
-        );
-        assert!(!name.is_null(), "{label} graph function name is null");
-        let symbol = unsafe { CStr::from_ptr(name) }
-            .to_str()
-            .expect("UTF-8 graph symbol");
+    for node in observed.kernels {
+        let params = node.params;
+        let symbol = node.symbol.as_str();
         let block = (params.blockDimX, params.blockDimY, params.blockDimZ);
         if label == "Tf32RnaM128N128S3"
             || symbol == "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
