@@ -193,7 +193,7 @@ fn m3_train_step_at_multichunk_shape() {
             tr.ctx().bi_tensor_cores(),
             tr.ctx().f32_triad_policy(),
             cfg.n_layers,
-            mamba_rs::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state).unwrap(),
+            tr.ctx().state_cap(),
         );
         let input = det(n, 0x91);
         let d_temporal = det(n, 0x92);
