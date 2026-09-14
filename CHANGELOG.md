@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.1 (unreleased)
+## 0.7.1 (2026-09-14)
 
 Performance improvements to the Mamba kernels and deterministic GEMMs.
 The GEMM modes and calling conventions stay the same: `Deterministic` is
