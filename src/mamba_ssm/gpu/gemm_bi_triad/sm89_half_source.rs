@@ -212,7 +212,7 @@ const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
         threads: 32,
         dynamic_shared_bytes: 0,
         static_shared_bytes: 36_864,
-        register_cap: 128,
+        register_cap: 78,
         occupancy_gate: 2,
     },
     Sm89HalfRuntimeSpec {
@@ -226,7 +226,7 @@ const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
         threads: 32,
         dynamic_shared_bytes: 0,
         static_shared_bytes: 36_864,
-        register_cap: 128,
+        register_cap: 78,
         occupancy_gate: 2,
     },
 ];
@@ -442,24 +442,27 @@ impl Sm89HalfAutoIdentity {
     }
 }
 
+/// Complete-module identities from the initial six-cohort census. Each
+/// toolkit produced the same identity at cap16 and cap64; raw-word admission
+/// remains a separate release gate.
 const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            159, 255, 251, 92, 130, 88, 114, 78, 220, 210, 91, 61, 113, 102, 42, 10, 188, 205, 238,
-            13, 69, 18, 148, 230, 248, 5, 37, 107, 17, 18, 151, 22,
+            78, 2, 201, 10, 198, 58, 141, 177, 143, 96, 18, 102, 120, 205, 197, 234, 107, 29, 235,
+            157, 20, 31, 87, 36, 218, 116, 173, 119, 29, 170, 153, 136,
         ],
         artifact_digest: [
-            113, 201, 94, 27, 28, 71, 177, 134, 197, 168, 255, 61, 203, 33, 165, 153, 186, 250,
-            103, 165, 215, 117, 157, 82, 9, 167, 7, 213, 235, 17, 68, 240,
+            16, 106, 128, 33, 183, 85, 92, 168, 200, 85, 209, 92, 243, 119, 10, 117, 116, 90, 191,
+            207, 171, 67, 133, 128, 42, 197, 211, 240, 162, 150, 225, 138,
         ],
         source_digest: [
-            41, 196, 241, 83, 119, 233, 164, 215, 130, 54, 236, 198, 179, 140, 228, 80, 184, 224,
-            190, 150, 106, 167, 223, 244, 200, 255, 223, 123, 187, 39, 114, 149,
+            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
+            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
         ],
         header_manifest_digest: [
-            45, 244, 28, 98, 175, 253, 239, 32, 178, 62, 159, 216, 214, 147, 98, 160, 95, 88, 75,
-            135, 154, 95, 166, 45, 97, 34, 10, 25, 9, 42, 85, 50,
+            205, 102, 54, 109, 97, 1, 150, 98, 93, 201, 231, 167, 158, 171, 38, 235, 249, 163, 100,
+            144, 81, 45, 156, 83, 246, 104, 17, 161, 125, 178, 135, 190,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -469,20 +472,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            151, 76, 104, 44, 242, 189, 45, 141, 90, 32, 111, 104, 254, 45, 52, 248, 77, 195, 235,
-            16, 122, 175, 206, 26, 58, 246, 136, 50, 255, 105, 12, 145,
+            77, 53, 182, 23, 33, 91, 10, 125, 143, 27, 90, 102, 26, 20, 20, 176, 241, 12, 177, 132,
+            165, 120, 0, 145, 88, 158, 244, 244, 124, 156, 134, 73,
         ],
         artifact_digest: [
-            250, 208, 145, 82, 4, 21, 203, 3, 103, 180, 215, 157, 79, 66, 169, 249, 60, 10, 197,
-            87, 115, 162, 236, 26, 139, 92, 121, 190, 51, 165, 102, 14,
+            15, 42, 163, 213, 227, 176, 47, 17, 114, 151, 175, 98, 52, 148, 191, 140, 73, 87, 27,
+            21, 134, 26, 13, 104, 208, 144, 42, 39, 95, 127, 244, 245,
         ],
         source_digest: [
-            41, 196, 241, 83, 119, 233, 164, 215, 130, 54, 236, 198, 179, 140, 228, 80, 184, 224,
-            190, 150, 106, 167, 223, 244, 200, 255, 223, 123, 187, 39, 114, 149,
+            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
+            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
         ],
         header_manifest_digest: [
-            107, 136, 12, 146, 208, 46, 51, 146, 159, 167, 177, 121, 143, 26, 35, 125, 83, 188,
-            103, 81, 155, 94, 51, 218, 179, 57, 9, 122, 32, 88, 64, 4,
+            73, 235, 188, 209, 96, 117, 26, 203, 45, 100, 12, 24, 203, 74, 84, 93, 202, 186, 155,
+            139, 115, 142, 238, 151, 138, 190, 83, 49, 194, 41, 185, 37,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -492,20 +495,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            108, 96, 214, 146, 176, 119, 90, 234, 54, 91, 150, 127, 12, 181, 26, 112, 33, 35, 130,
-            83, 176, 151, 88, 99, 252, 88, 122, 97, 117, 114, 93, 115,
+            234, 138, 214, 36, 186, 230, 152, 30, 234, 5, 200, 174, 109, 242, 44, 186, 88, 101,
+            123, 211, 243, 58, 214, 39, 118, 3, 225, 60, 95, 131, 165, 231,
         ],
         artifact_digest: [
-            19, 140, 250, 30, 92, 224, 155, 156, 238, 224, 118, 21, 140, 181, 135, 202, 163, 112,
-            148, 12, 21, 227, 12, 114, 2, 67, 243, 20, 112, 131, 238, 164,
+            121, 252, 100, 248, 101, 25, 21, 199, 140, 242, 96, 95, 109, 21, 228, 244, 235, 230,
+            73, 179, 113, 221, 10, 167, 220, 5, 245, 203, 237, 63, 48, 130,
         ],
         source_digest: [
-            41, 196, 241, 83, 119, 233, 164, 215, 130, 54, 236, 198, 179, 140, 228, 80, 184, 224,
-            190, 150, 106, 167, 223, 244, 200, 255, 223, 123, 187, 39, 114, 149,
+            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
+            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
         ],
         header_manifest_digest: [
-            251, 115, 54, 248, 169, 136, 243, 129, 157, 45, 255, 254, 87, 253, 18, 66, 240, 69, 80,
-            91, 231, 46, 0, 137, 136, 125, 44, 96, 180, 119, 77, 2,
+            145, 106, 110, 57, 212, 231, 162, 98, 10, 141, 99, 105, 186, 183, 100, 119, 228, 117,
+            92, 79, 204, 82, 50, 118, 118, 39, 30, 228, 145, 168, 215, 211,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -653,6 +656,97 @@ mod tests {
         NUMERIC_ABI_REVISION, SCHEDULE_REVISION,
     };
 
+    fn digest(hex: &str) -> [u8; 32] {
+        assert_eq!(hex.len(), 64);
+        std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
+    }
+
+    fn measured_auto_identities() -> [Sm89HalfAutoIdentity; 3] {
+        [
+            Sm89HalfAutoIdentity {
+                nvrtc_version: (12, 8),
+                compile_key: digest(
+                    "4e02c90ac63a8db18f60126678cdc5ea6b1deb9d141f5724da74ad771daa9988",
+                ),
+                artifact_digest: digest(
+                    "106a8021b7555ca8c855d15cf3770a75745abfcfab4385802ac5d3f0a296e18a",
+                ),
+                source_digest: digest(
+                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                ),
+                header_manifest_digest: digest(
+                    "cd66366d610196625dc9e7a79eab26ebf9a36490512d9c53f66811a17db287be",
+                ),
+                nvrtc_library_domain: digest(
+                    "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+                ),
+            },
+            Sm89HalfAutoIdentity {
+                nvrtc_version: (13, 0),
+                compile_key: digest(
+                    "4d35b617215b0a7d8f1b5a661a1414b0f10cb184a5780091589ef4f47c9c8649",
+                ),
+                artifact_digest: digest(
+                    "0f2aa3d5e3b02f117297af623494bf8c49571b15861a0d68d0902a275f7ff4f5",
+                ),
+                source_digest: digest(
+                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                ),
+                header_manifest_digest: digest(
+                    "49ebbcd160751acb2d640c18cb4a545dcaba9b8b738eee978abe5331c229b925",
+                ),
+                nvrtc_library_domain: digest(
+                    "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+                ),
+            },
+            Sm89HalfAutoIdentity {
+                nvrtc_version: (13, 2),
+                compile_key: digest(
+                    "ea8ad624bae6981eea05c8ae6df22cba58657bd3f33ad6277603e13c5f83a5e7",
+                ),
+                artifact_digest: digest(
+                    "79fc64f8651915c78cf2605f6d15e4f4ebe649b371dd0aa7dc05f5cbed3f3082",
+                ),
+                source_digest: digest(
+                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                ),
+                header_manifest_digest: digest(
+                    "916a6e39d4e7a2620a8d6369bab76477e4755c4fcc52327676271ee491a8d7d3",
+                ),
+                nvrtc_library_domain: digest(
+                    "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+                ),
+            },
+        ]
+    }
+
+    fn auto_context_for(identity: Sm89HalfAutoIdentity) -> Sm89HalfAutoContext {
+        Sm89HalfAutoContext {
+            compiler: Some(CompilerIdentity {
+                source_digest: identity.source_digest,
+                invocation_digest: identity.compile_key,
+                header_manifest_digest: identity.header_manifest_digest,
+                target: CudaTarget::new("sm_89").unwrap(),
+                nvrtc_version: identity.nvrtc_version,
+                nvrtc_library_domain: identity.nvrtc_library_domain,
+                nvrtc_library_known: true,
+                output_kind: ArtifactKind::Ptx,
+                composer_revision: COMPOSER_REVISION,
+                compiler_revision: COMPILER_REVISION,
+                numeric_abi_revision: NUMERIC_ABI_REVISION,
+                schedule_revision: SCHEDULE_REVISION,
+            }),
+            artifact: Some(ArtifactIdentity {
+                module_kind: ModuleKind::TriadSm89Half,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: identity.compile_key,
+                artifact_digest: identity.artifact_digest,
+            }),
+            compute_capability: (8, 9),
+            multiprocessor_count: 142,
+        }
+    }
+
     fn auto_context(nvrtc_version: (i32, i32)) -> Sm89HalfAutoContext {
         let identity = SM89_HALF_AUTO_IDENTITIES
             .iter()
@@ -690,6 +784,52 @@ mod tests {
             compute_capability: (8, 9),
             multiprocessor_count: 142,
         }
+    }
+
+    #[test]
+    fn triad_retained_identity_half_bindings_match_all_three_measured_modules() {
+        let expected = measured_auto_identities();
+        let request = auto_request(ResolvedGemmOp::Tn, WeightDtype::F16, (1024, 256, 128));
+        for identity in expected {
+            let context = auto_context_for(identity);
+            assert!(
+                select_sm89_half_auto_cell(context, request).is_some(),
+                "measured CUDA {:?} half module must enter AUTO",
+                identity.nvrtc_version
+            );
+
+            let mut changed = context;
+            changed.compiler.as_mut().unwrap().nvrtc_version.1 += 1;
+            assert_declined(changed, request, "measured toolkit");
+            let mut changed = context;
+            changed.compiler.as_mut().unwrap().source_digest[0] ^= 1;
+            assert_declined(changed, request, "measured source");
+            let mut changed = context;
+            changed.artifact.as_mut().unwrap().compile_key[0] ^= 1;
+            assert_declined(changed, request, "measured compile key");
+            let mut changed = context;
+            changed.artifact.as_mut().unwrap().artifact_digest[0] ^= 1;
+            assert_declined(changed, request, "measured artifact");
+        }
+        for (actual, expected) in SM89_HALF_AUTO_IDENTITIES.iter().zip(expected) {
+            assert_eq!(actual.nvrtc_version, expected.nvrtc_version);
+            assert_eq!(actual.compile_key, expected.compile_key);
+            assert_eq!(actual.artifact_digest, expected.artifact_digest);
+            assert_eq!(actual.source_digest, expected.source_digest);
+            assert_eq!(
+                actual.header_manifest_digest,
+                expected.header_manifest_digest
+            );
+            assert_eq!(actual.nvrtc_library_domain, expected.nvrtc_library_domain);
+        }
+        assert_eq!(
+            SM89_HALF_AUTO_IDENTITIES
+                .iter()
+                .map(|identity| identity.compile_key)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
     }
 
     fn auto_request(
@@ -765,7 +905,7 @@ mod tests {
             assert_eq!(spec.threads, 32);
             assert_eq!(spec.dynamic_shared_bytes, 0);
             assert_eq!(spec.static_shared_bytes, 36_864);
-            assert_eq!(spec.register_cap, 128);
+            assert_eq!(spec.register_cap, 78);
             assert_eq!(spec.occupancy_gate, 2);
         }
     }

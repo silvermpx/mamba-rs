@@ -618,24 +618,18 @@ fn scalar_group_m_option(arch: &str) -> String {
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
     validate_module_target(request.module_kind, request.arch)?;
     let nvrtc = nvrtc_version();
-    let mut combined = compose_module_source_for(request.module_kind, request.arch)?;
-    if request.module_kind == ModuleKind::Fixed {
-        let device_cc = request.ctx.compute_capability().ok();
-        combined = super::super::fold_transport::compose_fixed_source(
-            combined,
-            device_cc,
-            request.arch,
-            request.state_cap,
-            nvrtc,
-        )?;
-        combined = crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
-            combined,
-            device_cc,
-            request.arch,
-            request.state_cap,
-            nvrtc,
-        )?;
-    }
+    let device_cc = if request.module_kind == ModuleKind::Fixed {
+        request.ctx.compute_capability().ok()
+    } else {
+        None
+    };
+    let combined = compose_compile_module_source(
+        request.module_kind,
+        device_cc,
+        request.arch,
+        request.state_cap,
+        nvrtc,
+    )?;
     if request.module_kind == ModuleKind::TriadScalar
         && !combined.contains(&format!("#ifndef {SCALAR_GROUP_M_MACRO}"))
     {
@@ -7889,6 +7883,25 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
     compose_fragments(base)
 }
 
+fn compose_compile_module_source(
+    kind: ModuleKind,
+    device_cc: Option<(i32, i32)>,
+    arch: &str,
+    state_cap: usize,
+    nvrtc: (i32, i32),
+) -> Result<String, String> {
+    let mut combined = compose_module_source_for(kind, arch)?;
+    if kind == ModuleKind::Fixed {
+        combined = super::super::fold_transport::compose_fixed_source(
+            combined, device_cc, arch, state_cap, nvrtc,
+        )?;
+        combined = crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+            combined, device_cc, arch, state_cap, nvrtc,
+        )?;
+    }
+    Ok(combined)
+}
+
 /// The fullest composition of `kind`: every fragment any target composes.
 /// Source scans read this one; the compiler takes the per-target form.
 #[cfg(test)]
@@ -7903,14 +7916,27 @@ fn compose_module_source(kind: ModuleKind) -> Result<String, String> {
     )
 }
 
-/// Digest of a module's composed source for `arch`, the way the compiler
-/// identity takes it. Frozen evidence carries this value, so a host-side gate
-/// can tell that a cohort was measured against a source this tree no longer
-/// contains.
+/// Digest of the target-specific base composition. Non-Fixed modules compile
+/// these exact bytes; Fixed compilation additionally applies its two overlays.
 #[cfg(test)]
 pub(super) fn module_source_digest(kind: ModuleKind, arch: &str) -> Result<[u8; 32], String> {
     Ok(FramedSha256::bytes(
         compose_module_source_for(kind, arch)?.as_bytes(),
+    ))
+}
+
+/// Digest the exact post-overlay bytes supplied to NVRTC, without a CUDA
+/// context. This delegates to the same composer as `compile_module`.
+#[cfg(test)]
+pub(super) fn module_source_digest_for_compile(
+    kind: ModuleKind,
+    device_cc: Option<(i32, i32)>,
+    arch: &str,
+    state_cap: usize,
+    nvrtc: (i32, i32),
+) -> Result<[u8; 32], String> {
+    Ok(FramedSha256::bytes(
+        compose_compile_module_source(kind, device_cc, arch, state_cap, nvrtc)?.as_bytes(),
     ))
 }
 
@@ -11013,6 +11039,60 @@ mod tests {
         validate_tf32_parameter_abi, validate_tf32_ptx_inventory, validate_tf32_splitk_ptx,
         validate_tn_narrow_splitm_partial_ptx,
     };
+
+    fn digest(hex: &str) -> [u8; 32] {
+        assert_eq!(hex.len(), 64);
+        std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
+    }
+
+    #[test]
+    fn triad_retained_identity_fixed_source_digest_uses_complete_compile_composition() {
+        for (nvrtc, state_cap, expected) in [
+            (
+                (12, 8),
+                16,
+                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+            ),
+            (
+                (12, 8),
+                64,
+                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+            ),
+            (
+                (13, 0),
+                16,
+                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+            ),
+            (
+                (13, 0),
+                64,
+                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+            ),
+            (
+                (13, 2),
+                16,
+                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+            ),
+            (
+                (13, 2),
+                64,
+                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+            ),
+        ] {
+            assert_eq!(
+                super::module_source_digest_for_compile(
+                    ModuleKind::Fixed,
+                    Some((8, 9)),
+                    "sm_89",
+                    state_cap,
+                    nvrtc,
+                )
+                .unwrap(),
+                digest(expected),
+                "CUDA {nvrtc:?} cap{state_cap} must hash the exact source passed to NVRTC"
+            );
+        }
+    }
 
     #[test]
     fn inference_source_bundle_appends_each_retained_export_once() {

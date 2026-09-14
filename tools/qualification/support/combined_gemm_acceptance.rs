@@ -401,7 +401,7 @@ fn expected_nodes(
                         ModuleKind::Fixed,
                         (m, n),
                         (64, 64),
-                        (128, 0, None),
+                        (128, 0, Some(32_768)),
                         "bundle",
                     )
                 }
@@ -493,7 +493,7 @@ fn expected_nodes(
             ModuleKind::Fixed,
             (m, if case.op == "nt" { k } else { n }),
             (64, 64),
-            (128, 0, None),
+            (128, 0, Some(32_768)),
             "bundle",
         )
     };
@@ -1181,6 +1181,97 @@ fn verify_inference_holder(
     )
 }
 
+fn qualification_request(
+    case: &words::AcceptanceCase,
+) -> Result<PhysicalQualificationRequest, String> {
+    let route = if case.storage[0] == "f32" {
+        PhysicalQualificationRoute::F32Policy(if case.row == "tf32" {
+            F32TriadPolicy::AllowDeterministicTf32V1
+        } else {
+            F32TriadPolicy::ExactScalarFmaV1
+        })
+    } else {
+        PhysicalQualificationRoute::HalfPolicy {
+            dtype: words::dtype(case.storage[0])?,
+            tensor_cores: true,
+            half_policy: HalfTriadPolicy::TiledParityV1,
+        }
+    };
+    Ok(if case.storage[0] == "f32" {
+        PhysicalQualificationRequest::contiguous_f32(
+            logical_op(case.op)?,
+            case.dims,
+            route,
+            PhysicalQualificationF32Epilogue::new(
+                1.0,
+                if case.op == "tn" { 1.0 } else { 0.0 },
+                case.bias,
+            ),
+        )
+    } else {
+        PhysicalQualificationRequest::contiguous(logical_op(case.op)?, case.dims, route)
+    })
+}
+
+fn offset_negative_request(
+    dtype: WeightDtype,
+    offset: mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset,
+) -> PhysicalQualificationRequest {
+    PhysicalQualificationRequest::one_element_offset(
+        ResolvedGemmOp::Tn,
+        (1024, 256, 128),
+        PhysicalQualificationRoute::HalfPolicy {
+            dtype,
+            tensor_cores: true,
+            half_policy: HalfTriadPolicy::TiledParityV1,
+        },
+        offset,
+    )
+}
+
+fn epilogue_negative_request() -> PhysicalQualificationRequest {
+    PhysicalQualificationRequest::contiguous_f32(
+        ResolvedGemmOp::Nn,
+        (4096, 3072, 1536),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
+    )
+}
+
+fn combined_scratch_requests() -> Result<Vec<PhysicalQualificationRequest>, String> {
+    let cases = words::inventory()?;
+    let mut requests = cases
+        .iter()
+        .filter(|case| case.family == "triad")
+        .map(qualification_request)
+        .collect::<Result<Vec<_>, _>>()?;
+    for positive in cases.iter().filter(|case| case.required && !case.bias) {
+        let mut neighbor = (*positive).clone();
+        neighbor.dims.0 = neighbor
+            .dims
+            .0
+            .checked_sub(1)
+            .ok_or("negative-control M dimension underflow")?;
+        requests.push(qualification_request(&neighbor)?);
+    }
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for offset in [
+            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
+            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
+            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
+        ] {
+            requests.push(offset_negative_request(dtype, offset));
+        }
+    }
+    requests.push(epilogue_negative_request());
+    Ok(requests)
+}
+
+fn presize_combined_scratch(runtime: &words::Runtime) -> Result<(), String> {
+    let requests = combined_scratch_requests()?;
+    presize_physical_qualification_suite(&runtime.ctx, &requests)
+}
+
 impl words::Observer for Census {
     fn prepare(
         &mut self,
@@ -1191,29 +1282,7 @@ impl words::Observer for Census {
         if case.family != "triad" || self.qualified.contains_key(&case.id) {
             return Ok(());
         }
-        let route = if case.storage[0] == "f32" {
-            PhysicalQualificationRoute::F32Policy(runtime.ctx.f32_triad_policy())
-        } else {
-            PhysicalQualificationRoute::HalfPolicy {
-                dtype: words::dtype(case.storage[0])?,
-                tensor_cores: true,
-                half_policy: HalfTriadPolicy::TiledParityV1,
-            }
-        };
-        let request = if case.storage[0] == "f32" {
-            PhysicalQualificationRequest::contiguous_f32(
-                logical_op(case.op)?,
-                case.dims,
-                route,
-                PhysicalQualificationF32Epilogue::new(
-                    1.0,
-                    if case.op == "tn" { 1.0 } else { 0.0 },
-                    case.bias,
-                ),
-            )
-        } else {
-            PhysicalQualificationRequest::contiguous(logical_op(case.op)?, case.dims, route)
-        };
+        let request = qualification_request(case)?;
         let launch = qualify_physical_launch(&runtime.ctx, request)?;
         launch.validate_timed_request(&runtime.ctx, request)?;
         let evidence = launch.evidence().clone();
@@ -1484,6 +1553,7 @@ fn combined_gemm_module_census() -> Result<(), String> {
     let mut runtime = words::Runtime::new(false)?;
     runtime.metadata["current_acceptance_source_sha256"] =
         json!(words::sha(CURRENT_ACCEPTANCE_SOURCE));
+    presize_combined_scratch(&runtime)?;
     let mut census = Census::new(&runtime)?;
     if phase == "auto" {
         require_staged_identity(&runtime, &census)?;
@@ -1504,6 +1574,7 @@ fn combined_gemm_released_auto_bits() -> Result<(), String> {
     let mut runtime = words::Runtime::new(false)?;
     runtime.metadata["current_acceptance_source_sha256"] =
         json!(words::sha(CURRENT_ACCEPTANCE_SOURCE));
+    presize_combined_scratch(&runtime)?;
     let mut census = Census::new(&runtime)?;
     require_staged_identity(&runtime, &census)?;
     census.complete_auto_inventory(&runtime)?;
@@ -1545,22 +1616,12 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
         );
     }
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-        let route = PhysicalQualificationRoute::HalfPolicy {
-            dtype,
-            tensor_cores: true,
-            half_policy: HalfTriadPolicy::TiledParityV1,
-        };
         for offset in [
             mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
             mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
             mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
         ] {
-            let request = PhysicalQualificationRequest::one_element_offset(
-                ResolvedGemmOp::Tn,
-                (1024, 256, 128),
-                route,
-                offset,
-            );
+            let request = offset_negative_request(dtype, offset);
             let launch = qualify_physical_launch(ctx, request)?;
             if launch.evidence().nodes().iter().any(|node| {
                 node.symbol
@@ -1574,12 +1635,7 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
             );
         }
     }
-    let request = PhysicalQualificationRequest::contiguous_f32(
-        ResolvedGemmOp::Nn,
-        (4096, 3072, 1536),
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
-        PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
-    );
+    let request = epilogue_negative_request();
     let launch = qualify_physical_launch(ctx, request)?;
     if launch
         .evidence()
@@ -1824,6 +1880,72 @@ fn verify_six_cohorts() -> Result<(), String> {
 #[cfg(test)]
 mod combined_gemm_host {
     use super::*;
+
+    #[test]
+    fn scratch_preflight_covers_complete_current_suite_and_controls() {
+        let cases = words::inventory().unwrap();
+        let requests = combined_scratch_requests().unwrap();
+        let triad_cases = cases
+            .iter()
+            .filter(|case| case.family == "triad")
+            .collect::<Vec<_>>();
+        let shape_negatives = cases
+            .iter()
+            .filter(|case| case.required && !case.bias)
+            .collect::<Vec<_>>();
+
+        assert_eq!(triad_cases.len(), 39);
+        assert_eq!(shape_negatives.len(), 10);
+        assert_eq!(requests.len(), 39 + 10 + 6 + 1);
+        for case in triad_cases {
+            assert!(
+                requests.contains(&qualification_request(case).unwrap()),
+                "missing triad preflight request {}",
+                case.id
+            );
+        }
+        for positive in shape_negatives {
+            let mut neighbor = (*positive).clone();
+            neighbor.dims.0 -= 1;
+            assert!(
+                requests.contains(&qualification_request(&neighbor).unwrap()),
+                "missing shape-negative preflight request {}",
+                positive.id
+            );
+        }
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for offset in [
+                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
+                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
+                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
+            ] {
+                assert!(requests.contains(&offset_negative_request(dtype, offset)));
+            }
+        }
+        assert!(requests.contains(&epilogue_negative_request()));
+    }
+
+    #[test]
+    fn triad_retained_identity_fixed_n64_manifest_binds_static_shared_bytes() {
+        let cases = words::inventory().unwrap();
+        let mut occurrences = 0;
+        for toolkit in [(12, 8), (13, 0), (13, 2)] {
+            for case in &cases {
+                for node in expected_nodes(case, toolkit).unwrap() {
+                    if node.symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" {
+                        occurrences += 1;
+                        assert_eq!(
+                            node.static_bytes,
+                            Some(32_768),
+                            "{} on CUDA {toolkit:?}",
+                            case.id
+                        );
+                    }
+                }
+            }
+        }
+        assert!(occurrences > 0, "the acceptance inventory lost FixedN64");
+    }
 
     #[test]
     fn literal_symbols_keep_joint_precedence_and_legacy_control() {

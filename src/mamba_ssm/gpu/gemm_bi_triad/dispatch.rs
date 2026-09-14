@@ -3040,9 +3040,8 @@ const SM89_JOINT_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     },
 ];
 
-/// CUDA 13.2: four independently admitted NT cells. All use the A-only
-/// ldmatrix mainloop; d768-out and large-deep additionally use stage slicing.
-/// Lower toolkit identities below carry their own independent qualification.
+/// CUDA 13.2 complete-module identity from the initial six-cohort census.
+/// This unreleased binding does not claim the pending raw-word admission.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -3054,20 +3053,20 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            218, 72, 86, 111, 215, 97, 112, 28, 203, 189, 209, 17, 69, 242, 68, 91, 79, 196, 24,
-            38, 67, 31, 49, 1, 174, 126, 110, 78, 191, 51, 202, 63,
+            56, 62, 210, 201, 250, 16, 204, 205, 232, 82, 232, 228, 179, 242, 161, 160, 247, 28,
+            161, 42, 102, 251, 174, 48, 107, 76, 121, 65, 83, 28, 152, 236,
         ],
         artifact_digest: [
-            104, 31, 190, 73, 162, 146, 94, 128, 89, 187, 192, 146, 246, 27, 191, 138, 186, 196,
-            39, 158, 69, 40, 102, 135, 192, 249, 126, 106, 25, 59, 254, 100,
+            26, 122, 167, 203, 135, 224, 53, 10, 75, 244, 120, 65, 200, 4, 125, 150, 156, 159, 85,
+            233, 152, 247, 182, 208, 171, 131, 21, 182, 88, 138, 71, 181,
         ],
         source_digest: [
-            185, 68, 218, 183, 212, 177, 205, 11, 17, 93, 251, 231, 246, 119, 210, 68, 118, 93,
-            218, 97, 227, 203, 118, 53, 51, 46, 166, 196, 148, 30, 214, 220,
+            59, 39, 76, 20, 86, 67, 103, 136, 238, 86, 253, 127, 173, 57, 220, 246, 107, 149, 17,
+            204, 176, 215, 150, 157, 224, 59, 167, 41, 154, 106, 69, 135,
         ],
         invocation_digest: [
-            218, 72, 86, 111, 215, 97, 112, 28, 203, 189, 209, 17, 69, 242, 68, 91, 79, 196, 24,
-            38, 67, 31, 49, 1, 174, 126, 110, 78, 191, 51, 202, 63,
+            56, 62, 210, 201, 250, 16, 204, 205, 232, 82, 232, 228, 179, 242, 161, 160, 247, 28,
+            161, 42, 102, 251, 174, 48, 107, 76, 121, 65, 83, 28, 152, 236,
         ],
         header_manifest_digest: [
             12, 83, 218, 177, 236, 72, 159, 158, 186, 148, 61, 50, 156, 174, 213, 212, 95, 87, 91,
@@ -3079,7 +3078,7 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         ],
     };
 
-/// CUDA 12.8: all four NT cells passed the A-only ldmatrix correctness census.
+/// CUDA 12.8 complete-module identity from the initial six-cohort census.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -3091,20 +3090,20 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            60, 116, 152, 71, 73, 108, 212, 166, 124, 243, 242, 231, 147, 18, 227, 245, 92, 1, 194,
-            209, 249, 251, 204, 84, 157, 196, 104, 24, 22, 143, 192, 189,
+            223, 4, 71, 198, 215, 164, 177, 237, 3, 160, 243, 253, 168, 138, 156, 37, 46, 76, 216,
+            207, 194, 222, 3, 51, 230, 208, 135, 36, 128, 252, 195, 116,
         ],
         artifact_digest: [
-            122, 157, 128, 131, 172, 171, 231, 227, 28, 103, 219, 225, 161, 80, 146, 129, 84, 160,
-            103, 112, 28, 36, 92, 30, 8, 122, 218, 118, 155, 19, 7, 60,
+            213, 164, 82, 208, 38, 91, 14, 10, 122, 242, 213, 6, 230, 146, 6, 204, 247, 75, 11,
+            165, 227, 32, 159, 249, 123, 40, 170, 4, 72, 95, 40, 200,
         ],
         source_digest: [
-            185, 68, 218, 183, 212, 177, 205, 11, 17, 93, 251, 231, 246, 119, 210, 68, 118, 93,
-            218, 97, 227, 203, 118, 53, 51, 46, 166, 196, 148, 30, 214, 220,
+            59, 39, 76, 20, 86, 67, 103, 136, 238, 86, 253, 127, 173, 57, 220, 246, 107, 149, 17,
+            204, 176, 215, 150, 157, 224, 59, 167, 41, 154, 106, 69, 135,
         ],
         invocation_digest: [
-            60, 116, 152, 71, 73, 108, 212, 166, 124, 243, 242, 231, 147, 18, 227, 245, 92, 1, 194,
-            209, 249, 251, 204, 84, 157, 196, 104, 24, 22, 143, 192, 189,
+            223, 4, 71, 198, 215, 164, 177, 237, 3, 160, 243, 253, 168, 138, 156, 37, 46, 76, 216,
+            207, 194, 222, 3, 51, 230, 208, 135, 36, 128, 252, 195, 116,
         ],
         header_manifest_digest: [
             26, 162, 40, 219, 218, 99, 169, 54, 249, 125, 244, 188, 133, 141, 202, 230, 199, 83,
@@ -3116,7 +3115,7 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         ],
     };
 
-/// CUDA 13.0: all four NT cells passed the A-only ldmatrix correctness census.
+/// CUDA 13.0 complete-module identity from the initial six-cohort census.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -3128,20 +3127,20 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            245, 98, 160, 207, 174, 63, 61, 175, 197, 188, 182, 122, 241, 14, 109, 138, 184, 88,
-            187, 69, 165, 223, 184, 198, 57, 92, 150, 153, 104, 52, 250, 87,
+            131, 123, 0, 209, 130, 233, 88, 166, 129, 23, 88, 234, 174, 198, 70, 190, 58, 229, 199,
+            162, 93, 86, 30, 194, 135, 219, 67, 31, 149, 222, 245, 94,
         ],
         artifact_digest: [
-            38, 149, 196, 39, 226, 110, 253, 200, 48, 113, 189, 216, 21, 177, 189, 220, 30, 188,
-            84, 181, 6, 149, 162, 206, 58, 226, 93, 166, 196, 0, 154, 219,
+            219, 58, 82, 182, 9, 113, 84, 179, 17, 125, 61, 86, 102, 74, 207, 221, 81, 175, 192,
+            255, 91, 121, 231, 7, 202, 200, 65, 147, 7, 92, 136, 221,
         ],
         source_digest: [
-            185, 68, 218, 183, 212, 177, 205, 11, 17, 93, 251, 231, 246, 119, 210, 68, 118, 93,
-            218, 97, 227, 203, 118, 53, 51, 46, 166, 196, 148, 30, 214, 220,
+            59, 39, 76, 20, 86, 67, 103, 136, 238, 86, 253, 127, 173, 57, 220, 246, 107, 149, 17,
+            204, 176, 215, 150, 157, 224, 59, 167, 41, 154, 106, 69, 135,
         ],
         invocation_digest: [
-            245, 98, 160, 207, 174, 63, 61, 175, 197, 188, 182, 122, 241, 14, 109, 138, 184, 88,
-            187, 69, 165, 223, 184, 198, 57, 92, 150, 153, 104, 52, 250, 87,
+            131, 123, 0, 209, 130, 233, 88, 166, 129, 23, 88, 234, 174, 198, 70, 190, 58, 229, 199,
+            162, 93, 86, 30, 194, 135, 219, 67, 31, 149, 222, 245, 94,
         ],
         header_manifest_digest: [
             222, 255, 93, 179, 31, 14, 137, 221, 144, 161, 2, 244, 55, 234, 44, 142, 234, 181, 117,
@@ -6390,31 +6389,55 @@ impl FixedCopyPlanQualificationIdentity {
     }
 }
 
-const FIXED_COPYPLAN_SOURCE_DIGEST: [u8; 32] = [
-    212, 2, 182, 3, 173, 77, 27, 130, 60, 249, 195, 214, 50, 186, 82, 35, 3, 223, 115, 222, 65,
-    105, 18, 146, 133, 179, 136, 88, 112, 253, 219, 189,
+const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
+    12, 216, 168, 251, 70, 235, 222, 120, 141, 77, 38, 112, 127, 136, 230, 211, 78, 246, 220, 167,
+    112, 154, 172, 17, 137, 176, 24, 55, 248, 189, 254, 14,
 ];
 
-/// Exact live Fixed bindings measured with the three retained cells. The raw
-/// records are under `internal/perf/ada-fixed-copyplan-requal-20260911/
-/// once7-cuda{128,130,132}.log`. The Fixed module is composed from the Mamba
-/// kernels too, so any change to those sources moves this identity and the
-/// copy plan stays off until the discovery run is repeated.
+const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
+    70, 175, 82, 85, 39, 25, 126, 87, 155, 21, 9, 230, 156, 88, 207, 103, 237, 25, 197, 158, 247,
+    12, 19, 60, 216, 48, 243, 44, 241, 54, 143, 220,
+];
+
+/// Exact Fixed identities from the six initial complete-module compilations,
+/// ordered by CUDA toolkit and then state capacity (16, 64). Fixed carries the
+/// fold and Inference overlays, so its source, key and artifact remain
+/// capacity-specific even when the toolkit is unchanged.
 const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &[
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            32, 216, 101, 217, 14, 134, 177, 94, 27, 101, 123, 212, 165, 71, 238, 175, 157, 180,
-            30, 154, 231, 134, 134, 91, 70, 117, 123, 250, 210, 53, 79, 94,
+            5, 128, 50, 64, 193, 143, 202, 151, 176, 168, 157, 190, 10, 170, 76, 237, 69, 15, 219,
+            185, 173, 162, 181, 111, 144, 171, 200, 29, 121, 95, 248, 43,
         ],
         artifact_digest: [
-            28, 135, 152, 223, 33, 157, 133, 5, 193, 83, 21, 219, 198, 10, 182, 37, 176, 190, 81,
-            68, 148, 74, 195, 126, 9, 235, 104, 114, 60, 186, 85, 52,
+            97, 245, 29, 227, 213, 74, 60, 4, 187, 8, 62, 103, 33, 42, 87, 162, 36, 66, 238, 53,
+            17, 237, 59, 151, 56, 189, 210, 209, 133, 76, 5, 200,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            218, 6, 25, 145, 59, 92, 139, 215, 203, 1, 121, 128, 232, 2, 95, 62, 80, 199, 29, 232,
-            185, 2, 171, 53, 23, 103, 234, 193, 34, 187, 230, 238,
+            54, 53, 122, 215, 68, 166, 190, 33, 120, 39, 175, 241, 171, 59, 33, 201, 1, 212, 8, 18,
+            231, 167, 41, 162, 120, 177, 239, 32, 155, 220, 173, 217,
+        ],
+        nvrtc_library_domain: [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+    },
+    FixedCopyPlanQualificationIdentity {
+        nvrtc_version: (12, 8),
+        compile_key: [
+            154, 172, 251, 206, 4, 68, 217, 68, 181, 17, 133, 242, 81, 19, 119, 135, 93, 215, 170,
+            241, 216, 214, 143, 50, 233, 148, 213, 19, 141, 32, 52, 172,
+        ],
+        artifact_digest: [
+            131, 149, 11, 207, 75, 13, 47, 226, 202, 130, 149, 101, 248, 161, 239, 110, 95, 127,
+            98, 143, 240, 24, 32, 202, 90, 186, 241, 221, 121, 33, 198, 222,
+        ],
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        header_manifest_digest: [
+            42, 55, 84, 249, 75, 163, 181, 171, 27, 67, 189, 40, 75, 215, 120, 109, 103, 58, 11,
+            194, 160, 2, 188, 159, 192, 12, 94, 200, 13, 107, 106, 122,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6424,17 +6447,37 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            161, 121, 226, 216, 103, 249, 216, 126, 53, 78, 99, 3, 188, 188, 196, 206, 96, 230,
-            188, 46, 134, 31, 122, 103, 66, 164, 200, 121, 35, 28, 196, 78,
+            174, 177, 255, 162, 24, 69, 8, 223, 66, 49, 184, 125, 70, 10, 89, 29, 66, 124, 241,
+            103, 168, 68, 210, 181, 197, 150, 71, 37, 116, 63, 59, 162,
         ],
         artifact_digest: [
-            238, 149, 192, 75, 11, 29, 68, 235, 129, 65, 140, 194, 75, 202, 87, 2, 18, 4, 29, 248,
-            247, 247, 26, 2, 193, 164, 66, 8, 224, 93, 21, 69,
+            97, 241, 91, 122, 110, 197, 197, 221, 65, 212, 202, 104, 86, 3, 183, 218, 15, 84, 1,
+            247, 179, 210, 158, 136, 58, 255, 228, 178, 227, 250, 104, 24,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            228, 164, 136, 223, 50, 69, 204, 70, 85, 140, 171, 182, 155, 147, 60, 6, 154, 22, 188,
-            150, 3, 144, 24, 39, 118, 133, 252, 209, 223, 25, 116, 244,
+            247, 68, 126, 123, 142, 178, 198, 254, 3, 220, 29, 182, 116, 103, 204, 190, 10, 71, 74,
+            178, 111, 2, 235, 218, 44, 85, 50, 157, 127, 140, 134, 11,
+        ],
+        nvrtc_library_domain: [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+    },
+    FixedCopyPlanQualificationIdentity {
+        nvrtc_version: (13, 0),
+        compile_key: [
+            46, 101, 166, 35, 48, 249, 66, 187, 167, 160, 222, 89, 118, 97, 168, 63, 88, 83, 138,
+            13, 249, 12, 166, 114, 74, 39, 202, 203, 61, 22, 173, 1,
+        ],
+        artifact_digest: [
+            172, 165, 250, 39, 60, 193, 118, 13, 38, 137, 34, 223, 123, 119, 44, 195, 135, 249, 74,
+            84, 139, 225, 142, 130, 150, 13, 128, 132, 156, 0, 135, 73,
+        ],
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        header_manifest_digest: [
+            238, 23, 30, 64, 154, 96, 202, 191, 7, 48, 61, 203, 164, 70, 125, 33, 120, 123, 225,
+            13, 48, 52, 12, 8, 151, 140, 136, 238, 153, 170, 194, 231,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6444,17 +6487,37 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            212, 250, 3, 219, 119, 227, 139, 162, 112, 153, 1, 226, 130, 126, 159, 14, 138, 159,
-            195, 52, 220, 127, 182, 139, 181, 236, 210, 149, 131, 63, 165, 71,
+            78, 232, 190, 96, 71, 5, 191, 113, 191, 185, 57, 15, 146, 247, 147, 148, 216, 150, 225,
+            197, 230, 83, 115, 14, 226, 33, 193, 86, 192, 29, 219, 82,
         ],
         artifact_digest: [
-            191, 176, 211, 75, 25, 108, 110, 143, 74, 245, 207, 49, 22, 243, 206, 100, 198, 50, 12,
-            89, 227, 64, 5, 115, 156, 224, 233, 238, 169, 48, 43, 39,
+            87, 39, 89, 193, 59, 109, 157, 159, 252, 81, 67, 197, 63, 79, 192, 230, 78, 28, 177,
+            215, 63, 116, 120, 134, 24, 13, 56, 9, 106, 140, 171, 47,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST,
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            97, 240, 218, 196, 99, 181, 124, 141, 222, 122, 58, 113, 205, 140, 177, 49, 106, 190,
-            224, 182, 252, 197, 235, 134, 90, 58, 239, 12, 252, 238, 42, 56,
+            31, 69, 107, 100, 249, 112, 50, 67, 33, 250, 193, 162, 152, 218, 125, 233, 148, 94, 22,
+            16, 184, 225, 192, 131, 178, 106, 234, 255, 236, 224, 217, 185,
+        ],
+        nvrtc_library_domain: [
+            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
+            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
+        ],
+    },
+    FixedCopyPlanQualificationIdentity {
+        nvrtc_version: (13, 2),
+        compile_key: [
+            29, 41, 38, 118, 41, 39, 199, 234, 16, 111, 11, 175, 21, 247, 251, 16, 89, 162, 30,
+            209, 36, 51, 106, 81, 149, 78, 74, 188, 215, 28, 162, 205,
+        ],
+        artifact_digest: [
+            32, 64, 160, 54, 75, 29, 252, 182, 111, 197, 191, 120, 197, 45, 11, 187, 93, 86, 170,
+            111, 31, 182, 52, 251, 78, 218, 211, 57, 205, 213, 93, 181,
+        ],
+        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        header_manifest_digest: [
+            144, 236, 183, 104, 77, 107, 131, 34, 218, 55, 104, 207, 50, 21, 216, 12, 45, 246, 232,
+            215, 40, 182, 151, 221, 108, 141, 248, 119, 61, 245, 90, 1,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -6513,96 +6576,116 @@ const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
     195, 225, 30, 138, 195, 124, 98, 177, 254, 209, 98,
 ];
 
+const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8: ScalarTransposeQualificationIdentity =
+    ScalarTransposeQualificationIdentity {
+        nvrtc_version: (12, 8),
+        compile_key: [
+            218, 93, 171, 239, 245, 85, 112, 209, 251, 108, 164, 58, 29, 74, 138, 167, 162, 169,
+            210, 94, 251, 100, 54, 237, 127, 3, 196, 162, 138, 115, 217, 134,
+        ],
+        artifact_digest: [
+            92, 168, 107, 194, 225, 189, 85, 72, 151, 126, 12, 24, 208, 40, 121, 21, 226, 125, 87,
+            34, 111, 28, 195, 221, 15, 95, 218, 241, 90, 84, 157, 184,
+        ],
+        source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+        header_manifest_digest: [
+            44, 148, 40, 137, 0, 51, 35, 230, 249, 225, 48, 218, 59, 163, 27, 198, 52, 146, 222,
+            76, 152, 54, 15, 166, 85, 141, 79, 191, 226, 8, 18, 174,
+        ],
+        nvrtc_library_domain: [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+    };
+
+const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0: ScalarTransposeQualificationIdentity =
+    ScalarTransposeQualificationIdentity {
+        nvrtc_version: (13, 0),
+        compile_key: [
+            206, 237, 166, 233, 213, 92, 253, 22, 109, 175, 214, 56, 169, 5, 93, 175, 138, 27, 176,
+            68, 245, 115, 195, 52, 158, 20, 123, 255, 3, 184, 254, 123,
+        ],
+        artifact_digest: [
+            158, 235, 36, 113, 138, 235, 196, 161, 29, 14, 221, 218, 237, 115, 180, 105, 154, 140,
+            173, 141, 227, 203, 125, 83, 182, 204, 201, 230, 183, 47, 33, 102,
+        ],
+        source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+        header_manifest_digest: [
+            76, 60, 172, 174, 174, 125, 97, 215, 205, 18, 99, 225, 243, 152, 55, 228, 251, 231,
+            235, 13, 104, 174, 239, 177, 37, 48, 3, 79, 71, 19, 31, 100,
+        ],
+        nvrtc_library_domain: [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+    };
+
+const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2: ScalarTransposeQualificationIdentity =
+    ScalarTransposeQualificationIdentity {
+        nvrtc_version: (13, 2),
+        compile_key: [
+            130, 46, 191, 13, 218, 125, 207, 156, 79, 92, 90, 34, 19, 136, 77, 222, 66, 171, 69,
+            245, 207, 35, 132, 121, 168, 24, 86, 4, 44, 48, 43, 124,
+        ],
+        artifact_digest: [
+            114, 41, 222, 66, 227, 86, 38, 17, 254, 69, 16, 146, 195, 169, 45, 84, 14, 41, 8, 146,
+            11, 31, 186, 196, 154, 55, 207, 232, 30, 104, 32, 150,
+        ],
+        source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
+        header_manifest_digest: [
+            201, 169, 120, 47, 158, 22, 143, 115, 22, 184, 222, 18, 121, 145, 103, 223, 49, 196,
+            251, 190, 249, 43, 13, 107, 144, 9, 12, 61, 128, 110, 254, 147,
+        ],
+        nvrtc_library_domain: [
+            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
+            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
+        ],
+    };
+
 /// Frozen whole-pipeline identities for the portable transpose followed by
 /// the Fixed CopyPlan kernel. Each entry binds both modules to the same live
 /// toolkit domain; a Fixed-only match is intentionally insufficient.
 const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
     &[NtFixedCopyPlanComposedQualificationIdentity] = &[
     NtFixedCopyPlanComposedQualificationIdentity {
-        scalar: ScalarTransposeQualificationIdentity {
-            nvrtc_version: (12, 8),
-            compile_key: [
-                218, 93, 171, 239, 245, 85, 112, 209, 251, 108, 164, 58, 29, 74, 138, 167, 162,
-                169, 210, 94, 251, 100, 54, 237, 127, 3, 196, 162, 138, 115, 217, 134,
-            ],
-            artifact_digest: [
-                92, 168, 107, 194, 225, 189, 85, 72, 151, 126, 12, 24, 208, 40, 121, 21, 226, 125,
-                87, 34, 111, 28, 195, 221, 15, 95, 218, 241, 90, 84, 157, 184,
-            ],
-            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
-            header_manifest_digest: [
-                44, 148, 40, 137, 0, 51, 35, 230, 249, 225, 48, 218, 59, 163, 27, 198, 52, 146,
-                222, 76, 152, 54, 15, 166, 85, 141, 79, 191, 226, 8, 18, 174,
-            ],
-            nvrtc_library_domain: [
-                38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-                146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-            ],
-        },
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8,
         fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[0],
     },
     NtFixedCopyPlanComposedQualificationIdentity {
-        scalar: ScalarTransposeQualificationIdentity {
-            nvrtc_version: (13, 0),
-            compile_key: [
-                206, 237, 166, 233, 213, 92, 253, 22, 109, 175, 214, 56, 169, 5, 93, 175, 138, 27,
-                176, 68, 245, 115, 195, 52, 158, 20, 123, 255, 3, 184, 254, 123,
-            ],
-            artifact_digest: [
-                158, 235, 36, 113, 138, 235, 196, 161, 29, 14, 221, 218, 237, 115, 180, 105, 154,
-                140, 173, 141, 227, 203, 125, 83, 182, 204, 201, 230, 183, 47, 33, 102,
-            ],
-            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
-            header_manifest_digest: [
-                76, 60, 172, 174, 174, 125, 97, 215, 205, 18, 99, 225, 243, 152, 55, 228, 251, 231,
-                235, 13, 104, 174, 239, 177, 37, 48, 3, 79, 71, 19, 31, 100,
-            ],
-            nvrtc_library_domain: [
-                112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241,
-                16, 238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-            ],
-        },
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8,
         fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[1],
     },
     NtFixedCopyPlanComposedQualificationIdentity {
-        scalar: ScalarTransposeQualificationIdentity {
-            nvrtc_version: (13, 2),
-            compile_key: [
-                130, 46, 191, 13, 218, 125, 207, 156, 79, 92, 90, 34, 19, 136, 77, 222, 66, 171,
-                69, 245, 207, 35, 132, 121, 168, 24, 86, 4, 44, 48, 43, 124,
-            ],
-            artifact_digest: [
-                114, 41, 222, 66, 227, 86, 38, 17, 254, 69, 16, 146, 195, 169, 45, 84, 14, 41, 8,
-                146, 11, 31, 186, 196, 154, 55, 207, 232, 30, 104, 32, 150,
-            ],
-            source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
-            header_manifest_digest: [
-                201, 169, 120, 47, 158, 22, 143, 115, 22, 184, 222, 18, 121, 145, 103, 223, 49,
-                196, 251, 190, 249, 43, 13, 107, 144, 9, 12, 61, 128, 110, 254, 147,
-            ],
-            nvrtc_library_domain: [
-                208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40,
-                234, 34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-            ],
-        },
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
         fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[2],
+    },
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[3],
+    },
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[4],
+    },
+    NtFixedCopyPlanComposedQualificationIdentity {
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
+        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[5],
     },
 ];
 
-// The three frozen candidates passed the complete pre-admission qualification
-// on their exact CUDA12.8/13.0/13.2 toolkit domains. Admission is deliberately
-// an alias of that sealed set so no unqualified identity can be appended here.
+// The six measured complete-module pairs cover cap16/cap64 on each retained
+// toolkit. Admission is an alias of that sealed set so no unmeasured pair can
+// be appended here.
 const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
     &[NtFixedCopyPlanComposedQualificationIdentity] =
     NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
 
-// These scalar-only projections keep TN independent of the Fixed holder and
-// of later NT cohort growth. They are provisional assembly bindings until the
-// final combined-source census rechecks the identities and the new TN cell.
-const TN_M16N16_SPLITM16_SM89_PROVISIONAL_BINDINGS: [ScalarTransposeQualificationIdentity; 3] = [
+// These three toolkit projections keep TN independent of the Fixed holder and
+// of the paired cap-specific Fixed identity.
+const TN_M16N16_SPLITM16_SM89_BINDINGS: [ScalarTransposeQualificationIdentity; 3] = [
     NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[0].scalar,
-    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[1].scalar,
     NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[2].scalar,
+    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[4].scalar,
 ];
 
 fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
@@ -6617,7 +6700,7 @@ fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> 
 fn qualified_scalar_sm89_ada142_tn_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && facts.multiprocessor_count == 142
-        && TN_M16N16_SPLITM16_SM89_PROVISIONAL_BINDINGS
+        && TN_M16N16_SPLITM16_SM89_BINDINGS
             .iter()
             .copied()
             .any(|identity| identity.matches(facts))
@@ -7809,9 +7892,13 @@ pub(super) fn nt_routes_to_big(
 #[cfg(test)]
 mod scalar_wave_policy_tests {
     use super::{
-        FIXED_COPYPLAN_EVIDENCE_COHORTS, NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
-        NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES, ScalarDispatchPlan, ScalarLaunchFacts,
-        scalar_dispatch_plan, scalar_launch_plan,
+        FIXED_COPYPLAN_EVIDENCE_COHORTS, FixedCopyPlanQualificationIdentity,
+        NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
+        NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+        NtFixedCopyPlanComposedQualificationIdentity, ScalarDispatchPlan, ScalarLaunchFacts,
+        ScalarTransposeQualificationIdentity, TN_M16N16_SPLITM16_SM89_BINDINGS,
+        qualified_fixed_copyplan_environment, qualified_nt_fixed_copyplan_sibling_environment,
+        qualified_scalar_sm89_ada142_tn_environment, scalar_dispatch_plan, scalar_launch_plan,
     };
     use crate::mamba_ssm::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::mamba_ssm::gpu::kernel_identity::{
@@ -7820,6 +7907,175 @@ mod scalar_wave_policy_tests {
     };
 
     const RTX_6000_ADA_SMS: u32 = 142;
+
+    #[derive(Clone, Copy)]
+    struct MeasuredComposedRow {
+        nvrtc: (i32, i32),
+        fixed_source: &'static str,
+        fixed_key: &'static str,
+        fixed_artifact: &'static str,
+        fixed_header: &'static str,
+        scalar_key: &'static str,
+        scalar_artifact: &'static str,
+        scalar_header: &'static str,
+        library: &'static str,
+    }
+
+    fn digest(hex: &str) -> [u8; 32] {
+        assert_eq!(hex.len(), 64);
+        std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
+    }
+
+    fn measured_composed_identities() -> [NtFixedCopyPlanComposedQualificationIdentity; 6] {
+        const SCALAR_SOURCE: &str =
+            "2ec250bb6dadba670e24552a9939b4c308ab4a0ff0c3e11e8ac37c62b1fed162";
+        let rows = [
+            MeasuredComposedRow {
+                nvrtc: (12, 8),
+                fixed_source: "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                fixed_key: "05803240c18fca97b0a89dbe0aaa4ced450fdbb9ada2b56f90abc81d795ff82b",
+                fixed_artifact: "61f51de3d54a3c04bb083e67212a57a22442ee3511ed3b9738bdd2d1854c05c8",
+                fixed_header: "36357ad744a6be217827aff1ab3b21c901d40812e7a729a278b1ef209bdcadd9",
+                scalar_key: "da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986",
+                scalar_artifact: "5ca86bc2e1bd5548977e0c18d0287915e27d57226f1cc3dd0f5fdaf15a549db8",
+                scalar_header: "2c942889003323e6f9e130da3ba31bc63492de4c98360fa6558d4fbfe20812ae",
+                library: "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+            },
+            MeasuredComposedRow {
+                nvrtc: (12, 8),
+                fixed_source: "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                fixed_key: "9aacfbce0444d944b51185f2511377875dd7aaf1d8d68f32e994d5138d2034ac",
+                fixed_artifact: "83950bcf4b0d2fe2ca829565f8a1ef6e5f7f628ff01820ca5abaf1dd7921c6de",
+                fixed_header: "2a3754f94ba3b5ab1b43bd284bd7786d673a0bc2a002bc9fc00c5ec80d6b6a7a",
+                scalar_key: "da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986",
+                scalar_artifact: "5ca86bc2e1bd5548977e0c18d0287915e27d57226f1cc3dd0f5fdaf15a549db8",
+                scalar_header: "2c942889003323e6f9e130da3ba31bc63492de4c98360fa6558d4fbfe20812ae",
+                library: "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+            },
+            MeasuredComposedRow {
+                nvrtc: (13, 0),
+                fixed_source: "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                fixed_key: "aeb1ffa2184508df4231b87d460a591d427cf167a844d2b5c5964725743f3ba2",
+                fixed_artifact: "61f15b7a6ec5c5dd41d4ca685603b7da0f5401f7b3d29e883affe4b2e3fa6818",
+                fixed_header: "f7447e7b8eb2c6fe03dc1db67467ccbe0a474ab26f02ebda2c55329d7f8c860b",
+                scalar_key: "ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b",
+                scalar_artifact: "9eeb24718aebc4a11d0edddaed73b4699a8cad8de3cb7d53b6ccc9e6b72f2166",
+                scalar_header: "4c3cacaeae7d61d7cd1263e1f39837e4fbe7eb0d68aeefb12530034f47131f64",
+                library: "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+            },
+            MeasuredComposedRow {
+                nvrtc: (13, 0),
+                fixed_source: "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                fixed_key: "2e65a62330f942bba7a0de597661a83f58538a0df90ca6724a27cacb3d16ad01",
+                fixed_artifact: "aca5fa273cc1760d268922df7b772cc387f94a548be18e82960d80849c008749",
+                fixed_header: "ee171e409a60cabf07303dcba4467d21787be10d30340c08978c88ee99aac2e7",
+                scalar_key: "ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b",
+                scalar_artifact: "9eeb24718aebc4a11d0edddaed73b4699a8cad8de3cb7d53b6ccc9e6b72f2166",
+                scalar_header: "4c3cacaeae7d61d7cd1263e1f39837e4fbe7eb0d68aeefb12530034f47131f64",
+                library: "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+            },
+            MeasuredComposedRow {
+                nvrtc: (13, 2),
+                fixed_source: "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                fixed_key: "4ee8be604705bf71bfb9390f92f79394d896e1c5e653730ee221c156c01ddb52",
+                fixed_artifact: "572759c13b6d9d9ffc5143c53f4fc0e64e1cb1d73f747886180d38096a8cab2f",
+                fixed_header: "1f456b64f970324321fac1a298da7de9945e1610b8e1c083b26aeaffece0d9b9",
+                scalar_key: "822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c",
+                scalar_artifact: "7229de42e3562611fe451092c3a92d540e2908920b1fbac49a37cfe81e682096",
+                scalar_header: "c9a9782f9e168f7316b8de12799167df31c4fbbef92b0d6b90090c3d806efe93",
+                library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+            },
+            MeasuredComposedRow {
+                nvrtc: (13, 2),
+                fixed_source: "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                fixed_key: "1d2926762927c7ea106f0baf15f7fb1059a21ed124336a51954e4abcd71ca2cd",
+                fixed_artifact: "2040a0364b1dfcb66fc5bf78c52d0bbb5d56aa6f1fb634fb4edad339cdd55db5",
+                fixed_header: "90ecb7684d6b8322da3768cf3215d80c2df6e8d728b697dd6c8df8773df55a01",
+                scalar_key: "822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c",
+                scalar_artifact: "7229de42e3562611fe451092c3a92d540e2908920b1fbac49a37cfe81e682096",
+                scalar_header: "c9a9782f9e168f7316b8de12799167df31c4fbbef92b0d6b90090c3d806efe93",
+                library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+            },
+        ];
+        rows.map(|row| NtFixedCopyPlanComposedQualificationIdentity {
+            scalar: ScalarTransposeQualificationIdentity {
+                nvrtc_version: row.nvrtc,
+                compile_key: digest(row.scalar_key),
+                artifact_digest: digest(row.scalar_artifact),
+                source_digest: digest(SCALAR_SOURCE),
+                header_manifest_digest: digest(row.scalar_header),
+                nvrtc_library_domain: digest(row.library),
+            },
+            fixed: FixedCopyPlanQualificationIdentity {
+                nvrtc_version: row.nvrtc,
+                compile_key: digest(row.fixed_key),
+                artifact_digest: digest(row.fixed_artifact),
+                source_digest: digest(row.fixed_source),
+                header_manifest_digest: digest(row.fixed_header),
+                nvrtc_library_domain: digest(row.library),
+            },
+        })
+    }
+
+    fn facts_for_measured_pair(
+        identity: NtFixedCopyPlanComposedQualificationIdentity,
+    ) -> ScalarLaunchFacts {
+        let compiler = |source_digest,
+                        invocation_digest,
+                        header_manifest_digest,
+                        nvrtc_version,
+                        nvrtc_library_domain| CompilerIdentity {
+            source_digest,
+            invocation_digest,
+            header_manifest_digest,
+            target: CudaTarget::new("sm_89").unwrap(),
+            nvrtc_version,
+            nvrtc_library_domain,
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        ScalarLaunchFacts {
+            scalar_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::TriadScalar,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: identity.scalar.compile_key,
+                artifact_digest: identity.scalar.artifact_digest,
+            },
+            scalar_compiler: compiler(
+                identity.scalar.source_digest,
+                identity.scalar.compile_key,
+                identity.scalar.header_manifest_digest,
+                identity.scalar.nvrtc_version,
+                identity.scalar.nvrtc_library_domain,
+            ),
+            fixed_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Fixed,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: identity.fixed.compile_key,
+                artifact_digest: identity.fixed.artifact_digest,
+            },
+            fixed_compiler: compiler(
+                identity.fixed.source_digest,
+                identity.fixed.compile_key,
+                identity.fixed.header_manifest_digest,
+                identity.fixed.nvrtc_version,
+                identity.fixed.nvrtc_library_domain,
+            ),
+            fixed_copyplan_loaded: true,
+            sm89_exact_f32_artifact: None,
+            sm89_exact_f32_compiler: None,
+            sm89_exact_f32_symbols_loaded: [false; 3],
+            sm89_exact_f32_d128_artifact: None,
+            sm89_exact_f32_d128_compiler: None,
+            sm89_exact_f32_d128_symbols_loaded: [false; 2],
+            compute_capability: (8, 9),
+            multiprocessor_count: RTX_6000_ADA_SMS,
+        }
+    }
 
     fn plan(
         op: ResolvedGemmOp,
@@ -8975,11 +9231,83 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_admits_only_all_three_live_passed_cohorts() {
+    fn nt_fixed_copyplan_sibling_selector_admits_only_all_six_measured_cohorts() {
         assert_eq!(
             NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
             NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
-            "Batch A admission must contain exactly the three live-passed candidates"
+            "admission must contain exactly the six measured composed candidates"
+        );
+    }
+
+    #[test]
+    fn triad_retained_identity_fixed_scalar_pairs_match_the_six_measured_cohorts() {
+        let expected = measured_composed_identities();
+        assert_eq!(
+            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len(),
+            6,
+            "the six capacity-specific measured pairs must all be staged"
+        );
+        assert_eq!(FIXED_COPYPLAN_EVIDENCE_COHORTS.len(), 6);
+
+        for (index, identity) in expected.iter().copied().enumerate() {
+            let facts = facts_for_measured_pair(identity);
+            assert!(
+                qualified_fixed_copyplan_environment(facts),
+                "Fixed cohort {index}"
+            );
+            assert!(
+                qualified_nt_fixed_copyplan_sibling_environment(facts),
+                "scalar+Fixed cohort {index}"
+            );
+            assert!(
+                qualified_scalar_sm89_ada142_tn_environment(facts),
+                "scalar projection for cohort {index}"
+            );
+
+            let mut changed = facts;
+            changed.scalar_compiler.nvrtc_version.1 += 1;
+            changed.fixed_compiler.nvrtc_version.1 += 1;
+            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            let mut changed = facts;
+            changed.fixed_compiler.source_digest[0] ^= 1;
+            assert!(!qualified_fixed_copyplan_environment(changed));
+            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            let mut changed = facts;
+            changed.scalar_artifact.compile_key[0] ^= 1;
+            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            let mut changed = facts;
+            changed.fixed_artifact.artifact_digest[0] ^= 1;
+            assert!(!qualified_fixed_copyplan_environment(changed));
+            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+
+            let other_toolkit = expected[(index + 2) % expected.len()].scalar;
+            let mut crossed = facts;
+            crossed.scalar_artifact.compile_key = other_toolkit.compile_key;
+            crossed.scalar_artifact.artifact_digest = other_toolkit.artifact_digest;
+            crossed.scalar_compiler.source_digest = other_toolkit.source_digest;
+            crossed.scalar_compiler.invocation_digest = other_toolkit.compile_key;
+            crossed.scalar_compiler.header_manifest_digest = other_toolkit.header_manifest_digest;
+            crossed.scalar_compiler.nvrtc_version = other_toolkit.nvrtc_version;
+            crossed.scalar_compiler.nvrtc_library_domain = other_toolkit.nvrtc_library_domain;
+            assert!(qualified_fixed_copyplan_environment(crossed));
+            assert!(!qualified_nt_fixed_copyplan_sibling_environment(crossed));
+        }
+
+        assert_eq!(
+            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+            expected.as_slice()
+        );
+        assert_eq!(
+            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
+                .iter()
+                .map(|identity| identity.scalar.compile_key)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            TN_M16N16_SPLITM16_SM89_BINDINGS,
+            [expected[0].scalar, expected[2].scalar, expected[4].scalar]
         );
     }
 
@@ -9062,7 +9390,7 @@ mod scalar_wave_policy_tests {
             beta: 1.0,
             ..nn_qualified_operands()
         };
-        for cohort in 0..3 {
+        for cohort in [0, 2, 4] {
             let mut facts = nt_fixed_copyplan_sibling_facts(cohort);
             facts.fixed_copyplan_loaded = false;
             facts.fixed_artifact.compile_key = [0; 32];
@@ -9227,7 +9555,7 @@ mod scalar_wave_policy_tests {
         let operands = nn_qualified_operands();
         let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NtFinal { slim: false });
-        for cohort in 0..3 {
+        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
             assert_eq!(
                 scalar_launch_plan(nt_fixed_copyplan_sibling_facts(cohort), request, operands,)
                     .unwrap(),
@@ -12167,14 +12495,15 @@ mod sm120_tests {
 #[cfg(test)]
 mod tf32_tests {
     use super::{
-        FIXED_COPYPLAN_EVIDENCE_COHORTS, FIXED_COPYPLAN_SOURCE_DIGEST,
-        SM89_EXACT_F32_D128_EVIDENCE_COHORTS, SM89_EXACT_F32_EVIDENCE_COHORTS,
-        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_EVIDENCE_COHORTS,
-        SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-        SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8,
-        SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0, SM89_TF32_EVIDENCE_CELLS,
-        SM89_TF32_EVIDENCE_COHORTS, SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
-        SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED, SM120_TF32_EVIDENCE_COHORTS,
+        FIXED_COPYPLAN_EVIDENCE_COHORTS, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
+        FIXED_COPYPLAN_SOURCE_DIGEST_CAP64, SM89_EXACT_F32_D128_EVIDENCE_COHORTS,
+        SM89_EXACT_F32_EVIDENCE_COHORTS, SM89_FINALIST_TF32_EVIDENCE_COHORTS,
+        SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
+        SM89_JOINT_TF32_IDENTITY_CUDA_13_0, SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
+        SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8, SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0,
+        SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS, SM89_TF32_QUALIFICATION_IDENTITY,
+        SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+        SM120_TF32_EVIDENCE_COHORTS,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
@@ -12633,6 +12962,61 @@ mod tf32_tests {
         module.device.multiprocessor_count = identity.multiprocessor_count;
         module.device_caps.nvrtc_version = identity.nvrtc_version;
         module
+    }
+
+    fn measured_finalist_identities() -> [Tf32AutoQualificationIdentity; 3] {
+        fn digest(hex: &str) -> [u8; 32] {
+            assert_eq!(hex.len(), 64);
+            std::array::from_fn(|index| {
+                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
+            })
+        }
+        let identity =
+            |nvrtc_version,
+             compile_key,
+             artifact_digest,
+             header_manifest_digest,
+             nvrtc_library_domain| Tf32AutoQualificationIdentity {
+                module_kind: ModuleKind::TriadSm89Finalist,
+                module_target: "sm_89",
+                device_target: "sm_89",
+                compute_capability: (8, 9),
+                multiprocessor_count: 142,
+                nvrtc_version,
+                optin_shared_bytes: 101_376,
+                tensor_map_access: false,
+                compile_key: digest(compile_key),
+                artifact_digest: digest(artifact_digest),
+                source_digest: digest(
+                    "3b274c1456436788ee56fd7fad39dcf66b9511ccb0d7969de03ba7299a6a4587",
+                ),
+                invocation_digest: digest(compile_key),
+                header_manifest_digest: digest(header_manifest_digest),
+                nvrtc_library_domain: digest(nvrtc_library_domain),
+            };
+        [
+            identity(
+                (12, 8),
+                "df0447c6d7a4b1ed03a0f3fda88a9c252e4cd8cfc2de0333e6d0872480fcc374",
+                "d5a452d0265b0e0a7af2d506e69206ccf74b0ba5e3209ff97b28aa04485f28c8",
+                "1aa228dbda63a936f97df4bc858dcae6c753f22e709808a7d732c5c19d90b821",
+                "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+            ),
+            identity(
+                (13, 0),
+                "837b00d182e958a6811758eaaec646be3ae5c7a25d561ec287db431f95def55e",
+                "db3a52b6097154b3117d3d56664acfdd51afc0ff5b79e707cac84193075c88dd",
+                "deff5db31f0e89dd90a102f437ea2c8eeab575799ae54ccec5b56289220ead46",
+                "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+            ),
+            identity(
+                (13, 2),
+                "383ed2c9fa10cccde852e8e4b3f2a1a0f71ca12a66fbae306b4c7941531c98ec",
+                "1a7aa7cb87e0350a4bf47841c8047d969c9f55e998f7b6d0ab8315b6588a47b5",
+                "0c53dab1ec489f9eba943d329caed5d45f575b368acc18034ce80242ecaa8fb9",
+                "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+            ),
+        ]
     }
 
     /// The live SM120 cohort of a toolkit.
@@ -14384,16 +14768,35 @@ mod tf32_tests {
             super::super::modules::module_source_digest(kind, "sm_89")
                 .unwrap_or_else(|error| panic!("compose {kind:?} for sm_89: {error}"))
         };
-        assert_eq!(
-            FIXED_COPYPLAN_SOURCE_DIGEST,
-            live(ModuleKind::Fixed),
-            "the Fixed copy-plan cohorts pin a Fixed source this tree no longer composes"
-        );
-        assert!(
-            FIXED_COPYPLAN_EVIDENCE_COHORTS
-                .iter()
-                .all(|cohort| cohort.source_digest == FIXED_COPYPLAN_SOURCE_DIGEST)
-        );
+        let fixed = [
+            ((12, 8), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((12, 8), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
+            ((13, 0), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((13, 0), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
+            ((13, 2), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((13, 2), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
+        ];
+        assert_eq!(FIXED_COPYPLAN_EVIDENCE_COHORTS.len(), fixed.len());
+        for (cohort, (nvrtc, state_cap, expected_source)) in
+            FIXED_COPYPLAN_EVIDENCE_COHORTS.iter().zip(fixed)
+        {
+            assert_eq!(cohort.nvrtc_version, nvrtc);
+            assert_eq!(cohort.source_digest, expected_source);
+            let digest = super::super::modules::module_source_digest_for_compile(
+                ModuleKind::Fixed,
+                Some((8, 9)),
+                "sm_89",
+                state_cap,
+                nvrtc,
+            )
+            .unwrap_or_else(|error| {
+                panic!("compose Fixed for CUDA {nvrtc:?} cap{state_cap}: {error}")
+            });
+            assert_eq!(
+                cohort.source_digest, digest,
+                "a Fixed copy-plan cohort pins a pre-overlay or stale source"
+            );
+        }
         let tf32 = [
             (
                 "portable",
@@ -16889,6 +17292,53 @@ mod tf32_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn triad_retained_identity_finalist_bindings_match_three_measured_modules() {
+        let expected = measured_finalist_identities();
+        assert_eq!(SM89_FINALIST_TF32_EVIDENCE_COHORTS.len(), 3);
+        for identity in expected {
+            let module = qualified_module_for_auto_identity(identity);
+            let cohort = matching_tf32_cohort(module, SM89_FINALIST_TF32_EVIDENCE_COHORTS)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "measured CUDA {:?} finalist module must enter AUTO",
+                        identity.nvrtc_version
+                    )
+                });
+            assert_eq!(cohort.identity, identity);
+            assert_eq!(
+                cohort.tuning_revision,
+                super::super::contract::SM89_FINALIST_TUNING_REVISION
+            );
+
+            let mut changed = module;
+            changed.compiler.nvrtc_version.1 += 1;
+            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
+            let mut changed = module;
+            changed.compiler.source_digest[0] ^= 1;
+            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
+            let mut changed = module;
+            changed.artifact.compile_key[0] ^= 1;
+            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
+            let mut changed = module;
+            changed.artifact.artifact_digest[0] ^= 1;
+            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
+        }
+        let actual = SM89_FINALIST_TF32_EVIDENCE_COHORTS
+            .iter()
+            .map(|cohort| cohort.identity)
+            .collect::<Vec<_>>();
+        assert_eq!(actual.as_slice(), expected.as_slice());
+        assert_eq!(
+            SM89_FINALIST_TF32_EVIDENCE_COHORTS
+                .iter()
+                .map(|cohort| cohort.identity.compile_key)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
     }
 
     #[test]
