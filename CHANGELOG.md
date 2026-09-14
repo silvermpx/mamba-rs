@@ -61,6 +61,10 @@ retimed for these tables; their earlier measurements remain historical.
 
 ### Fixed
 
+- Refresh the CLI's transitive `chacha20` lock entry to 0.10.2. The
+  previous entry was yanked for an SSE2-backend soundness bug; this
+  dependency is used by the model downloader's retry logic, not the
+  Mamba or GEMM kernels.
 - The Mamba-3 F16 training benchmark waits for loss-scale calibration
   before timing. Timed steps still report skipped optimizer updates;
   measurements with a skip are rejected. The production trainer and
