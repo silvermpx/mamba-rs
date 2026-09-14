@@ -22,6 +22,8 @@ use super::super::kernels::{
     kernel_cache_dir, nvrtc_version,
 };
 
+pub(crate) mod inference_bundle;
+
 const TF32_EXCEPTIONAL_PROBE_BITS: [u32; 10] = [
     0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00001, 0x7f800001, 0x00000001, 0x007fffff,
     0x00800000, 0x7f7fffff,
@@ -545,6 +547,7 @@ pub(crate) struct CompiledModule {
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_postbias_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    inference_sm89_driver_abi: inference_bundle::InferenceSm89DriverAbiCensus,
 }
 
 /// A TF32 symbol the loaded module cannot serve on this toolkit: the
@@ -617,9 +620,17 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
     let nvrtc = nvrtc_version();
     let mut combined = compose_module_source_for(request.module_kind, request.arch)?;
     if request.module_kind == ModuleKind::Fixed {
+        let device_cc = request.ctx.compute_capability().ok();
         combined = super::super::fold_transport::compose_fixed_source(
             combined,
-            request.ctx.compute_capability().ok(),
+            device_cc,
+            request.arch,
+            request.state_cap,
+            nvrtc,
+        )?;
+        combined = crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+            combined,
+            device_cc,
             request.arch,
             request.state_cap,
             nvrtc,
@@ -784,6 +795,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
             tf32_qualification_verdict(request.module_kind, extensions, census, validation);
@@ -812,6 +829,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             fixed_sm120_exact_n64_abi,
             fixed_sm120_sliced_abi,
             fixed_sm120_postbias_abi,
+            inference_sm89_driver_abi,
         ));
     }
 
@@ -833,6 +851,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
         fixed_sm120_postbias_driver_abi,
+        inference_sm89_driver_abi,
     ) = match loaded {
         Some(value) => value,
         None => {
@@ -934,6 +953,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 request.arch,
                 &ptx_source,
             );
+            let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
             let validation =
                 validate_tf32_specialization(request.module_kind, request.arch, &ptx_source);
             let (tf32_driver_abi, tf32_qualification_error) =
@@ -1010,6 +1035,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 fixed_sm120_exact_n64_abi,
                 fixed_sm120_sliced_abi,
                 fixed_sm120_postbias_abi,
+                inference_sm89_driver_abi,
             )
         }
     };
@@ -1057,6 +1083,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
         fixed_sm120_postbias_driver_abi,
+        inference_sm89_driver_abi,
     })
 }
 
@@ -10958,6 +10985,147 @@ mod tests {
         validate_tf32_parameter_abi, validate_tf32_ptx_inventory, validate_tf32_splitk_ptx,
         validate_tn_narrow_splitm_partial_ptx,
     };
+
+    #[test]
+    fn inference_source_bundle_appends_each_retained_export_once() {
+        let symbols = [
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+        ];
+        for cap in [16, 64] {
+            for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+                let base = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+                let result =
+                    crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                        base.clone(),
+                        Some((8, 9)),
+                        "sm_89",
+                        cap,
+                        nvrtc,
+                    )
+                    .unwrap();
+                assert!(result.starts_with(&base));
+                for symbol in symbols {
+                    assert_eq!(result.matches(&format!("void {symbol}(")).count(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inference_source_bundle_preserves_the_complete_input_outside_its_envelope() {
+        let cases = [
+            ("missing CC", None, "sm_89", 16, (12, 8), false),
+            ("CC 8.0", Some((8, 0)), "sm_89", 16, (12, 8), false),
+            ("CC 12.0", Some((12, 0)), "sm_89", 16, (12, 8), false),
+            (
+                "compute_89 target",
+                Some((8, 9)),
+                "compute_89",
+                16,
+                (12, 8),
+                false,
+            ),
+            (
+                "compute_120 target",
+                Some((8, 9)),
+                "compute_120",
+                16,
+                (12, 8),
+                false,
+            ),
+            ("sm_80 target", Some((8, 9)), "sm_80", 16, (12, 8), false),
+            ("capacity 0", Some((8, 9)), "sm_89", 0, (12, 8), false),
+            ("capacity 8", Some((8, 9)), "sm_89", 8, (12, 8), false),
+            ("capacity 32", Some((8, 9)), "sm_89", 32, (12, 8), false),
+            ("capacity 128", Some((8, 9)), "sm_89", 128, (12, 8), false),
+            ("capacity 256", Some((8, 9)), "sm_89", 256, (12, 8), false),
+            ("NVRTC 0.0", Some((8, 9)), "sm_89", 16, (0, 0), false),
+            ("NVRTC 12.7", Some((8, 9)), "sm_89", 16, (12, 7), false),
+            ("NVRTC 13.1", Some((8, 9)), "sm_89", 16, (13, 1), false),
+            ("NVRTC 13.3", Some((8, 9)), "sm_89", 16, (13, 3), false),
+        ];
+
+        for (name, device_cc, target, state_cap, nvrtc, expected_supported) in cases {
+            assert_eq!(
+                crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compiler_supported(
+                    device_cc, target, state_cap, nvrtc,
+                ),
+                expected_supported,
+                "wrong compiler support for {name}"
+            );
+            let input = compose_module_source_for(ModuleKind::Fixed, target).unwrap();
+            let result =
+                crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                    input.clone(),
+                    device_cc,
+                    target,
+                    state_cap,
+                    nvrtc,
+                )
+                .unwrap();
+            assert_eq!(result, input, "composer changed bytes for {name}");
+        }
+    }
+
+    #[test]
+    fn inference_source_bundle_rejects_duplicate_retained_exports() {
+        let base = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+        let extended =
+            crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                base,
+                Some((8, 9)),
+                "sm_89",
+                16,
+                (12, 8),
+            )
+            .unwrap();
+        let duplicate =
+            crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                extended,
+                Some((8, 9)),
+                "sm_89",
+                16,
+                (12, 8),
+            );
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn inference_source_bundle_appends_after_the_complete_fold_overlay() {
+        let symbols = [
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+        ];
+        for state_cap in [16, 64] {
+            for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+                let base = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+                let folded = crate::mamba_ssm::gpu::fold_transport::compose_fixed_source(
+                    base,
+                    Some((8, 9)),
+                    "sm_89",
+                    state_cap,
+                    nvrtc,
+                )
+                .unwrap();
+                let final_source =
+                    crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                        folded.clone(),
+                        Some((8, 9)),
+                        "sm_89",
+                        state_cap,
+                        nvrtc,
+                    )
+                    .unwrap();
+                assert!(final_source.starts_with(&folded));
+                for symbol in symbols {
+                    assert_eq!(final_source.matches(&format!("void {symbol}(")).count(), 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn sm89_half_resource_failure_excludes_only_the_bad_symbol() {

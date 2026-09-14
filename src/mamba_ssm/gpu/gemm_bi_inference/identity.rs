@@ -96,6 +96,30 @@ const TERMINALS: &[TerminalSpec] = &[
         Optional
     ),
     terminal!(
+        "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+        (Bf16, F32),
+        InferenceMma16V1,
+        (128, 128, 64, 3, 256, 98304),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+        (F16, F32),
+        InferenceMma16V1,
+        (128, 128, 64, 3, 256, 98304),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+        (F32, F32),
+        InferenceScalarFmaV1,
+        (128, 64, 32, 2, 256, 0),
+        ExactF32,
+        Forbidden
+    ),
+    terminal!(
         "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
         (F32, F32),
         InferenceScalarFmaV1,
@@ -1445,6 +1469,24 @@ mod tests {
                 [1, 1, 1],
             ),
             (
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+                33,
+                (128, 128, 64, 3, 256, 98_304),
+                [3, 3, 1],
+            ),
+            (
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                33,
+                (128, 128, 64, 3, 256, 98_304),
+                [2, 2, 1],
+            ),
+            (
+                "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+                31,
+                (128, 64, 32, 2, 256, 0),
+                [1, 1, 1],
+            ),
+            (
                 "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
                 31,
                 (64, 64, 32, 2, 128, 0),
@@ -1892,7 +1934,7 @@ mod tests {
                 [1, 1, 1],
             ),
         ];
-        assert_eq!(TERMINALS.len(), 85);
+        assert_eq!(TERMINALS.len(), 88);
         assert_eq!(expected.len(), TERMINALS.len());
         let mut seen = std::collections::BTreeSet::new();
         for &(symbol, backend, geometry, storage) in expected {
@@ -1967,6 +2009,55 @@ mod tests {
         assert!(terminal("gemm_bi_f32_f32").is_none());
         assert!(terminal("gemm_bi_nn_sm90a_wgmma_wg1_f32out_bf16").is_none());
         assert!(terminal("unrelated_f32out_bf16").is_none());
+    }
+
+    #[test]
+    fn inference_bundle_admission_has_three_independent_closed_terminal_identities() {
+        let cases = [
+            (
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+                PolicyDtype::Bf16,
+                PhysicalGemmBackend::InferenceMma16V1,
+                AbiKind::HalfSm89,
+                (128, 128, 64, 3, 256, 98_304),
+                BiasDomain::Optional,
+            ),
+            (
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                PolicyDtype::F16,
+                PhysicalGemmBackend::InferenceMma16V1,
+                AbiKind::HalfSm89,
+                (128, 128, 64, 3, 256, 98_304),
+                BiasDomain::Optional,
+            ),
+            (
+                "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+                PolicyDtype::F32,
+                PhysicalGemmBackend::InferenceScalarFmaV1,
+                AbiKind::ExactF32,
+                (128, 64, 32, 2, 256, 0),
+                BiasDomain::Forbidden,
+            ),
+        ];
+        for (symbol, input, backend, abi, geometry, bias) in cases {
+            let spec = terminal(symbol).unwrap();
+            assert_eq!(spec.storage, [input, input, PolicyDtype::F32], "{symbol}");
+            assert_eq!(spec.backend, backend, "{symbol}");
+            assert_eq!(spec.abi, abi, "{symbol}");
+            assert_eq!(
+                (
+                    spec.tile.0,
+                    spec.tile.1,
+                    spec.bk,
+                    spec.stages,
+                    spec.threads,
+                    spec.shared
+                ),
+                geometry,
+                "{symbol}"
+            );
+            assert_eq!(spec.bias, bias, "{symbol}");
+        }
     }
 
     #[test]

@@ -1624,8 +1624,13 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
                 )
             } else {
                 let bias_symbol = has_bias.then_some("bias_broadcast");
-                let existing =
-                    fixed_explicit_vendor_graph_inventory(&graph, "Task7 Fast", None, bias_symbol);
+                let existing = fixed_explicit_vendor_graph_inventory(
+                    &graph,
+                    "Task7 Fast",
+                    None,
+                    None,
+                    bias_symbol,
+                );
                 format!(
                     "{{\"one_existing\":{},\"one\":{},\"twenty\":{}}}",
                     existing,

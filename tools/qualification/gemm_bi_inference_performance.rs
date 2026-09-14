@@ -35,7 +35,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ModuleKind, ResolvedGemmOp, TUNING_TABLE_REVISION, digest_hex,
+    ModuleKind, PhysicalGemmBackend, PolicyDtype, ResolvedGemmOp, ResolvedGemmRoute,
+    TUNING_TABLE_REVISION, digest_hex,
 };
 use production_auto_cohort::{
     ProductionAutoInventory, render_cohort_fragment, state_capacity_from_env,
@@ -11139,11 +11140,13 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         &vendor_graph,
         "PEDANTIC hot-cell vendor",
         None,
+        None,
         has_bias.then_some("bias_broadcast"),
     );
     let _ = fixed_explicit_vendor_graph_inventory(
         &vendor_fast_graph,
         "FAST_TF32 hot-cell vendor",
+        None,
         None,
         has_bias.then_some("bias_broadcast"),
     );
@@ -11842,6 +11845,326 @@ struct FixedForceSpec {
     compute_capability: (u32, u32),
     bias_contract: FixedForceBiasContract,
     expected_symbol: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct FixedAutoPhysicalRequest<'a> {
+    row: &'static str,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    selected: InferenceTile,
+    compute_capability: (u32, u32),
+    multiprocessors: u32,
+    compiler_target: &'a str,
+    state_capacity: usize,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    policy: F32TriadPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedAutoPhysicalDescriptor {
+    family: InferenceTile,
+    symbol: &'static str,
+    storage: [WeightDtype; 3],
+    backend: mamba_rs::mamba_ssm::gpu::kernel_identity::PhysicalGemmBackend,
+    tile: (u32, u32),
+    bk: u32,
+    stages: u8,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    dynamic_shared_bytes: u32,
+    static_shared_bytes: u32,
+    driver_abi: [(usize, usize); 5],
+}
+
+#[derive(Clone, Copy)]
+struct FixedAutoRecordedRoute {
+    op: ResolvedGemmOp,
+    symbol: &'static str,
+    dtype: PolicyDtype,
+    backend: PhysicalGemmBackend,
+    shape: (usize, usize, usize),
+    strides: (usize, usize, usize),
+    tile: (u32, u32),
+    bk: u32,
+    stages: u8,
+    threads: u32,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    dynamic_shared_bytes: u32,
+}
+
+impl From<&ResolvedGemmRoute> for FixedAutoRecordedRoute {
+    fn from(route: &ResolvedGemmRoute) -> Self {
+        Self {
+            op: route.op,
+            symbol: route.symbol,
+            dtype: route.dtype,
+            backend: route.backend,
+            shape: route.shape,
+            strides: route.strides,
+            tile: route.tile,
+            bk: route.bk,
+            stages: route.stages,
+            threads: route.threads,
+            grid: route.launch.grid_dim,
+            block: route.launch.block_dim,
+            dynamic_shared_bytes: route.launch.shared_mem_bytes,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FixedAutoGraphObservation<'a> {
+    node_count: usize,
+    symbol: &'a str,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    dynamic_shared_bytes: u32,
+    static_shared_bytes: u32,
+    driver_abi: Vec<(usize, usize)>,
+    terminal_sixth_rejected: bool,
+    pointers: [u64; 4],
+    bundle: [u32; 8],
+}
+
+fn fixed_auto_bundle_physical_descriptor(
+    request: FixedAutoPhysicalRequest<'_>,
+    recorded: &[FixedAutoRecordedRoute],
+) -> Result<Option<FixedAutoPhysicalDescriptor>, String> {
+    let FixedAutoPhysicalRequest {
+        row,
+        operands,
+        shape,
+        selected,
+        compute_capability,
+        multiprocessors,
+        compiler_target,
+        state_capacity,
+        nvrtc,
+        nvrtc_library_known,
+        policy,
+    } = request;
+    let pointers_admitted = [operands.c.ptr, operands.x.ptr, operands.w.ptr]
+        .into_iter()
+        .all(|pointer| pointer != 0 && pointer.is_multiple_of(16))
+        && operands
+            .bias_ptr
+            .is_none_or(|pointer| pointer != 0 && pointer.is_multiple_of(4));
+    if compute_capability != (8, 9)
+        || multiprocessors != 142
+        || compiler_target != "sm_89"
+        || !matches!(state_capacity, 16 | 64)
+        || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
+        || !nvrtc_library_known
+        || !pointers_admitted
+        || policy != F32TriadPolicy::ExactScalarFmaV1
+    {
+        return Ok(None);
+    }
+
+    let driver_abi = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    let descriptor = match (
+        row,
+        operands.x.dtype,
+        operands.w.dtype,
+        operands.c.dtype,
+        (shape.m, shape.k, shape.n),
+        operands.bias_ptr.is_some(),
+    ) {
+        (
+            "bf16_f32",
+            WeightDtype::Bf16,
+            WeightDtype::Bf16,
+            WeightDtype::F32,
+            (4621, 768, 2304),
+            _,
+        ) => FixedAutoPhysicalDescriptor {
+            family: InferenceTile::Tc128Sm89S3,
+            symbol: "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+            storage: [WeightDtype::Bf16, WeightDtype::Bf16, WeightDtype::F32],
+            backend: PhysicalGemmBackend::InferenceMma16V1,
+            tile: (128, 128),
+            bk: 64,
+            stages: 3,
+            grid: (666, 1, 1),
+            block: (256, 1, 1),
+            dynamic_shared_bytes: 98_304,
+            static_shared_bytes: 0,
+            driver_abi,
+        },
+        (
+            "bf16_f32",
+            WeightDtype::Bf16,
+            WeightDtype::Bf16,
+            WeightDtype::F32,
+            (4621, 1928, 384),
+            _,
+        ) => FixedAutoPhysicalDescriptor {
+            family: InferenceTile::Tc128Sm89S3,
+            symbol: "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+            storage: [WeightDtype::Bf16, WeightDtype::Bf16, WeightDtype::F32],
+            backend: PhysicalGemmBackend::InferenceMma16V1,
+            tile: (128, 128),
+            bk: 64,
+            stages: 3,
+            grid: (111, 1, 1),
+            block: (256, 1, 1),
+            dynamic_shared_bytes: 98_304,
+            static_shared_bytes: 0,
+            driver_abi,
+        },
+        ("f16_f32", WeightDtype::F16, WeightDtype::F16, WeightDtype::F32, (4621, 768, 2304), _) => {
+            FixedAutoPhysicalDescriptor {
+                family: InferenceTile::Tc128Sm89S3,
+                symbol: "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                storage: [WeightDtype::F16, WeightDtype::F16, WeightDtype::F32],
+                backend: PhysicalGemmBackend::InferenceMma16V1,
+                tile: (128, 128),
+                bk: 64,
+                stages: 3,
+                grid: (666, 1, 1),
+                block: (256, 1, 1),
+                dynamic_shared_bytes: 98_304,
+                static_shared_bytes: 0,
+                driver_abi,
+            }
+        }
+        ("f16_f32", WeightDtype::F16, WeightDtype::F16, WeightDtype::F32, (4621, 1928, 384), _) => {
+            FixedAutoPhysicalDescriptor {
+                family: InferenceTile::Tc128Sm89S3,
+                symbol: "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                storage: [WeightDtype::F16, WeightDtype::F16, WeightDtype::F32],
+                backend: PhysicalGemmBackend::InferenceMma16V1,
+                tile: (128, 128),
+                bk: 64,
+                stages: 3,
+                grid: (111, 1, 1),
+                block: (256, 1, 1),
+                dynamic_shared_bytes: 98_304,
+                static_shared_bytes: 0,
+                driver_abi,
+            }
+        }
+        (
+            "f32_exact" | "f32_exact_fast",
+            WeightDtype::F32,
+            WeightDtype::F32,
+            WeightDtype::F32,
+            (4621, 1928, 384),
+            false,
+        ) => FixedAutoPhysicalDescriptor {
+            family: InferenceTile::F32Sm89N64CopyPlan,
+            symbol: "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+            storage: [WeightDtype::F32; 3],
+            backend: PhysicalGemmBackend::InferenceScalarFmaV1,
+            tile: (128, 64),
+            bk: 32,
+            stages: 2,
+            grid: (222, 1, 1),
+            block: (256, 1, 1),
+            dynamic_shared_bytes: 0,
+            static_shared_bytes: 49_152,
+            driver_abi,
+        },
+        _ => return Ok(None),
+    };
+
+    if selected != descriptor.family {
+        return Err(format!(
+            "fully supported retained Inference AUTO request expected admitted holder {} and family {:?}, but AUTO returned {selected:?}; the holder may have been rejected and AUTO fell back",
+            descriptor.symbol, descriptor.family
+        ));
+    }
+    let [actual] = recorded else {
+        return Err(format!(
+            "fully supported retained Inference AUTO request expected exactly one recorded holder route {}, got {}",
+            descriptor.symbol,
+            recorded.len()
+        ));
+    };
+    let expected_dtype = match descriptor.storage[0] {
+        WeightDtype::F32 => PolicyDtype::F32,
+        WeightDtype::F16 => PolicyDtype::F16,
+        WeightDtype::Bf16 => PolicyDtype::Bf16,
+    };
+    if actual.op != ResolvedGemmOp::Nn
+        || actual.symbol != descriptor.symbol
+        || actual.dtype != expected_dtype
+        || actual.backend != descriptor.backend
+        || actual.shape != (shape.m, shape.k, shape.n)
+        || actual.strides != (shape.k, shape.n, shape.n)
+        || actual.tile != descriptor.tile
+        || actual.bk != descriptor.bk
+        || actual.stages != descriptor.stages
+        || actual.threads != descriptor.block.0
+        || actual.grid != descriptor.grid
+        || actual.block != descriptor.block
+        || actual.dynamic_shared_bytes != descriptor.dynamic_shared_bytes
+    {
+        return Err(format!(
+            "fully supported retained Inference AUTO request expected admitted holder route {}, but recorded symbol {:?}, dtype {:?}, backend {:?}, shape {:?}, strides {:?}, tile {:?}, bk {}, stages {}, threads {}, grid {:?}, block {:?}, dynamic shared {}; the holder may have been rejected and AUTO fell back",
+            descriptor.symbol,
+            actual.symbol,
+            actual.dtype,
+            actual.backend,
+            actual.shape,
+            actual.strides,
+            actual.tile,
+            actual.bk,
+            actual.stages,
+            actual.threads,
+            actual.grid,
+            actual.block,
+            actual.dynamic_shared_bytes
+        ));
+    }
+    Ok(Some(descriptor))
+}
+
+fn fixed_auto_bundle_graph_contract(
+    descriptor: FixedAutoPhysicalDescriptor,
+    observed: &FixedAutoGraphObservation<'_>,
+    expected_pointers: [u64; 4],
+    shape: InferenceShape,
+) -> Result<(), String> {
+    let expected_bundle = [
+        1.0f32.to_bits(),
+        0.0f32.to_bits(),
+        shape.m as u32,
+        shape.n as u32,
+        shape.k as u32,
+        shape.k as u32,
+        shape.n as u32,
+        shape.n as u32,
+    ];
+    if observed.node_count != 1
+        || observed.symbol != descriptor.symbol
+        || observed.grid != descriptor.grid
+        || observed.block != descriptor.block
+        || observed.dynamic_shared_bytes != descriptor.dynamic_shared_bytes
+        || observed.static_shared_bytes != descriptor.static_shared_bytes
+        || observed.driver_abi != descriptor.driver_abi
+        || !observed.terminal_sixth_rejected
+        || observed.pointers != expected_pointers
+        || observed.bundle != expected_bundle
+    {
+        return Err(format!(
+            "wrong retained Inference AUTO physical graph: nodes={} symbol={:?} grid={:?} block={:?} dynamic_shared={} static_shared={} abi={:?} sixth_rejected={} pointers={:?} expected_pointers={expected_pointers:?} bundle={:?}",
+            observed.node_count,
+            observed.symbol,
+            observed.grid,
+            observed.block,
+            observed.dynamic_shared_bytes,
+            observed.static_shared_bytes,
+            observed.driver_abi,
+            observed.terminal_sixth_rejected,
+            observed.pointers,
+            observed.bundle
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -13425,6 +13748,11 @@ fn fixed_explicit_vendor_graph_inventory(
         InferenceFwdOperands,
         InferenceShape,
     )>,
+    auto_descriptor: Option<(
+        FixedAutoPhysicalDescriptor,
+        InferenceFwdOperands,
+        InferenceShape,
+    )>,
     bias_symbol: Option<&str>,
 ) -> String {
     use cudarc::driver::sys;
@@ -13452,7 +13780,7 @@ fn fixed_explicit_vendor_graph_inventory(
         );
         if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
             assert!(
-                ada_descriptor.is_none(),
+                ada_descriptor.is_none() && auto_descriptor.is_none(),
                 "{label} pipeline captured non-kernel work"
             );
             non_kernel_nodes += 1;
@@ -13555,6 +13883,80 @@ fn fixed_explicit_vendor_graph_inventory(
                     1
                 )
             );
+        }
+        if let Some((descriptor, operands, shape)) = auto_descriptor {
+            let mut driver_abi = Vec::with_capacity(5);
+            for index in 0..5 {
+                let mut offset = 0;
+                let mut size = 0;
+                assert_eq!(
+                    unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+                    sys::CUresult::CUDA_SUCCESS,
+                    "{label} retained AUTO Driver parameter {index}",
+                );
+                driver_abi.push((offset, size));
+            }
+            let mut offset = 0;
+            let mut size = 0;
+            let terminal_sixth_rejected =
+                unsafe { sys::cuFuncGetParamInfo(params.func, 5, &mut offset, &mut size) }
+                    == sys::CUresult::CUDA_ERROR_INVALID_VALUE;
+            let mut static_shared_bytes = 0;
+            assert_eq!(
+                unsafe {
+                    sys::cuFuncGetAttribute(
+                        &mut static_shared_bytes,
+                        sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                        params.func,
+                    )
+                },
+                sys::CUresult::CUDA_SUCCESS,
+                "{label} retained AUTO static shared memory",
+            );
+            let static_shared_bytes = u32::try_from(static_shared_bytes)
+                .unwrap_or_else(|_| panic!("{label} retained AUTO static shared is negative"));
+            assert!(
+                !params.kernelParams.is_null(),
+                "{label} retained AUTO kernelParams"
+            );
+            let mut pointers = [0; 4];
+            for (index, pointer) in pointers.iter_mut().enumerate() {
+                let argument = unsafe { *params.kernelParams.add(index) };
+                assert!(
+                    !argument.is_null(),
+                    "{label} retained AUTO argument {index}"
+                );
+                *pointer = unsafe { argument.cast::<u64>().read_unaligned() };
+            }
+            let bundle_pointer = unsafe { *params.kernelParams.add(4) };
+            assert!(
+                !bundle_pointer.is_null(),
+                "{label} retained AUTO parameter bundle"
+            );
+            let bundle = unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() };
+            fixed_auto_bundle_graph_contract(
+                descriptor,
+                &FixedAutoGraphObservation {
+                    node_count: count,
+                    symbol,
+                    grid: (params.gridDimX, params.gridDimY, params.gridDimZ),
+                    block,
+                    dynamic_shared_bytes: params.sharedMemBytes,
+                    static_shared_bytes,
+                    driver_abi,
+                    terminal_sixth_rejected,
+                    pointers,
+                    bundle,
+                },
+                [
+                    operands.c.ptr,
+                    operands.x.ptr,
+                    operands.w.ptr,
+                    operands.bias_ptr.unwrap_or(0),
+                ],
+                shape,
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
         }
         if let Some((tile, dtype, operands, shape)) = ada_descriptor {
             let mut driver_abi = Vec::with_capacity(5);
@@ -13970,6 +14372,406 @@ fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
     .expect("SM120 no-bias tile must have a force spec");
     assert!(nobias.bias_contract.allows(false));
     assert!(!nobias.bias_contract.allows(true));
+}
+
+#[cfg(test)]
+fn inference_bundle_auto_tooling_request(
+    nvrtc: (i32, i32),
+    state_capacity: usize,
+    row: &'static str,
+    input_dtype: WeightDtype,
+    shape: InferenceShape,
+    bias_ptr: Option<u64>,
+) -> FixedAutoPhysicalRequest<'static> {
+    FixedAutoPhysicalRequest {
+        row,
+        operands: InferenceFwdOperands {
+            c: TypedPtr {
+                ptr: 0x1000,
+                dtype: WeightDtype::F32,
+            },
+            x: TypedPtr {
+                ptr: 0x2000,
+                dtype: input_dtype,
+            },
+            w: TypedPtr {
+                ptr: 0x3000,
+                dtype: input_dtype,
+            },
+            bias_ptr,
+        },
+        shape,
+        selected: if input_dtype == WeightDtype::F32 {
+            InferenceTile::F32Sm89N64CopyPlan
+        } else {
+            InferenceTile::Tc128Sm89S3
+        },
+        compute_capability: (8, 9),
+        multiprocessors: 142,
+        compiler_target: "sm_89",
+        state_capacity,
+        nvrtc,
+        nvrtc_library_known: true,
+        policy: F32TriadPolicy::ExactScalarFmaV1,
+    }
+}
+
+#[cfg(test)]
+fn inference_bundle_auto_tooling_recorded_route(
+    symbol: &'static str,
+    dtype: mamba_rs::mamba_ssm::gpu::kernel_identity::PolicyDtype,
+    backend: mamba_rs::mamba_ssm::gpu::kernel_identity::PhysicalGemmBackend,
+    shape: InferenceShape,
+    geometry: ((u32, u32), u32, u8),
+    launch: ((u32, u32, u32), (u32, u32, u32), u32),
+) -> FixedAutoRecordedRoute {
+    FixedAutoRecordedRoute {
+        op: ResolvedGemmOp::Nn,
+        symbol,
+        dtype,
+        backend,
+        shape: (shape.m, shape.k, shape.n),
+        strides: (shape.k, shape.n, shape.n),
+        tile: geometry.0,
+        bk: geometry.1,
+        stages: geometry.2,
+        threads: launch.1.0,
+        grid: launch.0,
+        block: launch.1,
+        dynamic_shared_bytes: launch.2,
+    }
+}
+
+#[test]
+fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_force_aliases() {
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
+
+    let hot_b = InferenceShape {
+        m: 4621,
+        k: 768,
+        n: 2304,
+    };
+    let hot_c = InferenceShape {
+        m: 4621,
+        k: 1928,
+        n: 384,
+    };
+    let abi = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    let cohorts = [
+        ((12, 8), 16),
+        ((12, 8), 64),
+        ((13, 0), 16),
+        ((13, 0), 64),
+        ((13, 2), 16),
+        ((13, 2), 64),
+    ];
+    assert_eq!(cohorts.len(), 6);
+    for (nvrtc, state_capacity) in cohorts {
+        for (row, dtype, policy_dtype, symbol) in [
+            (
+                "bf16_f32",
+                WeightDtype::Bf16,
+                PolicyDtype::Bf16,
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+            ),
+            (
+                "f16_f32",
+                WeightDtype::F16,
+                PolicyDtype::F16,
+                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+            ),
+        ] {
+            for (shape, grid) in [(hot_b, 666), (hot_c, 111)] {
+                for bias_ptr in [None, Some(0x4004)] {
+                    let request = inference_bundle_auto_tooling_request(
+                        nvrtc,
+                        state_capacity,
+                        row,
+                        dtype,
+                        shape,
+                        bias_ptr,
+                    );
+                    let route = inference_bundle_auto_tooling_recorded_route(
+                        symbol,
+                        policy_dtype,
+                        PhysicalGemmBackend::InferenceMma16V1,
+                        shape,
+                        ((128, 128), 64, 3),
+                        ((grid, 1, 1), (256, 1, 1), 98_304),
+                    );
+                    let descriptor = fixed_auto_bundle_physical_descriptor(request, &[route])
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        descriptor,
+                        FixedAutoPhysicalDescriptor {
+                            family: InferenceTile::Tc128Sm89S3,
+                            symbol,
+                            storage: [dtype, dtype, WeightDtype::F32],
+                            backend: PhysicalGemmBackend::InferenceMma16V1,
+                            tile: (128, 128),
+                            bk: 64,
+                            stages: 3,
+                            grid: (grid, 1, 1),
+                            block: (256, 1, 1),
+                            dynamic_shared_bytes: 98_304,
+                            static_shared_bytes: 0,
+                            driver_abi: abi,
+                        },
+                        "literal mixed AUTO descriptor for {nvrtc:?}/cap{state_capacity} {row} {shape:?} bias={bias_ptr:?}"
+                    );
+                    let bundle = if shape == hot_b {
+                        [1.0f32.to_bits(), 0, 4621, 2304, 768, 768, 2304, 2304]
+                    } else {
+                        [1.0f32.to_bits(), 0, 4621, 384, 1928, 1928, 384, 384]
+                    };
+                    let pointers = [0x1000, 0x2000, 0x3000, bias_ptr.unwrap_or(0)];
+                    assert!(
+                        fixed_auto_bundle_graph_contract(
+                            descriptor,
+                            &FixedAutoGraphObservation {
+                                node_count: 1,
+                                symbol,
+                                grid: (grid, 1, 1),
+                                block: (256, 1, 1),
+                                dynamic_shared_bytes: 98_304,
+                                static_shared_bytes: 0,
+                                driver_abi: abi.to_vec(),
+                                terminal_sixth_rejected: true,
+                                pointers,
+                                bundle,
+                            },
+                            pointers,
+                            shape,
+                        )
+                        .is_ok()
+                    );
+                }
+            }
+        }
+
+        for row in ["f32_exact", "f32_exact_fast"] {
+            let request = inference_bundle_auto_tooling_request(
+                nvrtc,
+                state_capacity,
+                row,
+                WeightDtype::F32,
+                hot_c,
+                None,
+            );
+            let symbol = "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1";
+            let route = inference_bundle_auto_tooling_recorded_route(
+                symbol,
+                PolicyDtype::F32,
+                PhysicalGemmBackend::InferenceScalarFmaV1,
+                hot_c,
+                ((128, 64), 32, 2),
+                ((222, 1, 1), (256, 1, 1), 0),
+            );
+            assert_eq!(
+                fixed_auto_bundle_physical_descriptor(request, &[route])
+                    .unwrap()
+                    .unwrap(),
+                FixedAutoPhysicalDescriptor {
+                    family: InferenceTile::F32Sm89N64CopyPlan,
+                    symbol,
+                    storage: [WeightDtype::F32; 3],
+                    backend: PhysicalGemmBackend::InferenceScalarFmaV1,
+                    tile: (128, 64),
+                    bk: 32,
+                    stages: 2,
+                    grid: (222, 1, 1),
+                    block: (256, 1, 1),
+                    dynamic_shared_bytes: 0,
+                    static_shared_bytes: 49_152,
+                    driver_abi: abi,
+                },
+                "literal exact AUTO descriptor for {nvrtc:?}/cap{state_capacity} {row}"
+            );
+        }
+    }
+
+    assert_eq!(
+        fixed_force_spec("bf16", (8, 9), InferenceTile::Tc128Sm89S3)
+            .unwrap()
+            .expected_symbol,
+        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16"
+    );
+    assert!(fixed_force_spec("bf16_f32", (8, 9), InferenceTile::Tc128Sm89S3).is_err());
+    assert_eq!(
+        fixed_force_spec("f32_exact", (8, 9), InferenceTile::F32Sm89N64CopyPlan,)
+            .unwrap()
+            .expected_symbol,
+        "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
+    );
+}
+
+#[test]
+fn inference_bundle_auto_tooling_rejects_request_route_and_graph_mutations_closed() {
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
+
+    let shape = InferenceShape {
+        m: 4621,
+        k: 1928,
+        n: 384,
+    };
+    let request = inference_bundle_auto_tooling_request(
+        (13, 2),
+        64,
+        "f32_exact",
+        WeightDtype::F32,
+        shape,
+        None,
+    );
+    let symbol = "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1";
+    let route = inference_bundle_auto_tooling_recorded_route(
+        symbol,
+        PolicyDtype::F32,
+        PhysicalGemmBackend::InferenceScalarFmaV1,
+        shape,
+        ((128, 64), 32, 2),
+        ((222, 1, 1), (256, 1, 1), 0),
+    );
+    let descriptor = fixed_auto_bundle_physical_descriptor(request, &[route])
+        .unwrap()
+        .unwrap();
+
+    let mut fallback_request = request;
+    fallback_request.selected = InferenceTile::Legacy;
+    let error = fixed_auto_bundle_physical_descriptor(fallback_request, &[route]).unwrap_err();
+    assert!(error.contains(symbol));
+    assert!(error.contains("holder"));
+
+    for wrong_symbol in [
+        "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+        "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1_extra",
+        "prefix_gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+    ] {
+        let mut changed = route;
+        changed.symbol = wrong_symbol;
+        assert!(fixed_auto_bundle_physical_descriptor(request, &[changed]).is_err());
+    }
+    for changed in [
+        FixedAutoRecordedRoute {
+            grid: (438, 1, 1),
+            ..route
+        },
+        FixedAutoRecordedRoute {
+            block: (128, 1, 1),
+            threads: 128,
+            ..route
+        },
+        FixedAutoRecordedRoute {
+            dynamic_shared_bytes: 4,
+            ..route
+        },
+        FixedAutoRecordedRoute {
+            tile: (64, 64),
+            ..route
+        },
+        FixedAutoRecordedRoute {
+            shape: (4620, 1928, 384),
+            ..route
+        },
+        FixedAutoRecordedRoute {
+            strides: (1928, 384, 383),
+            ..route
+        },
+    ] {
+        assert!(fixed_auto_bundle_physical_descriptor(request, &[changed]).is_err());
+    }
+    assert!(fixed_auto_bundle_physical_descriptor(request, &[]).is_err());
+    assert!(fixed_auto_bundle_physical_descriptor(request, &[route, route]).is_err());
+
+    let mut request_mutations = Vec::new();
+    let mut changed = request;
+    changed.compute_capability = (8, 8);
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.multiprocessors = 141;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.compiler_target = "compute_89";
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.state_capacity = 32;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.nvrtc = (13, 1);
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.nvrtc_library_known = false;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.policy = F32TriadPolicy::AllowDeterministicTf32V1;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.operands.bias_ptr = Some(0x4004);
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.shape.m -= 1;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.operands.x.ptr = 0x2008;
+    request_mutations.push(changed);
+    let mut changed = request;
+    changed.operands.w.dtype = WeightDtype::F16;
+    request_mutations.push(changed);
+    for changed in request_mutations {
+        assert!(
+            fixed_auto_bundle_physical_descriptor(changed, &[route])
+                .unwrap()
+                .is_none(),
+            "closed request mutation entered the retained AUTO domain"
+        );
+    }
+
+    let pointers = [0x1000, 0x2000, 0x3000, 0];
+    let bundle = [1.0f32.to_bits(), 0, 4621, 384, 1928, 1928, 384, 384];
+    let good_graph = FixedAutoGraphObservation {
+        node_count: 1,
+        symbol,
+        grid: (222, 1, 1),
+        block: (256, 1, 1),
+        dynamic_shared_bytes: 0,
+        static_shared_bytes: 49_152,
+        driver_abi: vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)],
+        terminal_sixth_rejected: true,
+        pointers,
+        bundle,
+    };
+    assert!(fixed_auto_bundle_graph_contract(descriptor, &good_graph, pointers, shape).is_ok());
+    let mut graph_mutations = Vec::new();
+    let mut changed = good_graph.clone();
+    changed.symbol = "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1_extra";
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.grid = (438, 1, 1);
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.block = (128, 1, 1);
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.dynamic_shared_bytes = 4;
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.static_shared_bytes = 49_148;
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.driver_abi[4] = (32, 28);
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.terminal_sixth_rejected = false;
+    graph_mutations.push(changed);
+    let mut changed = good_graph.clone();
+    changed.pointers[0] = 0x1004;
+    graph_mutations.push(changed);
+    let mut changed = good_graph;
+    changed.bundle[3] = 385;
+    graph_mutations.push(changed);
+    for changed in graph_mutations {
+        assert!(fixed_auto_bundle_graph_contract(descriptor, &changed, pointers, shape).is_err());
+    }
 }
 
 #[test]
@@ -14648,7 +15450,52 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     c: typed(&reference, WeightDtype::F32),
                     ..auto_ops
                 };
-                let selected = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
+                let mut recorded_selected = None;
+                let auto_trace = ctx
+                    .record_eager_gemm_trace(|| {
+                        recorded_selected =
+                            Some(launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape));
+                        Ok(())
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "record production AUTO physical route {}/{} bias={has_bias}: {error}",
+                            row_spec.name, cell.label
+                        )
+                    });
+                let selected = recorded_selected.unwrap_or_else(|| {
+                    panic!(
+                        "production AUTO physical route did not return a family for {}/{} bias={has_bias}",
+                        row_spec.name, cell.label
+                    )
+                });
+                let recorded_routes = auto_trace
+                    .routes()
+                    .iter()
+                    .map(FixedAutoRecordedRoute::from)
+                    .collect::<Vec<_>>();
+                let auto_descriptor = fixed_auto_bundle_physical_descriptor(
+                    FixedAutoPhysicalRequest {
+                        row: row_spec.name,
+                        operands: auto_ops,
+                        shape,
+                        selected,
+                        compute_capability: device.compute_capability,
+                        multiprocessors: device.multiprocessor_count(),
+                        compiler_target: compiler.target.as_str(),
+                        state_capacity: ctx.state_cap(),
+                        nvrtc: compiler.nvrtc_version,
+                        nvrtc_library_known: compiler.nvrtc_library_known,
+                        policy: row_spec.policy,
+                    },
+                    &recorded_routes,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "resolve production AUTO physical route {}/{} bias={has_bias}: {error}",
+                        row_spec.name, cell.label
+                    )
+                });
                 let auto_bits = f32_bits(&ctx, &auto, elements);
                 let auto_raw = fixed_explicit_vendor_raw_bytes(&ctx, &auto);
                 assert_eq!(
@@ -14728,18 +15575,26 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                 let auto_inventory = fixed_explicit_vendor_graph_inventory(
                     &auto_graph,
                     "AUTO",
-                    fixed_explicit_vendor_ada_descriptor(selected).then_some((
-                        selected,
-                        row_spec.input_dtype,
-                        auto_ops,
-                        shape,
-                    )),
+                    (auto_descriptor.is_none() && fixed_explicit_vendor_ada_descriptor(selected))
+                        .then_some((selected, row_spec.input_dtype, auto_ops, shape)),
+                    auto_descriptor.map(|descriptor| (descriptor, auto_ops, shape)),
                     None,
                 );
-                let expected_auto_symbol =
-                    fixed_force_spec(row_spec.name, device.compute_capability, selected)
-                        .expect("resolve production AUTO physical route")
-                        .expected_symbol;
+                let expected_auto_symbol = match auto_descriptor {
+                    Some(descriptor) => descriptor.symbol,
+                    None => fixed_force_spec(
+                        row_spec.name,
+                        device.compute_capability,
+                        selected,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "resolve legacy production AUTO physical route {}/{} bias={has_bias}: {error}",
+                            row_spec.name, cell.label
+                        )
+                    })
+                    .expected_symbol,
+                };
                 assert!(
                     fixed_production_auto_inventory_has_exact_symbol(
                         &auto_inventory,
@@ -14755,6 +15610,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                 let vendor_inventory = fixed_explicit_vendor_graph_inventory(
                     &vendor_graph,
                     "vendor",
+                    None,
                     None,
                     bias_symbol,
                 );
@@ -15110,7 +15966,52 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     c: typed(&reference, WeightDtype::F32),
                     ..auto_ops
                 };
-                let selected = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
+                let mut recorded_selected = None;
+                let auto_trace = ctx
+                    .record_eager_gemm_trace(|| {
+                        recorded_selected =
+                            Some(launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape));
+                        Ok(())
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "record rung AUTO physical route {row}/{} bias={has_bias}: {error}",
+                            cell.label
+                        )
+                    });
+                let selected = recorded_selected.unwrap_or_else(|| {
+                    panic!(
+                        "rung AUTO physical route did not return a family for {row}/{} bias={has_bias}",
+                        cell.label
+                    )
+                });
+                let recorded_routes = auto_trace
+                    .routes()
+                    .iter()
+                    .map(FixedAutoRecordedRoute::from)
+                    .collect::<Vec<_>>();
+                let auto_descriptor = fixed_auto_bundle_physical_descriptor(
+                    FixedAutoPhysicalRequest {
+                        row,
+                        operands: auto_ops,
+                        shape,
+                        selected,
+                        compute_capability: device.compute_capability,
+                        multiprocessors: device.multiprocessor_count(),
+                        compiler_target: compiler.target.as_str(),
+                        state_capacity: ctx.state_cap(),
+                        nvrtc: compiler.nvrtc_version,
+                        nvrtc_library_known: compiler.nvrtc_library_known,
+                        policy,
+                    },
+                    &recorded_routes,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "resolve rung AUTO physical route {row}/{} bias={has_bias}: {error}",
+                        cell.label
+                    )
+                });
                 if device.compute_capability == (8, 9)
                     && device.multiprocessor_count() == 142
                     && compiler.nvrtc_library_known
@@ -15240,20 +16141,21 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     // Establish physical identity before timing or numeric-family
                     // rejection. RNA and both Ada half routes are mandatory even when
                     // graph timing is disabled: eager-only must not bypass ABI/argument gates.
-                    let auto_identity_graph =
-                        if fixed_explicit_vendor_needs_identity_graph(&paths, selected) {
-                            Some(
-                                unsafe {
-                                    capture_into_graph(&ctx.stream, || {
-                                        auto_launch();
-                                        Ok(())
-                                    })
-                                }
-                                .expect("capture AUTO physical-identity graph"),
-                            )
-                        } else {
-                            None
-                        };
+                    let auto_identity_graph = if auto_descriptor.is_some()
+                        || fixed_explicit_vendor_needs_identity_graph(&paths, selected)
+                    {
+                        Some(
+                            unsafe {
+                                capture_into_graph(&ctx.stream, || {
+                                    auto_launch();
+                                    Ok(())
+                                })
+                            }
+                            .expect("capture AUTO physical-identity graph"),
+                        )
+                    } else {
+                        None
+                    };
                     let forced_identity_graph =
                         if fixed_explicit_vendor_needs_identity_graph(&paths, tile) {
                             let graph = unsafe {
@@ -15272,17 +16174,21 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         } else {
                             None
                         };
-                    let auto_identity_inventory = fixed_explicit_vendor_ada_descriptor(selected)
-                        .then(|| {
-                            fixed_explicit_vendor_graph_inventory(
-                                auto_identity_graph
-                                    .as_ref()
-                                    .expect("Ada half AUTO always captures an identity graph"),
-                                "AUTO",
-                                Some((selected, input_dtype, auto_ops, shape)),
-                                None,
-                            )
-                        });
+                    let auto_identity_inventory = (auto_descriptor.is_some()
+                        || fixed_explicit_vendor_ada_descriptor(selected))
+                    .then(|| {
+                        fixed_explicit_vendor_graph_inventory(
+                            auto_identity_graph.as_ref().unwrap_or_else(|| {
+                                panic!("physical AUTO always captures an identity graph")
+                            }),
+                            "AUTO",
+                            (auto_descriptor.is_none()
+                                && fixed_explicit_vendor_ada_descriptor(selected))
+                            .then_some((selected, input_dtype, auto_ops, shape)),
+                            auto_descriptor.map(|descriptor| (descriptor, auto_ops, shape)),
+                            None,
+                        )
+                    });
                     let forced_identity_inventory = (tile == InferenceTile::Tf32RnaM128N128S3
                         || fixed_explicit_vendor_ada_descriptor(tile))
                     .then(|| {
@@ -15301,6 +16207,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                                 forced_ops,
                                 shape,
                             )),
+                            None,
                             None,
                         )
                     });
@@ -15353,12 +16260,10 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         let auto_inventory = fixed_explicit_vendor_graph_inventory(
                             auto_graph,
                             "AUTO",
-                            fixed_explicit_vendor_ada_descriptor(selected).then_some((
-                                selected,
-                                input_dtype,
-                                auto_ops,
-                                shape,
-                            )),
+                            (auto_descriptor.is_none()
+                                && fixed_explicit_vendor_ada_descriptor(selected))
+                            .then_some((selected, input_dtype, auto_ops, shape)),
+                            auto_descriptor.map(|descriptor| (descriptor, auto_ops, shape)),
                             None,
                         );
                         let forced_inventory = fixed_explicit_vendor_graph_inventory(
@@ -15377,6 +16282,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                                 shape,
                             )),
                             None,
+                            None,
                         );
                         let bias_symbol = has_bias.then_some(match output_dtype {
                             WeightDtype::F32 => "bias_broadcast",
@@ -15386,6 +16292,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         let vendor_inventory = fixed_explicit_vendor_graph_inventory(
                             vendor_graph,
                             "vendor",
+                            None,
                             None,
                             bias_symbol,
                         );
@@ -15929,11 +16836,13 @@ fn fixed_ada_half_forced_direct_pair() {
                     "pipeline",
                     Some((pipeline_tile, input_dtype, pipeline_ops, shape)),
                     None,
+                    None,
                 );
                 let swizzle_inventory = fixed_explicit_vendor_graph_inventory(
                     &swizzle_graph,
                     "swizzle",
                     Some((swizzle_tile, input_dtype, swizzle_ops, shape)),
+                    None,
                     None,
                 );
                 let graph_inventory = format!(

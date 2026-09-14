@@ -27,15 +27,17 @@ use super::context::GpuCtx;
 use super::dtype::WeightDtype;
 
 pub(in crate::mamba_ssm::gpu) mod identity;
+mod runtime_bundle;
+pub(crate) mod source_bundle;
 use super::kernel_identity::{
     NoPhysicalObserver, PhysicalLaunchObserver, PolicyDtype, enqueue_with_physical_observation,
 };
 
 type CUptr = cudarc::driver::sys::CUdeviceptr;
 
-/// Which inference tile actually launched - returned so callers and
-/// tests can assert launch reality; a kernel that silently never fires
-/// must be impossible to miss.
+/// Public inference family/tile label returned after a successful launch.
+/// Explicit force labels resolve literally. AUTO may use a retained private
+/// member of the same family; physical observations carry that exact function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceTile {
     /// Exact-f32 64x128 CTA, two-stage async mainloop.
@@ -265,10 +267,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
         return launch_sm89_half_swizzle(ctx, operands.x.dtype, &args, observer);
     }
     if tile == InferenceTile::Tc128Sm89S3 {
-        if operands.x.dtype == WeightDtype::F32
-            || operands.x.dtype != operands.w.dtype
-            || operands.x.dtype != operands.c.dtype
-        {
+        if !runtime_bundle::legacy_force_s3_dtype_supported(operands) {
             return Err("Fixed Ada half s3 requires matching bf16/f16 operands".into());
         }
         let args = FixedArgs::try_new(operands, shape)?;
@@ -4639,7 +4638,9 @@ mod sm89_rna_auto_tests {
 
 /// The Inference family's NN forward: `C[M,N] = A[M,K] @ B[K,N] (+ bias)`,
 /// deterministic and batch-invariant for every covered operand triple.
-/// Returns the tile that actually launched.
+/// Returns the existing public family label after a successful launch. AUTO
+/// may resolve that label to a newer private physical member, so it is not an
+/// exact force or graph-replay token.
 pub fn inference_forward(
     ctx: &GpuCtx,
     c: TypedPtr,
@@ -4671,6 +4672,10 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
     let args = FixedArgs::try_new(operands, shape)?;
     let homogeneous_f32 =
         c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32;
+    if let Some(route) = runtime_bundle::select_for_context(ctx, operands, shape) {
+        runtime_bundle::launch_inference_bundle(ctx, route, operands, shape, observer)?;
+        return Ok(runtime_bundle::family_label(route));
+    }
     if homogeneous_f32
         && ctx.f32_triad_policy() == super::context::F32TriadPolicy::AllowDeterministicTf32V1
     {

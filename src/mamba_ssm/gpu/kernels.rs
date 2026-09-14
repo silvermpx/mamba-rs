@@ -5,6 +5,7 @@
 
 use super::dtype::WeightDtype;
 use super::gemm_bi_triad::GemmBiKernels;
+use super::gemm_bi_triad::modules::inference_bundle::InferenceSm89Bundle;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -422,6 +423,7 @@ pub struct MambaKernels {
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
     pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
+    pub(crate) inference_sm89_bundle: InferenceSm89Bundle,
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
     pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm120_f32_n64_copyplan_rejection: Option<String>,
@@ -552,6 +554,15 @@ impl MambaKernels {
             "gemm_bi_f32_f32_n128_s2" => Some(&self.gemm_bi_f32_f32_n128_s2),
             "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" => {
                 self.fixed_sm89_f32_n64_copyplan.as_ref()
+            }
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16" => {
+                self.inference_sm89_bundle.half_f32out_s3_bf16.as_ref().ok()
+            }
+            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16" => {
+                self.inference_sm89_bundle.half_f32out_s3_f16.as_ref().ok()
+            }
+            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1" => {
+                self.inference_sm89_bundle.exact_m128n64_tail.as_ref().ok()
             }
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1" => {
                 self.fixed_sm120_f32_n64_copyplan.as_ref()
@@ -991,6 +1002,10 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_sliced(ctx, &fixed);
         let (fixed_sm120_fma_postbias, fixed_sm120_fma_postbias_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_fma_postbias(ctx, &fixed);
+        let inference_sm89_bundle =
+            super::gemm_bi_triad::modules::inference_bundle::load_inference_sm89_bundle(
+                ctx, &fixed, state_cap,
+            );
         let triad = GemmBiKernels::load(
             ctx,
             super::gemm_bi_triad::modules::GemmBiModuleSet {
@@ -1380,6 +1395,7 @@ impl MambaKernels {
             fixed_sm89_half_m128n64_s2_f16_rejection,
             fixed_sm89_f32_n64_copyplan,
             fixed_sm89_f32_n64_copyplan_rejection,
+            inference_sm89_bundle,
             fixed_sm120_f32_n64_copyplan,
             fixed_sm120_f32_n64_copyplan_rejection,
             fixed_sm120_f32_n64_copyplan_t256,
