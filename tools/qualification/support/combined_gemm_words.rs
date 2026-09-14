@@ -407,11 +407,317 @@ pub(super) fn required_env(key: &str) -> Result<String, String> {
     std::env::var(key).map_err(|e| format!("{key} is required: {e}"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceScope {
+    Exclusive,
+    SharedFunctional,
+}
+
+impl DeviceScope {
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "exclusive" => Ok(Self::Exclusive),
+            "shared-functional" => Ok(Self::SharedFunctional),
+            _ => Err(format!(
+                "COMBINED_GEMM_DEVICE_SCOPE must be exclusive or shared-functional, got {value:?}"
+            )),
+        }
+    }
+
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exclusive => "exclusive",
+            Self::SharedFunctional => "shared-functional",
+        }
+    }
+}
+
+fn device_scope_from_value(value: Option<std::ffi::OsString>) -> Result<DeviceScope, String> {
+    match value {
+        None => Ok(DeviceScope::Exclusive),
+        Some(value) => DeviceScope::parse(
+            value
+                .to_str()
+                .ok_or("COMBINED_GEMM_DEVICE_SCOPE must be valid UTF-8")?,
+        ),
+    }
+}
+
+#[derive(Debug)]
+struct SharedTelemetry {
+    uuid: String,
+    gpu_utilization_percent: u32,
+    memory_utilization_percent: u32,
+    used_memory_mib: u64,
+    free_memory_mib: u64,
+    sm_clock_mhz: u32,
+    temperature_c: u32,
+    pstate: String,
+}
+
+#[derive(Debug)]
+struct SharedProcess {
+    uuid: String,
+    pid: u32,
+    used_memory_mib: u64,
+}
+
+fn parse_shared_telemetry(line: &str, expected_uuid: &str) -> Result<SharedTelemetry, String> {
+    let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+    if fields.len() != 8 {
+        return Err(format!(
+            "shared-functional GPU telemetry must contain eight fields, got {line:?}"
+        ));
+    }
+    if fields[0] != expected_uuid {
+        return Err(format!(
+            "NVML UUID {} differs from selected CUDA UUID {expected_uuid}",
+            fields[0]
+        ));
+    }
+    let parse_u32 = |index: usize, label: &str| {
+        fields[index]
+            .parse::<u32>()
+            .map_err(|error| format!("parse {label} {:?}: {error}", fields[index]))
+    };
+    let parse_u64 = |index: usize, label: &str| {
+        fields[index]
+            .parse::<u64>()
+            .map_err(|error| format!("parse {label} {:?}: {error}", fields[index]))
+    };
+    let telemetry = SharedTelemetry {
+        uuid: fields[0].to_owned(),
+        gpu_utilization_percent: parse_u32(1, "GPU utilization")?,
+        memory_utilization_percent: parse_u32(2, "memory utilization")?,
+        used_memory_mib: parse_u64(3, "used memory")?,
+        free_memory_mib: parse_u64(4, "free memory")?,
+        sm_clock_mhz: parse_u32(5, "SM clock")?,
+        temperature_c: parse_u32(6, "GPU temperature")?,
+        pstate: fields[7].to_owned(),
+    };
+    let pstate_number = telemetry
+        .pstate
+        .strip_prefix('P')
+        .and_then(|value| value.parse::<u32>().ok());
+    if telemetry.gpu_utilization_percent > 100
+        || telemetry.memory_utilization_percent > 100
+        || telemetry
+            .used_memory_mib
+            .checked_add(telemetry.free_memory_mib)
+            .is_none_or(|total| total == 0)
+        || telemetry.sm_clock_mhz == 0
+        || telemetry.temperature_c == 0
+        || pstate_number.is_none_or(|number| number > 15)
+    {
+        return Err(format!(
+            "shared-functional GPU telemetry is not well formed: {line:?}"
+        ));
+    }
+    Ok(telemetry)
+}
+
+fn parse_shared_processes(text: &str, expected_uuid: &str) -> Result<Vec<SharedProcess>, String> {
+    let mut processes = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(format!(
+                "shared-functional compute-process row must contain UUID, PID and used MiB: {line:?}"
+            ));
+        }
+        if fields[0] != expected_uuid {
+            return Err(format!(
+                "compute-process UUID {} differs from selected CUDA UUID {expected_uuid}",
+                fields[0]
+            ));
+        }
+        let pid = fields[1]
+            .parse::<u32>()
+            .map_err(|error| format!("parse compute PID {:?}: {error}", fields[1]))?;
+        let used_memory_mib = fields[2]
+            .parse::<u64>()
+            .map_err(|error| format!("parse process used memory {:?}: {error}", fields[2]))?;
+        if pid == 0 {
+            return Err("compute-process PID must be nonzero".into());
+        }
+        processes.push(SharedProcess {
+            uuid: fields[0].to_owned(),
+            pid,
+            used_memory_mib,
+        });
+    }
+    Ok(processes)
+}
+
+struct SharedFunctionalGpu {
+    cuda_ordinal: usize,
+    uuid: String,
+}
+
+impl SharedFunctionalGpu {
+    fn telemetry(&self) -> Result<SharedTelemetry, String> {
+        let output = std::process::Command::new("nvidia-smi")
+            .args([
+                "-i",
+                &self.uuid,
+                "--query-gpu=uuid,utilization.gpu,utilization.memory,memory.used,memory.free,clocks.sm,temperature.gpu,pstate",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map_err(|error| format!("run shared-functional GPU telemetry: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "shared-functional GPU telemetry for CUDA ordinal {} ({}) exited with {}: {}",
+                self.cuda_ordinal,
+                self.uuid,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let text = String::from_utf8(output.stdout)
+            .map_err(|error| format!("shared-functional GPU telemetry UTF-8: {error}"))?;
+        let mut rows = text.lines().filter(|line| !line.trim().is_empty());
+        let row = rows
+            .next()
+            .ok_or("shared-functional GPU telemetry returned no selected row")?;
+        if rows.next().is_some() {
+            return Err("shared-functional GPU telemetry returned multiple selected rows".into());
+        }
+        parse_shared_telemetry(row, &self.uuid)
+    }
+
+    fn processes(&self) -> Result<Vec<SharedProcess>, String> {
+        let output = std::process::Command::new("nvidia-smi")
+            .args([
+                "-i",
+                &self.uuid,
+                "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map_err(|error| format!("run shared-functional compute-process census: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "shared-functional compute-process census for {} exited with {}: {}",
+                self.uuid,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let text = String::from_utf8(output.stdout)
+            .map_err(|error| format!("shared-functional compute-process census UTF-8: {error}"))?;
+        parse_shared_processes(&text, &self.uuid)
+    }
+
+    fn observation(&self, label: &str, enforce_start_idle: bool) -> Result<Value, String> {
+        let telemetry = self.telemetry()?;
+        let processes = self.processes()?;
+        // WHY: correctness may share resident memory, but context construction starts only
+        // after an idle compute sample so pre-existing work cannot contaminate setup.
+        if enforce_start_idle && telemetry.gpu_utilization_percent > 1 {
+            return Err(format!(
+                "{label} requires start-only GPU utilization <=1%, observed {}%",
+                telemetry.gpu_utilization_percent
+            ));
+        }
+        let observation = json!({
+            "device_scope":"shared-functional",
+            "label":label,
+            "selected_cuda_ordinal":self.cuda_ordinal,
+            "selected_gpu_uuid":telemetry.uuid,
+            "gpu_utilization_percent":telemetry.gpu_utilization_percent,
+            "memory_utilization_percent":telemetry.memory_utilization_percent,
+            "used_memory_mib":telemetry.used_memory_mib,
+            "free_memory_mib":telemetry.free_memory_mib,
+            "sm_clock_mhz":telemetry.sm_clock_mhz,
+            "temperature_c":telemetry.temperature_c,
+            "pstate":telemetry.pstate,
+            "compute_processes":processes.iter().map(|process|json!({"gpu_uuid":process.uuid,"pid":process.pid,"used_memory_mib":process.used_memory_mib})).collect::<Vec<_>>(),
+            "resident_processes_allowed":true,
+            "resident_memory_allowed":true,
+            "performance_timing_certified":false,
+        });
+        eprintln!(
+            "{}",
+            json!({"record":"combined-gemm-device-observation","observation":observation})
+        );
+        Ok(observation)
+    }
+}
+
+enum DeviceScopeMonitor {
+    Exclusive(QuietGpu),
+    SharedFunctional(SharedFunctionalGpu),
+}
+
+impl DeviceScopeMonitor {
+    fn new(scope: DeviceScope) -> Result<Self, String> {
+        let selected = QuietGpu::for_cuda_ordinal(0)?;
+        match scope {
+            DeviceScope::Exclusive => Ok(Self::Exclusive(selected)),
+            DeviceScope::SharedFunctional => Ok(Self::SharedFunctional(SharedFunctionalGpu {
+                cuda_ordinal: 0,
+                uuid: selected.uuid,
+            })),
+        }
+    }
+
+    const fn scope(&self) -> DeviceScope {
+        match self {
+            Self::Exclusive(_) => DeviceScope::Exclusive,
+            Self::SharedFunctional(_) => DeviceScope::SharedFunctional,
+        }
+    }
+
+    fn uuid(&self) -> &str {
+        match self {
+            Self::Exclusive(gpu) => &gpu.uuid,
+            Self::SharedFunctional(gpu) => &gpu.uuid,
+        }
+    }
+
+    fn pre_context(&self, label: &str) -> Result<Value, String> {
+        match self {
+            Self::Exclusive(gpu) => {
+                let snapshot = gpu.require_pre_context(label)?;
+                Ok(
+                    json!({"device_scope":"exclusive","selected_cuda_ordinal":0,"selected_gpu_uuid":gpu.uuid,"quiet_gpu_snapshot":snapshot}),
+                )
+            }
+            Self::SharedFunctional(gpu) => gpu.observation(label, true),
+        }
+    }
+
+    fn cohort(&self, label: &str) -> Result<Value, String> {
+        match self {
+            Self::Exclusive(gpu) => {
+                let snapshot = gpu.require_cohort(label)?;
+                Ok(
+                    json!({"device_scope":"exclusive","selected_cuda_ordinal":0,"selected_gpu_uuid":gpu.uuid,"quiet_gpu_snapshot":snapshot}),
+                )
+            }
+            Self::SharedFunctional(gpu) => gpu.observation(label, false),
+        }
+    }
+
+    fn finish(&self, label: &str) -> Result<Value, String> {
+        match self {
+            Self::Exclusive(gpu) => {
+                let snapshot = gpu.verify_post_cohort(label)?;
+                Ok(
+                    json!({"device_scope":"exclusive","selected_cuda_ordinal":0,"selected_gpu_uuid":gpu.uuid,"quiet_gpu_snapshot":snapshot}),
+                )
+            }
+            Self::SharedFunctional(gpu) => gpu.observation(label, false),
+        }
+    }
+}
+
 pub(super) struct Runtime {
     pub ctx: GpuCtx,
     pub device: GpuDevice,
-    pub quiet: QuietGpu,
     pub metadata: Value,
+    monitor: DeviceScopeMonitor,
     source_digest: String,
 }
 
@@ -443,9 +749,9 @@ impl Runtime {
             );
         }
         let source_digest = source_snapshot()?;
-        let quiet = QuietGpu::for_cuda_ordinal(0)?;
-        // Final acceptance cannot coexist with another owner, even when memory is available.
-        let preflight = quiet.require_pre_context("combined-gemm/pre-context")?;
+        let scope = device_scope_from_value(std::env::var_os("COMBINED_GEMM_DEVICE_SCOPE"))?;
+        let monitor = DeviceScopeMonitor::new(scope)?;
+        let preflight = monitor.pre_context("combined-gemm/pre-context")?;
         let device = GpuDevice::new(0)?;
         if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
             return Err("combined acceptance requires the 142-SM CC8.9 device".into());
@@ -481,30 +787,38 @@ impl Runtime {
             "released_overlay_sha256":if released {Some(sha(super::HARNESS_SOURCE.as_bytes()))}else{None},
             "case_schema_sha256":sha(schema.as_bytes()), "lock_sha256":sha(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock")).map_err(|e| e.to_string())?),
             "executable_sha256":sha(&std::fs::read(&executable).map_err(|e| e.to_string())?), "executable":executable,
-            "rustc":String::from_utf8(rustc.stdout).map_err(|e| e.to_string())?, "device":format!("{:?}",device.identity()), "gpu_uuid":quiet.uuid, "preflight":preflight,
+            "rustc":String::from_utf8(rustc.stdout).map_err(|e| e.to_string())?, "device":format!("{:?}",device.identity()), "gpu_uuid":monitor.uuid(), "device_scope":scope.as_str(), "preflight":preflight,
             "fixed_compiler":format!("{compiler:?}"), "artifact_set":format!("{:?}",ctx.kernels.artifact_set_identity()), "logical_cases":99, "required_cases":14, "additional_cases":85});
         Ok(Self {
             ctx,
             device,
-            quiet,
             metadata,
+            monitor,
             source_digest,
         })
     }
 
-    pub(super) fn finish(&self) -> Result<(), String> {
+    pub(super) fn device_scope(&self) -> &'static str {
+        self.monitor.scope().as_str()
+    }
+
+    pub(super) fn cohort_observation(&self, label: &str) -> Result<Value, String> {
+        self.monitor.cohort(label)
+    }
+
+    pub(super) fn finish(&self) -> Result<Value, String> {
         self.ctx
             .stream
             .synchronize()
             .map_err(|e| format!("final sync: {e:?}"))?;
-        self.quiet.verify_post_cohort("combined-gemm/post-cohort")?;
+        let observation = self.monitor.finish("combined-gemm/post-cohort")?;
         if source_snapshot()? != self.source_digest {
             return Err("production source drifted during acceptance".into());
         }
         if self.metadata["device"] != format!("{:?}", self.device.identity()) {
             return Err("device identity drifted during acceptance".into());
         }
-        Ok(())
+        Ok(observation)
     }
 }
 
@@ -972,6 +1286,19 @@ pub(super) fn run_words(
         {
             return Err("released cohort has no complete exact AUTO replay/word receipt".into());
         }
+        let released_scope = DeviceScope::parse(
+            completion["device_scope"]
+                .as_str()
+                .ok_or("released completion is missing a valid device scope")?,
+        )?;
+        let released_identity_scope = DeviceScope::parse(
+            completion["identity"]["device_scope"]
+                .as_str()
+                .ok_or("released completion identity is missing a valid device scope")?,
+        )?;
+        if released_scope != runtime.monitor.scope() || released_identity_scope != released_scope {
+            return Err("released/current completion device scopes differ".into());
+        }
         expected_files = completion["reference_files"]
             .as_object()
             .ok_or("released completion has no reference-file hashes")?
@@ -984,7 +1311,7 @@ pub(super) fn run_words(
     let mut records = 0;
     for case in inventory()? {
         configure(&runtime.ctx, &case)?;
-        runtime.quiet.require_cohort(&case.id)?;
+        let cohort_observation = runtime.cohort_observation(&case.id)?;
         for exceptional in [false, true] {
             let path = directory.join(format!(
                 "{cohort}.{}.{}.words",
@@ -1022,7 +1349,7 @@ pub(super) fn run_words(
                 observer.after(&runtime.ctx, &fixture)?;
                 if reference.is_none() {
                     if released {
-                        let metadata = json!({"identity":runtime.metadata,"logical":logical,"reference_run":"independently-reset-eager","required_runs":["eager","replay1","replay2"],"required_prefix_bytes":[0,64],"words_sha256":sha(&actual)});
+                        let metadata = json!({"device_scope":runtime.device_scope(),"identity":runtime.metadata,"logical":logical,"reference_run":"independently-reset-eager","required_runs":["eager","replay1","replay2"],"required_prefix_bytes":[0,64],"words_sha256":sha(&actual),"performance_timing_certified":false});
                         write_reference(&path, &metadata.to_string(), &actual)?;
                     }
                     let (text, expected) = read_reference(&path)?;
@@ -1031,6 +1358,8 @@ pub(super) fn run_words(
                     if metadata["logical"] != logical
                         || metadata["identity"]["released"] != true
                         || metadata["identity"]["base_commit"] != RELEASED_SHA
+                        || metadata["device_scope"] != runtime.device_scope()
+                        || metadata["identity"]["device_scope"] != runtime.device_scope()
                         || metadata["words_sha256"] != sha(&expected)
                     {
                         return Err(format!(
@@ -1081,15 +1410,15 @@ pub(super) fn run_words(
             );
             eprintln!(
                 "{}",
-                json!({"record":"raw-word-pass","cohort":cohort,"case":case.id,"exceptional":exceptional,"independent_runs":6,"reference":path,"reference_file_sha256":sha(&std::fs::read(&path).map_err(|e|e.to_string())?)})
+                json!({"record":"raw-word-pass","device_scope":runtime.device_scope(),"device_observation":cohort_observation,"cohort":cohort,"case":case.id,"exceptional":exceptional,"independent_runs":6,"reference":path,"reference_file_sha256":sha(&std::fs::read(&path).map_err(|e|e.to_string())?),"performance_timing_certified":false})
             );
         }
     }
     if records != 198 {
         return Err(format!("incomplete raw word inventory {records}/198"));
     }
-    runtime.finish()?;
-    let completion = json!({"record":"cohort-complete","identity":runtime.metadata,"reference_records":records,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"reference_files":reference_files,"campaign_case_cohort_keys_required":594,"six_cohort_campaign_complete":false});
+    let finish_observation = runtime.finish()?;
+    let completion = json!({"record":"cohort-complete","device_scope":runtime.device_scope(),"finish_device_observation":finish_observation,"identity":runtime.metadata,"reference_records":records,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"reference_files":reference_files,"campaign_case_cohort_keys_required":594,"six_cohort_campaign_complete":false,"performance_timing_certified":false});
     let completion_path = directory.join(format!(
         "{cohort}.{}-complete.receipt",
         if released { "released" } else { "current" }
@@ -1102,6 +1431,73 @@ pub(super) fn run_words(
 #[cfg(test)]
 mod combined_gemm_host {
     use super::*;
+
+    #[test]
+    fn combined_gemm_shared_scope_parser_defaults_and_rejects_unknown_values() {
+        assert_eq!(
+            device_scope_from_value(None).unwrap(),
+            DeviceScope::Exclusive
+        );
+        assert_eq!(
+            device_scope_from_value(Some(std::ffi::OsString::from("exclusive"))).unwrap(),
+            DeviceScope::Exclusive
+        );
+        assert_eq!(
+            device_scope_from_value(Some(std::ffi::OsString::from("shared-functional"))).unwrap(),
+            DeviceScope::SharedFunctional
+        );
+        for value in ["", "shared", "Shared-functional", "exclusive "] {
+            assert!(
+                device_scope_from_value(Some(std::ffi::OsString::from(value))).is_err(),
+                "unexpected scope {value:?} must fail closed"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            assert!(
+                device_scope_from_value(Some(std::ffi::OsString::from_vec(vec![0xff]))).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn combined_gemm_shared_scope_parses_selected_telemetry_and_process_census() {
+        let uuid = "GPU-12345678-9abc-def0-1020-304050607080";
+        let telemetry = parse_shared_telemetry(
+            "GPU-12345678-9abc-def0-1020-304050607080, 1, 7, 14336, 34816, 1800, 44, P2",
+            uuid,
+        )
+        .unwrap();
+        assert_eq!(telemetry.gpu_utilization_percent, 1);
+        assert_eq!(telemetry.used_memory_mib, 14_336);
+        assert_eq!(telemetry.free_memory_mib, 34_816);
+        let processes = parse_shared_processes(
+            "GPU-12345678-9abc-def0-1020-304050607080, 4242, 12288\nGPU-12345678-9abc-def0-1020-304050607080, 4343, 2048",
+            uuid,
+        )
+        .unwrap();
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 4242);
+        assert_eq!(processes[0].used_memory_mib, 12_288);
+
+        assert!(
+            parse_shared_telemetry("GPU-foreign, 1, 7, 14336, 34816, 1800, 44, P2", uuid,).is_err()
+        );
+        assert!(
+            parse_shared_telemetry(
+                "GPU-12345678-9abc-def0-1020-304050607080, busy, 7, 14336, 34816, 1800, 44, P2",
+                uuid,
+            )
+            .is_err()
+        );
+        assert!(parse_shared_processes("GPU-foreign, 4242, 12288", uuid).is_err());
+        assert!(
+            parse_shared_processes("GPU-12345678-9abc-def0-1020-304050607080, pid, 12288", uuid,)
+                .is_err()
+        );
+    }
 
     #[test]
     fn transpose_expectation_keeps_every_active_raw_word_and_inactive_suffix() {

@@ -1123,7 +1123,7 @@ impl Census {
         self.auto_complete = true;
         eprintln!(
             "{}",
-            json!({"record":"auto-census-complete","cases":count,"literal_functions":self.functions.len(),"live_finalist_function_complete":true,"raw_word_acceptance_complete":false,"promotion_eligible":false})
+            json!({"record":"auto-census-complete","device_scope":runtime.device_scope(),"cases":count,"literal_functions":self.functions.len(),"live_finalist_function_complete":true,"raw_word_acceptance_complete":false,"promotion_eligible":false,"performance_timing_certified":false})
         );
         Ok(())
     }
@@ -1439,7 +1439,7 @@ fn identity_receipt(runtime: &words::Runtime, census: &Census) -> Result<Value, 
         );
     }
     Ok(
-        json!({"schema":"combined-gemm-census.v1","identity":runtime.metadata,"modules":modules,"scalar_fixed_pair":[modules["TriadScalar"],modules["Fixed"]],"functions":census.functions.iter().map(|(symbol,function)|(symbol,&function.json)).collect::<BTreeMap<_,_>>(),"anchors":census.anchors.iter().map(|anchor|json!({"graph":anchor.graph.cu_graph() as usize,"managed_pointers":anchor.fixture.pointers(),"replayed":false})).collect::<Vec<_>>(),"auto_cases_complete":if census.auto_complete {99}else{0},"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false}),
+        json!({"schema":"combined-gemm-census.v1","device_scope":runtime.device_scope(),"identity":runtime.metadata,"modules":modules,"scalar_fixed_pair":[modules["TriadScalar"],modules["Fixed"]],"functions":census.functions.iter().map(|(symbol,function)|(symbol,&function.json)).collect::<BTreeMap<_,_>>(),"anchors":census.anchors.iter().map(|anchor|json!({"graph":anchor.graph.cu_graph() as usize,"managed_pointers":anchor.fixture.pointers(),"replayed":false})).collect::<Vec<_>>(),"auto_cases_complete":if census.auto_complete {99}else{0},"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false,"performance_timing_certified":false}),
     )
 }
 
@@ -1456,6 +1456,8 @@ fn require_staged_identity(runtime: &words::Runtime, census: &Census) -> Result<
         || previous["modules"] != current["modules"]
         || previous["scalar_fixed_pair"] != current["scalar_fixed_pair"]
         || previous["identity"]["cohort"] != current["identity"]["cohort"]
+        || previous["device_scope"] != current["device_scope"]
+        || previous["identity"]["device_scope"] != current["identity"]["device_scope"]
         || previous["finalist_live_function_complete"] != false
     {
         return Err("staged build changed measured compiler/artifact/cohort identity, or initial receipt is not pre-finalist".into());
@@ -1470,7 +1472,7 @@ fn save_census(runtime: &words::Runtime, census: &Census) -> Result<String, Stri
 }
 
 #[test]
-#[ignore = "requires explicit identities/auto phase, cap, receipt paths and an exclusive 142-SM Ada GPU"]
+#[ignore = "requires explicit identities/auto phase, scope, cap, receipt paths and a 142-SM Ada GPU"]
 fn combined_gemm_module_census() -> Result<(), String> {
     let phase = words::required_env("COMBINED_GEMM_PHASE")?;
     if phase == "verify-six" {
@@ -1487,17 +1489,17 @@ fn combined_gemm_module_census() -> Result<(), String> {
         require_staged_identity(&runtime, &census)?;
         census.complete_auto_inventory(&runtime)?;
     }
-    runtime.finish()?;
+    let finish_observation = runtime.finish()?;
     let hash = save_census(&runtime, &census)?;
     eprintln!(
         "{}",
-        json!({"record":"census-phase-receipt","phase":phase,"receipt_sha256":hash,"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false})
+        json!({"record":"census-phase-receipt","device_scope":runtime.device_scope(),"finish_device_observation":finish_observation,"phase":phase,"receipt_sha256":hash,"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false,"performance_timing_certified":false})
     );
     Ok(())
 }
 
 #[test]
-#[ignore = "requires measured provisional identities, released reference files, explicit cap and exclusive Ada GPU"]
+#[ignore = "requires measured provisional identities, released reference files, explicit scope/cap and Ada GPU"]
 fn combined_gemm_released_auto_bits() -> Result<(), String> {
     let mut runtime = words::Runtime::new(false)?;
     runtime.metadata["current_acceptance_source_sha256"] =
@@ -1594,6 +1596,40 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
     Ok(())
 }
 
+fn completion_device_scope(receipt: &Value) -> Result<words::DeviceScope, String> {
+    let scope = words::DeviceScope::parse(
+        receipt["device_scope"]
+            .as_str()
+            .ok_or("completion receipt is missing a valid device scope")?,
+    )?;
+    let identity_scope = words::DeviceScope::parse(
+        receipt["identity"]["device_scope"]
+            .as_str()
+            .ok_or("completion identity is missing a valid device scope")?,
+    )?;
+    if identity_scope != scope {
+        return Err("completion and identity device scopes differ".into());
+    }
+    if !receipt["identity"]["physical_census"].is_null() {
+        let census_scope = words::DeviceScope::parse(
+            receipt["identity"]["physical_census"]["device_scope"]
+                .as_str()
+                .ok_or("physical census is missing a valid device scope")?,
+        )?;
+        if census_scope != scope {
+            return Err("completion and physical-census device scopes differ".into());
+        }
+    }
+    Ok(scope)
+}
+
+fn validate_completion_scope_pair(released: &Value, current: &Value) -> Result<(), String> {
+    if completion_device_scope(released)? != completion_device_scope(current)? {
+        return Err("released/current completion device scopes differ".into());
+    }
+    Ok(())
+}
+
 fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
     if receipts.len() != 6 {
         return Err("six complete current cohorts are required".into());
@@ -1602,8 +1638,16 @@ fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
     let mut fixed = std::collections::BTreeSet::new();
     let mut invariant: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut common: BTreeMap<&str, String> = BTreeMap::new();
+    let mut device_scope = None;
     let symbols = symbol_inventory()?;
     for receipt in receipts {
+        let receipt_scope = completion_device_scope(receipt)?;
+        if device_scope
+            .replace(receipt_scope)
+            .is_some_and(|scope| scope != receipt_scope)
+        {
+            return Err("current six-cohort completion device scopes differ".into());
+        }
         let identity = &receipt["identity"];
         let toolkit = identity["toolkit"].as_str().ok_or("missing toolkit")?;
         let cap = identity["state_capacity"]
@@ -1682,7 +1726,7 @@ fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
             }
         }
     }
-    if cohorts.len() != 6 || fixed.len() != 6 || invariant.len() != 12 {
+    if cohorts.len() != 6 || fixed.len() != 6 || invariant.len() != 12 || device_scope.is_none() {
         return Err("cohort module closure incomplete".into());
     }
     for module in ["TriadScalar", "TriadSm89Half", "TriadSm89Finalist"] {
@@ -1761,11 +1805,13 @@ fn verify_six_cohorts() -> Result<(), String> {
             {
                 return Err("released/current completion provenance differs".into());
             }
+            validate_completion_scope_pair(&pair[0], &pair[1])?;
             current.push(pair.remove(1));
         }
     }
     validate_six_current(&current)?;
-    let receipt = json!({"schema":"combined-gemm-six-cohort.v1","case_cohort_keys_per_version":594,"logical_cases":99,"toolkits":["12.8","13.0","13.2"],"state_capacities":[16,64],"literal_auto_and_raw_words_complete":true,"admission_arrays_modified":false,"receipts":current});
+    let device_scope = completion_device_scope(&current[0])?.as_str();
+    let receipt = json!({"schema":"combined-gemm-six-cohort.v1","device_scope":device_scope,"case_cohort_keys_per_version":594,"logical_cases":99,"toolkits":["12.8","13.0","13.2"],"state_capacities":[16,64],"literal_auto_and_raw_words_complete":true,"admission_arrays_modified":false,"performance_timing_certified":false,"receipts":current});
     let path = std::path::PathBuf::from(words::required_env("COMBINED_GEMM_CENSUS_RECEIPT")?);
     words::write_reference(&path, &receipt.to_string(), &[])?;
     eprintln!(
@@ -1942,7 +1988,7 @@ mod combined_gemm_host {
                 .iter()
                 .map(|symbol| (*symbol, json!({})))
                 .collect::<BTreeMap<_, _>>();
-            receipts.push(json!({"reference_records":198,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"identity":{"toolkit":toolkit,"state_capacity":cap,"cohort":format!("cuda{toolkit}-cap{cap}"),"released":false,"case_schema_sha256":"a".repeat(64),"shared_payload_sha256":"b".repeat(64),"harness_source_sha256":"c".repeat(64),"production_source_snapshot_sha256":"d".repeat(64),"physical_census":{"auto_cases_complete":99,"finalist_live_function_complete":true,"functions":functions,"modules":{"Fixed":fixed,"TriadScalar":scalar,"TriadSm89Half":format!("half-{toolkit}"),"TriadSm89Finalist":format!("finalist-{toolkit}"),"TriadSm89Tf32Joint":format!("joint-{toolkit}")},"scalar_fixed_pair":[scalar,fixed]}}}));
+            receipts.push(json!({"device_scope":"shared-functional","reference_records":198,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"identity":{"device_scope":"shared-functional","toolkit":toolkit,"state_capacity":cap,"cohort":format!("cuda{toolkit}-cap{cap}"),"released":false,"case_schema_sha256":"a".repeat(64),"shared_payload_sha256":"b".repeat(64),"harness_source_sha256":"c".repeat(64),"production_source_snapshot_sha256":"d".repeat(64),"physical_census":{"device_scope":"shared-functional","auto_cases_complete":99,"finalist_live_function_complete":true,"functions":functions,"modules":{"Fixed":fixed,"TriadScalar":scalar,"TriadSm89Half":format!("half-{toolkit}"),"TriadSm89Finalist":format!("finalist-{toolkit}"),"TriadSm89Tf32Joint":format!("joint-{toolkit}")},"scalar_fixed_pair":[scalar,fixed]}}}));
         }
         for receipt in &mut receipts {
             receipt["identity"]["current_acceptance_source_sha256"] = json!("e".repeat(64));
@@ -1981,6 +2027,48 @@ mod combined_gemm_host {
                 "missing or malformed current-only validator provenance must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn combined_gemm_shared_scope_six_cohort_closure_rejects_missing_invalid_or_mixed_scope() {
+        let receipts = six_current_receipt_fixture();
+        validate_six_current(&receipts).unwrap();
+        for invalid in [None, Some(json!("")), Some(json!("shared"))] {
+            let mut changed = receipts.clone();
+            let completion = changed[0].as_object_mut().unwrap();
+            completion.remove("device_scope");
+            if let Some(value) = invalid {
+                completion.insert("device_scope".into(), value);
+            }
+            assert!(validate_six_current(&changed).is_err());
+        }
+        let mut changed = receipts.clone();
+        changed[5]["device_scope"] = json!("exclusive");
+        changed[5]["identity"]["device_scope"] = json!("exclusive");
+        changed[5]["identity"]["physical_census"]["device_scope"] = json!("exclusive");
+        assert!(validate_six_current(&changed).is_err());
+    }
+
+    #[test]
+    fn combined_gemm_shared_scope_released_current_pair_rejects_missing_invalid_or_mixed_scope() {
+        let current = six_current_receipt_fixture().remove(0);
+        let mut released = current.clone();
+        released["identity"]["released"] = json!(true);
+        validate_completion_scope_pair(&released, &current).unwrap();
+
+        for invalid in [None, Some(json!("")), Some(json!("shared"))] {
+            let mut changed = released.clone();
+            let completion = changed.as_object_mut().unwrap();
+            completion.remove("device_scope");
+            if let Some(value) = invalid {
+                completion.insert("device_scope".into(), value);
+            }
+            assert!(validate_completion_scope_pair(&changed, &current).is_err());
+        }
+        released["device_scope"] = json!("exclusive");
+        released["identity"]["device_scope"] = json!("exclusive");
+        released["identity"]["physical_census"]["device_scope"] = json!("exclusive");
+        assert!(validate_completion_scope_pair(&released, &current).is_err());
     }
 
     #[test]
