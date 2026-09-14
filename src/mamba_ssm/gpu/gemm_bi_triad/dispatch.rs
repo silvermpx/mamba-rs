@@ -6596,6 +6596,15 @@ const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
     &[NtFixedCopyPlanComposedQualificationIdentity] =
     NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
 
+// These scalar-only projections keep TN independent of the Fixed holder and
+// of later NT cohort growth. They are provisional assembly bindings until the
+// final combined-source census rechecks the identities and the new TN cell.
+const TN_M16N16_SPLITM16_SM89_PROVISIONAL_BINDINGS: [ScalarTransposeQualificationIdentity; 3] = [
+    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[0].scalar,
+    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[1].scalar,
+    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[2].scalar,
+];
+
 fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && facts.multiprocessor_count == 142
@@ -6603,6 +6612,75 @@ fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> 
             .iter()
             .copied()
             .any(|identity| identity.matches(facts))
+}
+
+fn qualified_scalar_sm89_ada142_tn_environment(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability == (8, 9)
+        && facts.multiprocessor_count == 142
+        && TN_M16N16_SPLITM16_SM89_PROVISIONAL_BINDINGS
+            .iter()
+            .copied()
+            .any(|identity| identity.matches(facts))
+}
+
+#[cfg(test)]
+pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts {
+    let identity = NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
+    let compiler = |source_digest,
+                    invocation_digest,
+                    header_manifest_digest,
+                    nvrtc_version,
+                    nvrtc_library_domain| CompilerIdentity {
+        source_digest,
+        invocation_digest,
+        header_manifest_digest,
+        target: crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new("sm_89").unwrap(),
+        nvrtc_version,
+        nvrtc_library_domain,
+        nvrtc_library_known: true,
+        output_kind: ArtifactKind::Ptx,
+        composer_revision: COMPOSER_REVISION,
+        compiler_revision: COMPILER_REVISION,
+        numeric_abi_revision: NUMERIC_ABI_REVISION,
+        schedule_revision: SCHEDULE_REVISION,
+    };
+    ScalarLaunchFacts {
+        scalar_artifact: ArtifactIdentity {
+            module_kind: ModuleKind::TriadScalar,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: identity.scalar.compile_key,
+            artifact_digest: identity.scalar.artifact_digest,
+        },
+        scalar_compiler: compiler(
+            identity.scalar.source_digest,
+            identity.scalar.compile_key,
+            identity.scalar.header_manifest_digest,
+            identity.scalar.nvrtc_version,
+            identity.scalar.nvrtc_library_domain,
+        ),
+        fixed_artifact: ArtifactIdentity {
+            module_kind: ModuleKind::Fixed,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: identity.fixed.compile_key,
+            artifact_digest: identity.fixed.artifact_digest,
+        },
+        fixed_compiler: compiler(
+            identity.fixed.source_digest,
+            identity.fixed.compile_key,
+            identity.fixed.header_manifest_digest,
+            identity.fixed.nvrtc_version,
+            identity.fixed.nvrtc_library_domain,
+        ),
+        fixed_copyplan_loaded: true,
+        sm89_exact_f32_artifact: None,
+        sm89_exact_f32_compiler: None,
+        sm89_exact_f32_symbols_loaded: [false; 3],
+        sm89_exact_f32_d128_artifact: None,
+        sm89_exact_f32_d128_compiler: None,
+        sm89_exact_f32_d128_symbols_loaded: [false; 2],
+        compute_capability: (8, 9),
+        multiprocessor_count: 142,
+    }
 }
 
 fn qualified_fixed_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
@@ -7190,6 +7268,14 @@ pub(super) fn scalar_launch_plan(
     {
         return Ok(ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified);
     }
+    if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
+        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
+        && qualified_nt_large_deep_transpose_m64n64_request(request)
+        && qualified_nt_d768_transpose_m64n64_operands(operands)
+    {
+        return Ok(ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified);
+    }
     if fallback
         == (ScalarDispatchPlan::NtSplitKMain {
             n_main: 2_048,
@@ -7259,7 +7345,8 @@ pub(super) fn scalar_launch_plan(
             m_chunk: 16,
             chunks: 16,
         })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && (qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+            || qualified_scalar_sm89_ada142_tn_environment(facts))
         && qualified_tn_m16n16_splitm16_request(request)
         && qualified_tn_m16n16_splitm16_operands(operands)
     {
@@ -7350,6 +7437,7 @@ pub(super) enum ScalarDispatchPlan {
     NtD768OutSm89FixedCopyPlanQualified,
     NtD768InSm89FixedCopyPlanQualified,
     NtPrismSm89FixedCopyPlanQualified,
+    NtLargeDeepSm89FixedCopyPlanQualified,
     NtLargeDeepTransposeM64N64Qualified,
     NtPrismVectorQualified,
     NtD128OutTransposeM64N64Qualified,
@@ -7385,6 +7473,7 @@ impl ScalarDispatchPlan {
                 | Self::NtD768OutSm89FixedCopyPlanQualified
                 | Self::NtD768InSm89FixedCopyPlanQualified
                 | Self::NtPrismSm89FixedCopyPlanQualified
+                | Self::NtLargeDeepSm89FixedCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
                 | Self::NtPrismVectorQualified
                 | Self::NtD128OutTransposeM64N64Qualified
@@ -8959,6 +9048,325 @@ mod scalar_wave_policy_tests {
                 scalar_launch_plan(facts, d768_out, operands).unwrap(),
                 ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified,
                 "cohort {cohort} d768-out"
+            );
+        }
+    }
+
+    #[test]
+    fn triad_retained_scalar_ada_tn_m16n16_is_exact_and_fixed_holder_independent() {
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Tn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, (256, 512, 384)),
+        };
+        let operands = F32TriadOperands {
+            beta: 1.0,
+            ..nn_qualified_operands()
+        };
+        for cohort in 0..3 {
+            let mut facts = nt_fixed_copyplan_sibling_facts(cohort);
+            facts.fixed_copyplan_loaded = false;
+            facts.fixed_artifact.compile_key = [0; 32];
+            facts.fixed_artifact.artifact_digest = [0; 32];
+            assert_eq!(
+                scalar_launch_plan(facts, request, operands).unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified,
+                "Ada scalar cohort {cohort}"
+            );
+        }
+
+        let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
+        assert_eq!(
+            fallback,
+            ScalarDispatchPlan::TnSplitM {
+                m_chunk: 16,
+                chunks: 16,
+            }
+        );
+        let facts = nt_fixed_copyplan_sibling_facts(2);
+        for dims in [(257, 512, 384), (256, 513, 384), (256, 512, 385)] {
+            assert_ne!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Tn,
+                        shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+                    },
+                    operands,
+                )
+                .unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified
+            );
+        }
+        for shape in [
+            F32TriadShape {
+                lda: request.shape.lda + 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldb: request.shape.ldb + 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldc: request.shape.ldc + 1,
+                ..request.shape
+            },
+        ] {
+            assert_ne!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Tn,
+                        shape,
+                    },
+                    operands,
+                )
+                .unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified
+            );
+        }
+        for shape in [
+            F32TriadShape {
+                lda: request.shape.lda - 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldb: request.shape.ldb - 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldc: request.shape.ldc - 1,
+                ..request.shape
+            },
+        ] {
+            assert!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Tn,
+                        shape,
+                    },
+                    operands,
+                )
+                .is_err()
+            );
+        }
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Nt] {
+            let wrong_op = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, (256, 512, 384)),
+            };
+            assert_ne!(
+                scalar_launch_plan(facts, wrong_op, operands).unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified
+            );
+        }
+        for mutation in [
+            F32TriadOperands {
+                alpha: f32::from_bits(1.0_f32.to_bits() + 1),
+                ..operands
+            },
+            F32TriadOperands {
+                beta: -0.0,
+                ..operands
+            },
+            F32TriadOperands {
+                bias: Some(0x4000),
+                ..operands
+            },
+            F32TriadOperands {
+                output: 0,
+                ..operands
+            },
+            F32TriadOperands { a: 0, ..operands },
+            F32TriadOperands { b: 0, ..operands },
+            F32TriadOperands {
+                output: operands.output + 4,
+                ..operands
+            },
+            F32TriadOperands {
+                a: operands.a + 4,
+                ..operands
+            },
+            F32TriadOperands {
+                b: operands.b + 4,
+                ..operands
+            },
+        ] {
+            assert_ne!(
+                scalar_launch_plan(facts, request, mutation).unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified
+            );
+        }
+        let mut identity_mutations = Vec::new();
+        let mut mutation = facts;
+        mutation.compute_capability = (8, 8);
+        identity_mutations.push(mutation);
+        mutation = facts;
+        mutation.multiprocessor_count = 141;
+        identity_mutations.push(mutation);
+        mutation = facts;
+        mutation.scalar_artifact.artifact_digest[0] ^= 1;
+        identity_mutations.push(mutation);
+        mutation = facts;
+        mutation.scalar_compiler.header_manifest_digest[0] ^= 1;
+        identity_mutations.push(mutation);
+        for mutation in identity_mutations {
+            assert_ne!(
+                scalar_launch_plan(mutation, request, operands).unwrap(),
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified
+            );
+        }
+    }
+
+    #[test]
+    fn triad_retained_scalar_ada_large_deep_requires_the_exact_composed_pair() {
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_096, 3_072, 1_536)),
+        };
+        let operands = nn_qualified_operands();
+        let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
+        assert_eq!(fallback, ScalarDispatchPlan::NtFinal { slim: false });
+        for cohort in 0..3 {
+            assert_eq!(
+                scalar_launch_plan(nt_fixed_copyplan_sibling_facts(cohort), request, operands,)
+                    .unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified,
+                "composed cohort {cohort}"
+            );
+        }
+
+        let facts = nt_fixed_copyplan_sibling_facts(2);
+        let other = nt_fixed_copyplan_sibling_facts(1);
+        let mut pair_mismatch = facts;
+        pair_mismatch.fixed_artifact = other.fixed_artifact;
+        pair_mismatch.fixed_compiler = other.fixed_compiler;
+        let mut holder_missing = facts;
+        holder_missing.fixed_copyplan_loaded = false;
+        for mutation in [pair_mismatch, holder_missing] {
+            assert_eq!(
+                scalar_launch_plan(mutation, request, operands).unwrap(),
+                fallback,
+                "composed identity or holder mutation {mutation:?}"
+            );
+        }
+
+        for dims in [
+            (4_097, 3_072, 1_536),
+            (4_096, 3_073, 1_536),
+            (4_096, 3_072, 1_537),
+        ] {
+            assert_ne!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Nt,
+                        shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+                    },
+                    operands,
+                )
+                .unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            );
+        }
+        for shape in [
+            F32TriadShape {
+                lda: request.shape.lda + 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldb: request.shape.ldb + 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldc: request.shape.ldc + 1,
+                ..request.shape
+            },
+        ] {
+            assert_ne!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Nt,
+                        shape,
+                    },
+                    operands,
+                )
+                .unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            );
+        }
+        for shape in [
+            F32TriadShape {
+                lda: request.shape.lda - 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldb: request.shape.ldb - 1,
+                ..request.shape
+            },
+            F32TriadShape {
+                ldc: request.shape.ldc - 1,
+                ..request.shape
+            },
+        ] {
+            assert!(
+                scalar_launch_plan(
+                    facts,
+                    F32TriadRequest {
+                        op: ResolvedGemmOp::Nt,
+                        shape,
+                    },
+                    operands,
+                )
+                .is_err()
+            );
+        }
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn] {
+            let wrong_op = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, (4_096, 3_072, 1_536)),
+            };
+            assert_ne!(
+                scalar_launch_plan(facts, wrong_op, operands).unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            );
+        }
+        for mutation in [
+            F32TriadOperands {
+                alpha: f32::from_bits(1.0_f32.to_bits() + 1),
+                ..operands
+            },
+            F32TriadOperands {
+                beta: -0.0,
+                ..operands
+            },
+            F32TriadOperands {
+                bias: Some(0x4000),
+                ..operands
+            },
+            F32TriadOperands {
+                output: 0,
+                ..operands
+            },
+            F32TriadOperands { a: 0, ..operands },
+            F32TriadOperands { b: 0, ..operands },
+            F32TriadOperands {
+                output: operands.output + 4,
+                ..operands
+            },
+            F32TriadOperands {
+                a: operands.a + 4,
+                ..operands
+            },
+            F32TriadOperands {
+                b: operands.b + 4,
+                ..operands
+            },
+        ] {
+            assert_ne!(
+                scalar_launch_plan(facts, request, mutation).unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
             );
         }
     }

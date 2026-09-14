@@ -76,7 +76,9 @@ const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
                 (params.m == 2048 && params.k == 1536 && params.n == 768
                     && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)
                 || (params.m == 4096 && params.k == 3072 && params.n == 1536
-                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);
+                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072)
+                || (params.m == 4621 && params.k == 384 && params.n == 1928
+                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384);
             if (use_stage_sliced) {
                 gemm_bi_tf32_nt_compact_sliced_mainloop(
                     storage, problem, tile_count, thread_plan, accumulators);
@@ -695,12 +697,19 @@ mod tests {
             "                (params.m == 2048 && params.k == 1536 && params.n == 768\n",
             "                    && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)\n",
             "                || (params.m == 4096 && params.k == 3072 && params.n == 1536\n",
-            "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);"
+            "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072)\n",
+            "                || (params.m == 4621 && params.k == 384 && params.n == 1928\n",
+            "                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384);"
         );
         assert!(body.contains(expected_gate));
         assert!(body.contains(A_LDMATRIX_LOAD));
         assert!(!body.contains("params.m == 2048 && params.k == 768 && params.n == 3072"));
-        assert!(!body.contains("params.m == 4621 && params.k == 384 && params.n == 1928"));
+        assert_eq!(
+            body.matches("params.m == 4621 && params.k == 384 && params.n == 1928")
+                .count(),
+            1
+        );
+        assert!(body.contains("const int k_offsets[4] = {0, 8, 16, 24};"));
         assert!(body.contains(
             "static_assert(sizeof(Sm80Tf32KernelParams) == 32, \"TF32 parameter ABI drift\");"
         ));

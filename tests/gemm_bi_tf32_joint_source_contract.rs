@@ -195,7 +195,9 @@ fn finalist_maps_all_dispatch_admitted_nt_cells_to_a_only_ldmatrix_body() {
         "                (params.m == 2048 && params.k == 1536 && params.n == 768\n",
         "                    && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)\n",
         "                || (params.m == 4096 && params.k == 3072 && params.n == 1536\n",
-        "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072);"
+        "                    && params.lda == 1536 && params.ldb == 1536 && params.ldc == 3072)\n",
+        "                || (params.m == 4621 && params.k == 384 && params.n == 1928\n",
+        "                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384);"
     );
     assert!(source.contains(expected_gate));
     let generic_compute = extract_device_function(&source, "gemm_bi_tf32_compute_stage");
@@ -208,10 +210,12 @@ fn finalist_maps_all_dispatch_admitted_nt_cells_to_a_only_ldmatrix_body() {
         "bool use_stage_sliced =\n",
         "                (params.m == 2048 && params.k == 768 && params.n == 3072"
     )));
-    assert!(!source.contains(concat!(
-        "|| (params.m == 4621 && params.k == 384 && params.n == 1928\n",
-        "                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384)"
-    )));
+    assert_eq!(
+        source
+            .matches("params.m == 4621 && params.k == 384 && params.n == 1928")
+            .count(),
+        1
+    );
     assert_eq!(
         source
             .matches("gemm_bi_tf32_nt_compact_sliced_mainloop(")

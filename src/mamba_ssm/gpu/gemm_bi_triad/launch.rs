@@ -2132,6 +2132,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
@@ -2153,6 +2154,7 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -2201,6 +2203,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified => (38, 0, 0),
         ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified => (39, 0, 0),
         ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified => (40, 0, 0),
+        ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified => (46, 0, 0),
         ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified => (27, 0, 0),
         ScalarDispatchPlan::NtPrismVectorQualified => (30, 0, 0),
         ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => (29, 0, 0),
@@ -2256,6 +2259,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 1)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 1) => ScalarArgumentLayout {
@@ -2267,6 +2271,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 0)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 0) => {
@@ -2878,6 +2883,7 @@ fn scalar_physical_nodes(
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => {
@@ -2893,6 +2899,7 @@ fn scalar_physical_nodes(
                     ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
                         | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
                         | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+                        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
                 ) {
                     ("gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1", 32, 0)
                 } else {
@@ -3985,6 +3992,7 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
@@ -9830,6 +9838,7 @@ fn gemm_bi_backward_dx_with_control<
             | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -9899,6 +9908,7 @@ fn gemm_bi_backward_dx_with_control<
             ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
                 | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
                 | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
+                | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
         );
         let m64_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
@@ -15415,40 +15425,47 @@ mod prepared_f32_launch_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, (256, 512, 384)),
         };
         let operands = scalar_test_operands(ResolvedGemmOp::Tn, 1.0);
-        let raw_plan = scalar_launch_plan(scalar_tn_admission_facts(), request, operands).unwrap();
-        let prepared_plan =
-            scalar_launch_plan(scalar_tn_admission_facts(), request, operands).unwrap();
-        assert_eq!(raw_plan, ScalarDispatchPlan::TnM16N16SplitM16Qualified);
-        assert_eq!(prepared_plan, raw_plan);
+        let mut ada = super::super::dispatch::scalar_sm89_composed_test_facts(2);
+        ada.fixed_copyplan_loaded = false;
+        for (environment, facts) in [("SM120", scalar_tn_admission_facts()), ("Ada", ada)] {
+            let raw_plan = scalar_launch_plan(facts, request, operands).unwrap();
+            let prepared_plan = scalar_launch_plan(facts, request, operands).unwrap();
+            assert_eq!(
+                raw_plan,
+                ScalarDispatchPlan::TnM16N16SplitM16Qualified,
+                "{environment}"
+            );
+            assert_eq!(prepared_plan, raw_plan, "{environment}");
 
-        let raw_nodes = scalar_physical_nodes(request, operands, raw_plan).unwrap();
-        let prepared_nodes = scalar_physical_nodes(request, operands, prepared_plan).unwrap();
-        assert_eq!(prepared_nodes, raw_nodes);
-        assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
-        assert_eq!(raw_nodes.len(), 1);
-        let node = raw_nodes[0];
-        assert_eq!(node.symbol, "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1");
-        assert_eq!(node.tile, (16, 16));
-        assert_eq!((node.bk, node.stages), (16, 2));
-        assert_eq!(node.launch.grid_dim, (768, 1, 1));
-        assert_eq!(node.launch.block_dim, (64, 1, 1));
-        assert_eq!(node.launch.shared_mem_bytes, 4_096);
-        assert_ne!(node.launch.arguments_digest, [0; 32]);
-        assert_eq!(scalar_plan_fields(raw_plan), (35, 0, 0));
-        assert_eq!(
-            scalar_argument_layout(request, operands, raw_plan, 0),
-            ScalarArgumentLayout::default()
-        );
-        assert_eq!(
-            scalar_route_contract(node.symbol),
-            (
-                PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
-            )
-        );
-        assert!(!raw_plan.needs_transpose_scratch());
-        assert!(!raw_plan.needs_split_scratch());
+            let raw_nodes = scalar_physical_nodes(request, operands, raw_plan).unwrap();
+            let prepared_nodes = scalar_physical_nodes(request, operands, prepared_plan).unwrap();
+            assert_eq!(prepared_nodes, raw_nodes, "{environment}");
+            assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
+            assert_eq!(raw_nodes.len(), 1);
+            let node = raw_nodes[0];
+            assert_eq!(node.symbol, "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1");
+            assert_eq!(node.tile, (16, 16));
+            assert_eq!((node.bk, node.stages), (16, 2));
+            assert_eq!(node.launch.grid_dim, (768, 1, 1));
+            assert_eq!(node.launch.block_dim, (64, 1, 1));
+            assert_eq!(node.launch.shared_mem_bytes, 4_096);
+            assert_ne!(node.launch.arguments_digest, [0; 32]);
+            assert_eq!(scalar_plan_fields(raw_plan), (35, 0, 0));
+            assert_eq!(
+                scalar_argument_layout(request, operands, raw_plan, 0),
+                ScalarArgumentLayout::default()
+            );
+            assert_eq!(
+                scalar_route_contract(node.symbol),
+                (
+                    PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
+                    ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                    ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                )
+            );
+            assert!(!raw_plan.needs_transpose_scratch());
+            assert!(!raw_plan.needs_split_scratch());
+        }
     }
 
     #[test]
@@ -15554,6 +15571,81 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_physical_nodes(request, operands, prepared_plan).unwrap(),
             scalar_physical_nodes(request, operands, raw_plan).unwrap()
+        );
+        let nodes = scalar_physical_nodes(request, operands, raw_plan).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].symbol, "gemm_bi_nn_m64n64_bk16_s2_v1");
+        assert_eq!((nodes[1].bk, nodes[1].stages), (16, 2));
+    }
+
+    #[test]
+    fn triad_retained_scalar_ada_large_deep_freezes_two_fixed_owned_nodes() {
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_096, 3_072, 1_536)),
+        };
+        let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
+        let facts = super::super::dispatch::scalar_sm89_composed_test_facts(2);
+        let raw_plan = scalar_launch_plan(facts, request, operands).unwrap();
+        let prepared_plan = scalar_launch_plan(facts, request, operands).unwrap();
+        assert_eq!(
+            raw_plan,
+            ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+        );
+        assert_eq!(prepared_plan, raw_plan);
+        assert_eq!(scalar_plan_fields(raw_plan), (46, 0, 0));
+        assert!(scalar_plan_requires_zero_beta(raw_plan));
+        assert!(raw_plan.needs_transpose_scratch());
+        assert!(!raw_plan.needs_split_scratch());
+        assert_eq!(
+            scalar_transpose_scratch_elements(request, raw_plan).unwrap(),
+            Some(4_718_592)
+        );
+
+        let raw_nodes = scalar_physical_nodes(request, operands, raw_plan).unwrap();
+        let prepared_nodes = scalar_physical_nodes(request, operands, prepared_plan).unwrap();
+        assert_eq!(prepared_nodes, raw_nodes);
+        assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
+        assert_eq!(raw_nodes.len(), 2);
+        assert_eq!(raw_nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+        assert_eq!(raw_nodes[0].launch.grid_dim, (48, 96, 1));
+        assert_eq!(raw_nodes[0].launch.block_dim, (32, 16, 1));
+        assert_eq!(raw_nodes[0].launch.shared_mem_bytes, 0);
+        assert_eq!(
+            raw_nodes[1].symbol,
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
+        );
+        assert_eq!(raw_nodes[1].launch.grid_dim, (3_072, 1, 1));
+        assert_eq!(raw_nodes[1].launch.block_dim, (128, 1, 1));
+        assert_eq!(raw_nodes[1].launch.shared_mem_bytes, 0);
+        assert_eq!(
+            (raw_nodes[1].tile, raw_nodes[1].bk, raw_nodes[1].stages),
+            ((64, 64), 32, 2)
+        );
+        assert_eq!(
+            scalar_route_contract(raw_nodes[0].symbol),
+            (
+                PhysicalGemmBackend::ScalarFmaV1,
+                ResolvedNumericContract::ScalarFmaV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            )
+        );
+        assert_eq!(
+            scalar_route_contract(raw_nodes[1].symbol),
+            (
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+                ResolvedNumericContract::ScalarFmaV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            )
+        );
+        assert!(
+            raw_nodes
+                .iter()
+                .all(|node| node.launch.arguments_digest != [0; 32])
+        );
+        assert_ne!(
+            raw_nodes[0].launch.arguments_digest,
+            raw_nodes[1].launch.arguments_digest
         );
     }
 
@@ -15880,6 +15972,83 @@ mod prepared_f32_launch_tests {
                 sm120_fma_exclusions: Default::default(),
             },
         }
+    }
+
+    #[test]
+    fn triad_retained_tf32_prism_nt_freezes_one_rna_mma_node() {
+        let route = Tf32PhysicalRoute::Sm89MmaTf32Compact8V1;
+        let spec = tf32_kernel_spec(ResolvedGemmOp::Nt, route).unwrap();
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_621, 384, 1_928)),
+        };
+        let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
+        let mut binding = portable_binding();
+        binding.qualified.module_kind = ModuleKind::TriadSm89Finalist;
+        binding.qualified.artifact.module_kind = ModuleKind::TriadSm89Finalist;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (222, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 49_152,
+        };
+        let arguments = tf32_kernel_arguments_digest(request, operands, spec.symbol, [0; 32]);
+        let resolved = tf32_resolved_route(
+            request,
+            spec,
+            binding,
+            Tf32LaunchDigests {
+                maps: [0; 32],
+                resources: [2; 32],
+                arguments,
+            },
+            false,
+            config,
+        );
+
+        assert_eq!(
+            resolved.symbol,
+            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2"
+        );
+        assert_eq!(resolved.module_kind, ModuleKind::TriadSm89Finalist);
+        assert_eq!(resolved.backend, PhysicalGemmBackend::Sm89MmaTf32Compact8V1);
+        assert_eq!(
+            resolved.numeric_contract,
+            ResolvedNumericContract::MmaTf32RnaV1
+        );
+        assert_eq!(
+            resolved.instruction_family,
+            ResolvedInstructionFamily::MmaSync
+        );
+        assert_eq!(
+            resolved.instruction_shape,
+            ResolvedInstructionShape { m: 16, n: 8, k: 8 }
+        );
+        assert_eq!(
+            resolved.operand_conversion,
+            ResolvedOperandConversion::RegisterCvtRnaTf32F32V1
+        );
+        assert_eq!(
+            resolved.ownership,
+            ResolvedOutputOwnership::OneCtaPerOutputTileV1
+        );
+        assert_eq!(resolved.shape, (4_621, 384, 1_928));
+        assert_eq!(resolved.strides, (1_928, 1_928, 384));
+        assert_eq!(
+            (resolved.tile, resolved.bk, resolved.stages),
+            ((128, 64), 32, 2)
+        );
+        assert_eq!(resolved.threads, 256);
+        assert_eq!(resolved.launch.grid_dim, (222, 1, 1));
+        assert_eq!(resolved.launch.block_dim, (256, 1, 1));
+        assert_eq!(resolved.launch.shared_mem_bytes, 49_152);
+        assert_eq!(resolved.launch.arguments_digest, arguments);
+        assert_ne!(resolved.launch.arguments_digest, [0; 32]);
+        assert_eq!(resolved.tuning_table_revision, 4);
+        let raw = build_resolved_gemm_launch_set(&[resolved]).unwrap();
+        let prepared = build_resolved_gemm_launch_set(&[resolved]).unwrap();
+        assert_eq!(prepared, raw);
+        assert_eq!(raw.launch_count, 1);
+        assert_ne!(raw.ordered_digest, [0; 32]);
     }
 
     fn rect_wide_sm120_binding() -> Tf32MapBinding {
