@@ -9,14 +9,68 @@ const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 
 #[test]
 #[cfg(feature = "cuda")]
-fn production_half_module_registry_includes_all_retained_tn_winners() {
+fn triad_retained_half_public_registry_and_getter_api_remain_compatible() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfRoute,
+        GemmBiKernels, SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfKernelSpec,
+        Sm89HalfRoute,
     };
     use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+    use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
+
+    type GemmGetter = for<'a> fn(
+        &'a GemmBiKernels,
+        Sm89HalfRoute,
+        WeightDtype,
+    ) -> Option<&'a cudarc::driver::CudaFunction>;
+    type MambaGetter = for<'a> fn(
+        &'a MambaKernels,
+        Sm89HalfRoute,
+        WeightDtype,
+    ) -> Option<&'a cudarc::driver::CudaFunction>;
+
+    const _: [Sm89HalfKernelSpec; 10] = SM89_HALF_KERNEL_SPECS;
+    const _: GemmGetter = GemmBiKernels::sm89_half_function;
+    const _: MambaGetter = MambaKernels::triad_sm89_half_function;
+
+    fn exhaustive_route(route: Sm89HalfRoute) -> u8 {
+        match route {
+            Sm89HalfRoute::NnM128N128Bk64S3 => 0,
+            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor => 1,
+            Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => 2,
+            Sm89HalfRoute::NtM128N128Bk64S3Bxor => 3,
+            Sm89HalfRoute::NtM96N128Bk64S3 => 4,
+        }
+    }
 
     assert_eq!(SM89_HALF_KERNEL_SPECS.len(), 10);
     assert_eq!(SM89_HALF_AUTO_CELLS.len(), 18);
+    assert_eq!(
+        SM89_HALF_KERNEL_SPECS.map(|spec| spec.symbol),
+        [
+            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
+            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16",
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16",
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16",
+            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16",
+            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16",
+            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16",
+            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
+            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16",
+        ],
+    );
+    assert_eq!(
+        [
+            Sm89HalfRoute::NnM128N128Bk64S3,
+            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor,
+            Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+            Sm89HalfRoute::NtM96N128Bk64S3,
+        ]
+        .map(exhaustive_route),
+        [0, 1, 2, 3, 4],
+    );
     assert_eq!(
         SM89_HALF_AUTO_CELLS
             .iter()
@@ -68,7 +122,7 @@ fn production_families_are_normalized_body_identical_to_retained_winners() {
 }
 
 #[test]
-fn owner_exports_only_the_four_retained_dtype_families() {
+fn triad_retained_half_owner_exports_all_six_retained_kernels() {
     production::validate_source().expect("sealed SM89 half-TN source");
     let source = production::compose_source().expect("compose sealed SM89 half-TN source");
     assert_eq!(
@@ -78,6 +132,8 @@ fn owner_exports_only_the_four_retained_dtype_families() {
             production::COMPACT_F16_SYMBOL,
             production::REGPIPE_VEC2_BF16_SYMBOL,
             production::REGPIPE_VEC2_F16_SYMBOL,
+            production::SMALL16_BF16_SYMBOL,
+            production::SMALL16_F16_SYMBOL,
         ]
     );
     for forbidden in [
@@ -126,10 +182,10 @@ fn standalone_composition_supplies_each_retained_dependency_once() {
 }
 
 #[test]
-fn four_specs_pin_tn_driver_abi_geometry_and_resource_bounds() {
+fn triad_retained_half_specs_pin_small16_geometry_and_resource_bounds() {
     use production::{SM89_HALF_TN_KERNEL_SPECS, Sm89HalfTnKernelKind};
 
-    assert_eq!(SM89_HALF_TN_KERNEL_SPECS.len(), 4);
+    assert_eq!(SM89_HALF_TN_KERNEL_SPECS.len(), 6);
     for (symbol, kind) in [
         (
             production::COMPACT_F16_SYMBOL,
@@ -167,6 +223,25 @@ fn four_specs_pin_tn_driver_abi_geometry_and_resource_bounds() {
         [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)]
     );
     assert_eq!(production::HALF_TN_TERMINAL_ARGUMENT, 7);
+
+    for symbol in [
+        production::SMALL16_BF16_SYMBOL,
+        production::SMALL16_F16_SYMBOL,
+    ] {
+        let spec = production::kernel_spec(symbol).expect("retained small16 half-TN symbol");
+        assert_eq!(spec.kind, Sm89HalfTnKernelKind::Small16Bk64S2Ldb72);
+        assert_eq!(spec.tile, (16, 16));
+        assert_eq!(spec.bk, 64);
+        assert_eq!(spec.stages, 2);
+        assert_eq!(spec.block, (32, 1, 1));
+        assert_eq!(spec.dynamic_shared_bytes, 0);
+        assert_eq!(spec.static_shared_bytes, 36_864);
+        assert_eq!(spec.local_bytes, 0);
+        assert_eq!(spec.register_cap, 128);
+        assert_eq!(spec.occupancy_gate, 2);
+        assert_eq!(spec.abi_parameter_count, 7);
+        assert_eq!(spec.abi_parameter_bytes, 40);
+    }
     assert!(production::kernel_spec("gemm_bi_tn_tc64_f16").is_none());
     assert!(production::kernel_spec("").is_none());
 }

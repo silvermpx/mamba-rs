@@ -1757,8 +1757,7 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
         return Err("TriadSm89Half requires exact sm_89 source and PTX targets".into());
     }
-    let expected = super::sm89_half_source::SM89_HALF_KERNEL_SPECS
-        .iter()
+    let expected = super::sm89_half_source::runtime_kernel_specs()
         .map(|spec| spec.symbol)
         .collect::<BTreeSet<_>>();
     let symbols = ptx_entry_symbols(ptx)?;
@@ -1772,7 +1771,7 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         return Err("TriadSm89Half PTX inventory is incomplete, duplicated, or foreign".into());
     }
     let parsed = parse_ptx(ptx)?;
-    for spec in super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+    for spec in super::sm89_half_source::runtime_kernel_specs() {
         let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
         let mma = if spec.dtype == crate::mamba_ssm::gpu::dtype::WeightDtype::Bf16 {
             "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
@@ -1780,7 +1779,9 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
         let (async_copy, loads, opposite_x4, opposite_x2) = match spec.route {
-            super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => (
+            super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+                super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
+            ) => (
                 "cp.async.cg.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
@@ -1789,8 +1790,11 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
             ),
-            super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor
-            | super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => (
+            super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+                super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor
+                | super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => (
                 "cp.async.ca.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
@@ -1799,8 +1803,10 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
             ),
-            super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
-            | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => (
+            super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+                super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor
+                | super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3,
+            ) => (
                 "cp.async.cg.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
@@ -2757,7 +2763,7 @@ fn validate_fixed_sm89_half_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Res
 }
 
 fn validate_sm89_half_driver_abi(
-    spec: &super::sm89_half_source::Sm89HalfKernelSpec,
+    spec: &super::sm89_half_source::Sm89HalfRuntimeSpec,
     abi: &Tf32DriverAbi,
 ) -> Result<(), String> {
     const NN: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
@@ -2806,7 +2812,7 @@ fn census_sm89_half_driver_abi(
     let get: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
-    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+    for spec in super::sm89_half_source::runtime_kernel_specs() {
         let abi = (|| {
             let function = unsafe {
                 cudarc::driver::result::module::get_function(
@@ -2831,7 +2837,7 @@ fn census_sm89_half_driver_abi(
                 query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
                     get(function, index, offset, size)
                 })?;
-            validate_sm89_half_driver_abi(spec, &abi)?;
+            validate_sm89_half_driver_abi(&spec, &abi)?;
             Ok(abi)
         })();
         if census.insert(spec.symbol, abi).is_some() {
@@ -8220,6 +8226,16 @@ fn sm89_half_abi_for_symbol<'a>(
         .map_err(Clone::clone)
 }
 
+fn sm89_half_runtime_entry<'a, T>(
+    functions: &'a HashMap<&'static str, T>,
+    module_available: bool,
+    symbol: &str,
+) -> Option<&'a T> {
+    super::sm89_half_source::runtime_kernel_spec(symbol)?;
+    module_available.then_some(())?;
+    functions.get(symbol)
+}
+
 fn load_sm89_half_functions(
     ctx: &CudaContext,
     module: &CompiledModule,
@@ -8249,9 +8265,9 @@ fn load_sm89_half_functions(
     let abi = module.sm89_half_driver_abi.as_ref().map_err(Clone::clone)?;
     let mut functions = HashMap::new();
     let mut exclusions = Vec::new();
-    for spec in &super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+    for spec in super::sm89_half_source::runtime_kernel_specs() {
         let loaded = (|| {
-            validate_sm89_half_driver_abi(spec, sm89_half_abi_for_symbol(abi, spec.symbol)?)?;
+            validate_sm89_half_driver_abi(&spec, sm89_half_abi_for_symbol(abi, spec.symbol)?)?;
             let total_shared_bytes = spec
                 .static_shared_bytes
                 .checked_add(spec.dynamic_shared_bytes)
@@ -8321,7 +8337,8 @@ fn load_sm89_half_functions(
         })();
         retain_sm89_half_symbol(&mut functions, &mut exclusions, spec.symbol, loaded)?;
     }
-    if functions.len() + exclusions.len() != super::sm89_half_source::SM89_HALF_KERNEL_SPECS.len() {
+    if functions.len() + exclusions.len() != super::sm89_half_source::runtime_kernel_specs().count()
+    {
         return Err("TriadSm89Half lost a symbol while applying resource gates".into());
     }
     Ok((functions, exclusions))
@@ -9569,6 +9586,17 @@ impl GemmBiKernels {
         let spec = super::sm89_half_source::kernel_spec(route, dtype)?;
         self.sm89_half_compiler_identity()?;
         self.sm89_half_functions.get(spec.symbol)
+    }
+
+    pub(in crate::mamba_ssm::gpu) fn sm89_half_runtime_function(
+        &self,
+        symbol: &str,
+    ) -> Option<&CudaFunction> {
+        sm89_half_runtime_entry(
+            &self.sm89_half_functions,
+            self.sm89_half_compiler_identity().is_some(),
+            symbol,
+        )
     }
 
     pub fn sm89_exact_f32_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -11128,29 +11156,47 @@ mod tests {
     }
 
     #[test]
-    fn sm89_half_resource_failure_excludes_only_the_bad_symbol() {
-        let mut functions = HashMap::new();
-        let mut exclusions = Vec::new();
-        super::retain_sm89_half_symbol(&mut functions, &mut exclusions, "nn_f16", Ok(11_u8))
-            .unwrap();
-        super::retain_sm89_half_symbol(
-            &mut functions,
-            &mut exclusions,
-            "nt_bf16",
-            Err("registers 168 exceed cap 167".into()),
-        )
-        .unwrap();
-        super::retain_sm89_half_symbol(&mut functions, &mut exclusions, "nt_f16", Ok(13_u8))
-            .unwrap();
+    fn sm89_half_resource_failure_excludes_only_the_bad_small16_dtype() {
+        let bf16 = super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL;
+        let f16 = super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL;
 
-        assert_eq!(functions, HashMap::from([("nn_f16", 11), ("nt_f16", 13)]));
-        assert_eq!(
-            exclusions,
-            [super::Tf32SymbolExclusion {
-                symbol: "nt_bf16",
-                reason: "registers 168 exceed cap 167".into(),
-            }]
-        );
+        for (missing, sibling) in [(bf16, f16), (f16, bf16)] {
+            let mut functions = HashMap::new();
+            let mut exclusions = Vec::new();
+            super::retain_sm89_half_symbol(
+                &mut functions,
+                &mut exclusions,
+                missing,
+                Err("registers exceed the retained gate".into()),
+            )
+            .unwrap();
+            super::retain_sm89_half_symbol(&mut functions, &mut exclusions, sibling, Ok(13_u8))
+                .unwrap();
+
+            assert_eq!(
+                super::sm89_half_runtime_entry(&functions, true, missing),
+                None
+            );
+            assert_eq!(
+                super::sm89_half_runtime_entry(&functions, true, sibling),
+                Some(&13)
+            );
+            assert_eq!(
+                super::sm89_half_runtime_entry(&functions, false, sibling),
+                None
+            );
+            assert_eq!(
+                super::sm89_half_runtime_entry(&functions, true, "unknown_half_symbol"),
+                None
+            );
+            assert_eq!(
+                exclusions,
+                [super::Tf32SymbolExclusion {
+                    symbol: missing,
+                    reason: "registers exceed the retained gate".into(),
+                }]
+            );
+        }
     }
 
     #[test]
@@ -11194,23 +11240,46 @@ mod tests {
         assert_eq!(exclusions[0].reason, "nn_f16 Driver ABI mismatch");
     }
 
+    #[test]
+    fn triad_retained_half_small16_uses_the_exact_seven_argument_driver_abi() {
+        let valid = Tf32DriverAbi::checked(
+            7,
+            vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)],
+        )
+        .unwrap();
+        let short =
+            Tf32DriverAbi::checked(6, vec![(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4)])
+                .unwrap();
+        for symbol in [
+            super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+            super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+        ] {
+            let spec = super::super::sm89_half_source::runtime_kernel_spec(symbol).unwrap();
+            super::validate_sm89_half_driver_abi(&spec, &valid).unwrap();
+            assert!(super::validate_sm89_half_driver_abi(&spec, &short).is_err());
+        }
+    }
+
     fn sm89_half_validator_test_loads(
-        route: super::super::sm89_half_source::Sm89HalfRoute,
+        route: super::super::sm89_half_source::Sm89HalfRuntimeRoute,
     ) -> [&'static str; 2] {
-        use super::super::sm89_half_source::Sm89HalfRoute;
+        use super::super::sm89_half_source::{Sm89HalfRoute, Sm89HalfRuntimeRoute};
 
         match route {
-            Sm89HalfRoute::NnM128N128Bk64S3 => [
+            Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::NnM128N128Bk64S3) => [
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
             ],
-            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
-                [
-                    "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
-                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
-                ]
-            }
-            Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => [
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => [
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3,
+            ) => [
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
             ],
@@ -11218,38 +11287,48 @@ mod tests {
     }
 
     fn sm89_half_validator_opposite_x2(
-        route: super::super::sm89_half_source::Sm89HalfRoute,
+        route: super::super::sm89_half_source::Sm89HalfRuntimeRoute,
     ) -> &'static str {
-        use super::super::sm89_half_source::Sm89HalfRoute;
+        use super::super::sm89_half_source::{Sm89HalfRoute, Sm89HalfRuntimeRoute};
 
         match route {
-            Sm89HalfRoute::NnM128N128Bk64S3 => "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
-            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+            Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::NnM128N128Bk64S3) => {
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16"
             }
-            Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3 => {
-                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16"
             }
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3,
+            ) => "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
         }
     }
 
     fn sm89_half_validator_opposite_x4(
-        route: super::super::sm89_half_source::Sm89HalfRoute,
+        route: super::super::sm89_half_source::Sm89HalfRuntimeRoute,
     ) -> &'static str {
-        use super::super::sm89_half_source::Sm89HalfRoute;
+        use super::super::sm89_half_source::{Sm89HalfRoute, Sm89HalfRuntimeRoute};
 
         match route {
-            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
             }
-            Sm89HalfRoute::NnM128N128Bk64S3
-            | Sm89HalfRoute::NtM128N128Bk64S3Bxor
-            | Sm89HalfRoute::NtM96N128Bk64S3 => "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::NnM128N128Bk64S3
+                | Sm89HalfRoute::NtM128N128Bk64S3Bxor
+                | Sm89HalfRoute::NtM96N128Bk64S3,
+            ) => "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
         }
     }
 
     fn sm89_half_validator_test_entry(
-        spec: super::super::sm89_half_source::Sm89HalfKernelSpec,
+        spec: super::super::sm89_half_source::Sm89HalfRuntimeSpec,
     ) -> String {
         let [a_load, b_load] = sm89_half_validator_test_loads(spec.route);
         let mma = match spec.dtype {
@@ -11279,27 +11358,43 @@ mod tests {
     }
 
     fn sm89_half_validator_test_ptx() -> String {
-        super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS
-            .iter()
-            .fold(
-                String::from(".version 8.5\n.target sm_89\n.address_size 64\n"),
-                |mut ptx, &spec| {
-                    ptx.push_str(&sm89_half_validator_test_entry(spec));
-                    ptx
-                },
-            )
+        super::super::sm89_half_source::runtime_kernel_specs().fold(
+            String::from(".version 8.5\n.target sm_89\n.address_size 64\n"),
+            |mut ptx, spec| {
+                ptx.push_str(&sm89_half_validator_test_entry(spec));
+                ptx
+            },
+        )
     }
 
     #[test]
     fn sm89_half_validator_accepts_exact_route_specific_ldmatrix_pairs() {
         super::validate_sm89_half_ptx("sm_89", &sm89_half_validator_test_ptx())
-            .expect("the ten exact route-specific half entries must validate");
+            .expect("the twelve exact route-specific half entries must validate");
+    }
+
+    #[test]
+    fn triad_retained_half_validator_accepts_the_closed_twelve_symbol_inventory() {
+        let baseline = sm89_half_validator_test_ptx();
+        for symbol in [
+            super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+            super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+        ] {
+            let missing = baseline.replace(
+                &sm89_half_validator_test_entry(
+                    super::super::sm89_half_source::runtime_kernel_spec(symbol).unwrap(),
+                ),
+                "",
+            );
+            super::validate_sm89_half_ptx("sm_89", &missing)
+                .expect_err("the closed half inventory must reject a missing small16 sibling");
+        }
     }
 
     #[test]
     fn sm89_half_validator_rejects_missing_or_swapped_ldmatrix_per_spec() {
         let baseline = sm89_half_validator_test_ptx();
-        for &spec in &super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        for spec in super::super::sm89_half_source::runtime_kernel_specs() {
             let entry = sm89_half_validator_test_entry(spec);
             let [required_x4, required_x2] = sm89_half_validator_test_loads(spec.route);
 
@@ -11324,7 +11419,7 @@ mod tests {
     #[test]
     fn sm89_half_validator_rejects_opposite_x2_coexisting_per_spec() {
         let baseline = sm89_half_validator_test_ptx();
-        for &spec in &super::super::sm89_half_source::SM89_HALF_KERNEL_SPECS {
+        for spec in super::super::sm89_half_source::runtime_kernel_specs() {
             let entry = sm89_half_validator_test_entry(spec);
             let opposite_x2 = sm89_half_validator_opposite_x2(spec.route);
             let coexisting_entry = entry.replacen(

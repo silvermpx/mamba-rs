@@ -469,3 +469,225 @@ GEMM_BI_DEFINE_GEMM_BI_TN_TC64(f16,  __half,        from_f_f16,  "f16")
 #undef GEMM_BI_TC64_BN
 #undef GEMM_BI_TC64_BM
 
+// SM89_HALF_TN_SMALL16_BEGIN
+#define GEMM_BI_SMALL16_BK 64
+#define GEMM_BI_SMALL16_STAGES 2
+#define GEMM_BI_SMALL16_LDB 72
+#define GEMM_BI_SMALL16_THREADS 32
+
+__device__ __forceinline__ int gemm_bi_small16_valid_elems(bool row_valid, int extent, int start) {
+    if (!row_valid || start >= extent) return 0;
+    int remaining = extent - start;
+    return remaining < 8 ? remaining : 8;
+}
+
+template <typename T>
+__device__ __forceinline__ const T* gemm_bi_small16_async_source(
+    const T* base, long long valid_offset, int valid_bytes) {
+    return valid_bytes == 0 ? base : base + valid_offset;
+}
+
+__device__ __forceinline__ void gemm_bi_small16_async_zfill(
+    unsigned shared_dst, const void* global_src, int valid_bytes) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"
+                 :: "r"(shared_dst), "l"(global_src), "r"(valid_bytes));
+}
+
+__device__ __forceinline__ __nv_bfloat16 gemm_bi_small16_from_bf16(float value) {
+    return __float2bfloat16_rn(value);
+}
+
+__device__ __forceinline__ __half gemm_bi_small16_from_f16(float value) {
+    return __float2half_rn(value);
+}
+
+#define GEMM_BI_SMALL16_STAGE_ASYNC(buf, m_idx, BM, BN)                                      \
+    do {                                                                            \
+        unsigned xs = Xs_base +                                                     \
+            (unsigned)((buf) * GEMM_BI_SMALL16_BK * GEMM_BI_SMALL16_LDB * 2);                          \
+        unsigned ys = Ys_base +                                                     \
+            (unsigned)((buf) * GEMM_BI_SMALL16_BK * GEMM_BI_SMALL16_LDB * 2);                          \
+        for (int i = threadIdx.x; i < GEMM_BI_SMALL16_BK * ((BM) / 8);                       \
+             i += GEMM_BI_SMALL16_THREADS) {                                                  \
+            int row = i / ((BM) / 8);                                               \
+            int column = (i % ((BM) / 8)) * 8;                                     \
+            int global_m = (m_idx) + row;                                           \
+            int global_k = pid_m * (BM) + column;                                  \
+            int elems = gemm_bi_small16_valid_elems(global_m < M_red, K_out, global_k);       \
+            int bytes = elems * 2;                                                  \
+            unsigned dst = xs + (unsigned)((row * GEMM_BI_SMALL16_LDB + column) * 2);         \
+            long long offset = bytes == 0 ? 0 :                                    \
+                (long long)global_m * K_out + global_k;                             \
+            const void* src = gemm_bi_small16_async_source(A, offset, bytes);                 \
+            gemm_bi_small16_async_zfill(dst, src, bytes);                                     \
+        }                                                                           \
+        for (int i = threadIdx.x; i < GEMM_BI_SMALL16_BK * ((BN) / 8);                       \
+             i += GEMM_BI_SMALL16_THREADS) {                                                  \
+            int row = i / ((BN) / 8);                                               \
+            int column = (i % ((BN) / 8)) * 8;                                     \
+            int global_m = (m_idx) + row;                                           \
+            int global_n = pid_n * (BN) + column;                                  \
+            int elems = gemm_bi_small16_valid_elems(global_m < M_red, N, global_n);           \
+            int bytes = elems * 2;                                                  \
+            unsigned dst = ys + (unsigned)((row * GEMM_BI_SMALL16_LDB + column) * 2);         \
+            long long offset = bytes == 0 ? 0 :                                    \
+                (long long)global_m * N + global_n;                                 \
+            const void* src = gemm_bi_small16_async_source(B, offset, bytes);                 \
+            gemm_bi_small16_async_zfill(dst, src, bytes);                                     \
+        }                                                                           \
+        asm volatile("cp.async.commit_group;\n");                                 \
+    } while (0)
+
+#define GEMM_BI_SMALL16_STAGE_SCALAR(buf, m_idx, T_ACT, FROM_F, BM, BN)                      \
+    do {                                                                            \
+        T_ACT* xs = &Xs[(buf)][0][0];                                               \
+        T_ACT* ys = &Ys[(buf)][0][0];                                               \
+        for (int i = threadIdx.x; i < GEMM_BI_SMALL16_BK * (BM); i += GEMM_BI_SMALL16_THREADS) {       \
+            int row = i / (BM);                                                     \
+            int column = i % (BM);                                                  \
+            int global_m = (m_idx) + row;                                           \
+            int global_k = pid_m * (BM) + column;                                  \
+            xs[row * GEMM_BI_SMALL16_LDB + column] =                                         \
+                global_m < M_red && global_k < K_out                               \
+                    ? A[(long long)global_m * K_out + global_k]                     \
+                    : FROM_F(0.0f);                                                 \
+        }                                                                           \
+        for (int i = threadIdx.x; i < GEMM_BI_SMALL16_BK * (BN); i += GEMM_BI_SMALL16_THREADS) {       \
+            int row = i / (BN);                                                     \
+            int column = i % (BN);                                                  \
+            int global_m = (m_idx) + row;                                           \
+            int global_n = pid_n * (BN) + column;                                  \
+            ys[row * GEMM_BI_SMALL16_LDB + column] =                                         \
+                global_m < M_red && global_n < N                                   \
+                    ? B[(long long)global_m * N + global_n]                         \
+                    : FROM_F(0.0f);                                                 \
+        }                                                                           \
+    } while (0)
+
+#define DEFINE_GEMM_BI_SMALL16_TN(SYMBOL, T_ACT, FROM_F, MMA_T, BM, BN, FM_COUNT, FN_COUNT)  \
+extern "C" __global__ __launch_bounds__(GEMM_BI_SMALL16_THREADS, 1)                         \
+void SYMBOL(float* __restrict__ C, const T_ACT* __restrict__ A,                    \
+            const T_ACT* __restrict__ B, float alpha,                              \
+            int M_red, int K_out, int N) {                                         \
+    __shared__ __align__(16) T_ACT Xs[GEMM_BI_SMALL16_STAGES][GEMM_BI_SMALL16_BK][GEMM_BI_SMALL16_LDB];          \
+    __shared__ __align__(16) T_ACT Ys[GEMM_BI_SMALL16_STAGES][GEMM_BI_SMALL16_BK][GEMM_BI_SMALL16_LDB];          \
+    int num_pid_n = (N + (BN) - 1) / (BN);                                         \
+    int pid_m = blockIdx.x / num_pid_n;                                             \
+    int pid_n = blockIdx.x % num_pid_n;                                             \
+    int lane = threadIdx.x;                                                         \
+    int group = lane >> 2;                                                          \
+    int thread = lane & 3;                                                          \
+    int matrix_row = lane & 7;                                                      \
+    int matrix_quad = lane >> 3;                                                    \
+    int a_row_offset = (matrix_quad & 2) ? 8 : 0;                                  \
+    int a_column_offset = (matrix_quad & 1) ? 8 : 0;                               \
+    int b_row_offset = (matrix_quad & 1) ? 8 : 0;                                  \
+    unsigned Xs_base = (unsigned)__cvta_generic_to_shared(&Xs[0][0][0]);            \
+    unsigned Ys_base = (unsigned)__cvta_generic_to_shared(&Ys[0][0][0]);            \
+    bool fast_stage = (((unsigned long long)A & 15ULL) == 0ULL) &&                  \
+                      (((unsigned long long)B & 15ULL) == 0ULL) &&                  \
+                      ((K_out & 7) == 0) && ((N & 7) == 0);                         \
+    float acc[FM_COUNT][FN_COUNT][4];                                               \
+    _Pragma("unroll")                                                             \
+    for (int fm = 0; fm < (FM_COUNT); fm++)                                        \
+        _Pragma("unroll")                                                         \
+        for (int fn = 0; fn < (FN_COUNT); fn++)                                    \
+            _Pragma("unroll")                                                     \
+            for (int e = 0; e < 4; e++) acc[fm][fn][e] = 0.0f;                    \
+    int num_m_tiles = (M_red + GEMM_BI_SMALL16_BK - 1) / GEMM_BI_SMALL16_BK;                          \
+    if (fast_stage) {                                                               \
+        GEMM_BI_SMALL16_STAGE_ASYNC(0, 0, BM, BN);                                            \
+    } else {                                                                        \
+        GEMM_BI_SMALL16_STAGE_SCALAR(0, 0, T_ACT, FROM_F, BM, BN);                           \
+    }                                                                               \
+    int read_buf = 0;                                                               \
+    for (int mt = 0; mt < num_m_tiles; mt++) {                                     \
+        if (fast_stage) asm volatile("cp.async.wait_group 0;\n");                 \
+        __syncthreads();                                                            \
+        if (mt + 1 < num_m_tiles) {                                                 \
+            if (fast_stage) {                                                       \
+                GEMM_BI_SMALL16_STAGE_ASYNC(read_buf ^ 1, (mt + 1) * GEMM_BI_SMALL16_BK, BM, BN);       \
+            } else {                                                                \
+                GEMM_BI_SMALL16_STAGE_SCALAR(read_buf ^ 1, (mt + 1) * GEMM_BI_SMALL16_BK,              \
+                                   T_ACT, FROM_F, BM, BN);                          \
+            }                                                                       \
+        }                                                                           \
+        unsigned Xs_read = Xs_base +                                                \
+            (unsigned)(read_buf * GEMM_BI_SMALL16_BK * GEMM_BI_SMALL16_LDB * 2);                       \
+        unsigned Ys_read = Ys_base +                                                \
+            (unsigned)(read_buf * GEMM_BI_SMALL16_BK * GEMM_BI_SMALL16_LDB * 2);                       \
+        _Pragma("unroll")                                                         \
+        for (int ks = 0; ks < (GEMM_BI_SMALL16_BK / 16); ks++) {                             \
+            int k0 = ks * 16;                                                       \
+            unsigned a_frag[FM_COUNT][4];                                          \
+            unsigned b_frag[FN_COUNT][2];                                          \
+            _Pragma("unroll")                                                     \
+            for (int fm = 0; fm < (FM_COUNT); fm++) {                              \
+                int row = k0 + a_row_offset + matrix_row;                          \
+                int column = fm * 16 + a_column_offset;                            \
+                unsigned addr = Xs_read +                                          \
+                    (unsigned)((row * GEMM_BI_SMALL16_LDB + column) * 2);                     \
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 "     \
+                             "{%0,%1,%2,%3}, [%4];\n"                            \
+                             : "=r"(a_frag[fm][0]), "=r"(a_frag[fm][1]),         \
+                               "=r"(a_frag[fm][2]), "=r"(a_frag[fm][3])          \
+                             : "r"(addr));                                        \
+            }                                                                       \
+            _Pragma("unroll")                                                     \
+            for (int fn = 0; fn < (FN_COUNT); fn++) {                              \
+                int row = k0 + b_row_offset + matrix_row;                          \
+                unsigned addr = Ys_read +                                          \
+                    (unsigned)((row * GEMM_BI_SMALL16_LDB + fn * 8) * 2);                    \
+                asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 "     \
+                             "{%0,%1}, [%2];\n"                                   \
+                             : "=r"(b_frag[fn][0]), "=r"(b_frag[fn][1])          \
+                             : "r"(addr));                                        \
+            }                                                                       \
+            _Pragma("unroll")                                                     \
+            for (int fm = 0; fm < (FM_COUNT); fm++) {                              \
+                _Pragma("unroll")                                                 \
+                for (int fn = 0; fn < (FN_COUNT); fn++) {                          \
+                    asm volatile(                                                   \
+                        "mma.sync.aligned.m16n8k16.row.col.f32." MMA_T "."       \
+                        MMA_T ".f32 "                                             \
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                 \
+                        "{%0,%1,%2,%3};\n"                                        \
+                        : "+f"(acc[fm][fn][0]), "+f"(acc[fm][fn][1]),           \
+                          "+f"(acc[fm][fn][2]), "+f"(acc[fm][fn][3])            \
+                        : "r"(a_frag[fm][0]), "r"(a_frag[fm][1]),                \
+                          "r"(a_frag[fm][2]), "r"(a_frag[fm][3]),                \
+                          "r"(b_frag[fn][0]), "r"(b_frag[fn][1]));               \
+                }                                                                   \
+            }                                                                       \
+        }                                                                           \
+        read_buf ^= 1;                                                              \
+    }                                                                               \
+    _Pragma("unroll")                                                             \
+    for (int fm = 0; fm < (FM_COUNT); fm++) {                                      \
+        _Pragma("unroll")                                                         \
+        for (int fn = 0; fn < (FN_COUNT); fn++) {                                  \
+            int row0 = pid_m * (BM) + fm * 16 + group;                             \
+            int column0 = pid_n * (BN) + fn * 8 + 2 * thread;                      \
+            _Pragma("unroll")                                                     \
+            for (int e = 0; e < 4; e++) {                                          \
+                int row = row0 + (e >= 2 ? 8 : 0);                                 \
+                int column = column0 + (e & 1);                                    \
+                if (row >= K_out || column >= N) continue;                         \
+                C[(long long)row * N + column] += alpha * acc[fm][fn][e];          \
+            }                                                                       \
+        }                                                                           \
+    }                                                                               \
+}
+
+DEFINE_GEMM_BI_SMALL16_TN(gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16,
+                __nv_bfloat16, gemm_bi_small16_from_bf16, "bf16", 16, 16, 1, 2)
+DEFINE_GEMM_BI_SMALL16_TN(gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16,
+                __half, gemm_bi_small16_from_f16, "f16", 16, 16, 1, 2)
+// SM89_HALF_TN_SMALL16_END
+#undef DEFINE_GEMM_BI_SMALL16_TN
+#undef GEMM_BI_SMALL16_STAGE_SCALAR
+#undef GEMM_BI_SMALL16_STAGE_ASYNC
+#undef GEMM_BI_SMALL16_THREADS
+#undef GEMM_BI_SMALL16_LDB
+#undef GEMM_BI_SMALL16_STAGES
+#undef GEMM_BI_SMALL16_BK

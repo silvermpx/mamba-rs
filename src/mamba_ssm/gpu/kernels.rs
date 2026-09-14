@@ -1669,6 +1669,13 @@ impl MambaKernels {
         self.triad.sm89_half_function(route, dtype)
     }
 
+    pub(in crate::mamba_ssm::gpu) fn triad_sm89_half_runtime_function(
+        &self,
+        symbol: &str,
+    ) -> Option<&CudaFunction> {
+        self.triad.sm89_half_runtime_function(symbol)
+    }
+
     pub fn triad_sm89_exact_f32_compiler_identity(
         &self,
     ) -> Option<super::kernel_identity::CompilerIdentity> {

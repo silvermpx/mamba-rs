@@ -10742,6 +10742,7 @@ impl HalfKernelIdentity {
             "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
                 | "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1"
                 | "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1"
+                | "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1"
                 | "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
                 | "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
         ) {
@@ -10825,6 +10826,12 @@ impl HalfKernelIdentity {
             }
             ("gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1", WeightDtype::F16) => {
                 "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16"
+            }
+            ("gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1", WeightDtype::Bf16) => {
+                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16"
+            }
+            ("gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1", WeightDtype::F16) => {
+                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16"
             }
             ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::Bf16) => {
                 "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16"
@@ -10952,6 +10959,24 @@ pub(in crate::mamba_ssm::gpu) struct HalfNativeBranchSeal {
     pub(in crate::mamba_ssm::gpu) shared_mem_bytes: u32,
 }
 
+fn half_native_branch_seal(
+    observation: HalfGemmObservation,
+    config: LaunchConfig,
+) -> HalfNativeBranchSeal {
+    HalfNativeBranchSeal {
+        base: observation.base,
+        op: observation.op,
+        dtype: observation.dtype,
+        dims: observation.dims,
+        strides: observation.strides,
+        tile: observation.tile,
+        bk_stages: observation.bk_stages,
+        grid_dim: config.grid_dim,
+        block_dim: config.block_dim,
+        shared_mem_bytes: config.shared_mem_bytes,
+    }
+}
+
 fn half_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
@@ -11056,9 +11081,7 @@ fn half_gemm_arguments_digest(
 
 fn half_gemm_resources_digest(identity: HalfKernelIdentity, config: LaunchConfig) -> Sha256Digest {
     let static_shared_bytes = if identity.module_kind == ModuleKind::TriadSm89Half {
-        super::sm89_half_source::SM89_HALF_KERNEL_SPECS
-            .iter()
-            .find(|spec| spec.symbol == identity.symbol)
+        super::sm89_half_source::runtime_kernel_spec(identity.symbol)
             .map(|spec| spec.static_shared_bytes)
             .unwrap_or(0)
     } else {
@@ -11082,6 +11105,22 @@ fn half_gemm_resources_digest(identity: HalfKernelIdentity, config: LaunchConfig
         .finish()
 }
 
+fn half_kernel_compiler_identity(
+    kernels: &GpuKernels,
+    identity: HalfKernelIdentity,
+) -> Result<crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity, String> {
+    match identity.module_kind {
+        ModuleKind::TriadScalar => Ok(kernels.triad_scalar_compiler_identity()),
+        ModuleKind::TriadSm80 => Ok(kernels.triad_sm80_compiler_identity()),
+        ModuleKind::TriadSm89Half => kernels
+            .triad_sm89_half_compiler_identity()
+            .ok_or_else(|| "SM89 half route has no compiler identity".to_string()),
+        module_kind => Err(format!(
+            "half physical GEMM has unsupported module owner {module_kind:?}"
+        )),
+    }
+}
+
 fn resolved_half_gemm_route(
     context: GemmRouteIdentity,
     kernels: &GpuKernels,
@@ -11090,12 +11129,29 @@ fn resolved_half_gemm_route(
     identity: HalfKernelIdentity,
     config: LaunchConfig,
 ) -> Result<ResolvedGemmRoute, String> {
+    resolved_half_gemm_route_with_compiler(
+        context,
+        half_kernel_compiler_identity(kernels, identity)?,
+        argument_identity,
+        observation,
+        identity,
+        config,
+    )
+}
+
+fn resolved_half_gemm_route_with_compiler(
+    context: GemmRouteIdentity,
+    compiler: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
+    argument_identity: impl Fn(CUptr, u64) -> Result<Sha256Digest, String>,
+    observation: HalfGemmObservation,
+    identity: HalfKernelIdentity,
+    config: LaunchConfig,
+) -> Result<ResolvedGemmRoute, String> {
     let dtype = half_policy_dtype(observation.dtype)?;
     let shape = observation.shape();
-    let (compiler, artifact, backend, numeric_contract, instruction_family, instruction_shape) =
+    let (artifact, backend, numeric_contract, instruction_family, instruction_shape) =
         match identity.module_kind {
             ModuleKind::TriadScalar => (
-                kernels.triad_scalar_compiler_identity(),
                 context.artifacts.triad_scalar,
                 PhysicalGemmBackend::ScalarFmaV1,
                 ResolvedNumericContract::ScalarFmaV1,
@@ -11103,7 +11159,6 @@ fn resolved_half_gemm_route(
                 ResolvedInstructionShape { m: 1, n: 1, k: 1 },
             ),
             ModuleKind::TriadSm80 => (
-                kernels.triad_sm80_compiler_identity(),
                 context.artifacts.triad_sm80,
                 PhysicalGemmBackend::Sm80Mma16V1,
                 match identity.schedule {
@@ -11116,16 +11171,12 @@ fn resolved_half_gemm_route(
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             ),
             ModuleKind::TriadSm89Half => (
-                kernels
-                    .triad_sm89_half_compiler_identity()
-                    .ok_or_else(|| "SM89 half route has no compiler identity".to_string())?,
                 context
                     .artifacts
                     .sm89_half
                     .ok_or_else(|| "SM89 half route has no artifact identity".to_string())?,
-                if identity
-                    .symbol
-                    .starts_with("gemm_bi_tn_sm89_m64n64_bk64_s2_")
+                if super::sm89_half_source::runtime_kernel_spec(identity.symbol)
+                    .is_some_and(|spec| spec.stages == 2)
                 {
                     PhysicalGemmBackend::Sm89Mma16HalfS2V1
                 } else {
@@ -11192,16 +11243,14 @@ fn resolved_half_gemm_route(
     })
 }
 
-fn resolve_half_gemm_observation<O: PhysicalLaunchObserver>(
+fn resolve_half_gemm_observation_with_context<O: PhysicalLaunchObserver>(
     observer: &O,
-    kernels: &GpuKernels,
+    context: GemmRouteIdentity,
+    compiler: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
     observation: HalfGemmObservation,
+    identity: HalfKernelIdentity,
     config: LaunchConfig,
 ) -> Result<PhysicalLaunchObservation, String> {
-    let context = observer
-        .route_context()
-        .ok_or_else(|| "recording half launch requires a GEMM route context".to_string())?;
-    let identity = HalfKernelIdentity::resolve(observation.base, observation.dtype)?;
     if !context.policy.batch_invariant
         || context.policy.bi_gemm_family != crate::mamba_ssm::gpu::context::BiGemmFamily::Triad
     {
@@ -11215,9 +11264,9 @@ fn resolve_half_gemm_observation<O: PhysicalLaunchObserver>(
                 .into(),
         );
     }
-    let route = resolved_half_gemm_route(
+    let route = resolved_half_gemm_route_with_compiler(
         context,
-        kernels,
+        compiler,
         |pointer, bytes| observer.argument_identity_digest(pointer, bytes),
         observation,
         identity,
@@ -11228,6 +11277,26 @@ fn resolve_half_gemm_observation<O: PhysicalLaunchObserver>(
         None,
         route,
     ))
+}
+
+fn resolve_half_gemm_observation<O: PhysicalLaunchObserver>(
+    observer: &O,
+    kernels: &GpuKernels,
+    observation: HalfGemmObservation,
+    config: LaunchConfig,
+) -> Result<PhysicalLaunchObservation, String> {
+    let context = observer
+        .route_context()
+        .ok_or_else(|| "recording half launch requires a GEMM route context".to_string())?;
+    let identity = HalfKernelIdentity::resolve(observation.base, observation.dtype)?;
+    resolve_half_gemm_observation_with_context(
+        observer,
+        context,
+        half_kernel_compiler_identity(kernels, identity)?,
+        observation,
+        identity,
+        config,
+    )
 }
 
 pub(in crate::mamba_ssm::gpu) struct PreparedHalfGraphIdentity {
@@ -11250,21 +11319,115 @@ impl PreparedHalfGraphIdentity {
     }
 }
 
+fn prepared_half_graph_base(
+    expected: ResolvedPhysicalKernelLaunch,
+    dtype: WeightDtype,
+) -> Result<&'static str, String> {
+    let suffix = match dtype {
+        WeightDtype::Bf16 => "_bf16",
+        WeightDtype::F16 => "_f16",
+        WeightDtype::F32 => return Err("native half graph identity does not accept f32".into()),
+    };
+    expected
+        .symbol()
+        .strip_suffix(suffix)
+        .ok_or_else(|| "native half graph symbol has the wrong dtype suffix".to_string())
+}
+
+fn prepared_half_graph_observation(
+    expected: ResolvedPhysicalKernelLaunch,
+    request: HalfPhysicalTraceRequest,
+    base: &'static str,
+) -> Result<(LaunchConfig, HalfGemmObservation), String> {
+    let launch = expected.launch();
+    let config = LaunchConfig {
+        grid_dim: launch.grid_dim,
+        block_dim: launch.block_dim,
+        shared_mem_bytes: launch.shared_mem_bytes,
+    };
+    let route = expected
+        .gemm_route()
+        .ok_or_else(|| "native half graph node has no GEMM route".to_string())?;
+    let observation = HalfGemmObservation {
+        base,
+        op: request.op,
+        dtype: request.dtype,
+        dims: request.dims,
+        strides: request.nn_strides.unwrap_or_else(|| {
+            let shape = F32TriadShape::contiguous(request.op, request.dims);
+            (shape.lda, shape.ldb, shape.ldc)
+        }),
+        tile: expected
+            .tile()
+            .ok_or_else(|| "native half graph node has no tile".to_string())?,
+        bk_stages: (route.bk, route.stages),
+        arguments: HalfGemmArguments {
+            output: request.output,
+            a: request.a,
+            b: request.b,
+            bias: if request.op == ResolvedGemmOp::Nn {
+                request.bias
+            } else {
+                0
+            },
+        },
+    };
+    Ok((config, observation))
+}
+
+fn resolve_prepared_half_graph_node_with_context<O: PhysicalLaunchObserver>(
+    observer: &O,
+    context: GemmRouteIdentity,
+    compiler: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
+    expected: ResolvedPhysicalKernelLaunch,
+    request: HalfPhysicalTraceRequest,
+    base: &'static str,
+) -> Result<(LaunchConfig, ResolvedPhysicalKernelLaunch), String> {
+    let (config, observation) = prepared_half_graph_observation(expected, request, base)?;
+    let identity = HalfKernelIdentity::resolve(base, request.dtype)?;
+    if expected.module_kind() != identity.module_kind || expected.symbol() != identity.symbol {
+        return Err("half kernel identity does not match its exact symbol and module owner".into());
+    }
+    let resolved = resolve_half_gemm_observation_with_context(
+        observer,
+        context,
+        compiler,
+        observation,
+        identity,
+        config,
+    )?;
+    let node = resolve_physical_launch_observation(observer, resolved, config)?;
+    Ok((config, node))
+}
+
+fn resolve_prepared_half_graph_node<O: PhysicalLaunchObserver>(
+    observer: &O,
+    kernels: &GpuKernels,
+    expected: ResolvedPhysicalKernelLaunch,
+    request: HalfPhysicalTraceRequest,
+    base: &'static str,
+) -> Result<(LaunchConfig, ResolvedPhysicalKernelLaunch), String> {
+    let context = observer
+        .route_context()
+        .ok_or_else(|| "recording half launch requires a GEMM route context".to_string())?;
+    let identity = HalfKernelIdentity::resolve(base, request.dtype)?;
+    resolve_prepared_half_graph_node_with_context(
+        observer,
+        context,
+        half_kernel_compiler_identity(kernels, identity)?,
+        expected,
+        request,
+        base,
+    )
+}
+
 pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     observer: &O,
     expected: ResolvedPhysicalKernelLaunch,
     request: HalfPhysicalTraceRequest,
 ) -> Result<PreparedHalfGraphIdentity, String> {
-    let suffix = match request.dtype {
-        WeightDtype::Bf16 => "_bf16",
-        WeightDtype::F16 => "_f16",
-        WeightDtype::F32 => return Err("native half graph identity does not accept f32".into()),
-    };
-    let base = expected
-        .symbol()
-        .strip_suffix(suffix)
-        .ok_or_else(|| "native half graph symbol has the wrong dtype suffix".to_string())?;
+    let base = prepared_half_graph_base(expected, request.dtype)?;
     let choice = match base {
         "gemm_bi_nn_gemv" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_gemv_typed.get(request.dtype))
@@ -11365,6 +11528,12 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                     "prepared SM89 half TN regpipe+vec2 symbol is unavailable".to_string()
                 })?,
         ),
+        "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .triad_sm89_half_runtime_function(expected.symbol())
+                .ok_or_else(|| "prepared SM89 half TN small16 symbol is unavailable".to_string())?,
+        ),
         "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1" => HalfKernelChoice::new(
             base,
             ctx.kernels
@@ -11385,41 +11554,8 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
         ),
         _ => return Err("native half graph symbol is not a prepared typed route".into()),
     };
-    let launch = expected.launch();
-    let config = LaunchConfig {
-        grid_dim: launch.grid_dim,
-        block_dim: launch.block_dim,
-        shared_mem_bytes: launch.shared_mem_bytes,
-    };
-    let route = expected
-        .gemm_route()
-        .ok_or_else(|| "native half graph node has no GEMM route".to_string())?;
-    let observation = HalfGemmObservation {
-        base: choice.base,
-        op: request.op,
-        dtype: request.dtype,
-        dims: request.dims,
-        strides: request.nn_strides.unwrap_or_else(|| {
-            let shape = F32TriadShape::contiguous(request.op, request.dims);
-            (shape.lda, shape.ldb, shape.ldc)
-        }),
-        tile: expected
-            .tile()
-            .ok_or_else(|| "native half graph node has no tile".to_string())?,
-        bk_stages: (route.bk, route.stages),
-        arguments: HalfGemmArguments {
-            output: request.output,
-            a: request.a,
-            b: request.b,
-            bias: if request.op == ResolvedGemmOp::Nn {
-                request.bias
-            } else {
-                0
-            },
-        },
-    };
-    let resolved = resolve_half_gemm_observation(observer, &ctx.kernels, observation, config)?;
-    let node = resolve_physical_launch_observation(observer, resolved, config)?;
+    let (config, node) =
+        resolve_prepared_half_graph_node(observer, &ctx.kernels, expected, request, choice.base)?;
     Ok(PreparedHalfGraphIdentity {
         function: choice.function.clone(),
         config,
@@ -11479,42 +11615,34 @@ unsafe fn enqueue_half_gemm<O: PhysicalLaunchObserver>(
     };
     unsafe { enqueue_with_physical_observation(observer, builder, config, physical_observation) }
         .map_err(|error| error.with_driver_context(driver_context))?;
-    Ok(HalfNativeBranchSeal {
-        base: observation.base,
-        op: observation.op,
-        dtype: observation.dtype,
-        dims: observation.dims,
-        strides: observation.strides,
-        tile: observation.tile,
-        bk_stages: observation.bk_stages,
-        grid_dim: config.grid_dim,
-        block_dim: config.block_dim,
-        shared_mem_bytes: config.shared_mem_bytes,
-    })
+    Ok(half_native_branch_seal(observation, config))
 }
 
-fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRoute) -> &'static str {
+fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRuntimeRoute) -> &'static str {
     match route {
-        super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3 => {
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
+        super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+            super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
+        ) => "gemm_bi_nn_sm89_m128n128_bk64_s3_v1",
+        super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+            super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor,
+        ) => "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1",
+        super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+            super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+        ) => "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1",
+        super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
+            "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1"
         }
-        super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor => {
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1"
-        }
-        super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1"
-        }
-        super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor => {
-            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
-        }
-        super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3 => {
-            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
-        }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+            super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
+        ) => "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1",
+        super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
+            super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3,
+        ) => "gemm_bi_nt_sm89_m96n128_bk64_s3_v1",
     }
 }
 
 fn sm89_half_launch_config(
-    spec: &super::sm89_half_source::Sm89HalfKernelSpec,
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
     dims: (usize, usize, usize),
 ) -> Result<LaunchConfig, String> {
     let (output_rows, output_columns) = match spec.op {
@@ -11535,6 +11663,77 @@ fn sm89_half_launch_config(
         ),
         block_dim: (spec.threads, 1, 1),
         shared_mem_bytes: spec.dynamic_shared_bytes,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sm89HalfTnArgument {
+    Pointer(CUptr),
+    ScalarF32(f32),
+    ScalarI32(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sm89HalfTnArguments([Sm89HalfTnArgument; 7]);
+
+impl Sm89HalfTnArguments {
+    fn bind<'a>(&'a self, builder: &mut LaunchArgs<'a>) {
+        for argument in &self.0 {
+            match argument {
+                Sm89HalfTnArgument::Pointer(value) => builder.arg(value),
+                Sm89HalfTnArgument::ScalarF32(value) => builder.arg(value),
+                Sm89HalfTnArgument::ScalarI32(value) => builder.arg(value),
+            };
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Sm89HalfTnLaunchPlan {
+    arguments: Sm89HalfTnArguments,
+    config: LaunchConfig,
+    observation: HalfGemmObservation,
+}
+
+fn sm89_half_tn_launch_plan(
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
+    dw_ptr: CUptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<Sm89HalfTnLaunchPlan, String> {
+    if spec.op != ResolvedGemmOp::Tn || spec.dtype != dy.dtype || x_saved.dtype != dy.dtype {
+        return Err("SM89 half TN launch plan does not match the selected dtype and op".into());
+    }
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims);
+    let checked = GemmDims::tn(dims)?;
+    let base = sm89_half_base(spec.route);
+    Ok(Sm89HalfTnLaunchPlan {
+        arguments: Sm89HalfTnArguments([
+            Sm89HalfTnArgument::Pointer(dw_ptr),
+            Sm89HalfTnArgument::Pointer(x_saved.ptr),
+            Sm89HalfTnArgument::Pointer(dy.ptr),
+            Sm89HalfTnArgument::ScalarF32(1.0),
+            Sm89HalfTnArgument::ScalarI32(checked.m_i32),
+            Sm89HalfTnArgument::ScalarI32(checked.k_i32),
+            Sm89HalfTnArgument::ScalarI32(checked.n_i32),
+        ]),
+        config: sm89_half_launch_config(spec, dims)?,
+        observation: HalfGemmObservation {
+            base,
+            op: ResolvedGemmOp::Tn,
+            dtype: dy.dtype,
+            dims,
+            strides: (shape.lda, shape.ldb, shape.ldc),
+            tile: spec.tile,
+            bk_stages: (spec.bk, spec.stages),
+            arguments: HalfGemmArguments {
+                output: dw_ptr,
+                a: x_saved.ptr,
+                b: dy.ptr,
+                bias: 0,
+            },
+        },
     })
 }
 
@@ -11579,10 +11778,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLa
     ) else {
         return Ok(None);
     };
-    let Some(function) = ctx
-        .kernels
-        .triad_sm89_half_function(spec.route, ops.y.dtype)
-    else {
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
         return Ok(None);
     };
     let cfg = sm89_half_launch_config(spec, dims)?;
@@ -11665,43 +11861,20 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLa
     ) else {
         return Ok(None);
     };
-    let Some(function) = ctx.kernels.triad_sm89_half_function(spec.route, dy.dtype) else {
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
         return Ok(None);
     };
-    let cfg = sm89_half_launch_config(spec, dims)?;
-    let checked = GemmDims::tn(dims)?;
-    let alpha = 1.0_f32;
-    let base = sm89_half_base(spec.route);
+    let plan = sm89_half_tn_launch_plan(spec, dw_ptr, dy, x_saved, dims)?;
     let mut builder = ctx.stream.launch_builder(function);
-    builder.arg(&dw_ptr);
-    builder.arg(&x_saved.ptr);
-    builder.arg(&dy.ptr);
-    builder.arg(&alpha);
-    builder.arg(&checked.m_i32);
-    builder.arg(&checked.k_i32);
-    builder.arg(&checked.n_i32);
+    plan.arguments.bind(&mut builder);
     let seal = unsafe {
         enqueue_half_gemm(
             observer,
             (&ctx.kernels, Some(ctx)),
             &mut builder,
-            cfg,
-            HalfGemmObservation {
-                base,
-                op: ResolvedGemmOp::Tn,
-                dtype: dy.dtype,
-                dims,
-                strides: (shape.lda, shape.ldb, shape.ldc),
-                tile: spec.tile,
-                bk_stages: (spec.bk, spec.stages),
-                arguments: HalfGemmArguments {
-                    output: dw_ptr,
-                    a: x_saved.ptr,
-                    b: dy.ptr,
-                    bias: 0,
-                },
-            },
-            format_args!("{base}"),
+            plan.config,
+            plan.observation,
+            format_args!("{}", plan.observation.base),
         )
     }?;
     Ok(Some(seal))
@@ -11741,7 +11914,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLa
     ) else {
         return Ok(None);
     };
-    let Some(function) = ctx.kernels.triad_sm89_half_function(spec.route, dx.dtype) else {
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
         return Ok(None);
     };
     let cfg = sm89_half_launch_config(spec, dims)?;
@@ -16374,6 +16547,95 @@ mod prepared_f32_launch_tests {
 #[cfg(test)]
 mod half_physical_trace_tests {
     use super::*;
+    use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
+        CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, NUMERIC_ABI_REVISION,
+        PhysicalLaunchKind, build_artifact_set, route_backend_contract_sets,
+    };
+
+    fn small16_compiler_fixture() -> CompilerIdentity {
+        let target = CudaTarget::new("sm_89").unwrap();
+        CompilerIdentity {
+            source_digest: [31; 32],
+            invocation_digest: [32; 32],
+            header_manifest_digest: [33; 32],
+            target,
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: [34; 32],
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        }
+    }
+
+    fn small16_context_fixture(compiler: CompilerIdentity) -> GemmRouteIdentity {
+        let artifact = |module_kind, seed| ArtifactIdentity {
+            module_kind,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: [seed; 32],
+            artifact_digest: [seed + 1; 32],
+        };
+        let policy = GemmPolicy {
+            batch_invariant: true,
+            bi_tensor_cores: true,
+            fast_gemm: false,
+            cublas_tf32: false,
+            f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+            half_triad_policy: HalfTriadPolicy::TiledParityV1,
+            bi_gemm_family: BiGemmFamily::Triad,
+        };
+        let (backend_set, numeric_contracts) = route_backend_contract_sets(policy);
+        GemmRouteIdentity {
+            policy,
+            backend_set,
+            numeric_contracts,
+            compiler,
+            artifacts: build_artifact_set(&[
+                artifact(ModuleKind::Fixed, 1),
+                artifact(ModuleKind::TriadScalar, 3),
+                artifact(ModuleKind::TriadSm80, 5),
+                artifact(ModuleKind::TriadSm89Half, 7),
+            ])
+            .unwrap(),
+            policy_revision: 1,
+            policy_hash: [35; 32],
+            device: DeviceIdentity {
+                compute_capability: (8, 9),
+                multiprocessor_count: 142,
+                target: CudaTarget::new("sm_89").unwrap(),
+                driver: DriverIdentity {
+                    api_version: 13_020,
+                    build_sources: 1,
+                    build_digest: [36; 32],
+                },
+            },
+            device_caps: DeviceCaps {
+                compute_capability: (8, 9),
+                nvrtc_version: (13, 2),
+                accepted_target: Some(CudaTarget::new("sm_89").unwrap()),
+                optin_shared_bytes: 99_000,
+                tensor_map_access: false,
+            },
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_set_revision: SCHEDULE_REVISION,
+            state_capacity: 64,
+        }
+    }
+
+    fn small16_observer() -> RecordingPhysicalObserver {
+        crate::mamba_ssm::gpu::kernel_identity::inference_test_support::observer(
+            |pointer, bytes| {
+                Ok(FramedSha256::new(b"small16-test-allocation.v1")
+                    .required(b"pointer", &pointer.to_le_bytes())
+                    .required(b"bytes", &bytes.to_le_bytes())
+                    .finish())
+            },
+        )
+    }
 
     #[test]
     fn no_physical_observer_is_zero_sized_and_never_records() {
@@ -16446,13 +16708,13 @@ mod half_physical_trace_tests {
                 0,
             ),
         ] {
-            let spec = super::super::sm89_half_source::kernel_spec(route, dtype).unwrap();
+            let spec = (*super::super::sm89_half_source::kernel_spec(route, dtype).unwrap()).into();
             let config = sm89_half_launch_config(spec, dims).unwrap();
             assert_eq!(config.grid_dim, (expected_grid, 1, 1), "{route:?}");
             assert_eq!(config.block_dim, (expected_block, 1, 1), "{route:?}");
             assert_eq!(config.shared_mem_bytes, expected_shared, "{route:?}");
             assert_eq!(
-                sm89_half_base(route),
+                sm89_half_base(super::super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(route)),
                 spec.symbol
                     .trim_end_matches("_bf16")
                     .trim_end_matches("_f16")
@@ -16523,6 +16785,263 @@ mod half_physical_trace_tests {
         );
         assert!(HalfKernelIdentity::resolve("gemm_bi_nn_tc64", WeightDtype::F32).is_err());
         assert!(HalfKernelIdentity::resolve("gemm_bi_unknown", WeightDtype::Bf16).is_err());
+    }
+
+    #[test]
+    fn triad_retained_half_small16_identity_uses_exact_suffix_and_owner() {
+        let base = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1";
+        for (dtype, symbol, resources_digest) in [
+            (
+                WeightDtype::Bf16,
+                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16",
+                [
+                    158, 160, 174, 127, 8, 46, 75, 224, 212, 149, 133, 12, 207, 231, 197, 26, 6,
+                    89, 14, 95, 93, 70, 251, 217, 236, 156, 176, 15, 60, 89, 80, 35,
+                ],
+            ),
+            (
+                WeightDtype::F16,
+                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16",
+                [
+                    177, 199, 237, 244, 19, 91, 188, 127, 113, 229, 96, 221, 96, 195, 28, 71, 118,
+                    105, 21, 105, 244, 186, 144, 3, 62, 146, 62, 125, 71, 50, 168, 9,
+                ],
+            ),
+        ] {
+            let identity =
+                HalfKernelIdentity::resolve(base, dtype).expect("retained small16 half identity");
+            assert_eq!(identity.symbol, symbol);
+            assert_eq!(identity.module_kind, ModuleKind::TriadSm89Half);
+            assert_eq!(identity.schedule, HalfSchedule::Tiled);
+            let spec = super::super::sm89_half_source::runtime_kernel_spec(symbol).unwrap();
+            let config = sm89_half_launch_config(spec, (1024, 256, 128)).unwrap();
+            assert_eq!(sm89_half_base(spec.route), base);
+            assert_eq!(config.grid_dim, (128, 1, 1));
+            assert_eq!(config.block_dim, (32, 1, 1));
+            assert_eq!(config.shared_mem_bytes, 0);
+            assert_eq!(
+                half_gemm_resources_digest(identity, config),
+                resources_digest
+            );
+        }
+    }
+
+    #[test]
+    fn triad_retained_half_small16_tn_argument_spans_match_the_physical_abi() {
+        let dims = (1024, 256, 128);
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let base = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1";
+            let identity = HalfKernelIdentity::resolve(base, dtype).unwrap();
+            let spec =
+                super::super::sm89_half_source::runtime_kernel_spec(identity.symbol).unwrap();
+            let plan = sm89_half_tn_launch_plan(
+                spec,
+                0x3000,
+                TypedPtr { ptr: 0x2000, dtype },
+                TypedPtr { ptr: 0x1000, dtype },
+                dims,
+            )
+            .unwrap();
+            assert_eq!(
+                plan.arguments,
+                Sm89HalfTnArguments([
+                    Sm89HalfTnArgument::Pointer(0x3000),
+                    Sm89HalfTnArgument::Pointer(0x1000),
+                    Sm89HalfTnArgument::Pointer(0x2000),
+                    Sm89HalfTnArgument::ScalarF32(1.0),
+                    Sm89HalfTnArgument::ScalarI32(1024),
+                    Sm89HalfTnArgument::ScalarI32(256),
+                    Sm89HalfTnArgument::ScalarI32(128),
+                ])
+            );
+            let ranges = std::cell::RefCell::new(Vec::new());
+            half_gemm_arguments_digest(
+                |pointer, bytes| {
+                    ranges.borrow_mut().push((pointer, bytes));
+                    Ok(FramedSha256::new(b"small16-test-allocation.v1")
+                        .required(b"pointer", &pointer.to_le_bytes())
+                        .required(b"bytes", &bytes.to_le_bytes())
+                        .finish())
+                },
+                plan.observation,
+                identity,
+                half_policy_dtype(dtype).unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                *ranges.borrow(),
+                [
+                    (0x3000, 256 * 128 * 4),
+                    (0x1000, 1024 * 256 * 2),
+                    (0x2000, 1024 * 128 * 2),
+                ]
+            );
+            assert_eq!(plan.config.grid_dim, (128, 1, 1));
+            assert_eq!(plan.config.block_dim, (32, 1, 1));
+            assert_eq!(plan.config.shared_mem_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn triad_retained_half_small16_eager_and_prepared_physical_nodes_match() {
+        let compiler = small16_compiler_fixture();
+        let context = small16_context_fixture(compiler);
+        let mut argument_digests = Vec::new();
+        for (dtype, policy_dtype, symbol, resources_digest) in [
+            (
+                WeightDtype::Bf16,
+                PolicyDtype::Bf16,
+                super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+                [
+                    158, 160, 174, 127, 8, 46, 75, 224, 212, 149, 133, 12, 207, 231, 197, 26, 6,
+                    89, 14, 95, 93, 70, 251, 217, 236, 156, 176, 15, 60, 89, 80, 35,
+                ],
+            ),
+            (
+                WeightDtype::F16,
+                PolicyDtype::F16,
+                super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+                [
+                    177, 199, 237, 244, 19, 91, 188, 127, 113, 229, 96, 221, 96, 195, 28, 71, 118,
+                    105, 21, 105, 244, 186, 144, 3, 62, 146, 62, 125, 71, 50, 168, 9,
+                ],
+            ),
+        ] {
+            let spec = super::super::sm89_half_source::runtime_kernel_spec(symbol).unwrap();
+            let plan = sm89_half_tn_launch_plan(
+                spec,
+                0x3000,
+                TypedPtr { ptr: 0x2000, dtype },
+                TypedPtr { ptr: 0x1000, dtype },
+                (1024, 256, 128),
+            )
+            .unwrap();
+            let identity = HalfKernelIdentity::resolve(plan.observation.base, dtype).unwrap();
+            let observer = small16_observer();
+            let physical = resolve_half_gemm_observation_with_context(
+                &observer,
+                context,
+                compiler,
+                plan.observation,
+                identity,
+                plan.config,
+            )
+            .unwrap();
+            let node =
+                resolve_physical_launch_observation(&observer, physical, plan.config).unwrap();
+            let route = node.gemm_route().unwrap();
+
+            assert_eq!(node.kind(), PhysicalLaunchKind::Gemm);
+            assert_eq!(node.symbol(), symbol);
+            assert_eq!(node.module_kind(), ModuleKind::TriadSm89Half);
+            assert_eq!(node.logical_op(), ResolvedGemmOp::Tn);
+            assert_eq!(node.logical_dtype(), policy_dtype);
+            assert_eq!(node.execution_dtype(), policy_dtype);
+            assert_eq!(node.shape(), (1024, 256, 128));
+            assert_eq!(node.strides(), (256, 128, 128));
+            assert_eq!(node.tile(), Some((16, 16)));
+            assert_eq!(route.op, ResolvedGemmOp::Tn);
+            assert_eq!(route.dtype, policy_dtype);
+            assert_eq!(route.backend, PhysicalGemmBackend::Sm89Mma16HalfS2V1);
+            assert_eq!(
+                route.numeric_contract,
+                ResolvedNumericContract::MmaSyncF32V1
+            );
+            assert_eq!(route.instruction_family, ResolvedInstructionFamily::MmaSync);
+            assert_eq!(
+                route.instruction_shape,
+                ResolvedInstructionShape { m: 16, n: 8, k: 16 }
+            );
+            assert_eq!(route.operand_conversion, ResolvedOperandConversion::None);
+            assert_eq!(
+                route.ownership,
+                ResolvedOutputOwnership::OneCtaPerOutputTileV1
+            );
+            assert_eq!(route.symbol, symbol);
+            assert_eq!(route.module_kind, ModuleKind::TriadSm89Half);
+            assert_eq!(route.target, compiler.target);
+            assert_eq!(route.artifact, context.artifacts.sm89_half.unwrap());
+            assert_eq!(route.compiler, compiler);
+            assert_eq!(route.device, context.device);
+            assert_eq!(route.device_caps, context.device_caps);
+            assert_eq!(route.shape, (1024, 256, 128));
+            assert_eq!(route.strides, (256, 128, 128));
+            assert_eq!(route.tile, (16, 16));
+            assert_eq!((route.bk, route.stages, route.threads), (64, 2, 32));
+            assert_eq!(route.launch.grid_dim, (128, 1, 1));
+            assert_eq!(route.launch.block_dim, (32, 1, 1));
+            assert_eq!(route.launch.shared_mem_bytes, 0);
+            assert_ne!(route.launch.arguments_digest, [0; 32]);
+            assert_eq!(route.tensor_map_revision, 0);
+            assert_eq!(route.tensor_maps_digest, [0; 32]);
+            assert_eq!(route.resources_digest, resources_digest);
+            assert_eq!(route.tuning_table_revision, SM89_HALF_ROUTE_REVISION);
+            assert_eq!(route.schedule_revision, SCHEDULE_REVISION);
+            argument_digests.push(route.launch.arguments_digest);
+
+            let seal = half_native_branch_seal(plan.observation, plan.config);
+            assert_eq!(seal.base, plan.observation.base);
+            assert_eq!(seal.op, node.logical_op());
+            assert_eq!(half_policy_dtype(seal.dtype).unwrap(), node.logical_dtype());
+            assert_eq!(seal.dims, node.shape());
+            assert_eq!(seal.strides, node.strides());
+            assert_eq!(Some(seal.tile), node.tile());
+            assert_eq!(seal.bk_stages, (route.bk, route.stages));
+            assert_eq!(seal.grid_dim, node.launch().grid_dim);
+            assert_eq!(seal.block_dim, node.launch().block_dim);
+            assert_eq!(seal.shared_mem_bytes, node.launch().shared_mem_bytes);
+
+            let request = HalfPhysicalTraceRequest {
+                op: ResolvedGemmOp::Tn,
+                output: 0x3000,
+                a: 0x1000,
+                b: 0x2000,
+                bias: 0,
+                dtype,
+                dims: (1024, 256, 128),
+                nn_strides: None,
+                forced_tile: None,
+                capacity: 1,
+            };
+            let base = prepared_half_graph_base(node, dtype).unwrap();
+            let (prepared_config, prepared_node) = resolve_prepared_half_graph_node_with_context(
+                &observer, context, compiler, node, request, base,
+            )
+            .unwrap();
+            assert_eq!(prepared_config.grid_dim, plan.config.grid_dim);
+            assert_eq!(prepared_config.block_dim, plan.config.block_dim);
+            assert_eq!(
+                prepared_config.shared_mem_bytes,
+                plan.config.shared_mem_bytes
+            );
+            assert_eq!(prepared_node, node);
+
+            let wrong_dtype = match dtype {
+                WeightDtype::Bf16 => WeightDtype::F16,
+                WeightDtype::F16 => WeightDtype::Bf16,
+                WeightDtype::F32 => unreachable!(),
+            };
+            assert!(prepared_half_graph_base(node, wrong_dtype).is_err());
+            let mut wrong_owner = node;
+            wrong_owner.module_kind = ModuleKind::TriadSm80;
+            assert!(
+                identity
+                    .validate(wrong_owner.module_kind(), wrong_owner.symbol())
+                    .is_err()
+            );
+            let error = resolve_prepared_half_graph_node_with_context(
+                &observer,
+                context,
+                compiler,
+                wrong_owner,
+                request,
+                base,
+            )
+            .expect_err("prepared small16 identity must reject the wrong module owner");
+            assert!(error.contains("exact symbol and module owner"), "{error}");
+        }
+        assert_ne!(argument_digests[0], argument_digests[1]);
     }
 
     #[test]

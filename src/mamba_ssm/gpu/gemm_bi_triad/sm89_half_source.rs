@@ -178,6 +178,111 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
     },
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Sm89HalfRuntimeRoute {
+    Legacy(Sm89HalfRoute),
+    TnSmall16Bk64S2Ldb72,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sm89HalfRuntimeSpec {
+    pub(super) route: Sm89HalfRuntimeRoute,
+    pub(super) op: ResolvedGemmOp,
+    pub(super) dtype: WeightDtype,
+    pub(super) symbol: &'static str,
+    pub(super) tile: (u32, u32),
+    pub(super) bk: u32,
+    pub(super) stages: u8,
+    pub(super) threads: u32,
+    pub(super) dynamic_shared_bytes: u32,
+    pub(super) static_shared_bytes: u32,
+    pub(super) register_cap: u32,
+    pub(super) occupancy_gate: u32,
+}
+
+const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
+    Sm89HalfRuntimeSpec {
+        route: Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        op: ResolvedGemmOp::Tn,
+        dtype: WeightDtype::F16,
+        symbol: super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+        tile: (16, 16),
+        bk: 64,
+        stages: 2,
+        threads: 32,
+        dynamic_shared_bytes: 0,
+        static_shared_bytes: 36_864,
+        register_cap: 128,
+        occupancy_gate: 2,
+    },
+    Sm89HalfRuntimeSpec {
+        route: Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        op: ResolvedGemmOp::Tn,
+        dtype: WeightDtype::Bf16,
+        symbol: super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+        tile: (16, 16),
+        bk: 64,
+        stages: 2,
+        threads: 32,
+        dynamic_shared_bytes: 0,
+        static_shared_bytes: 36_864,
+        register_cap: 128,
+        occupancy_gate: 2,
+    },
+];
+
+impl From<Sm89HalfKernelSpec> for Sm89HalfRuntimeSpec {
+    fn from(spec: Sm89HalfKernelSpec) -> Self {
+        Self {
+            route: Sm89HalfRuntimeRoute::Legacy(spec.route),
+            op: spec.op,
+            dtype: spec.dtype,
+            symbol: spec.symbol,
+            tile: spec.tile,
+            bk: spec.bk,
+            stages: spec.stages,
+            threads: spec.threads,
+            dynamic_shared_bytes: spec.dynamic_shared_bytes,
+            static_shared_bytes: spec.static_shared_bytes,
+            register_cap: spec.register_cap,
+            occupancy_gate: spec.occupancy_gate,
+        }
+    }
+}
+
+pub(super) fn runtime_kernel_specs() -> impl Iterator<Item = Sm89HalfRuntimeSpec> {
+    SM89_HALF_KERNEL_SPECS
+        .into_iter()
+        .map(Into::into)
+        .chain(SM89_HALF_SMALL16_RUNTIME_SPECS)
+}
+
+pub(super) fn runtime_kernel_spec(symbol: &str) -> Option<Sm89HalfRuntimeSpec> {
+    runtime_kernel_specs().find(|spec| spec.symbol == symbol)
+}
+
+type Sm89HalfRuntimeAutoCell = (
+    ResolvedGemmOp,
+    WeightDtype,
+    (usize, usize, usize),
+    Sm89HalfRuntimeRoute,
+);
+
+const SM89_HALF_RUNTIME_AUTO_CELLS: &[Sm89HalfRuntimeAutoCell] = &[
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::F16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+    ),
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::Bf16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+    ),
+];
+
 /// One automatically served Ada half cell: op, dtype, (m, k, n) and the
 /// route the frozen discovery ledger proved for it.
 pub type Sm89HalfAutoCell = (
@@ -412,7 +517,7 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
 pub(crate) fn select_sm89_half_auto_cell(
     context: Sm89HalfAutoContext,
     request: Sm89HalfAutoRequest,
-) -> Option<&'static Sm89HalfKernelSpec> {
+) -> Option<Sm89HalfRuntimeSpec> {
     let compiler = context.compiler?;
     let artifact = context.artifact?;
     if context.compute_capability != (8, 9)
@@ -462,12 +567,20 @@ pub(crate) fn select_sm89_half_auto_cell(
     {
         return None;
     }
-    let &(_, _, _, route) = SM89_HALF_AUTO_CELLS
+    let legacy_route = SM89_HALF_AUTO_CELLS
         .iter()
         .find(|&&(op, dtype, shape, _)| {
             op == request.request.op && dtype == request.dtype && shape == dims
-        })?;
-    kernel_spec(route, request.dtype)
+        })
+        .map(|&(_, _, _, route)| Sm89HalfRuntimeRoute::Legacy(route));
+    let runtime_route = SM89_HALF_RUNTIME_AUTO_CELLS
+        .iter()
+        .find(|&&(op, dtype, shape, _)| {
+            op == request.request.op && dtype == request.dtype && shape == dims
+        })
+        .map(|&(_, _, _, route)| route);
+    let route = legacy_route.or(runtime_route)?;
+    runtime_kernel_specs().find(|spec| spec.route == route && spec.dtype == request.dtype)
 }
 
 pub(super) fn kernel_spec(
@@ -483,9 +596,9 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
     super::sm89_half_tn_source::validate_source()?;
     let tn_fragment = super::sm89_half_tn_source::compose_fragment_for_sm89_half()?;
     let source = format!("{}\n{}", BASE_SOURCE.trim_end(), tn_fragment);
-    for spec in SM89_HALF_KERNEL_SPECS {
+    for spec in runtime_kernel_specs() {
         let represented_once = match spec.route {
-            Sm89HalfRoute::NtM128N128Bk64S3Bxor => {
+            Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::NtM128N128Bk64S3Bxor) => {
                 source
                     .matches("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_##SUFFIX")
                     .count()
@@ -501,7 +614,10 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
                         .count()
                         == 1
             }
-            Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2 => {
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
                 super::sm89_half_tn_source::kernel_spec(spec.symbol)
                     .and_then(|_| super::sm89_half_tn_source::family_source(&source, spec.symbol))
                     .is_some()
@@ -614,6 +730,135 @@ mod tests {
     }
 
     #[test]
+    fn triad_retained_half_private_registry_has_twelve_specs_and_twenty_auto_cells() {
+        let specs = runtime_kernel_specs().collect::<Vec<_>>();
+        assert_eq!(specs.len(), 12);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.route)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            6
+        );
+        assert_eq!(
+            SM89_HALF_AUTO_CELLS.len() + SM89_HALF_RUNTIME_AUTO_CELLS.len(),
+            20
+        );
+        for (symbol, dtype) in [
+            (
+                super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+                WeightDtype::Bf16,
+            ),
+            (
+                super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+                WeightDtype::F16,
+            ),
+        ] {
+            let spec = runtime_kernel_spec(symbol).expect("private small16 runtime spec");
+            assert_eq!(spec.route, Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72);
+            assert_eq!(spec.op, ResolvedGemmOp::Tn);
+            assert_eq!(spec.dtype, dtype);
+            assert_eq!(spec.tile, (16, 16));
+            assert_eq!(spec.bk, 64);
+            assert_eq!(spec.stages, 2);
+            assert_eq!(spec.threads, 32);
+            assert_eq!(spec.dynamic_shared_bytes, 0);
+            assert_eq!(spec.static_shared_bytes, 36_864);
+            assert_eq!(spec.register_cap, 128);
+            assert_eq!(spec.occupancy_gate, 2);
+        }
+    }
+
+    #[test]
+    fn triad_retained_half_selector_admits_only_the_exact_small16_cells() {
+        for (dtype, symbol) in [
+            (
+                WeightDtype::Bf16,
+                super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+            ),
+            (
+                WeightDtype::F16,
+                super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+            ),
+        ] {
+            let selected = select_sm89_half_auto_cell(
+                auto_context((13, 2)),
+                auto_request(ResolvedGemmOp::Tn, dtype, (1024, 256, 128)),
+            )
+            .expect("exact retained small16 AUTO cell");
+            assert_eq!(selected.symbol, symbol);
+        }
+    }
+
+    #[test]
+    fn triad_retained_half_small16_selector_rejects_contract_drift() {
+        let context = auto_context((13, 2));
+        let valid = auto_request(ResolvedGemmOp::Tn, WeightDtype::Bf16, (1024, 256, 128));
+        assert!(select_sm89_half_auto_cell(context, valid).is_some());
+
+        for field in ["m", "k", "n", "lda", "ldb", "ldc"] {
+            let mut changed = valid;
+            match field {
+                "m" => changed.request.shape.m += 1,
+                "k" => changed.request.shape.k += 1,
+                "n" => changed.request.shape.n += 1,
+                "lda" => changed.request.shape.lda += 1,
+                "ldb" => changed.request.shape.ldb += 1,
+                "ldc" => changed.request.shape.ldc += 1,
+                _ => unreachable!(),
+            }
+            assert_declined(context, changed, field);
+        }
+        for field in ["output", "a", "b"] {
+            let mut null = valid;
+            let mut misaligned = valid;
+            match field {
+                "output" => {
+                    null.operands.output = 0;
+                    misaligned.operands.output += 4;
+                }
+                "a" => {
+                    null.operands.a = 0;
+                    misaligned.operands.a += 2;
+                }
+                "b" => {
+                    null.operands.b = 0;
+                    misaligned.operands.b += 2;
+                }
+                _ => unreachable!(),
+            }
+            assert_declined(context, null, field);
+            assert_declined(context, misaligned, field);
+        }
+        let mut changed = valid;
+        changed.dtype = WeightDtype::F32;
+        assert_declined(context, changed, "dtype");
+        let mut changed = valid;
+        changed.operands.alpha = 0.5;
+        assert_declined(context, changed, "alpha");
+        let mut changed = valid;
+        changed.operands.beta = 0.0;
+        assert_declined(context, changed, "beta");
+        let mut changed = valid;
+        changed.operands.bias = Some(0x4000);
+        assert_declined(context, changed, "bias");
+
+        let mut changed = context;
+        changed.compute_capability = (9, 0);
+        assert_declined(changed, valid, "compute capability");
+        let mut changed = context;
+        changed.multiprocessor_count = 141;
+        assert_declined(changed, valid, "SM count");
+        let mut changed = context;
+        changed.compiler = None;
+        assert_declined(changed, valid, "compiler holder");
+        let mut changed = context;
+        changed.artifact = None;
+        assert_declined(changed, valid, "artifact holder");
+    }
+
+    #[test]
     fn auto_registry_is_exactly_the_eighteen_proven_cells() {
         use ResolvedGemmOp::{Nn, Nt, Tn};
         use Sm89HalfRoute::{
@@ -664,7 +909,7 @@ mod tests {
                 let selected =
                     select_sm89_half_auto_cell(auto_context(nvrtc), auto_request(op, dtype, dims))
                         .unwrap_or_else(|| panic!("{nvrtc:?}/{op:?}/{dtype:?}/{dims:?} declined"));
-                assert_eq!(selected.route, route);
+                assert_eq!(selected.route, Sm89HalfRuntimeRoute::Legacy(route));
                 assert_eq!(selected.op, op);
                 assert_eq!(selected.dtype, dtype);
             }
