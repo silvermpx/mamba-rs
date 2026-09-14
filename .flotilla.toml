@@ -1,8 +1,10 @@
 schema = 1
 # Frozen workspace identity: folds the worktree pools into the main one.
 ident = "mamba-rs-915fb0b19265"
-# Mac-only; cargo deny stays narrow.
-provision = ["brew:cargo-deny"]
+# cargo installs its own subcommands on every platform; the formula
+# form was a line a Linux worker could never satisfy, and the fleet
+# places by capability, not by kind.
+provision = ["cargo:deny"]
 
 [classes]
 # Installs into this checkout's .git; a worker's copy is not the one that pushes.
