@@ -1,6 +1,16 @@
 # GEMM benchmarks
 
-This page holds the measured performance of the deterministic GEMM kernels
+The [0.7.1 Ada measurements](gemm-benchmarks-0.7.1-ada.md) compare the
+assembled Inference and Triad dispatchers with the released 0.7.0 source,
+including eager execution, CUDA Graph replay and cuBLAS controls.
+
+The tables below retain the historical 0.7.0 measurements, including the
+RTX 5090 results. They have not been relabelled as 0.7.1 results or scaled
+from the Ada measurements.
+
+## 0.7.0 measurement scope
+
+This page records the performance of the deterministic GEMM kernels
 that mamba-rs 0.7.0 runs by default. Every number was taken on real
 hardware with the protocol described below, and every table names the GPU,
 the CUDA toolkit, the precision and the cuBLAS setting it compares against.

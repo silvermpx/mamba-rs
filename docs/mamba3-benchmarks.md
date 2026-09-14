@@ -1,28 +1,146 @@
 # Mamba-3 SISO Benchmarks
 
-Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
-Generation (48 GB), CUDA 13.2, Driver 595.45. GPU training-step
-sections were measured on 2x RTX 5090 (CUDA 13.0) as marked. Every table
+Unless a section names another board, measurements use an Intel Xeon Gold
+5412U (48 threads) and NVIDIA RTX 6000 Ada Generation (48 GB), CUDA 13.2,
+driver 595.45. RTX 5090 results name that board and toolkit explicitly. Every table
 is a measurement of the release named in its heading and is kept as
 history; the current kernel comparisons against cuBLAS are in
 [determinism-benchmarks.md](determinism-benchmarks.md).
 
-> **Note**: all numbers below are against synthetic weights via
-> `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet
-> (checked: HuggingFace `state-spaces` hosts only Mamba-1/Mamba-2).
-> For end-to-end LLM inference benchmarks against production weights,
-> see [mamba1-benchmarks.md](mamba1-benchmarks.md).
+The fixtures below use synthetic initialization, not a trained language
+model. They measure the implementation at the stated shapes, not model
+quality. For inference measurements using trained Mamba-1 checkpoints,
+see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## Training step — 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
 
-## 0.7.1 — the sequential scan
+Fresh measurements on September 14, 2026: released `v0.7.0`
+(`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) against assembled `0.7.1`
+(`83079104fe1efa7ad5dca0a28c5b48bcd86c5b14`). RTX 6000 Ada, 142 SMs, driver
+595.45.04, CUDA 13.2.51 / NVRTC 13.2, Rust 1.98.1, release build.
 
-RTX 6000 Ada, CUDA 13.2. The sequential lane only; the chunked lane and
-every GEMM route are unchanged and their 0.7.0 tables stand.
+Both versions run the public trainer in the default `Deterministic`
+GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
+separate storage modes; the F32 row uses the default exact policy.
+TF32-permitted training is measured in the next section; the separate
+[GEMM tables](gemm-benchmarks-0.7.1-ada.md) cover kernel timings.
+
+Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
+input width 384. The fixtures use synthetic weights and pre-generated
+inputs and output gradients. They exercise backbone training, without
+tokenization, a vocabulary head or its loss. Timing includes the complete
+public `step`: input handling, forward, backward, optimizer, metric
+handling and synchronization.
+Initialization, compilation and graph capture are outside the timers.
+
+Each dtype ran as old, new, new, old on an otherwise idle board, with
+separate source trees and kernel caches. Each table entry is the median
+of the two process-average step times; parentheses show their range,
+not a confidence interval. `old/new` above 1 means 0.7.1 is faster.
+
+No timed step skipped its optimizer update because of overflow.
+
+| storage | execution | 0.7.0 ms/step (range) | 0.7.1 ms/step (range) | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 146.60 (146.60–146.61) | 133.64 (133.63–133.66) | 1.097× |
+| BF16 | graph | 145.51 (145.47–145.55) | 132.46 (132.44–132.47) | 1.099× |
+| F16 | eager | 146.98 (146.85–147.11) | 133.92 (133.87–133.97) | 1.098× |
+| F16 | graph | 145.90 (145.88–145.92) | 132.92 (132.92–132.92) | 1.098× |
+| F32 | eager | 186.16 (186.15–186.16) | 174.86 (174.79–174.93) | 1.065× |
+| F32 | graph | 185.46 (185.32–185.61) | 174.18 (174.04–174.32) | 1.065× |
+
+Mamba-3 uses the chunked scan (`Auto` resolves to parallel here), head
+dimension 16, one group, RoPE fraction 0.5, a_floor 1e-4 and output
+projection normalization. The model state width is 16; the actual
+compiled context capacity is 64. BF16 and F32 keep the original three
+eager warmup steps and five graph warmup steps. Before each F16 timed
+arm, the fixture instead requires eight consecutive zero-skipped
+optimizer updates, failing if it cannot reach them within 128 attempts.
+Every dtype still averages exactly five eager and five graph timed steps.
+
+The F32 fixture has an explicit identity input-projection matrix;
+BF16/F16 use the mixed trainer's identity branch with that matrix
+omitted. Both releases use the same per-dtype measurement overlay,
+including the corrected F16 warmup. These rows should not be interpreted
+as throughput on a trained checkpoint or as a controlled comparison
+between storage modes.
+
+Reproduce with `m3_prefill_bench::m3_train_step_at_multichunk_shape`,
+setting `MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
+`MAMBA_RS_BENCH_ITERS=5`, and `MAMBA_RS_BENCH_DTYPE` to one of
+`bf16`, `f16`, `f32`. Leave scan-tape, IEEE-F32 and GEMM mode/policy
+overrides unset; the remaining model configuration is fixed in the
+instrument.
+
+Run the instrument as an exact ignored test with
+`cargo test --release --locked --features cuda,qualification --test TARGET
+TEST -- --exact --ignored --nocapture --test-threads=1`. The old tree
+uses the same measurement fixture and logging code, with its released
+library and CUDA sources unchanged. Raw logs identify the resolved mode,
+scan path, context capacity and skipped-step count.
+
+Sampled device memory includes setup and both execution modes. It is the
+maximum of 200 ms NVML samples across the two processes per tree, not
+an allocator high-water mark or a measurement for an individual step.
+
+| storage | 0.7.0 peak MiB | 0.7.1 peak MiB |
+|---|---:|---:|
+| BF16 | 6716 | 6718 |
+| F16 | 6716 | 6718 |
+| F32 | 9948 | 9950 |
+
+The assembled source passed the same-board 0.7.0 comparison for all
+161 original normalized Mamba ledger keys and, separately, all 48
+expanded decode cells. No changed or missing cell was observed in either
+comparison. These bit checks and the whole-step timings are separate
+evidence. Earlier prefill/decode and RTX 5090 tables below remain
+historical measurements, not extrapolated 0.7.1 results.
+
+## Mamba-3 supplemental TF32-permitted F32 training
+
+Separate TF32-permitted measurements compare released `v0.7.0`
+(`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) with assembled `0.7.1`
+(`83079104fe1efa7ad5dca0a28c5b48bcd86c5b14`). The same F32 measurement
+fixture is compiled against each version; runs use separate
+kernel caches on an RTX 6000 Ada in the same CUDA 13.2 environment.
+
+`MAMBA_RS_GEMM_MODE=deterministic` resolves the Triad family and
+`MAMBA_RS_BI_F32_POLICY=tf32` resolves
+`AllowDeterministicTf32V1`. That policy permits deterministic TF32 where a
+qualified route applies; it does not force every GEMM to use TF32, and an
+exact deterministic fallback remains valid.
+
+Shape: d_model 384, 24 layers, B=8, T=1300, Auto parallel scan,
+capacity-64 context; five eager and five graph timed steps per process.
+Each tree has two
+process observations in old, new, new, old order. Values are medians of the
+two process-average timings; parentheses are the process range, not a
+confidence interval. Every timed step performed its optimizer update.
+
+| execution | v0.7.0 ms/step median (range) | 0.7.1 ms/step median (range) | old/new |
+|---|---:|---:|---:|
+| eager | 176.88 (176.83–176.93) | 165.56 (165.54–165.58) | 1.068× |
+| graph | 175.90 (175.83–175.96) | 164.52 (164.45–164.58) | 1.069× |
+
+Peak device memory is the maximum 200 ms NVML sample across setup, eager,
+capture and graph execution in each process; it is not an allocator
+high-water mark or an individual-step measurement.
+
+| model | v0.7.0 peak MiB median (range) | 0.7.1 peak MiB median (range) |
+|---|---:|---:|
+| Mamba-3 | 9948.0 (9948–9948) | 9950.0 (9950–9950) |
+
+## 0.7.1 development — sequential-scan checkpoint
+
+RTX 6000 Ada, CUDA 13.2. These measurements cover the initial sequential
+scan pass, before the later backward, typed burn-in and GEMM work. They
+are not final 0.7.1 bundle measurements. Historical 0.7.0 tables below
+remain measurements of that release.
 
 Forward and backward of one layer, batch 64, eight heads of 32 over a
 16-wide state, timed on the same buffers in one run:
 
-| sequence | 0.7.0 | 0.7.1 | faster by |
+| sequence | 0.7.0 | scan checkpoint | faster by |
 |---|---:|---:|---:|
 | T = 48 | 709 us | 178 us | 3.98x |
 | T = 390 | 6969 us | 1918 us | 3.63x |
@@ -31,18 +149,27 @@ Forward and backward of one layer, batch 64, eight heads of 32 over a
 A four-layer training step at the crate's default shape (d_model 128,
 16 heads of 16, state 16, batch 1, T 32), from `m3_gpu_benchmark`:
 
-| | 0.7.0 | 0.7.1 | faster by |
+| | 0.7.0 | scan checkpoint | faster by |
 |---|---:|---:|---:|
 | forward | 891.1 us | 701.4 us | 1.27x |
 | backward | 1704.6 us | 645.5 us | 2.64x |
 | forward and backward | 2595.7 us | 1346.8 us | 1.93x |
 
-Decode is unchanged: the decode step keeps its 0.7.0 kernel, so the T=1
-figures on that page stand as measured.
+The initial pass left decode unchanged. Later normalization changes also
+affect decode, so the T=1 tables below must not be read as fresh 0.7.1
+measurements.
 
-Bits: the 161-key bit ledger of the two trees, recorded on this board and
-toolkit, is identical key for key.
+The final assembled source `83079104` was checked against the released
+0.7.0 source on this board with CUDA 13.2: all 161 original normalized
+ledger keys match, with no changed or missing keys. A separate expanded
+decode corpus matches all 48 cells, including native BF16/F16 eager and
+graph execution and persistent states after 16 steps. These two inventories
+are separate checks, not a combined cell count.
 
+## Historical measurements
+
+The following prefill, decode and RTX 5090 tables retain their original
+measurement scope. They were not retimed for the 0.7.1 training comparison.
 
 ## Training step — production shape (2x RTX 5090, CUDA 13.0)
 

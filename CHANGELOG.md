@@ -2,82 +2,85 @@
 
 ## 0.7.1 (unreleased)
 
-**The Mamba-3 sequential scan runs three to four times faster.** No numeric
-change: the bit ledgers of 0.7.0 and this tree were recorded on the same
-board and toolkit and every one of the 161 keys matched.
+Performance improvements to the Mamba kernels and deterministic GEMMs.
+The GEMM modes and calling conventions stay the same: `Deterministic` is
+the default, with `CublasFast` and `CublasPedantic` available explicitly.
+The retained GEMM routes are integrated and bit-qualified.
 
 ### Performance
 
-The sequential scan was the slowest lane in the crate by a wide margin.
-Measured against the same recurrence in another tree on an RTX 6000 Ada it
-lost 2.3 to 5.2 times at the geometries this crate itself ships. The gap
-was not the algorithm: the kernels are the same math with the same launch
-shape, the same warp shuffles and the same global traffic. It was three
-mechanical things. The entries carried no launch bounds, so the compiler
-sized occupancy for a block it could not see was one warp. Only the output
-pointers promised no aliasing, so every input was re-read through the
-general path. And every loop over the state width and every warp reduction
-was bounded by a runtime value, so nothing unrolled and the state lived in
-local memory instead of registers - by the language rule, not by pressure:
-an array indexed by the variable of a rolled loop cannot be kept in
-registers at any capacity.
+Full synthetic backbone training steps on RTX 6000 Ada, CUDA 13.2,
+d_model 384, 24 layers, B=8, T=1300. CUDA Graph replay; median of two
+process-average measurements per version. `old/new` above 1 means faster.
 
-The state width is known when the module is built, because the module is
-compiled per model. The scan body is now a template on that width,
-instantiated for the widths these models use, with the runtime-width body
-kept as the general entry so any other `d_state` still runs; the host
-picks by the model's own width. The warp reductions walk five constant
-offsets under a predicate instead of a runtime-bounded halving loop, which
-keeps the same offsets in the same order for every head dimension up to a
-warp.
+| model | precision / policy | 0.7.0 ms/step | 0.7.1 ms/step | old/new |
+|---|---|---:|---:|---:|
+| Mamba-1 | BF16 | 112.20 | 110.93 | 1.011× |
+| Mamba-1 | F16 | 114.63 | 113.16 | 1.013× |
+| Mamba-1 | exact F32 | 206.08 | 206.15 | 1.000× |
+| Mamba-1 | F32, TF32 permitted | 180.86 | 180.58 | 1.002× |
+| Mamba-3 | BF16 | 145.51 | 132.46 | 1.099× |
+| Mamba-3 | F16 | 145.90 | 132.92 | 1.098× |
+| Mamba-3 | exact F32 | 185.46 | 174.18 | 1.065× |
+| Mamba-3 | F32, TF32 permitted | 175.90 | 164.52 | 1.069× |
 
-The training forward and backward take this; the decode step and the
-target-network burn-in do not, and the reason is in the verification
-section below.
+Mamba-1 F32 and TF32 are effectively unchanged between releases. The
+Inference half-to-F32 graph rows improve by 1.216× in geometric mean;
+Triad BF16/F16 improve by about 1.027×, with the d128 output-projection
+weight gradient improving by 1.487×/1.502×. These are measured shapes,
+not a claim of that gain for every workload. See the full
+[GEMM tables](docs/gemm-benchmarks-0.7.1-ada.md),
+[Mamba-1](docs/mamba1-benchmarks.md) and
+[Mamba-3](docs/mamba3-benchmarks.md) for eager timings, cuBLAS controls,
+process ranges and fixture details. Prefill, decode and RTX 5090 were not
+retimed for these tables; their earlier measurements remain historical.
 
-Forward and backward per layer, batch 64, eight heads of 32 over a 16-wide
-state (RTX 6000 Ada, CUDA 13.2):
+### Changed
 
-| sequence | 0.7.0 | 0.7.1 |
-|---|---:|---:|
-| T = 48 | 709 us | 178 us |
-| T = 390 | 6969 us | 1918 us |
-| T = 1440 | 25813 us | 7270 us |
-
-A four-layer training step at the default shape, measured by this crate's
-own `m3_gpu_benchmark` on the same board:
-
-| | 0.7.0 | 0.7.1 |
-|---|---:|---:|
-| forward | 891 us | 701 us |
-| backward | 1705 us | 646 us |
-| forward and backward | 2596 us | 1347 us |
+- Mamba-3 sequential training uses constant-width state loops and explicit
+  launch bounds. Typed sequential burn-in also uses width-specialized
+  entries on qualified Ada configurations, preserving the released
+  recurrence's multiply/FMA rounding and persistent-state layout.
+- Mamba-3 packs short B/C normalization rows and uses retained backward
+  staging and reduction kernels on qualified shapes. The reduction order
+  is unchanged; other configurations keep their existing entries.
+- Mamba-1 uses retained BF16/F16 parallel-backward fold kernels on qualified
+  Ada shapes. Selection binds the compiler, shape and available function.
+- The Inference and Triad dispatchers select the retained Ada variants for
+  14 shape, precision and bias configurations. The additions cover native
+  half, half-to-F32, deterministic TF32 and exact F32 paths. Other
+  architectures keep their existing routes; this pass does not assign
+  Ada's measurements to RTX 5090.
 
 ### Added
 
-`m3_scan_micro_bench` gained a `sequential_prefill_time_and_hash`
-instrument: the sequential target burn-in at the serve shape, timed the
-same way the chunk trio is, printing a hash of its output and of all three
-carried states. The chunk kernels have had that footing since the 0.6
-pass; the sequential lane had none, and it is the lane most exposed to a
-scheduling change moving its bits.
+- `m3_scan_micro_bench` records sequential prefill timing and hashes for
+  the output and all three carried states.
+- The decode ledger now includes native BF16/F16 eager and graph paths,
+  per-step output and final persistent-state checks.
+
+### Fixed
+
+- The Mamba-3 F16 training benchmark waits for loss-scale calibration
+  before timing. Timed steps still report skipped optimizer updates;
+  measurements with a skip are rejected. The production trainer and
+  its loss-scaler settings are unchanged.
 
 ### Measurements and verification
 
-Every kernel entry this release touches is covered by the bit ledger, and
-the ledger is the acceptance: the digest suites of 0.7.0 and of this tree
-were run on the same board and toolkit and diffed line by line. 161 keys,
-161 identical, none missing.
+The final assembled source `83079104` matches the released 0.7.0 source
+on all 161 original normalized Mamba ledger keys, with no changed or
+missing keys, on RTX 6000 Ada and CUDA 13.2. The separate decode inventory
+matches all 48 cells, including the 22 cells added to the original 26.
+These are different inventories, not a combined count.
 
-The decode step and the target burn-in were ported the same way and put
-back. The decode step moved its own digest, and the new instrument showed
-the burn-in moving its output hash while running three and a half times
-faster. Neither is an error: the three transforms are only numerically
-neutral while the compiler happens to contract the same multiply-adds, and
-launch bounds change the register budget the contraction decision is made
-against. The two kernels that kept their bits kept them by that accident,
-not by construction - which is the case for pinning the scan's
-contraction explicitly, an item this release does not take.
+Combined Inference/Triad acceptance checks 99 logical cases under CUDA
+12.8, 13.0 and 13.2, at state capacities 16 and 64: 594 case/toolkit/capacity
+combinations per version. Each configuration records finite and exceptional
+inputs over six independent runs. All recorded output words match 0.7.0;
+the launch census reaches 35 physical functions per toolkit/capacity pair.
+This is same-board correctness evidence, not cross-architecture bit identity
+or a performance measurement.
 
 ## 0.7.0 (2026-09-12)
 

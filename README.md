@@ -6,13 +6,12 @@ kernels compiled at run time through NVRTC. No Python, no C++ build step,
 no framework dependency; the GPU path links only the CUDA driver API and
 cuBLAS.
 
-## What's new in 0.7.0
+## What's new in 0.7.x
 
-0.7.0 is a big performance release: new deterministic GEMM kernels, now
-the default, a pass over every Mamba kernel around them, and the two
-scan and weight-gradient routes moved to their faster families. A
-training step of the release shapes runs 1.13 to 1.63 times faster than
-0.6.9 on an RTX 6000 Ada.
+0.7.0 made the new deterministic GEMM kernels the default, optimized the
+Mamba kernels around them, and moved the two scan and weight-gradient
+routes to their faster families. A training step of the 0.7.0 release
+shapes ran 1.13 to 1.63 times faster than 0.6.9 on an RTX 6000 Ada.
 
 - **Every GPU context has a `GemmMode`.** `Deterministic` (the default)
   runs the crate's own kernels and never calls cuBLAS; `CublasFast` and
@@ -37,15 +36,14 @@ training step of the release shapes runs 1.13 to 1.63 times faster than
 - **Explicit-mode constructors** beside every environment-reading one, and
   a recorded numeric route on every captured graph.
 
-The full list is in [CHANGELOG.md](CHANGELOG.md); the mode guide is
-[docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
+The full list and patch-release changes are in [CHANGELOG.md](CHANGELOG.md);
+the mode guide is [docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
 [docs/determinism-benchmarks.md](docs/determinism-benchmarks.md).
 
-What comes next: the scan, convolution and norm kernels around the GEMMs
-are the next target, the GEMM kernels keep moving toward cuBLAS Fast in
-the 0.7.x releases, and the architectures on the portable kernels today
-(SM80, SM86, Hopper, datacenter Blackwell, CC 12.1) get measured kernels
-in later releases.
+The 0.7.x releases continue optimizing the scan, convolution and norm
+kernels around the GEMMs, and the GEMM kernels toward cuBLAS Fast.
+The architectures on the portable kernels today (SM80, SM86, Hopper,
+datacenter Blackwell, CC 12.1) get measured kernels in later releases.
 
 ## Features
 
