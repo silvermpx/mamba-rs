@@ -38,6 +38,42 @@ fn training_dtypes(value: Option<&str>) -> Result<&'static [WeightDtype], String
     }
 }
 
+fn warm_up_f16_training(
+    graph_replayed: bool,
+    mut step: impl FnMut() -> Result<mamba_rs::mamba_ssm::gpu::trainer::StepMetrics, String>,
+) -> Result<(usize, usize, f32), String> {
+    let mut skipped = 0;
+    let mut consecutive_clean = 0;
+    let mut last_scale = 0.0;
+    // Initial loss-scale backoff can outlast a fixed warmup count. Require
+    // successful optimizer updates before timing, but bound unstable runs.
+    for attempts in 1..=128 {
+        let metrics = step()?;
+        if metrics.graph_replayed != graph_replayed {
+            return Err("F16 warmup used the wrong eager/graph execution path".into());
+        }
+        last_scale = metrics
+            .loss_scale
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .ok_or("F16 warmup did not report a valid loss scale")?;
+        if metrics
+            .overflow_skipped
+            .ok_or("F16 warmup did not report overflow status")?
+        {
+            skipped += 1;
+            consecutive_clean = 0;
+        } else {
+            consecutive_clean += 1;
+        }
+        if consecutive_clean == 8 {
+            return Ok((attempts, skipped, last_scale));
+        }
+    }
+    Err(format!(
+        "F16 warmup failed to reach 8 consecutive successful updates: attempts=128 skipped={skipped} consecutive_clean={consecutive_clean} last_used_loss_scale={last_scale}"
+    ))
+}
+
 #[test]
 fn training_dtype_filter_selects_only_the_requested_lane() {
     for (name, dtype) in [
@@ -61,6 +97,56 @@ fn training_dtype_filter_selects_only_the_requested_lane() {
 fn training_dtype_filter_rejects_a_misspelled_lane() {
     for value in ["", "bf61", "tf32", "f16,bf16"] {
         assert!(training_dtypes(Some(value)).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn f16_training_warmup_restarts_after_overflow() {
+    use mamba_rs::mamba_ssm::gpu::loss_scaler::DynamicLossScaler;
+    use mamba_rs::mamba_ssm::gpu::trainer::StepMetrics;
+
+    for graph_replayed in [false, true] {
+        let mut scaler = DynamicLossScaler::new();
+        let mut attempts = 0;
+        let mut updates = 0;
+        let result = warm_up_f16_training(graph_replayed, || {
+            attempts += 1;
+            let overflow = attempts <= 4 || attempts == 7;
+            let scale = scaler.scale();
+            scaler.update(overflow);
+            updates += u64::from(!overflow);
+            Ok(StepMetrics {
+                step: updates,
+                graph_replayed,
+                loss_scale: Some(scale),
+                overflow_skipped: Some(overflow),
+            })
+        })
+        .unwrap();
+        assert_eq!(result, (15, 5, 2048.0));
+        assert_eq!(attempts, 15);
+        assert_eq!(updates, 10);
+    }
+}
+
+#[test]
+fn f16_training_warmup_stops_at_the_attempt_limit() {
+    use mamba_rs::mamba_ssm::gpu::trainer::StepMetrics;
+
+    for intermittent in [false, true] {
+        let mut attempts = 0usize;
+        let result = warm_up_f16_training(false, || {
+            attempts += 1;
+            assert!(attempts <= 128, "warmup exceeded its finite limit");
+            Ok(StepMetrics {
+                step: 0,
+                graph_replayed: false,
+                loss_scale: Some(1.0),
+                overflow_skipped: Some(!intermittent || attempts.is_multiple_of(8)),
+            })
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 128);
     }
 }
 
@@ -197,8 +283,16 @@ fn m3_train_step_at_multichunk_shape() {
         );
         let input = det(n, 0x91);
         let d_temporal = det(n, 0x92);
-        for _ in 0..3 {
-            tr.step(&input, &d_temporal).unwrap();
+        if dtype == WeightDtype::F16 {
+            let (attempts, skipped, scale) =
+                warm_up_f16_training(false, || tr.step(&input, &d_temporal)).unwrap();
+            eprintln!(
+                "train warmup F16 eager attempts={attempts} skipped={skipped} consecutive_clean=8 last_used_loss_scale={scale}"
+            );
+        } else {
+            for _ in 0..3 {
+                tr.step(&input, &d_temporal).unwrap();
+            }
         }
         tr.ctx().stream.synchronize().unwrap();
         let mut eager_skips = 0usize;
@@ -225,8 +319,16 @@ fn m3_train_step_at_multichunk_shape() {
         // Graph arm too: the M1 table is graph-mode; an eager-only M3
         // number was never comparable with it.
         tr.capture_graph().unwrap();
-        for _ in 0..5 {
-            tr.step(&input, &d_temporal).unwrap();
+        if dtype == WeightDtype::F16 {
+            let (attempts, skipped, scale) =
+                warm_up_f16_training(true, || tr.step(&input, &d_temporal)).unwrap();
+            eprintln!(
+                "train warmup F16 graph attempts={attempts} skipped={skipped} consecutive_clean=8 last_used_loss_scale={scale}"
+            );
+        } else {
+            for _ in 0..5 {
+                tr.step(&input, &d_temporal).unwrap();
+            }
         }
         tr.ctx().stream.synchronize().unwrap();
         let mut graph_skips = 0usize;
