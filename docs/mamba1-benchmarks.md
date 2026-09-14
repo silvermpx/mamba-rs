@@ -69,12 +69,17 @@ setting `MAMBA_RS_BENCH_DM=384`, `MAMBA_RS_BENCH_LAYERS=24`,
 The instrument's iteration counts are fixed, not read from
 `MAMBA_RS_BENCH_ITERS`.
 
-Run the instrument as an exact ignored test with
-`cargo test --release --locked --features cuda,qualification --test TARGET
-TEST -- --exact --ignored --nocapture --test-threads=1`. The old tree
-uses the same measurement fixture and logging code, with its released
-library and CUDA sources unchanged. Raw logs identify the resolved mode,
-scan path, context capacity and skipped-step count.
+Run the instrument as an exact ignored test:
+
+```sh
+cargo test --release --locked --features cuda,qualification \
+  --test trainer_benchmarks bench_lm_train_production_shape \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The old tree uses the same measurement fixture and logging code, with
+its released library and CUDA sources unchanged. Raw logs identify the
+resolved mode, scan path, context capacity and skipped-step count.
 
 Sampled device memory includes setup and both execution modes. It is the
 maximum of 200 ms NVML samples across the two processes per tree, not

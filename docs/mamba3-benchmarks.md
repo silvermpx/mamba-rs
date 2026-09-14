@@ -72,12 +72,17 @@ setting `MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
 overrides unset; the remaining model configuration is fixed in the
 instrument.
 
-Run the instrument as an exact ignored test with
-`cargo test --release --locked --features cuda,qualification --test TARGET
-TEST -- --exact --ignored --nocapture --test-threads=1`. The old tree
-uses the same measurement fixture and logging code, with its released
-library and CUDA sources unchanged. Raw logs identify the resolved mode,
-scan path, context capacity and skipped-step count.
+Run the instrument as an exact ignored test:
+
+```sh
+cargo test --release --locked --features cuda,qualification \
+  --test m3_prefill_bench m3_train_step_at_multichunk_shape \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The old tree uses the same measurement fixture and logging code, with
+its released library and CUDA sources unchanged. Raw logs identify the
+resolved mode, scan path, context capacity and skipped-step count.
 
 Sampled device memory includes setup and both execution modes. It is the
 maximum of 200 ms NVML samples across the two processes per tree, not
