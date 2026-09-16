@@ -98,8 +98,8 @@ The assembled source passed the same-board 0.7.0 comparison for all
 161 original normalized Mamba ledger keys and, separately, all 48
 expanded decode cells. No changed or missing cell was observed in either
 comparison. These bit checks and the whole-step timings are separate
-evidence. Earlier prefill/decode and RTX 5090 tables below remain
-historical measurements, not extrapolated 0.7.1 results.
+evidence. Earlier prefill/decode tables below remain historical
+measurements; the RTX 5090 training step is measured in its own section.
 
 ## Mamba-3 supplemental TF32-permitted F32 training
 
@@ -170,6 +170,46 @@ ledger keys match, with no changed or missing keys. A separate expanded
 decode corpus matches all 48 cells, including native BF16/F16 eager and
 graph execution and persistent states after 16 steps. These two inventories
 are separate checks, not a combined cell count.
+
+## Training step — 0.7.0 to 0.7.1 (RTX 5090, CUDA 13.2)
+
+Measurements on September 16, 2026: released `v0.7.0`
+(`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) against released `v0.7.1`
+(`1988e4b86f44b2a7819ab7336804774041640c0f`, run from the 0.7.2 tree,
+which changes no kernel or route). One RTX 5090, 170 SMs, driver
+595.58.03, CUDA 13.2 / NVRTC 13.2, Rust 1.98.1, release build. The board
+reports 100 % utilization while idle under this driver; a quiet card was
+judged by resident memory and the compute-process list instead.
+
+Same shape and fixtures as the Ada section above: B=8, T=1300, 24 layers,
+five timed eager and five timed graph steps, default `Deterministic` mode
+with the Triad family; the TF32 rows use `MAMBA_RS_BI_F32_POLICY=tf32`.
+Each dtype ran as old, new, new, old with separate trees and kernel caches.
+Entries are the median of the two process-average step times, parentheses
+their range. `old/new` above 1 means 0.7.1 is faster.
+
+| storage | execution | 0.7.0 ms/step (range) | 0.7.1 ms/step (range) | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 108.90 (108.60–109.20) | 108.62 (108.56–108.68) | 1.003× |
+| BF16 | graph | 108.24 (107.96–108.52) | 108.43 (108.39–108.47) | 0.998× |
+| F16 | eager | — | 109.11 (109.02–109.19) | — |
+| F16 | graph | — | 108.81 (108.68–108.93) | — |
+| F32 | eager | 113.33 (113.06–113.59) | 112.22 (111.87–112.58) | 1.010× |
+| F32 | graph | 113.70 (113.48–113.92) | 113.84 (113.41–114.26) | 0.999× |
+| F32, TF32 permitted | eager | 113.43 (113.27–113.59) | 112.22 (111.62–112.82) | 1.011× |
+| F32, TF32 permitted | graph | 113.72 (113.53–113.92) | 113.72 (113.13–114.32) | 1.000× |
+
+The 0.7.0 tree ran its own released instrument, which measures F32 and
+BF16 in one process and has no F16 arm, so the F16 row carries 0.7.1
+only and no 0.7.0 peak memory is reported: a two-model process is not a
+per-dtype figure. 0.7.1 peak device memory, the maximum 200 ms NVML
+sample per process: 6834 MiB for BF16 and F16, 10066 MiB for F32.
+
+0.7.1 is neutral on this board: its Mamba-3 gains on Ada came from the
+retained sm89 routes, which the dispatcher does not select here, so both
+releases run the same routes. The TF32-permitted policy changes nothing
+on this board at this shape either. The bit ledger of both tags on this
+board matched on all 161 original Mamba keys, none moved, none missing.
 
 ## Historical measurements
 

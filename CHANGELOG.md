@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.7.2 (2026-09-16)
+
+Two verification instruments that ship with the crate were red on the
+v0.7.1 tag, and the RTX 5090 got the same-board comparison 0.7.1 had left
+to Ada. No kernel, route or numeric change: the bits of every ledger key,
+the generation of a real checkpoint and the consumer build are the ones
+0.7.1 shipped.
+
+### Fixed
+
+- The physical-trace ownership contract (`gemm_bi_tf32_contract`) now
+  admits `gemm_bi_inference/runtime_bundle.rs`, the launch owner of the
+  retained inference routes added in 0.7.1. Its single submission is
+  audited under `launch_inference_bundle`, the same way every launcher in
+  `gemm_bi_inference.rs` is; three of the contract's tests failed on the
+  released tree because the owner was never registered. The same contract
+  now audits the half-route observation and the prepared half graph node
+  in the helpers the release moved them to,
+  `resolve_half_gemm_observation_with_context` and
+  `resolve_prepared_half_graph_node_with_context`, plus the node the
+  retained small16 test resolves itself; its census error names the scope
+  it was checking.
+- The Mamba-1 fold qualification expected capacities 32 and 64 to compile
+  the legacy Fixed source. Capacity 64 has carried the retained inference
+  overlay since the route assembly, and the dispatcher's cohorts already
+  bind that identity; the gate now expects the legacy digest at 32 and the
+  qualified capacity-64 digest at 64. The raw byte-for-byte comparison of
+  the new fold kernels at capacity 16 was never affected.
+
+### Measurements and verification
+
+RTX 6000 Ada, CUDA 13.2, v0.7.0 against v0.7.1, both trees recorded on the
+same day: all 161 original Mamba ledger keys identical, none moved, none
+missing, plus the 102 decode keys 0.7.1 added; the same three training
+digests under CUDA 12.8 and 13.0; text generation from
+`state-spaces/mamba-130m-hf` byte-identical between the two tags on CPU
+f32, GPU f32 and GPU bf16. Every test target of the crate ran on that
+board: 162 targets, 160 green, the two reds being the instruments fixed
+above, and the compile gate green outside the runner's thirty-minute slot.
+The ignored training instruments ran as well: the fifteen trainer
+benchmarks, the Mamba-3 training steps at the multi-chunk and default
+shapes, the serve prefill, both decode benchmarks and the GEMM
+training-step benchmark. The crate checks without the `cuda` feature in
+every feature set and on the 1.97 toolchain, and lints clean with
+`-D warnings` in both feature lanes.
+
+RTX 5090 (driver 595.58.03, CUDA 13.2), which 0.7.1 had not measured: the
+same 161 ledger keys identical between the two tags, and the whole-step
+training comparison of the 0.7.1 tables repeated on this board. 0.7.1 is
+performance-neutral on the 5090, within noise on every row: its gains
+came from routes retained for Ada, and the changelog of 0.7.1 said as
+much. The tables are in [Mamba-1](docs/mamba1-benchmarks.md) and
+[Mamba-3](docs/mamba3-benchmarks.md).
+
 ## 0.7.1 (2026-09-14)
 
 Performance improvements to the Mamba kernels and deterministic GEMMs.

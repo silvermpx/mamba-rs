@@ -95,8 +95,8 @@ The assembled source passed the same-board 0.7.0 comparison for all
 161 original normalized Mamba ledger keys and, separately, all 48
 expanded decode cells. No changed or missing cell was observed in either
 comparison. These bit checks and the whole-step timings are separate
-evidence. Earlier prefill/decode and RTX 5090 tables below remain
-historical measurements, not extrapolated 0.7.1 results.
+evidence. Earlier prefill/decode tables below remain historical
+measurements; the RTX 5090 training step is measured in its own section.
 
 ## Mamba-1 supplemental TF32-permitted F32 training
 
@@ -132,11 +132,51 @@ high-water mark or an individual-step measurement.
 |---|---:|---:|
 | Mamba-1 | 7544.0 (7544–7544) | 7546.0 (7546–7546) |
 
+## Training step — 0.7.0 to 0.7.1 (RTX 5090, CUDA 13.2)
+
+Measurements on September 16, 2026: released `v0.7.0`
+(`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) against released `v0.7.1`
+(`1988e4b86f44b2a7819ab7336804774041640c0f`, run from the 0.7.2 tree,
+which changes no kernel or route). One RTX 5090, 170 SMs, driver
+595.58.03, CUDA 13.2 / NVRTC 13.2, Rust 1.98.1, release build. The board
+reports 100 % utilization while idle under this driver; a quiet card was
+judged by resident memory and the compute-process list instead.
+
+Same shape, fixtures, timers and instrument as the Ada section above:
+d_model 384, 24 layers, B=8, T=1300, parallel scan, capacity-16 context,
+default `Deterministic` mode with the Triad family; the TF32 rows use
+`MAMBA_RS_BI_F32_POLICY=tf32`. Each dtype ran as old, new, new, old with
+separate trees and kernel caches. Entries are the median of the two
+process-average step times, parentheses their range. `old/new` above 1
+means 0.7.1 is faster.
+
+| storage | execution | 0.7.0 ms/step (range) | 0.7.1 ms/step (range) | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 71.88 (71.78–71.98) | 71.83 (71.79–71.88) | 1.001× |
+| BF16 | graph | 72.08 (72.02–72.13) | 72.01 (71.97–72.05) | 1.001× |
+| F16 | eager | 73.25 (73.23–73.26) | 73.19 (73.18–73.19) | 1.001× |
+| F16 | graph | 73.89 (73.88–73.91) | 73.79 (73.74–73.84) | 1.001× |
+| F32 | eager | 120.63 (120.61–120.65) | 120.80 (120.53–121.07) | 0.999× |
+| F32 | graph | 120.91 (120.90–120.92) | 120.90 (120.69–121.12) | 1.000× |
+| F32, TF32 permitted | eager | 115.87 (115.85–115.88) | 115.97 (115.89–116.04) | 0.999× |
+| F32, TF32 permitted | graph | 116.05 (115.93–116.17) | 116.15 (116.07–116.23) | 0.999× |
+
+| storage | 0.7.0 peak MiB | 0.7.1 peak MiB |
+|---|---:|---:|
+| BF16 | 4844 | 4844 |
+| F16 | 4876 | 4876 |
+| F32 | 7660 | 7660 |
+
+0.7.1 is neutral on this board: its Mamba-1 gains on Ada came from the
+retained sm89 fold kernels, which the dispatcher does not select here,
+so both releases run the same routes. The bit ledger of both tags on this
+board matched on all 161 original Mamba keys, none moved, none missing.
+
 ## Historical measurements
 
 The sections below retain their original versions, boards and measurement
 protocols. Prefill and decode were not retimed in the 0.7.1 training
-comparison; the RTX 5090 results are historical, not estimates from Ada.
+comparison; the RTX 5090 training step of 0.7.1 is measured above.
 
 ## Serving prefill — classifier page shape (0.6.4, RTX 5090, CUDA 13.0)
 
