@@ -18,8 +18,10 @@ cargo test --release --features cuda,qualification \
 ```
 
 The default checks capacity16 raw outputs in F32, BF16 and F16, with full and
-slim tapes. It also checks that capacities32/64 retain the old source digest
-and function selection. Fixtures start from a nonzero recurrent state and use
+slim tapes. It also checks that capacities32/64 keep the legacy function
+selection, that capacity32 still compiles the legacy source digest, and that
+capacity64 compiles the qualified capacity-64 composition (the retained
+inference overlay on the same base). Fixtures start from a nonzero recurrent state and use
 the frozen forward kernel to make saved inputs. Each arm owns separate input
 and output allocations with guards. All six gradient outputs must match byte
 for byte, inputs must remain unchanged, and a one-node graph must reproduce

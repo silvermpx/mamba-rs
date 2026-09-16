@@ -60,11 +60,20 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
         if cap == 16 {
             raw::qualify(&device, &kernels);
         } else {
+            // Capacity 32 compiles the legacy Fixed composition unchanged.
+            // Capacity 64 carries the retained inference overlay on top of it,
+            // so its source is the qualified capacity-64 identity that the
+            // dispatcher's cohorts bind, not the legacy base.
+            let expected = if cap == 64 {
+                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc"
+            } else {
+                "d402b603ad4d1b823cf9c3d632ba522303df73de4169129285b3885870fddbbd"
+            };
             assert_eq!(
                 mamba_rs::mamba_ssm::gpu::kernel_identity::digest_hex(
                     &kernels.compiler_identity().source_digest
                 ),
-                "d402b603ad4d1b823cf9c3d632ba522303df73de4169129285b3885870fddbbd",
+                expected,
             );
         }
     }

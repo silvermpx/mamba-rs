@@ -5393,7 +5393,8 @@ fn validate_sensitive_scope(
         Ok(())
     } else {
         Err(format!(
-            "audited physical call-site census changed: actual={actual:?}, expected={expected:?}"
+            "audited physical call-site census changed: actual={actual:?}, expected={expected:?} in {:?}",
+            scope.lines().next().unwrap_or("").trim()
         ))
     }
 }
@@ -5709,7 +5710,14 @@ fn validate_physical_sensitive_call_site_ownership(
                     &[(PhysicalSensitiveCall::Submission, 1)][..],
                 ),
                 (
-                    audited_function_scope(source, "resolve_half_gemm_observation", "")?,
+                    // The half observation is built where the policy guards
+                    // live now: the shared helper that the eager path, the
+                    // prepared graph path and the retained half routes all call.
+                    audited_function_scope(
+                        source,
+                        "resolve_half_gemm_observation_with_context",
+                        "",
+                    )?,
                     &[(PhysicalSensitiveCall::GemmObservation, 1)][..],
                 ),
                 (
@@ -5803,7 +5811,24 @@ fn validate_physical_sensitive_call_site_ownership(
                     ][..],
                 ),
                 (
-                    audited_function_scope(source, "prepare_native_half_graph_identity", "")?,
+                    // The prepared half graph node is resolved in the helper
+                    // shared by the native path and the retained half routes,
+                    // not in prepare_native_half_graph_identity any more.
+                    audited_function_scope(
+                        source,
+                        "resolve_prepared_half_graph_node_with_context",
+                        "",
+                    )?,
+                    &[(PhysicalSensitiveCall::ObservationResolution, 1)][..],
+                ),
+                (
+                    // The retained small16 test resolves one physical node of
+                    // its own to compare the eager and prepared identities.
+                    direct_test_function_scope(
+                        active_test_module_scope(source, "half_physical_trace_tests")?,
+                        "triad_retained_half_small16_eager_and_prepared_physical_nodes_match",
+                        "#[test]",
+                    )?,
                     &[(PhysicalSensitiveCall::ObservationResolution, 1)][..],
                 ),
             ] {
@@ -5851,6 +5876,17 @@ fn validate_physical_sensitive_call_site_ownership(
                     &mut covered,
                 )?;
             }
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/runtime_bundle.rs") {
+            // The retained-route runtime bundle is a launch owner in its own
+            // right: one submission from its single launch function, the same
+            // shape as every launcher in gemm_bi_inference.rs.
+            validate_sensitive_scope(
+                source,
+                audited_function_scope(source, "launch_inference_bundle", "")?,
+                &[(PhysicalSensitiveCall::Submission, 1)],
+                &calls,
+                &mut covered,
+            )?;
         } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
             for name in [
                 "launch_sm89_exact_n64",
@@ -5936,6 +5972,12 @@ fn validate_physical_sensitive_call_site_ownership(
             .collect::<BTreeMap<_, _>>()
         } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/identity.rs") {
             [(PhysicalSensitiveCall::ObservationResolution, 1)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/runtime_bundle.rs") {
+            // The import of the submission function sits outside any audited
+            // scope, as it does in gemm_bi_inference.rs.
+            [(PhysicalSensitiveCall::Submission, 1)]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>()
         } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
@@ -7432,7 +7474,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
 
     let duplicate_semantics = replace_nth_in_function(
         LAUNCH_SOURCE,
-        "resolve_half_gemm_observation",
+        "resolve_half_gemm_observation_with_context",
         "Ok(PhysicalLaunchObservation::gemm(",
         "let _duplicate = PhysicalLaunchObservation :: gemm(half_policy_dtype(observation.dtype)?, None, route); Ok(PhysicalLaunchObservation::gemm(",
         0,
