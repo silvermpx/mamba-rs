@@ -28,6 +28,10 @@ the generation of a real checkpoint and the consumer build are the ones
   bind that identity; the gate now expects the legacy digest at 32 and the
   qualified capacity-64 digest at 64. The raw byte-for-byte comparison of
   the new fold kernels at capacity 16 was never affected.
+- The lockfile moves `rustls` to 0.23.45 (RUSTSEC-2026-0285, a TLS 1.3
+  handshake message accepted at the wrong encryption level). It is reached
+  only through the HuggingFace hub client behind the `cli` feature; the
+  scheduled security audit had gone red on the released tree.
 
 ### Measurements and verification
 
