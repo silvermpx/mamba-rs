@@ -3427,7 +3427,9 @@ impl Sm90aForcedRoute {
             (Sm90aOp::Nt, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
                 "nt_sm90a_wgmma_wg2_f16"
             }
-            (_, WeightDtype::F32, _) => unreachable!("f32 has no SM90a WGMMA route"),
+            (_, WeightDtype::F32 | WeightDtype::Tf32, _) => {
+                unreachable!("f32 has no SM90a WGMMA route")
+            }
         }
     }
 }
@@ -4558,7 +4560,7 @@ impl Sm90aPreparedTensorMaps {
 
     pub fn identity_digest(&self) -> Sha256Digest {
         let dtype = match self.request.dtype {
-            WeightDtype::F32 => 0,
+            WeightDtype::F32 | WeightDtype::Tf32 => 0,
             WeightDtype::F16 => 1,
             WeightDtype::Bf16 => 2,
         };
@@ -4923,7 +4925,7 @@ impl Sm100PreparedTensorMaps {
 
 fn dtype_tag(dtype: WeightDtype) -> u8 {
     match dtype {
-        WeightDtype::F32 => 0,
+        WeightDtype::F32 | WeightDtype::Tf32 => 0,
         WeightDtype::F16 => 1,
         WeightDtype::Bf16 => 2,
     }
@@ -6145,7 +6147,9 @@ impl Sm120RouteIdentity {
         let dtype = match self.dtype {
             WeightDtype::F16 => PolicyDtype::F16,
             WeightDtype::Bf16 => PolicyDtype::Bf16,
-            WeightDtype::F32 => return Err("SM120 TMA route requires f16 or bf16".into()),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                return Err("SM120 TMA route requires f16 or bf16".into());
+            }
         };
         let (output_rows, output_columns) = match self.op {
             Sm120Op::Nn => (self.shape.m, self.shape.n),
@@ -6996,7 +7000,9 @@ impl Sm100RouteIdentity {
         let dtype = match self.dtype {
             WeightDtype::F16 => PolicyDtype::F16,
             WeightDtype::Bf16 => PolicyDtype::Bf16,
-            WeightDtype::F32 => return Err("SM100 TCGEN route requires f16 or bf16".into()),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                return Err("SM100 TCGEN route requires f16 or bf16".into());
+            }
         };
         let (output_rows, output_columns) = match self.op {
             Sm100Op::Nn => (self.shape.m, self.shape.n),
@@ -7094,7 +7100,9 @@ impl Sm90aRouteIdentity {
         let dtype = match self.dtype {
             WeightDtype::F16 => PolicyDtype::F16,
             WeightDtype::Bf16 => PolicyDtype::Bf16,
-            WeightDtype::F32 => return Err("SM90a WGMMA route requires f16 or bf16".into()),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                return Err("SM90a WGMMA route requires f16 or bf16".into());
+            }
         };
         let (output_rows, output_columns) = match self.op {
             Sm90aOp::Nn => (self.shape.m, self.shape.n),

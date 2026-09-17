@@ -60,38 +60,10 @@ fn module_kind_discriminants_are_stable() {
 }
 
 #[test]
-fn f32_triad_policy_parser_accepts_only_the_versioned_public_spellings() {
-    assert_eq!(
-        F32TriadPolicy::parse_env_value("exact").unwrap(),
-        F32TriadPolicy::ExactScalarFma
-    );
-    assert_eq!(
-        F32TriadPolicy::parse_env_value(" \t\ntf32\r ").unwrap(),
-        F32TriadPolicy::AllowDeterministicTf32
-    );
+fn f32_triad_policy_defaults_to_exact_with_stable_discriminants() {
     assert_eq!(F32TriadPolicy::default(), F32TriadPolicy::ExactScalarFma);
     assert_eq!(F32TriadPolicy::ExactScalarFma as u8, 0);
     assert_eq!(F32TriadPolicy::AllowDeterministicTf32 as u8, 1);
-
-    for rejected in [
-        "",
-        "EXACT",
-        "TF32",
-        "1",
-        "on",
-        "true",
-        "yes",
-        "off",
-        "false",
-        "other",
-        "\u{a0}exact",
-    ] {
-        let error = F32TriadPolicy::parse_env_value(rejected)
-            .expect_err("unsupported policy spelling must fail closed");
-        assert!(error.contains("MAMBA_RS_BI_F32_POLICY"), "{error}");
-        assert!(error.contains(&format!("{rejected:?}")), "{error}");
-        assert!(error.contains("exact") && error.contains("tf32"), "{error}");
-    }
 }
 
 #[test]

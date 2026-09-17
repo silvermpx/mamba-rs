@@ -14,7 +14,7 @@ use crate::mamba_ssm::gpu::adamw::{
     step_multi,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
+use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -77,13 +77,14 @@ pub struct Mamba3Trainer {
 }
 
 impl Mamba3Trainer {
-    /// Construct an M3 trainer with default Adam settings and env-selected GEMMs.
+    /// Construct an M3 trainer with default Adam settings in the GEMM mode
+    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
-    /// `dtype` controls storage independently of GEMM mode. Missing selectors
-    /// use Deterministic + Triad; invalid or conflicting selectors are errors.
-    /// See [`Self::new_full`] for explicit optimizer settings, and
-    /// [`Self::new_full_with_mode`] with [`TrainSessionCfg::new`] to pick the
-    /// GEMM mode explicitly. [`Self::ctx`] shows the route graph capture binds.
+    /// `dtype` controls storage independently of the mode: f32, tf32 (f32 storage
+    /// with deterministic TF32 products), bf16, or f16. See [`Self::new_full`]
+    /// for explicit optimizer settings, and [`Self::new_full_with_mode`] with
+    /// [`TrainSessionCfg::new`] to pick the mode in code. [`Self::ctx`] shows the
+    /// route graph capture binds.
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -102,13 +103,12 @@ impl Mamba3Trainer {
         )
     }
 
-    /// Construct an M3 trainer with session settings and env-selected GEMMs.
+    /// Construct an M3 trainer with session settings in the GEMM mode
+    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
-    /// Missing selectors use Deterministic + Triad. An explicit environment
-    /// family can select Inference, whose `MAMBA_RS_ARCH_RUNG` policy is applied
-    /// on first use. Invalid configuration/environment, M3 state-cap, CUDA,
-    /// upload, or allocation returns an error. Use [`Self::new_full_with_mode`]
-    /// to bypass GEMM selectors.
+    /// Invalid configuration, `MAMBA_RS_GEMM_MODE`, M3 state-cap, CUDA, upload, or
+    /// allocation returns an error. Use [`Self::new_full_with_mode`] to pick the
+    /// mode in code.
     pub fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -121,15 +121,12 @@ impl Mamba3Trainer {
 
     /// Construct an M3 trainer with an explicit GEMM execution mode.
     ///
-    /// `dtype` selects weight/activation storage while `mode` independently
-    /// selects deterministic custom GEMMs or cuBLAS. GEMM mode, custom
-    /// precision/tensor-core controls, and family selectors in the environment
-    /// are ignored, and the context stores [`BiGemmFamily::Triad`]. Existing
+    /// `dtype` selects weight/activation storage (`Tf32` stores f32 with
+    /// deterministic TF32 products) while `mode` independently selects the
+    /// deterministic kernels or cuBLAS; `MAMBA_RS_GEMM_MODE` is ignored. Existing
     /// configuration, launch-capacity, explicit f32 input-projection, M3
     /// state-cap, CUDA, upload, and allocation errors are preserved. Captured
     /// graphs remain bound to the complete construction route.
-    /// `MAMBA_RS_ARCH_RUNG` remains a separate first-use process policy and is
-    /// not captured by this constructor.
     pub fn new_full_with_mode(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -160,7 +157,7 @@ impl Mamba3Trainer {
             cfg.d_state,
         )?;
         let inner = match dtype {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 // The f32 backbone runs the input projection GEMM
                 // unconditionally; an empty weight is a zero-size device
                 // allocation whose null pointer only surfaces later as
@@ -179,6 +176,7 @@ impl Mamba3Trainer {
                     cfg,
                     session,
                     mode,
+                    dtype,
                 )?))
             }
             WeightDtype::Bf16 | WeightDtype::F16 => Trainer3Inner::Mixed(Box::new(
@@ -191,7 +189,7 @@ impl Mamba3Trainer {
     /// Weight storage dtype the trainer was constructed with.
     pub fn dtype(&self) -> WeightDtype {
         match &self.inner {
-            Trainer3Inner::F32(_) => WeightDtype::F32,
+            Trainer3Inner::F32(t) => t.ctx.f32_storage_dtype(),
             Trainer3Inner::Mixed(t) => t.dtype,
         }
     }
@@ -797,15 +795,10 @@ impl Mamba3TrainerMixed {
         );
 
         let device = GpuDevice::new(gpu_ordinal)?;
-        // Trainer entry point: the documented tier selection is the
-        // MAMBA_RS_* environment (the benches' contract).
+        let role = GemmRole::triad(dtype);
         let ctx = match mode {
-            Some(mode) => {
-                GpuCtx::new_with_state_cap_mode_and_family(&device, 64, mode, BiGemmFamily::Triad)?
-            }
-            None => {
-                GpuCtx::new_from_env_with_state_cap_and_family(&device, 64, BiGemmFamily::Triad)?
-            }
+            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(&device, 64, mode, role)?,
+            None => GpuCtx::new_from_env_with_state_cap_and_role(&device, 64, role)?,
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(
@@ -1923,6 +1916,7 @@ impl Mamba3TrainerF32 {
         cfg: Mamba3Config,
         session: TrainSessionCfg,
         mode: Option<GemmMode>,
+        dtype: WeightDtype,
     ) -> Result<Self, String> {
         let TrainSessionCfg {
             input_dim,
@@ -1932,15 +1926,10 @@ impl Mamba3TrainerF32 {
             weight_decay,
         } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
-        // Trainer entry point: the documented tier selection is the
-        // MAMBA_RS_* environment (the benches' contract).
+        let role = GemmRole::triad(dtype);
         let ctx = match mode {
-            Some(mode) => {
-                GpuCtx::new_with_state_cap_mode_and_family(&device, 64, mode, BiGemmFamily::Triad)?
-            }
-            None => {
-                GpuCtx::new_from_env_with_state_cap_and_family(&device, 64, BiGemmFamily::Triad)?
-            }
+            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(&device, 64, mode, role)?,
+            None => GpuCtx::new_from_env_with_state_cap_and_role(&device, 64, role)?,
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(

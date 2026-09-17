@@ -7152,7 +7152,7 @@ fn validate_sm120_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
         let (core, forbidden) = match spec.dtype {
             super::super::dtype::WeightDtype::Bf16 => (BF16_CORE, [F16_CORE, TF32_CORE]),
             super::super::dtype::WeightDtype::F16 => (F16_CORE, [BF16_CORE, TF32_CORE]),
-            super::super::dtype::WeightDtype::F32 => {
+            super::super::dtype::WeightDtype::F32 | super::super::dtype::WeightDtype::Tf32 => {
                 return Err(format!(
                     "TriadSm120/{} has unsupported typed route metadata",
                     spec.symbol
@@ -9876,7 +9876,7 @@ impl GemmBiKernels {
             .lock()
             .map_err(|_| "SM90a tensor-map cache is poisoned".to_string())?;
         let dtype = match request.dtype {
-            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F32 | super::super::dtype::WeightDtype::Tf32 => 0,
             super::super::dtype::WeightDtype::F16 => 1,
             super::super::dtype::WeightDtype::Bf16 => 2,
         };
@@ -9916,7 +9916,7 @@ impl GemmBiKernels {
             .lock()
             .map_err(|_| "SM100 tensor-map cache is poisoned".to_string())?;
         let dtype = match request.dtype {
-            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F32 | super::super::dtype::WeightDtype::Tf32 => 0,
             super::super::dtype::WeightDtype::F16 => 1,
             super::super::dtype::WeightDtype::Bf16 => 2,
         };
@@ -9970,7 +9970,7 @@ impl GemmBiKernels {
             .lock()
             .map_err(|_| "SM120 tensor-map cache is poisoned".to_string())?;
         let dtype = match request.dtype {
-            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F32 | super::super::dtype::WeightDtype::Tf32 => 0,
             super::super::dtype::WeightDtype::F16 => 1,
             super::super::dtype::WeightDtype::Bf16 => 2,
         };
@@ -11489,7 +11489,8 @@ mod tests {
             crate::mamba_ssm::gpu::dtype::WeightDtype::F16 => {
                 "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
             }
-            crate::mamba_ssm::gpu::dtype::WeightDtype::F32 => unreachable!(),
+            crate::mamba_ssm::gpu::dtype::WeightDtype::F32
+            | crate::mamba_ssm::gpu::dtype::WeightDtype::Tf32 => unreachable!(),
         };
         format!(
             ".visible .entry {}() {{\n\

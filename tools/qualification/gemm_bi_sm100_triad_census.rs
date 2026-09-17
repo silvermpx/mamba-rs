@@ -35,7 +35,7 @@ fn quantize(dtype: WeightDtype, value: f32) -> f32 {
     match dtype {
         WeightDtype::Bf16 => half::bf16::from_f32(value).to_f32(),
         WeightDtype::F16 => half::f16::from_f32(value).to_f32(),
-        WeightDtype::F32 => value,
+        WeightDtype::F32 | WeightDtype::Tf32 => value,
     }
 }
 
@@ -346,7 +346,7 @@ impl CensusCase {
             (Sm100Op::Tn, _) => (8.0e-4, 8.0e-4),
             (_, WeightDtype::Bf16) => (3.0e-2, 3.0e-2),
             (_, WeightDtype::F16) => (5.0e-3, 5.0e-3),
-            (_, WeightDtype::F32) => unreachable!(),
+            (_, WeightDtype::F32 | WeightDtype::Tf32) => unreachable!(),
         };
         for row in 0..self.output_rows {
             for column in 0..self.output_columns {

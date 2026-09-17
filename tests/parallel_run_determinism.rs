@@ -105,14 +105,14 @@ fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
                 .ctx()
                 .set_gemm_mode(GemmMode::Deterministic)
                 .unwrap();
-            trainer.ctx().set_bi_tensor_cores(false);
+            trainer.ctx().route_controls().set_tensor_cores(false);
         }
         GemmTier::BatchInvariantTc => {
             trainer
                 .ctx()
                 .set_gemm_mode(GemmMode::Deterministic)
                 .unwrap();
-            trainer.ctx().set_bi_tensor_cores(true);
+            trainer.ctx().route_controls().set_tensor_cores(true);
         }
     }
     let mut temporal = vec![0.0f32; batch * seq_len * cfg.d_model];

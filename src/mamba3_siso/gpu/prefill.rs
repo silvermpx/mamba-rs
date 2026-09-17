@@ -196,7 +196,7 @@ impl Mamba3Prefill {
     ) -> Result<Self, String> {
         dims.validate_index_budget()?;
         let typed = match dtype {
-            WeightDtype::F32 => None,
+            WeightDtype::F32 | WeightDtype::Tf32 => None,
             _ => Some(Mamba3PrefillTypedScratch::new(stream, dims, dtype)?),
         };
         Ok(Self {
@@ -341,7 +341,9 @@ impl Mamba3Prefill {
                 let cast = match dtype {
                     WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
                     WeightDtype::F16 => &m3k.cast_f32_to_f16,
-                    WeightDtype::F32 => unreachable!("typed scratch exists only for half dtypes"),
+                    WeightDtype::F32 | WeightDtype::Tf32 => {
+                        unreachable!("typed scratch exists only for half dtypes")
+                    }
                 };
                 let dst = ts.input_cast.cached_ptr();
                 let src = mamba_input.cached_ptr();
@@ -374,7 +376,9 @@ impl Mamba3Prefill {
                 let cast = match dtype {
                     WeightDtype::Bf16 => &m3k.cast_bf16_to_f32,
                     WeightDtype::F16 => &m3k.cast_f16_to_f32,
-                    WeightDtype::F32 => unreachable!("typed scratch exists only for half dtypes"),
+                    WeightDtype::F32 | WeightDtype::Tf32 => {
+                        unreachable!("typed scratch exists only for half dtypes")
+                    }
                 };
                 let dst = tgt.temporal_work.cached_ptr();
                 let src = ts.out_flat.cached_ptr();

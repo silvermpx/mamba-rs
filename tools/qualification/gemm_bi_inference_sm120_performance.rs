@@ -138,9 +138,9 @@ fn sm120_exact_environment_preflight(label: &str) -> Result<(), String> {
 
 fn configure_sm120_exact_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(policy);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls().set_f32_policy(policy);
 }
 
 fn launch_sm120_exact_auto(
@@ -172,7 +172,7 @@ fn sm120_exact_vendor_launch(
         // A half output rounds the broadcast bias to its storage dtype before
         // GEMM; the independent reference below keeps its output in F32.
         let kernel = match operands.c.dtype {
-            WeightDtype::F32 => &ctx.kernels.bias_broadcast,
+            WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.bias_broadcast,
             dtype => ctx.kernels.bias_broadcast_typed.get(dtype),
         };
         let rows = shape.m as c_int;

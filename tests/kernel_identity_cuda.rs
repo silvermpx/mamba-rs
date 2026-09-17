@@ -458,7 +458,7 @@ fn half_trace_context() -> GpuCtx {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let scratch_requests = [
         PhysicalQualificationRequest::contiguous(
             ResolvedGemmOp::Nn,
@@ -652,7 +652,7 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
             "nt_tc_bf16",
         ),
     ] {
-        ctx.set_bi_tensor_cores(false);
+        ctx.route_controls().set_tensor_cores(false);
         let trace = record_half_fixture(
             &ctx,
             HalfTraceFixture {
@@ -666,10 +666,13 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
         .unwrap();
         assert_eq!(trace.single_launch_tile(), Some(expected_extent));
         assert_eq!(trace.single_launch_symbol(), Some(symbol));
-        assert!(!ctx.bi_tensor_cores(), "forced route must restore policy");
+        assert!(
+            !ctx.route_controls().tensor_cores(),
+            "forced route must restore policy"
+        );
     }
 
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     let trace = record_half_fixture(
         &ctx,
@@ -683,8 +686,8 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     )
     .expect("qualification must normalize its private live policy");
     assert_eq!(trace.launch_count(), 1);
-    assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Inference);
-    assert!(!ctx.batch_invariant());
+    assert_eq!(ctx.route_controls().family(), BiGemmFamily::Inference);
+    assert!(!ctx.route_controls().batch_invariant());
 }
 
 fn assert_exact_n64_resources(function: &cudarc::driver::CudaFunction) {

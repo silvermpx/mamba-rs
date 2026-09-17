@@ -250,7 +250,7 @@ fn typed_pooled_graph_replay_and_container_guard_for_family(family: BiGemmFamily
     let w = Mamba3Weights::init(&cfg, input_dim, 0xB16_B00B);
     let device = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&device).expect("ctx");
-    ctx.set_bi_gemm_family(family);
+    ctx.route_controls().set_family(family);
     let arch = GpuDevice::nvrtc_arch(device.compute_capability);
     let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");
     let dims = gpu_dims(&cfg, input_dim, 1, seq_len);
@@ -361,7 +361,7 @@ fn typed_pooled_batch_invariance_on_the_serve_route() {
     let device = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&device).expect("ctx");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_tensor_cores(true);
+    ctx.route_controls().set_tensor_cores(true);
     let arch = GpuDevice::nvrtc_arch(device.compute_capability);
     let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");
     let mw = GpuMamba3MixedWeights::from_cpu(&ctx.stream, &w, dtype).unwrap();

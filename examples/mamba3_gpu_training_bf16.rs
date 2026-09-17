@@ -96,9 +96,9 @@ mod cuda_example {
             GemmMode::Deterministic,
         )?;
         println!(
-            "mode {:?}, family {:?}",
-            trainer.ctx().gemm_mode(),
-            trainer.ctx().bi_gemm_family()
+            "storage {:?}, mode {:?}",
+            trainer.dtype(),
+            trainer.ctx().gemm_mode()
         );
 
         // Warmup eager.

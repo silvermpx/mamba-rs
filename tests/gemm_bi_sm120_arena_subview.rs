@@ -56,8 +56,8 @@ fn sm120_half_route_serves_operands_sliced_from_an_arena() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_bi_tensor_cores(true);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_tensor_cores(true);
 
     let x_host = synth(M * K, 0x51ce_a11e);
     let w_host = synth(K * N, 0xa2ea_0b01);

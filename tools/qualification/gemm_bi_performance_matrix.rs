@@ -508,7 +508,9 @@ mod cublaslt_qualification {
         let dtype = match cell.dtype {
             WeightDtype::Bf16 => cudaDataType_t::CUDA_R_16BF,
             WeightDtype::F16 => cudaDataType_t::CUDA_R_16F,
-            WeightDtype::F32 => return Err("SM120 half NN pairing rejects F32 storage".into()),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                return Err("SM120 half NN pairing rejects F32 storage".into());
+            }
         };
         let (m, k, n) = cell.shape.dims;
         let as_u64 =
@@ -1511,7 +1513,9 @@ mod cublaslt_tn_nt_qualification {
                 b_elements: extent(k, n, "NT B")?,
                 output_elements: extent(m, k, "NT output")?,
             }),
-            (WeightDtype::F32, _) => Err("paired TN/NT requires BF16 or F16 inputs".into()),
+            (WeightDtype::F32 | WeightDtype::Tf32, _) => {
+                Err("paired TN/NT requires BF16 or F16 inputs".into())
+            }
             (_, Sm120Op::Nn) => Err("paired TN/NT inventory rejects NN".into()),
         }
     }
@@ -1521,7 +1525,7 @@ mod cublaslt_tn_nt_qualification {
         match dtype {
             WeightDtype::Bf16 => Ok(cudaDataType_t::CUDA_R_16BF),
             WeightDtype::F16 => Ok(cudaDataType_t::CUDA_R_16F),
-            WeightDtype::F32 => Ok(cudaDataType_t::CUDA_R_32F),
+            WeightDtype::F32 | WeightDtype::Tf32 => Ok(cudaDataType_t::CUDA_R_32F),
         }
     }
 
@@ -1604,7 +1608,7 @@ mod cublaslt_tn_nt_qualification {
         match dtype {
             WeightDtype::Bf16 => half::bf16::from_f32(value).to_f32(),
             WeightDtype::F16 => half::f16::from_f32(value).to_f32(),
-            WeightDtype::F32 => value,
+            WeightDtype::F32 | WeightDtype::Tf32 => value,
         }
     }
 
@@ -3086,7 +3090,7 @@ fn op_name(op: ResolvedGemmOp) -> &'static str {
 
 fn dtype_name(dtype: WeightDtype) -> &'static str {
     match dtype {
-        WeightDtype::F32 => "f32",
+        WeightDtype::F32 | WeightDtype::Tf32 => "f32",
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
     }
@@ -3746,7 +3750,7 @@ fn cublas_denominator_compute(
     use cudarc::cublas::sys::cublasComputeType_t;
 
     match (dtype, mode) {
-        (WeightDtype::F32, CublasDenominatorMode::Fast) => {
+        (WeightDtype::F32 | WeightDtype::Tf32, CublasDenominatorMode::Fast) => {
             cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32
         }
         (WeightDtype::Bf16 | WeightDtype::F16, CublasDenominatorMode::Fast) => {
@@ -3761,7 +3765,7 @@ fn cublas_denominator_compute_name(
     mode: CublasDenominatorMode,
 ) -> &'static str {
     match (dtype, mode) {
-        (WeightDtype::F32, CublasDenominatorMode::Fast) => "32f_fast_tf32",
+        (WeightDtype::F32 | WeightDtype::Tf32, CublasDenominatorMode::Fast) => "32f_fast_tf32",
         (WeightDtype::Bf16 | WeightDtype::F16, CublasDenominatorMode::Fast) => "32f",
         (_, CublasDenominatorMode::Pedantic) => "32f_pedantic",
     }
@@ -5423,7 +5427,9 @@ fn seed_final_auto_vendor(
     salt: u64,
 ) -> Result<(), String> {
     let generator = |len, operand_salt| match final_auto_input_dtype(cell) {
-        Ok(WeightDtype::F32) => tf32_tournament_seeded_values(len, operand_salt),
+        Ok(WeightDtype::F32 | WeightDtype::Tf32) => {
+            tf32_tournament_seeded_values(len, operand_salt)
+        }
         Ok(WeightDtype::Bf16 | WeightDtype::F16) => {
             final_auto_half_seeded_values(len, operand_salt as usize)
         }
@@ -5473,7 +5479,9 @@ fn reset_final_auto_vendor_output(
         return Ok(());
     }
     let values = match final_auto_input_dtype(cell)? {
-        WeightDtype::F32 => tf32_tournament_seeded_values(buffers.output.len_elems(), salt ^ 0x91),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            tf32_tournament_seeded_values(buffers.output.len_elems(), salt ^ 0x91)
+        }
         WeightDtype::Bf16 | WeightDtype::F16 => {
             final_auto_half_seeded_values(buffers.output.len_elems(), (salt ^ 0x91) as usize)
         }
@@ -7223,8 +7231,9 @@ mod tn_narrow_cublas_pair {
         }
         let ctx = GpuCtx::new(&device)?;
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::ExactScalarFma);
         let multiprocessors = device.multiprocessor_count();
         for cell in CELLS {
             run_cell(&ctx, &quiet_gpu, cell, multiprocessors, windows, &mut sink)
@@ -8624,8 +8633,9 @@ fn run_tf32_tournament_assignment(
     };
     for ctx in [primary_ctx, secondary_ctx] {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     }
     let requests = TF32_TOURNAMENT_SHAPES
         .into_iter()
@@ -8799,8 +8809,10 @@ fn run_gemm_bi_production_auto_paired_cublas(
     );
     let cublas_workspace_bytes = auto_ctx._blas_workspace.len();
     auto_ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    auto_ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    auto_ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    auto_ctx.route_controls().set_family(BiGemmFamily::Triad);
+    auto_ctx
+        .route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     let requests = cells
         .iter()
         .copied()
@@ -8884,8 +8896,9 @@ fn gemm_bi_deterministic_performance_matrix() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
 
     let shard = parse_env_usize("GEMM_BI_QUAL_SHARD", 0).expect("parse shard");
     let shards = parse_env_usize("GEMM_BI_QUAL_SHARDS", 1).expect("parse shard count");
@@ -8965,8 +8978,9 @@ fn gemm_bi_sm120_tf32_forced_hot_performance() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let windows =
         parse_env_usize("GEMM_BI_QUAL_WINDOWS", DEFAULT_WINDOWS).expect("parse window count");
@@ -9030,8 +9044,9 @@ fn gemm_bi_sm120_tf32_forced_nn_nt_hot_performance() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let windows =
         parse_env_usize("GEMM_BI_QUAL_WINDOWS", DEFAULT_WINDOWS).expect("parse window count");
@@ -9107,7 +9122,7 @@ fn gemm_bi_sm120_half_nn_paired_cublaslt_hot() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let runtime = Sm120PairedLtRuntime::new(&ctx).expect("prepare paired cuBLASLt runtime");
 
     for cell in build_sm120_paired_nn_cells() {
@@ -9138,7 +9153,7 @@ fn gemm_bi_sm120_half_tn_nt_paired_vendor_hot() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let runtime = Sm120PairedTnNtRuntime::new(&ctx).expect("prepare paired TN/NT vendor runtime");
 
     for cell in build_sm120_paired_tn_nt_cells() {
@@ -9161,8 +9176,9 @@ fn gemm_bi_deterministic_performance_edges() {
     );
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
 
     let shard = parse_env_usize("GEMM_BI_QUAL_SHARD", 0).expect("parse edge shard");
     let shards = parse_env_usize("GEMM_BI_QUAL_SHARDS", 1).expect("parse edge shard count");
@@ -11054,8 +11070,9 @@ mod sm89_nt_finalist_once21 {
 
     fn configure(ctx: &GpuCtx) {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     }
 
     fn request(cell: NtCell, route: PhysicalQualificationRoute) -> PhysicalQualificationRequest {

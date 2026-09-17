@@ -94,7 +94,7 @@ fn run_sync(dtype: WeightDtype) {
     let tol = match dtype {
         WeightDtype::Bf16 => 0.9995_f32,
         WeightDtype::F16 => 0.99999_f32,
-        WeightDtype::F32 => 0.999999_f32,
+        WeightDtype::F32 | WeightDtype::Tf32 => 0.999999_f32,
     };
     assert!(
         cos >= tol,

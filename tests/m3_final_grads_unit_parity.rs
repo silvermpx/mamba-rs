@@ -109,7 +109,7 @@ fn tolerances(dtype: WeightDtype) -> (f32, f32) {
     match dtype {
         WeightDtype::Bf16 => (0.99, 0.05),
         WeightDtype::F16 => (0.999, 0.02),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     }
 }
 

@@ -138,24 +138,20 @@ impl GpuMambaLM {
 }
 
 impl GpuMambaLM {
-    /// Load an HF model with f32 storage, a batch of one, and env-selected GEMMs.
+    /// Load an HF model with f32 storage and a batch of one, in the GEMM mode
+    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
-    /// Missing selectors use Deterministic + Inference; invalid or conflicting
-    /// selectors are errors. Use [`Self::from_hf_with_mode`] for an explicit
-    /// mode and [`Self::ctx`] to inspect the route that graph capture binds.
-    /// Errors match [`Self::from_hf_with_dtype_batch`]; `MAMBA_RS_ARCH_RUNG`
-    /// remains a separate first-use Inference policy.
+    /// Use [`Self::from_hf_with_mode`] to pick the mode in code and [`Self::ctx`]
+    /// to inspect the route that graph capture binds. Errors match
+    /// [`Self::from_hf_with_dtype_batch`].
     pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
     }
 
     /// Load an HF model with f32 storage, a batch of one, and an explicit GEMM mode.
     ///
-    /// GEMM mode, custom precision/tensor-core controls, and family selectors
-    /// in the environment are ignored. `MAMBA_RS_ARCH_RUNG` remains the
-    /// separate first-use Inference policy and is not captured by this
-    /// constructor. Loading, validation, CUDA setup, upload, and allocation
-    /// failures are returned.
+    /// `MAMBA_RS_GEMM_MODE` is ignored. Loading, validation, CUDA setup, upload,
+    /// and allocation failures are returned.
     pub fn from_hf_with_mode(
         dir: &Path,
         gpu_ordinal: usize,
@@ -164,12 +160,12 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, WeightDtype::F32, 1, Some(mode))
     }
 
-    /// Load an HF model with explicit storage dtype and env-selected GEMMs.
+    /// Load an HF model with an explicit storage precision, in the GEMM mode
+    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
-    /// `dtype` controls storage independently of execution mode. Missing
-    /// selectors use Deterministic + Inference; invalid or conflicting values
-    /// are errors. See [`Self::from_hf_with_dtype_and_mode`] for explicit mode;
-    /// other errors match [`Self::from_hf_with_dtype_batch`].
+    /// `dtype` controls storage independently of the mode (`Tf32` stores f32 with
+    /// deterministic TF32 products). See [`Self::from_hf_with_dtype_and_mode`] for
+    /// an explicit mode; other errors match [`Self::from_hf_with_dtype_batch`].
     pub fn from_hf_with_dtype(
         dir: &Path,
         gpu_ordinal: usize,
@@ -178,13 +174,10 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, dtype, 1)
     }
 
-    /// Load an HF model with explicit storage dtype and GEMM mode, a batch of one.
+    /// Load an HF model with an explicit storage precision and GEMM mode, a batch of one.
     ///
-    /// Storage precision and GEMM execution are independent. The explicit
-    /// lane ignores GEMM mode, custom precision/tensor-core controls, and
-    /// family selectors in the environment; `MAMBA_RS_ARCH_RUNG` remains a
-    /// separate first-use policy and is not captured by this constructor.
-    /// Errors match [`Self::from_hf_with_dtype`].
+    /// Storage precision and GEMM execution are independent; `MAMBA_RS_GEMM_MODE`
+    /// is ignored. Errors match [`Self::from_hf_with_dtype`].
     pub fn from_hf_with_dtype_and_mode(
         dir: &Path,
         gpu_ordinal: usize,
@@ -194,19 +187,17 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, 1, Some(mode))
     }
 
-    /// Load HF model with explicit dtype and batch size.
+    /// Load an HF model with an explicit storage precision and batch size.
     ///
-    /// `batch > 1` enables parallel generation of multiple independent
-    /// sequences sharing the same weights. Each batch slot has its own
-    /// recurrent state. Storage remains independent of GEMM execution. Missing
-    /// selectors use Deterministic + Inference; invalid or conflicting values
-    /// are errors. Use [`Self::generate_batch`] to drive the result and
-    /// [`Self::ctx`] to inspect its route. `MAMBA_RS_ARCH_RUNG` remains a
-    /// separate first-use Inference policy.
+    /// `batch > 1` enables parallel generation of multiple independent sequences
+    /// sharing the same weights. Each batch slot has its own recurrent state.
+    /// Storage is independent of the GEMM mode, which `MAMBA_RS_GEMM_MODE` names
+    /// (`deterministic` when unset). Use [`Self::generate_batch`] to drive the
+    /// result and [`Self::ctx`] to inspect its route.
     ///
     /// # Errors
     ///
-    /// Returns checkpoint, configuration, GEMM-environment, CUDA, upload, or
+    /// Returns checkpoint, configuration, `MAMBA_RS_GEMM_MODE`, CUDA, upload, or
     /// batch-dependent allocation failures.
     pub fn from_hf_with_dtype_batch(
         dir: &Path,
@@ -217,14 +208,12 @@ impl GpuMambaLM {
         Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, batch, None)
     }
 
-    /// Load an HF model with explicit storage dtype, batch size, and GEMM mode.
+    /// Load an HF model with an explicit storage precision, batch size, and GEMM mode.
     ///
-    /// `dtype` controls storage and `mode` independently controls GEMM
-    /// execution. GEMM environment selectors are bypassed except that
-    /// `MAMBA_RS_ARCH_RUNG` remains the separate first-use Inference policy and
-    /// is not captured by this constructor. Invalid checkpoints, model
-    /// configuration, batch-dependent allocation, CUDA setup, or upload
-    /// failures are returned. Graph capture remains tied to the complete route.
+    /// `dtype` controls storage and `mode` independently controls GEMM execution;
+    /// `MAMBA_RS_GEMM_MODE` is ignored. Invalid checkpoints, model configuration,
+    /// batch-dependent allocation, CUDA setup, or upload failures are returned.
+    /// Graph capture remains tied to the complete route.
     pub fn from_hf_with_dtype_batch_and_mode(
         dir: &Path,
         gpu_ordinal: usize,
@@ -290,7 +279,7 @@ impl GpuMambaLM {
 
         // Upload embed + optional lm_head in requested dtype.
         let embed_storage = match dtype {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 let mut e = GpuBuffer::zeros(stream, vocab_size_padded * d_model)?;
                 e.upload(stream, &embed)?;
                 let lm = if let Some(ref lm_w) = lm_head_padded {
@@ -346,7 +335,7 @@ impl GpuMambaLM {
     /// Storage dtype (f32 / bf16 / f16).
     pub fn dtype(&self) -> WeightDtype {
         match &self.embed_storage {
-            EmbedStorage::F32 { .. } => WeightDtype::F32,
+            EmbedStorage::F32 { .. } => self.backbone.dtype(),
             EmbedStorage::Half { dtype, .. } => *dtype,
         }
     }
@@ -634,7 +623,7 @@ impl GpuMambaLM {
         // Mixed backbone → native bf16/f16 prefill (DtypedBuf scratch).
         // F32 backbone → f32 prefill (GpuBuffer scratch).
         match self.backbone.dtype() {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 let mut prefill_scratch = self.backbone.alloc_prefill_scratch(t)?;
                 self.backbone
                     .prefill_sequence(&ip_out_flat, &mut prefill_scratch)?;
@@ -707,7 +696,7 @@ impl GpuMambaLM {
                     let kernel = match *dtype {
                         WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                         WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-                        WeightDtype::F32 => unreachable!(),
+                        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
                     };
                     let mut builder = stream.launch_builder(kernel);
                     builder.arg(&staging_ptr);
@@ -787,7 +776,7 @@ fn upload_f32_as_dtype(
     let dst_ptr = dst.cached_ptr() + byte_off as u64;
 
     match dtype {
-        WeightDtype::F32 => {
+        WeightDtype::F32 | WeightDtype::Tf32 => {
             let bytes: &[u8] = bytemuck::cast_slice(src);
             assert_eq!(bytes.len(), byte_count);
             cu_memcpy_htod_raw(stream, dst_ptr, bytes)

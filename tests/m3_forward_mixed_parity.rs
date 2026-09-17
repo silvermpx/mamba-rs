@@ -327,7 +327,7 @@ fn check(dtype: WeightDtype) {
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::Bf16 => (0.995_f32, 0.05_f32),
         WeightDtype::F16 => (0.999_f32, 0.02_f32),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     };
     assert!(cos >= cos_min, "{dtype:?}: cos {cos:.6} < {cos_min}");
     assert!(

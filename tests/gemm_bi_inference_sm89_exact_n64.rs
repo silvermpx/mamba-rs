@@ -1185,7 +1185,10 @@ fn run_auto_view(
     }
     drop(graph);
     inputs.unchanged(ctx);
-    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
+    assert_eq!(
+        ctx.route_controls().f32_policy(),
+        F32TriadPolicy::ExactScalarFma
+    );
     let actual_symbol = match actual_tile {
         CANDIDATE => SYMBOL,
         InferenceTile::Legacy => LEGACY_SYMBOL,
@@ -1236,9 +1239,10 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
     ));
     assert!(compiler.nvrtc_library_known);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     // The eight exact rows were independently admitted by 101-window production
     // pairs. This test is the full-hot *raw* batch/view gate, not a replacement
     // for that test's independent PEDANTIC/dyadic numerical gates.

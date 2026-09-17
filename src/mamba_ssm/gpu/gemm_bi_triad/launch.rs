@@ -653,7 +653,7 @@ impl std::hash::Hash for Sm120PreparedKey {
         self.context.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
-            WeightDtype::F32 => 0_u8,
+            WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
             WeightDtype::F16 => 1,
             WeightDtype::Bf16 => 2,
         }
@@ -877,7 +877,7 @@ impl std::hash::Hash for Sm100PreparedKey {
         self.context.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
-            WeightDtype::F32 => 0_u8,
+            WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
             WeightDtype::F16 => 1,
             WeightDtype::Bf16 => 2,
         }
@@ -1043,7 +1043,9 @@ fn sm100_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
         WeightDtype::F16 => Ok(PolicyDtype::F16),
-        WeightDtype::F32 => Err("SM100 automatic route requires BF16 or F16".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("SM100 automatic route requires BF16 or F16".into())
+        }
     }
 }
 
@@ -1221,7 +1223,7 @@ impl std::hash::Hash for Sm90aPreparedKey {
         self.context.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
-            WeightDtype::F32 => 0_u8,
+            WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
             WeightDtype::F16 => 1,
             WeightDtype::Bf16 => 2,
         }
@@ -1394,7 +1396,9 @@ fn sm90a_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
         WeightDtype::F16 => Ok(PolicyDtype::F16),
-        WeightDtype::F32 => Err("SM90a automatic route requires BF16 or F16".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("SM90a automatic route requires BF16 or F16".into())
+        }
     }
 }
 
@@ -8163,7 +8167,9 @@ fn sm120_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
         WeightDtype::F16 => Ok(PolicyDtype::F16),
-        WeightDtype::F32 => Err("SM120 automatic route requires BF16 or F16".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("SM120 automatic route requires BF16 or F16".into())
+        }
     }
 }
 
@@ -10908,7 +10914,9 @@ fn half_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
         WeightDtype::F16 => Ok(PolicyDtype::F16),
-        WeightDtype::F32 => Err("half physical launch identity does not accept f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("half physical launch identity does not accept f32".into())
+        }
     }
 }
 
@@ -11253,7 +11261,9 @@ fn prepared_half_graph_base(
     let suffix = match dtype {
         WeightDtype::Bf16 => "_bf16",
         WeightDtype::F16 => "_f16",
-        WeightDtype::F32 => return Err("native half graph identity does not accept f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            return Err("native half graph identity does not accept f32".into());
+        }
     };
     expected
         .symbol()
@@ -17011,7 +17021,7 @@ mod half_physical_trace_tests {
             let wrong_dtype = match dtype {
                 WeightDtype::Bf16 => WeightDtype::F16,
                 WeightDtype::F16 => WeightDtype::Bf16,
-                WeightDtype::F32 => unreachable!(),
+                WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
             };
             assert!(prepared_half_graph_base(node, wrong_dtype).is_err());
             let mut wrong_owner = node;

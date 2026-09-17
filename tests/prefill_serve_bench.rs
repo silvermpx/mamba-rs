@@ -125,19 +125,19 @@ fn set_tier(ctx: &GpuCtx, tier: &str) {
     match tier {
         "cublas+tf32" => {
             ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
-            ctx.set_bi_tensor_cores(false);
+            ctx.route_controls().set_tensor_cores(false);
         }
         "cublas" => {
             ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
-            ctx.set_bi_tensor_cores(false);
+            ctx.route_controls().set_tensor_cores(false);
         }
         "bi" => {
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-            ctx.set_bi_tensor_cores(false);
+            ctx.route_controls().set_tensor_cores(false);
         }
         "bi+tc" => {
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-            ctx.set_bi_tensor_cores(true);
+            ctx.route_controls().set_tensor_cores(true);
         }
         other => panic!("unknown tier {other}"),
     }

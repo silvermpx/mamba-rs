@@ -243,8 +243,9 @@ const fn sm120_case(
 
 fn configure_deterministic_tf32(ctx: &GpuCtx) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
 }
 
 fn nt_finalist_request(
@@ -677,8 +678,9 @@ fn tf32_cohort_binds_on_this_board() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     if device.compute_capability == (12, 0) && device.multiprocessor_count() == 170 {
         run_sm120_current_cohort_binding(&ctx);
         return;
@@ -760,8 +762,9 @@ fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     for dims in [
         (2048, 768, 3072),
         (2048, 1536, 768),

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 fn suffix(dtype: WeightDtype) -> &'static str {
     match dtype {
-        WeightDtype::F32 => "",
+        WeightDtype::F32 | WeightDtype::Tf32 => "",
         WeightDtype::Bf16 => "_bf16",
         WeightDtype::F16 => "_f16",
     }

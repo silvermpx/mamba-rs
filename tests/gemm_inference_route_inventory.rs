@@ -13,7 +13,7 @@ fn assert_public_inference_nn_is_inventoried(input_dtype: WeightDtype, output_dt
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     let x = DtypedBuf::zeros(&ctx.stream, 3 * 37, input_dtype).expect("allocate X[3,37]");
     let w = DtypedBuf::zeros(&ctx.stream, 37 * 96, input_dtype).expect("allocate W[37,96]");
@@ -89,9 +89,9 @@ fn deterministic_triad_public_half_matvec_records_both_tensor_core_states() {
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&device).unwrap();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     for tc in [false, true] {
-        ctx.set_bi_tensor_cores(tc);
+        ctx.route_controls().set_tensor_cores(tc);
         for input_dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             for output_dtype in [input_dtype, WeightDtype::F32] {
                 let x = DtypedBuf::zeros(&ctx.stream, 3 * 37, input_dtype).unwrap();
@@ -151,7 +151,7 @@ fn deterministic_inference_direct_empty_output_has_no_terminal_record() {
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&device).unwrap();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     // Canonical F32 forwarding rejects empty output axes before dispatch.
     // The direct Inference adapter instead preserves terminal no-op behavior.
     let f32_null = TypedPtr {

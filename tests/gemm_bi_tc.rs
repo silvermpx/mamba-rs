@@ -38,7 +38,7 @@ fn quantize(v: &[f32], dt: WeightDtype) -> Vec<f32> {
     match dt {
         WeightDtype::Bf16 => v.iter().map(|&x| bf16::from_f32(x).to_f32()).collect(),
         WeightDtype::F16 => v.iter().map(|&x| f16::from_f32(x).to_f32()).collect(),
-        WeightDtype::F32 => v.to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => v.to_vec(),
     }
 }
 
@@ -231,7 +231,7 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
                 dtype: dt,
             };
             let run_policy = |tensor_cores: bool| {
-                t.ctx.set_bi_tensor_cores(tensor_cores);
+                t.ctx.route_controls().set_tensor_cores(tensor_cores);
                 gemm_bi_forward_typed(
                     &t.ctx,
                     typed(&policy_output),
@@ -470,7 +470,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         let mut tr =
             MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
         tr.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
-        tr.ctx().set_bi_tensor_cores(true);
+        tr.ctx().route_controls().set_tensor_cores(true);
         let n = 4 * 256 * cfg.d_model;
         tr.step(&det(n, 0x11, 1.0), &det(n, 0x77, 0.1))
             .expect("warmup");
@@ -1015,7 +1015,7 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
     ];
 
     t.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    t.ctx.set_bi_tensor_cores(true);
+    t.ctx.route_controls().set_tensor_cores(true);
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
         for (case, &(m, k, n)) in tn_shapes.iter().enumerate() {
             let x = t.typed_buf(&quantize(&det(m * k, 0x7100 + case as u32, 0.5), dt), dt);
@@ -1765,7 +1765,7 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
     // The lease restored the context's own policy, the stream-K default of
     // the tensor-core tier.
     assert_eq!(
-        t.ctx.half_triad_policy(),
+        t.ctx.route_controls().half_policy(),
         mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrder
     );
 }
@@ -1791,8 +1791,8 @@ fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
     }
     let t = Ctx::new();
     t.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    t.ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    t.ctx.set_bi_tensor_cores(true);
+    t.ctx.route_controls().set_family(BiGemmFamily::Triad);
+    t.ctx.route_controls().set_tensor_cores(true);
     let dims = (10400usize, 384usize, 384usize);
     let dt = WeightDtype::Bf16;
     let x = t.typed_buf(&quantize(&det(dims.0 * dims.1, 0x91, 0.5), dt), dt);
@@ -1814,7 +1814,7 @@ fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
             .collect::<Vec<_>>()
     };
     let automatic = |policy: HalfTriadPolicy| {
-        t.ctx.set_half_triad_policy(policy);
+        t.ctx.route_controls().set_half_policy(policy);
         let dw = GpuBuffer::zeros(&t.ctx.stream, dims.1 * dims.2).unwrap();
         gemm_bi_backward_dw_typed(&t.ctx, dw.cached_ptr(), dyp, xp, dims).expect("automatic dW");
         bits(&dw)
@@ -1849,7 +1849,9 @@ fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
         stream_k,
         "the permitting policy must launch the stream-K kernel"
     );
-    t.ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
+    t.ctx
+        .route_controls()
+        .set_half_policy(HalfTriadPolicy::TiledParity);
     assert_eq!(automatic(HalfTriadPolicy::TiledParity), tiled);
     // The stream-K fold differs in order, not in value: accumulation tolerance.
     let worst = tiled

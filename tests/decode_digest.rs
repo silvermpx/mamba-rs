@@ -188,7 +188,7 @@ fn decode_run_digest_mixed(dtype: WeightDtype) {
     let lane = match dtype {
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
-        WeightDtype::F32 => panic!("mixed decode helper rejects f32 storage"),
+        WeightDtype::F32 | WeightDtype::Tf32 => panic!("mixed decode helper rejects f32 storage"),
     };
     let cfg = config();
     let input_dim = 384usize;

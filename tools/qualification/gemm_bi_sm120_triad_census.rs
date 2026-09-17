@@ -49,7 +49,7 @@ fn quantize(dtype: WeightDtype, value: f32) -> f32 {
     match dtype {
         WeightDtype::Bf16 => half::bf16::from_f32(value).to_f32(),
         WeightDtype::F16 => half::f16::from_f32(value).to_f32(),
-        WeightDtype::F32 => value,
+        WeightDtype::F32 | WeightDtype::Tf32 => value,
     }
 }
 
@@ -537,7 +537,7 @@ impl CensusCase {
             (Sm120Op::Tn, _) => (8.0e-4, 8.0e-4),
             (_, WeightDtype::Bf16) => (3.0e-2, 3.0e-2),
             (_, WeightDtype::F16) => (5.0e-3, 5.0e-3),
-            (_, WeightDtype::F32) => unreachable!(),
+            (_, WeightDtype::F32 | WeightDtype::Tf32) => unreachable!(),
         };
         for row in 0..self.output_rows {
             for column in 0..self.output_columns {
@@ -1103,8 +1103,8 @@ fn sm120_context() -> Option<(GpuDevice, GpuCtx)> {
 
 fn enable_sm120_auto_policy(ctx: &GpuCtx) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_bi_tensor_cores(true);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_tensor_cores(true);
 }
 
 fn launch_auto_typed(
@@ -1376,11 +1376,13 @@ fn sm120_auto_typed_qualified_cells() {
     // The stream-K cells open under the half policy that permits their
     // fixed-order fold; each qualifies against its forced stream-K route and
     // repeats bit for bit, while the tiled table stays the default answer.
-    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
     for route in SM120_STREAMK_CELLS_CC120.iter().copied() {
         assert_auto_cell_repeats_bit_for_bit(&ctx, route);
     }
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::TiledParity);
     for streamk in SM120_STREAMK_CELLS_CC120.iter().copied() {
         let tiled = SM120_AUTO_CELLS_CC120
             .iter()
@@ -1483,7 +1485,7 @@ fn sm120_auto_typed_graph_cache() {
         "prepared SM120 Triad allocation epoch changed during graph capture; run eager warmup again"
     );
 
-    ctx.set_bi_tensor_cores(false);
+    ctx.route_controls().set_tensor_cores(false);
     let logical_len = case.initial.len();
     let fallback = GuardedOutput::new(&ctx, route.op, route.dtype, logical_len, 0);
     let fallback_trace = ctx
@@ -1878,7 +1880,7 @@ fn sm120_dtype_name(dtype: WeightDtype) -> &'static str {
     match dtype {
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     }
 }
 

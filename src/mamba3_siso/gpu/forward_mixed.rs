@@ -1077,7 +1077,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             let cast = match dtype {
                 WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
                 WeightDtype::F16 => &m3k.cast_f32_to_f16,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("m3_mixed forward: unexpected f32 compute dtype".into());
                 }
             };
@@ -1112,7 +1112,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             let cast = match dtype {
                 WeightDtype::Bf16 => &m3k.cast_bf16_to_f32,
                 WeightDtype::F16 => &m3k.cast_f16_to_f32,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("m3_mixed forward: unexpected f32 compute dtype".into());
                 }
             };

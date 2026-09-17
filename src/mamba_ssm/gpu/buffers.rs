@@ -790,7 +790,7 @@ impl DtypedBuf {
         assert_eq!(src.len(), self.n_elems, "DtypedBuf upload size mismatch");
         let ptr = self.inner.cached_ptr();
         match self.dtype {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 let bytes: &[u8] = bytemuck::cast_slice(src);
                 cu_memcpy_htod_raw(stream, ptr, bytes)
             }
@@ -817,7 +817,7 @@ impl DtypedBuf {
         assert_eq!(dst.len(), self.n_elems, "DtypedBuf download size mismatch");
         let ptr = self.inner.cached_ptr();
         match self.dtype {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
                 cu_memcpy_dtoh_raw(stream, ptr, bytes)
             }
@@ -951,7 +951,7 @@ impl WeightSliceDyn {
             return Ok(());
         }
         match self.dtype {
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
                 cu_memcpy_dtoh_raw(stream, self.ptr, bytes)
             }
@@ -987,7 +987,9 @@ impl WeightSliceDyn {
             return Ok(());
         }
         match self.dtype {
-            WeightDtype::F32 => self.upload_raw_bytes(stream, bytemuck::cast_slice(src)),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                self.upload_raw_bytes(stream, bytemuck::cast_slice(src))
+            }
             WeightDtype::Bf16 => {
                 let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
                 self.upload_raw_bytes(stream, bytemuck::cast_slice(&buf))

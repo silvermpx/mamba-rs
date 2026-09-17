@@ -15,14 +15,14 @@ fn assert_tied_half_inputs_preserve_f32_product_bit(dtype: WeightDtype, precisio
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     let input = 1.0f32 + 2.0f32.powi(-precision);
     let expected_bits = (input * input).to_bits();
     let half_rounded_product_bits = match dtype {
         WeightDtype::Bf16 => half::bf16::from_f32(input * input).to_f32().to_bits(),
         WeightDtype::F16 => half::f16::from_f32(input * input).to_f32().to_bits(),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     };
     assert_ne!(
         expected_bits, half_rounded_product_bits,
@@ -91,7 +91,7 @@ fn assert_irregular_tied_half_f32_output_is_exact_and_guarded(dtype: WeightDtype
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     let step = 2.0f32.powi(-precision);
     let temporal_host = (0..BATCH * IRREGULAR_D)
@@ -214,7 +214,7 @@ fn deterministic_tied_half_zero_reduction_uses_f32_epilogue_without_inputs() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let active_len = BATCH * VOCAB_PADDED;
     let initial = vec![GUARD; PREFIX + active_len + SUFFIX];
 
@@ -258,7 +258,7 @@ fn deterministic_tied_half_rejects_null_and_overflow_before_execution() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let temporal =
         DtypedBuf::zeros(&ctx.stream, BATCH * D_MODEL, WeightDtype::Bf16).expect("temporal owner");
     let embed = DtypedBuf::zeros(&ctx.stream, VOCAB_PADDED * D_MODEL, WeightDtype::Bf16)

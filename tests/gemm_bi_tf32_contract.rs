@@ -3079,7 +3079,7 @@ fn tf32_rna_finite_normal(bits: u32) -> u32 {
 }
 
 #[test]
-fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
+fn exact_f32_policy_is_the_default_and_tf32_storage_is_its_only_door() {
     let declaration = braced_scope_after(CONTEXT_SOURCE, "pub enum F32TriadPolicy");
     assert_contains_all(
         declaration,
@@ -3102,49 +3102,46 @@ fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
         "F32TriadPolicy must use a stable u8 representation"
     );
 
-    let parser = source_mask(braced_scope_after(CONTEXT_SOURCE, "pub fn parse_env_value"));
+    // The storage precision is the one public door to deterministic TF32:
+    // the numeric contract is derived from the dtype, never parsed from
+    // the environment.
+    let numeric = source_mask(braced_scope_after(
+        CONTEXT_SOURCE,
+        "pub(crate) fn f32_numeric(self) -> F32TriadPolicy",
+    ));
     assert_contains_all(
-        &parser,
+        &numeric,
         &[
-            "pub fn parse_env_value(value: &str) -> Result<Self, String>",
-            "ExactScalarFma",
-            "AllowDeterministicTf32",
+            "Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32",
+            "Self::F32 | Self::Bf16 | Self::F16 => F32TriadPolicy::ExactScalarFma",
         ],
-        "MAMBA_RS_BI_F32_POLICY parser",
+        "storage precision to f32 numeric contract",
     );
-    for forbidden in [
-        "to_ascii_lowercase",
-        "\"\" =>",
-        "\"1\" =>",
-        "\"on\" =>",
-        "\"true\" =>",
-        "\"yes\" =>",
+    // A withdrawn control is read through a string literal, so this scan
+    // runs on the raw source, not on the mask that blanks literals.
+    for withdrawn in [
+        "MAMBA_RS_BI_F32_POLICY",
+        "MAMBA_RS_BI_HALF_POLICY",
+        "MAMBA_RS_BI_GEMM_FAMILY",
+        "MAMBA_RS_BI_TENSOR_CORES",
+        "MAMBA_RS_BATCH_INVARIANT",
+        "MAMBA_RS_FAST_GEMM",
+        "MAMBA_RS_ARCH_RUNG",
+        "parse_env_value(value: &str) -> Result<Self, String>",
     ] {
         assert!(
-            !parser.contains(forbidden),
-            "F32 triad policy must reject bool-like value {forbidden}"
+            !CONTEXT_SOURCE.contains(withdrawn),
+            "the context must not read the withdrawn control {withdrawn}"
         );
     }
-    let result = braced_scope_after(CONTEXT_SOURCE, "fn f32_triad_policy_from_result");
-    assert_contains_all(
-        result,
-        &[
-            "Ok(value) => F32TriadPolicy::parse_env_value(&value)",
-            "VarError::NotPresent",
-            "ExactScalarFma",
-            "VarError::NotUnicode",
-        ],
-        "strict F32 triad environment result parser",
+    assert!(
+        CONTEXT_SOURCE.contains("mode: std::env::var(\"MAMBA_RS_GEMM_MODE\")"),
+        "one environment variable, resolved in one place is missing the mode read"
     );
-    // The environment is read once into GemmEnvValues and resolved in one
-    // place; the f32 policy value reaches the strict parser unchanged.
     assert_contains_all(
-        &source_mask(CONTEXT_SOURCE),
-        &[
-            "f32_policy: std::env::var(",
-            "let f32_policy = f32_triad_policy_from_result(values.f32_policy)?;",
-        ],
-        "exact environment delegation",
+        CONTEXT_SOURCE,
+        &["fn resolve_gemm_env(values: GemmEnvValues, role: GemmRole)"],
+        "one environment variable, resolved in one place",
     );
 }
 
@@ -3155,10 +3152,9 @@ fn deterministic_tf32_policy_is_separate_from_cublas_tf32_state() {
         &[
             "cublas_tf32:",
             "f32_triad_policy:",
-            "pub fn set_f32_triad_policy(&self, policy: F32TriadPolicy)",
-            "pub fn f32_triad_policy(&self) -> F32TriadPolicy",
-            "pub fn disable_tf32(&self)",
-            "pub fn tf32(&self) -> bool",
+            "pub(crate) fn set_f32_triad_policy(&self, policy: F32TriadPolicy)",
+            "pub(crate) fn f32_triad_policy(&self) -> F32TriadPolicy",
+            "pub(crate) fn tf32(&self) -> bool",
         ],
         "cuBLAS/triad TF32 state separation",
     );
@@ -3167,15 +3163,6 @@ fn deterministic_tf32_policy_is_separate_from_cublas_tf32_state() {
         "the internal legacy field must be named cublas_tf32"
     );
 
-    let disable_cublas = source_mask(braced_scope_after(
-        CONTEXT_SOURCE,
-        "pub fn disable_tf32(&self)",
-    ));
-    assert_contains_all(
-        &disable_cublas,
-        &["legacy_disable_tf32()", "set_gemm_mode"],
-        "legacy cuBLAS TF32 setter",
-    );
     let set_mode = source_mask(braced_scope_after(
         CONTEXT_SOURCE,
         "pub fn set_gemm_mode(&self, mode: GemmMode)",
@@ -3185,19 +3172,19 @@ fn deterministic_tf32_policy_is_separate_from_cublas_tf32_state() {
         &["change_math_mode", "mode.cublas_math()"],
         "GEMM mode owns the cuBLAS math mode",
     );
+    assert!(
+        !set_mode.contains("f32_triad_policy.set"),
+        "the mode must not mutate the deterministic triad policy"
+    );
     assert_contains_all(
         &source_mask(CONTEXT_SOURCE),
         &["cublasSetMathMode"],
         "cuBLAS math-mode backend",
     );
-    assert!(
-        !disable_cublas.contains("f32_triad_policy.set"),
-        "legacy cuBLAS state must not mutate deterministic triad policy"
-    );
 
     let set_policy = source_mask(braced_scope_after(
         CONTEXT_SOURCE,
-        "pub fn set_f32_triad_policy",
+        "pub(crate) fn set_f32_triad_policy",
     ));
     assert_contains_all(
         &set_policy,
@@ -3542,7 +3529,7 @@ fn graph_identity_rejects_policy_and_physical_route_drift_before_launch() {
         &["self.gemm_policy()", "GemmRouteIdentity"],
         "context graph route snapshot",
     );
-    let policy_snapshot = braced_scope_after(CONTEXT_SOURCE, "pub fn gemm_policy(&self)");
+    let policy_snapshot = braced_scope_after(CONTEXT_SOURCE, "pub(crate) fn gemm_policy(&self)");
     assert_contains_all(
         policy_snapshot,
         &["cublas_tf32", "f32_triad_policy", "bi_gemm_family"],

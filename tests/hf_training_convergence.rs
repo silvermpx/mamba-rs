@@ -112,7 +112,7 @@ struct DtypeConfig {
 
 fn cfg_for(dt: WeightDtype) -> DtypeConfig {
     match dt {
-        WeightDtype::F32 => DtypeConfig {
+        WeightDtype::F32 | WeightDtype::Tf32 => DtypeConfig {
             lr: 3e-5,
             grad_scale: 0.01,
             max_overflow_frac: 0.0, // scaler disabled, never overflow

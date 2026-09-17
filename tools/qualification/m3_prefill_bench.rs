@@ -175,10 +175,10 @@ fn m3_prefill_latency_at_serve_shape() {
     eprintln!(
         "prefill route: mode={:?} family={:?} route={:?} tensor_cores={} f32_policy={:?}",
         bb.ctx().gemm_mode(),
-        bb.ctx().bi_gemm_family(),
+        bb.ctx().route_controls().family(),
         bb.ctx().gemm_route(),
-        bb.ctx().bi_tensor_cores(),
-        bb.ctx().f32_triad_policy(),
+        bb.ctx().route_controls().tensor_cores(),
+        bb.ctx().route_controls().f32_policy(),
     );
     let stream = bb.stream().clone();
     let mut gpu_input = GpuBuffer::zeros(&stream, t * dm).unwrap();
@@ -274,10 +274,10 @@ fn m3_train_step_at_multichunk_shape() {
             cfg.scan_mode,
             cfg.train_use_parallel_scan(),
             tr.ctx().gemm_mode(),
-            tr.ctx().bi_gemm_family(),
+            tr.ctx().route_controls().family(),
             tr.ctx().gemm_route(),
-            tr.ctx().bi_tensor_cores(),
-            tr.ctx().f32_triad_policy(),
+            tr.ctx().route_controls().tensor_cores(),
+            tr.ctx().route_controls().f32_policy(),
             cfg.n_layers,
             tr.ctx().state_cap(),
         );
@@ -439,9 +439,9 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         let device = GpuDevice::new(0).expect("cuda device");
         let ctx = GpuCtx::new(&device).expect("ctx");
         ctx.set_gemm_mode(mode).unwrap();
-        ctx.set_bi_gemm_family(family);
+        ctx.route_controls().set_family(family);
         if tc {
-            ctx.set_bi_tensor_cores(true);
+            ctx.route_controls().set_tensor_cores(true);
         }
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");

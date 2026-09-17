@@ -18,14 +18,14 @@ pub fn bench_stamp(
     route: &str,
     depth: usize,
 ) -> String {
-    let (bi, tc, fast) = ctx.gemm_flags();
-    let tier = match (bi, tc) {
+    let controls = ctx.route_controls();
+    let tier = match (controls.batch_invariant(), controls.tensor_cores()) {
         (true, true) => "bi+tc",
         (true, false) => "bi",
-        (false, _) if ctx.tf32() => "cublas+tf32",
+        (false, _) if controls.tf32() => "cublas+tf32",
         (false, _) => "cublas",
     };
-    let fast = if fast { "+fast" } else { "" };
+    let fast = if controls.fast_gemm() { "+fast" } else { "" };
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {

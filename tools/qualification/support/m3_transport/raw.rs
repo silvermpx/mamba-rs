@@ -38,7 +38,9 @@ fn values(n: usize, mut seed: u32) -> Vec<f32> {
 
 fn encode(values: &[f32], dtype: WeightDtype) -> Vec<u8> {
     match dtype {
-        WeightDtype::F32 => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            values.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
         WeightDtype::Bf16 => values
             .iter()
             .flat_map(|&v| half::bf16::from_f32(v).to_bits().to_le_bytes())

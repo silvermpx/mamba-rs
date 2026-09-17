@@ -603,7 +603,9 @@ impl HalfPhysicalContext {
         match self.dtype {
             WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
             WeightDtype::F16 => Ok(PolicyDtype::F16),
-            WeightDtype::F32 => Err("half physical context does not accept f32".into()),
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                Err("half physical context does not accept f32".into())
+            }
         }
     }
 
@@ -678,7 +680,9 @@ fn bi_upcast_to_f32<O: PhysicalLaunchObserver>(
     let kernel = match src.dtype {
         WeightDtype::Bf16 => &ctx.kernels.cast_bf16_to_f32,
         WeightDtype::F16 => &ctx.kernels.cast_f16_to_f32,
-        WeightDtype::F32 => return Err("bi_upcast_to_f32: src is already f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            return Err("bi_upcast_to_f32: src is already f32".into());
+        }
     };
     let n_i = i32::try_from(n)
         .map_err(|_| format!("invalid GEMM dimensions: element count {n} exceeds i32::MAX"))?;
@@ -716,7 +720,9 @@ fn bi_downcast_from_f32<O: PhysicalLaunchObserver>(
     let kernel = match dst.dtype {
         WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
         WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-        WeightDtype::F32 => return Err("bi_downcast_from_f32: dst is already f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            return Err("bi_downcast_from_f32: dst is already f32".into());
+        }
     };
     let n_i = i32::try_from(n)
         .map_err(|_| format!("invalid GEMM dimensions: element count {n} exceeds i32::MAX"))?;
@@ -1865,7 +1871,9 @@ fn prepare_conversion_graph_launch(
 fn request_half_dtype(physical: HalfPhysicalContext) -> Result<WeightDtype, String> {
     match physical.dtype {
         WeightDtype::Bf16 | WeightDtype::F16 => Ok(physical.dtype),
-        WeightDtype::F32 => Err("physical half graph fallback does not accept f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("physical half graph fallback does not accept f32".into())
+        }
     }
 }
 
@@ -2390,7 +2398,9 @@ pub fn gpu_gemm_forward_dispatch(
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
     match w_dtype {
-        WeightDtype::F32 => gpu_gemm_bi_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            gpu_gemm_bi_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims)
+        }
         WeightDtype::F16 | WeightDtype::Bf16 => {
             // cuBLAS requires A and B to have matching dtype. Downcast x f32 -> w_dtype
             // into the ctx's reusable half-staging buffer.
@@ -3344,7 +3354,7 @@ mod physical_graph_tests {
             let expected_logical_dtype = match dtype {
                 WeightDtype::Bf16 => PolicyDtype::Bf16,
                 WeightDtype::F16 => PolicyDtype::F16,
-                WeightDtype::F32 => unreachable!(),
+                WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
             };
             assert!(
                 nodes
@@ -4269,7 +4279,7 @@ pub fn gpu_gemm_typed_forward_raw(
         let n_i = n_out as i32;
         let c_ptr = c.ptr;
         let bias_kernel = match c.dtype {
-            WeightDtype::F32 => &ctx.kernels.bias_broadcast,
+            WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.bias_broadcast,
             d => ctx.kernels.bias_broadcast_typed.get(d),
         };
         let mut builder = ctx.stream.launch_builder(bias_kernel);

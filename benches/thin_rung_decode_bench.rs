@@ -37,7 +37,7 @@ fn thin16_vs_matvec_decode() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     // Decode shapes: (m, k, n) across model widths.
     let shapes: &[(usize, usize, usize)] = &[
@@ -148,7 +148,7 @@ fn tile128_prefill_bench() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     let shapes: &[(usize, usize, usize)] = &[
         (4621, 384, 1928),

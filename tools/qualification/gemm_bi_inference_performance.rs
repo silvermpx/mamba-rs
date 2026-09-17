@@ -1692,7 +1692,7 @@ fn f32_s2_production_matches_legacy_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for shape in [
         InferenceShape { m: 1, k: 0, n: 1 },
         InferenceShape {
@@ -1785,8 +1785,9 @@ fn fixed_tf32_forward_is_repeatable_and_tile_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let tiles = [
         InferenceTile::Tf32M128S2,
         InferenceTile::Tf32M128S3,
@@ -1874,8 +1875,9 @@ fn fixed_sm120_tf32_is_portable_bit_exact_and_selected() {
         return;
     }
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let specialized = [
         InferenceTile::Tf32Sm120M128S2,
         InferenceTile::Tf32Sm120M128S3,
@@ -1975,8 +1977,9 @@ fn fixed_sm120_tf32_producer_warp_candidate_screen() {
         "producer-warp candidate screen is qualified on SM120",
     );
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let incumbent = InferenceTile::Tf32Sm120M64S2;
     let candidate = InferenceTile::Tf32Sm120M64S2ProducerWarp;
@@ -2146,8 +2149,9 @@ fn fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails() {
         return;
     }
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let shape = InferenceShape {
         m: 65,
         k: 36,
@@ -2227,8 +2231,9 @@ fn fixed_tf32_forward_is_batch_prefix_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let (large_m, k, n) = (129usize, 96usize, 196usize);
     let large_a_host = synth(large_m * k, 0xba7c4);
     let b_host = synth(k * n, 0xb32);
@@ -2286,8 +2291,9 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
     assert_eq!(compiler.nvrtc_version, (13, 2));
     assert!(compiler.nvrtc_library_known);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let shape = InferenceShape {
         m: 4621,
@@ -2447,8 +2453,9 @@ fn fixed_tf32_hot_shapes_smoke() {
         ]);
     }
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     for shape in shapes {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32)
             .expect("A allocation");
@@ -2620,8 +2627,9 @@ fn fixed_vs_triad_pairwise_census() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let sm120 = matches!(device.compute_capability, (12, 0) | (12, 1));
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let iterations = 200;
     // The half routes stage an upcast scratch that cannot grow once a
     // qualification has captured a graph: size it for every request first.
@@ -2959,7 +2967,7 @@ fn half_to_f32_portable_ladder_matches_legacy_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
             InferenceShape { m: 9, k: 33, n: 17 },
@@ -3065,7 +3073,7 @@ fn half_to_f32_sm120_tma_ladder_matches_portable_bits() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for (tile, shape) in [
         (
             InferenceSm120HalfTile::M64N64Bk64S2,
@@ -3187,7 +3195,7 @@ fn half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails() {
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
     let shape = InferenceShape {
         m: 128,
@@ -3413,7 +3421,7 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -3748,7 +3756,7 @@ fn half_to_f32_portable_ladder_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -3786,7 +3794,7 @@ fn half_to_f32_portable_selector_grid_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [
             1usize, 16, 64, 128, 256, 512, 768, 1024, 1536, 2048, 3072, 4621,
@@ -3829,7 +3837,7 @@ fn half_to_f32_portable_k_axis_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [2048usize, 4621] {
             for n in [384usize, 768, 1928, 2304] {
@@ -3932,7 +3940,7 @@ fn fixed_portable_half_epilogues_are_tile_and_alignment_invariant() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
@@ -4023,7 +4031,7 @@ fn fixed_sm120_half_tma_matches_portable_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
             InferenceShape {
@@ -4121,7 +4129,9 @@ fn fixed_sm120_half_symbol(tile: InferenceSm120HalfTile, dtype: WeightDtype) -> 
         (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
             "nn_sm120_tma_128x128_bk32_s3_f16"
         }
-        (_, WeightDtype::F32) => panic!("SM120 half symbol requested for F32"),
+        (_, WeightDtype::F32 | WeightDtype::Tf32) => {
+            panic!("SM120 half symbol requested for F32")
+        }
     }
 }
 
@@ -4310,7 +4320,7 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     for (label, dtype, shape, has_bias, expected) in [
         (
@@ -4603,7 +4613,7 @@ fn fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact() {
         ],
     );
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     for (tile, shape, geometry) in [
         (
@@ -4803,7 +4813,7 @@ fn fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
     let shape = InferenceShape {
         m: 128,
@@ -4876,7 +4886,7 @@ fn fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let shape = InferenceShape {
         m: 128,
         k: 96,
@@ -4949,7 +4959,7 @@ fn fixed_sm120_half_is_batch_prefix_invariant_across_selectors() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let (small_m, large_m, k, n) = (64usize, 512usize, 384usize, 1536usize);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         let large_a_host = synth(large_m * k, 0xba7c4);
@@ -5008,7 +5018,7 @@ fn fixed_half_narrow_n_uses_portable_numeric_family() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let (small_m, large_m, k, n) = (16usize, 8192usize, 768usize, 24usize);
 
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -5069,7 +5079,7 @@ fn fixed_half_narrow_n_performance_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in [
             InferenceShape {
@@ -5186,7 +5196,7 @@ fn fixed_sm120_half_hot_census() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -5249,7 +5259,7 @@ fn fixed_sm120_half_selector_census() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let dtype = WeightDtype::Bf16;
     for m in [16usize, 64, 128] {
         for k in [64usize, 384, 768, 1928] {
@@ -5441,7 +5451,7 @@ fn fixed_sm120_half_selector_paired_gaps() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -5603,7 +5613,7 @@ fn fixed_sm120_half_remaining_gap_all_tile_screen() {
     assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let candidate_filter = std::env::var("MAMBA_FIXED_HALF_TILE_CANDIDATE").ok();
     if let Some(filter) = candidate_filter.as_deref() {
         assert!(
@@ -5868,7 +5878,7 @@ fn fixed_sm120_half_selector_paired_boundaries() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             for challenger_first in [true, false] {
@@ -5992,7 +6002,7 @@ fn fixed_sm120_half_selector_paired_shallow_boundaries() {
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (shape, incumbent, challenger) in cells {
             for challenger_first in [true, false] {
@@ -6243,7 +6253,7 @@ fn fixed_sm120_half_legacy_overlay_requalification() {
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(compiler.nvrtc_version, (13, 2));
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let rust_source_sha256 = sha256_file(&manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"));
@@ -6422,7 +6432,7 @@ fn half_to_f32_hot_shapes_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for shape in shapes {
             let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -6539,7 +6549,7 @@ fn f32_s2_hot_shapes_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for shape in shapes {
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32)
             .expect("A allocation");
@@ -6610,7 +6620,7 @@ fn forced_fixed_portable_tiles_execute() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let shape = InferenceShape {
         m: 128,
         k: 128,
@@ -6695,7 +6705,7 @@ fn fixed_hot_shapes_smoke() {
 
             ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-            ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+            ctx.route_controls().set_family(BiGemmFamily::Inference);
             let mut selected = InferenceTile::Legacy;
             let fixed_us = average_us(&ctx, || {
                 selected = inference_forward(
@@ -6772,7 +6782,7 @@ fn fixed_forced_hot_shapes_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for shape in shapes {
         let dtype = WeightDtype::Bf16;
         let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A allocation");
@@ -6803,7 +6813,7 @@ fn fixed_w64_deep_k_grid_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for m in [1024usize, 2048, 4621] {
             for (k, n) in [(1024usize, 384usize), (1536, 768), (1928, 384), (2304, 768)] {
@@ -7333,7 +7343,7 @@ fn fixed_thin_selector_sm89_paired_boundary() {
     assert_eq!(device.compute_capability, (8, 9), "SM89 required");
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let shapes = [
         InferenceShape {
             m: 96,
@@ -7549,7 +7559,7 @@ fn fixed_tc16_occupancy_cliff_paired_census() {
     );
     assert_eq!(device.multiprocessor_count(), 142);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let shapes = [
         InferenceShape {
             m: 64,
@@ -8465,7 +8475,10 @@ fn fixed_sm120_tf32_bd_paired_forced_routes() {
     }
     let ctx = GpuCtx::new(&device).expect("GPU context");
     configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::AllowDeterministicTf32);
-    assert!(ctx.tf32(), "fast cuBLAS TF32 must remain enabled");
+    assert!(
+        ctx.route_controls().tf32(),
+        "fast cuBLAS TF32 must remain enabled"
+    );
 
     for comparison in FIXED_SM120_TF32_BD_PAIRED_COMPARISONS {
         let emitter = FixedSm120Tf32BdComparisonEmitter::new(&sink);
@@ -10327,16 +10340,16 @@ fn fixed_auto_vendor_mixed_expectation_tracks_the_qualified_compiler_cell() {
 
 fn configure_fixed_auto_vendor_custom(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(policy);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls().set_f32_policy(policy);
 }
 
 fn configure_fixed_auto_vendor_vendor(ctx: &GpuCtx, policy: F32TriadPolicy) {
     ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(policy);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls().set_f32_policy(policy);
 }
 
 fn launch_fixed_auto_vendor_custom(
@@ -10653,7 +10666,10 @@ fn fixed_production_auto_vs_fast_cublas_hot_and_selector_census() {
         return;
     }
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    assert!(ctx.tf32(), "fast cuBLAS TF32 must remain enabled");
+    assert!(
+        ctx.route_controls().tf32(),
+        "fast cuBLAS TF32 must remain enabled"
+    );
     println!();
     let rows = [
         FixedAutoVendorRow {
@@ -10761,7 +10777,7 @@ fn fixed_ada_vendor_launch(
         // A half output rounds the broadcast bias to its storage dtype before
         // GEMM; the independent reference below keeps its output in F32.
         let kernel = match operands.c.dtype {
-            WeightDtype::F32 => &ctx.kernels.bias_broadcast,
+            WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.bias_broadcast,
             dtype => ctx.kernels.bias_broadcast_typed.get(dtype),
         };
         let rows = shape.m as c_int;
@@ -10873,8 +10889,9 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
 
     let cell = std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_CELL").unwrap_or_else(|_| "b".into());
     let dims = match cell.as_str() {
@@ -12082,7 +12099,7 @@ fn fixed_auto_bundle_physical_descriptor(
         ));
     };
     let expected_dtype = match descriptor.storage[0] {
-        WeightDtype::F32 => PolicyDtype::F32,
+        WeightDtype::F32 | WeightDtype::Tf32 => PolicyDtype::F32,
         WeightDtype::F16 => PolicyDtype::F16,
         WeightDtype::Bf16 => PolicyDtype::Bf16,
     };
@@ -13126,7 +13143,9 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
     let suffix = match dtype {
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
-        WeightDtype::F32 => return Err("Ada half pipeline cannot have F32 storage".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            return Err("Ada half pipeline cannot have F32 storage".into());
+        }
     };
     let (family, expected_shared) = match tile {
         InferenceTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
@@ -15533,7 +15552,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     "captured AUTO graph omitted selected symbol {expected_auto_symbol}"
                 );
                 let bias_symbol = has_bias.then_some(match row_spec.output_dtype {
-                    WeightDtype::F32 => "bias_broadcast",
+                    WeightDtype::F32 | WeightDtype::Tf32 => "bias_broadcast",
                     WeightDtype::Bf16 => "bias_broadcast_bf16",
                     WeightDtype::F16 => "bias_broadcast_f16",
                 });
@@ -16211,7 +16230,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             None,
                         );
                         let bias_symbol = has_bias.then_some(match output_dtype {
-                            WeightDtype::F32 => "bias_broadcast",
+                            WeightDtype::F32 | WeightDtype::Tf32 => "bias_broadcast",
                             WeightDtype::Bf16 => "bias_broadcast_bf16",
                             WeightDtype::F16 => "bias_broadcast_f16",
                         });
@@ -17066,8 +17085,9 @@ fn fixed_f32_n128_matches_legacy_bits() {
     let measured_stack =
         measured_device && compiler.nvrtc_version == (13, 2) && compiler.nvrtc_library_known;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
 
     let shapes = [
         InferenceShape { m: 1, k: 0, n: 1 },
@@ -17489,8 +17509,9 @@ fn fixed_f32_n128_baseline_window_us(
     iterations: usize,
 ) -> f64 {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     fixed_tile_window_us(ctx, operands, shape, InferenceTile::Legacy, iterations)
 }
 
@@ -17501,8 +17522,9 @@ fn fixed_f32_n128_candidate_window_us(
     iterations: usize,
 ) -> f64 {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     fixed_tile_window_us(ctx, operands, shape, InferenceTile::F32N128S2, iterations)
 }
 
@@ -17556,7 +17578,10 @@ fn fixed_f32_n128_paired_a_e() {
         "paired gate requires 170 SMs"
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    assert!(ctx.tf32(), "fast cuBLAS diagnostic requires TF32 enabled");
+    assert!(
+        ctx.route_controls().tf32(),
+        "fast cuBLAS diagnostic requires TF32 enabled"
+    );
     assert_fixed_f32_n128_resources(&ctx);
     let cells = [
         (

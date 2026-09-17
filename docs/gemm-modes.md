@@ -33,16 +33,25 @@ Speed depends on the GPU, the precision and the shape. The measured
 comparison of the deterministic kernels against both cuBLAS modes, kernel by
 kernel, is in [GEMM benchmarks](determinism-benchmarks.md).
 
-## Setting the mode
+## Setting the mode and the storage precision
 
-The storage precision and the mode are separate choices. `WeightDtype` picks
-how weights are stored (f32, bf16, f16); `GemmMode` picks who multiplies.
-Every route accumulates in f32.
+A GPU context has two settings and nothing else. `WeightDtype` picks how
+weights are stored and, with it, the precision of every product;
+`GemmMode` picks who multiplies. Every route accumulates in f32. Inside the
+deterministic mode the kernels are chosen from the two and from the
+context's role (a model context or a trainer); there is no further knob.
+
+| `WeightDtype` | storage | products in the deterministic mode |
+|---|---|---|
+| `F32` (default) | f32 | exact: one fused multiply-add per step in ascending K order, f32 throughout |
+| `Tf32` | f32 | deterministic TF32 where a measured kernel exists for the shape and the board, the exact f32 kernel elsewhere. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order; it is not the vendor's Fast TF32, and its bits are reproducible like the rest of the mode. Under `CublasFast` the vendor's TF32 already applies to every f32 product; under `CublasPedantic` the products are pedantic f32 |
+| `Bf16` | bf16 | tensor-core kernels with f32 accumulation |
+| `F16` | f16 | tensor-core kernels with f32 accumulation; training runs the dynamic loss scaler |
 
 Every GPU entry point comes in two forms. The plain constructor reads the
 environment variable `MAMBA_RS_GEMM_MODE` and defaults to `Deterministic`.
 The `*_with_mode` twin takes the mode as its last argument and ignores the
-GEMM environment variables entirely.
+environment entirely. The storage precision is always an argument.
 
 | plain constructor (reads the environment) | explicit twin |
 |---|---|
@@ -79,45 +88,23 @@ restores the previous cuBLAS setting if the change fails half way. Change
 the mode before capturing a graph; a graph captured in one mode refuses to
 replay in another (see [Graphs](#graphs)).
 
-### Environment variables
+### The environment variable
 
-The plain constructors read these variables once, at construction. The
-`*_with_mode` constructors ignore all of them except `MAMBA_RS_ARCH_RUNG`.
+The plain constructors read one variable once, at construction; the
+`*_with_mode` constructors ignore it.
 
 | variable | values | default |
 |---|---|---|
 | `MAMBA_RS_GEMM_MODE` | `deterministic`, `cublas-fast`, `cublas-pedantic` (case-sensitive) | `deterministic` |
-| `MAMBA_RS_BI_GEMM_FAMILY` | `triad`, `inference` | the family of the context's role (see [Two kernel families](#two-kernel-families)); an empty value means `triad` |
-| `MAMBA_RS_BI_TENSOR_CORES` | `1`, `true`, `yes`, `on` or `0`, `false`, `no`, `off` | on; an empty value means off |
-| `MAMBA_RS_BI_F32_POLICY` | `exact`, `tf32` | `exact` |
-| `MAMBA_RS_BI_HALF_POLICY` | `tiled`, `streamk` | `streamk` with tensor cores on, `tiled` with them off |
-| `MAMBA_RS_ARCH_RUNG` | `off` | on |
 
-The four `MAMBA_RS_BI_*` variables describe settings inside the
-deterministic mode. Setting any of them together with a cuBLAS mode is an
-error at construction, and so is `streamk` with tensor cores off. An empty
-value is not the same as an unset variable: an empty f32 or half policy is
-rejected, an empty tensor-core flag means off, and an empty family means
-`triad`.
-
-The older variables `MAMBA_RS_BATCH_INVARIANT` and `MAMBA_RS_FAST_GEMM`
-are still understood. When both are absent the mode is `Deterministic`.
-`MAMBA_RS_BATCH_INVARIANT=1` selects `Deterministic`; `MAMBA_RS_FAST_GEMM=1`
-selects `CublasFast`; an explicit `0` on either one, with no positive
-selector, selects `CublasPedantic`. Setting both to `1` is an error, and
-setting either of them together with `MAMBA_RS_GEMM_MODE` is an error. A
-script that set `MAMBA_RS_BATCH_INVARIANT=0` under 0.6.9 therefore keeps the
-0.6.9 numbers, while a script that set nothing moves to the deterministic
-kernels.
-
-### Deprecated setters
-
-`GpuCtx::set_batch_invariant`, `set_fast_gemm` and `disable_tf32` remain as
-adapters onto `set_gemm_mode` and are marked deprecated. They map onto the
-three modes the same way the older environment variables do, and because
-their signatures cannot return an error they panic when the underlying mode
-change is refused. New code should call `set_gemm_mode` and handle the
-result.
+Nothing else in the environment changes a GEMM route. The variables that
+tuned the deterministic mode in 0.7.0 to 0.7.2 (`MAMBA_RS_BI_GEMM_FAMILY`,
+`MAMBA_RS_BI_TENSOR_CORES`, `MAMBA_RS_BI_F32_POLICY`,
+`MAMBA_RS_BI_HALF_POLICY`, `MAMBA_RS_ARCH_RUNG`) and the pre-0.7 selectors
+(`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_FAST_GEMM`) are no longer read; a
+program that set `MAMBA_RS_BI_F32_POLICY=tf32` stores its weights as
+`WeightDtype::Tf32` instead, and the 0.6.9 numbers are
+`MAMBA_RS_GEMM_MODE=cublas-pedantic`.
 
 ## Two kernel families
 
@@ -130,19 +117,26 @@ them, chosen by its role:
 | `Triad` | `kernels/gemm_bi_triad/` | trainers (`MambaTrainer`, `Mamba3Trainer`) and plain `GpuCtx` | forward, weight gradient and input gradient (the NN, TN and NT products) | bit-identical across every batch size that lands in the same dispatch bucket; crossing a bucket boundary changes the association deterministically |
 
 The weight-gradient product always runs on the Triad kernels, whatever the
-family, because the Inference family has no transposed products.
+family, because the Inference family has no transposed products. The
+family is part of the recorded numeric route, so a graph captured with one
+family refuses to replay with the other.
 
-`ctx.set_bi_gemm_family` and `MAMBA_RS_BI_GEMM_FAMILY` override the role's
-default. The family is part of the recorded numeric route, so a graph
-captured with one family refuses to replay with the other.
+### What the deterministic mode chooses by itself
 
-### Settings inside the deterministic mode
-
-| setting | values | meaning |
-|---|---|---|
-| tensor cores (`set_bi_tensor_cores`, `MAMBA_RS_BI_TENSOR_CORES`) | on (default), off | permission to run bf16 and f16 products on the tensor-core kernels. Off keeps every product on the scalar kernels, which are slower. The tensor-core kernels are their own bit family: repeated launches of one kernel are bit-identical, but they do not reproduce the scalar kernels' bits. |
-| f32 policy (`set_f32_triad_policy`, `MAMBA_RS_BI_F32_POLICY`) | `exact` (default), `tf32` | `exact` multiplies f32 inputs with one fused multiply-add per step in ascending K order. `tf32` permits the deterministic TF32 kernels on the shapes and boards where they were measured, and stays exact everywhere else. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order; it is not the vendor's Fast TF32. |
-| half policy (`set_half_triad_policy`, `MAMBA_RS_BI_HALF_POLICY`) | `streamk` (default with tensor cores), `tiled` | `streamk` takes the stream-K kernel for a weight gradient whenever the reduction is deep enough for its persistent grid to pay (32 or more 64-row slabs per multiprocessor); it folds per-block partial sums in a fixed order and is a separate bit family. `tiled` reproduces the portable tensor-core kernels bit for bit. `streamk` requires tensor cores. |
+- bf16 and f16 products run on the tensor-core kernels wherever a shape
+  and board gate admits one; the scalar kernels serve the rest. The
+  tensor-core kernels are their own bit family: repeated launches of one
+  kernel are bit-identical, but they do not reproduce the scalar kernels'
+  bits.
+- A half-precision weight gradient takes the stream-K kernel whenever the
+  reduction is deep enough for its persistent grid to pay (32 or more
+  64-row slabs per multiprocessor); it folds per-block partial sums in a
+  fixed order and is a separate bit family from the tiled kernels.
+- f32 products are exact unless the weights are stored as `Tf32`, which
+  permits the deterministic TF32 kernels on the shapes and boards where
+  they were measured and stays exact everywhere else.
+- The Hopper and Blackwell native kernels run behind a first-use
+  self-check (see [Architecture coverage](#architecture-coverage)).
 
 ## What is guaranteed
 
@@ -168,15 +162,16 @@ after this one lists what is not claimed.
   point in the crate returns an error instead of running; a model context
   never reaches one.
 - **Route recording.** A captured graph stores the complete numeric route
-  (mode, family, policies, the kernels selected, compiler and device
-  identity) and every replay checks it.
+  (mode, storage precision and role, the kernels selected, compiler and
+  device identity) and every replay checks it.
 
 ## What is not guaranteed
 
-- Bits are not equal across routes: scalar against tensor-core, exact
-  against TF32, tiled against stream-K, Inference against Triad, or any of
-  them against cuBLAS. Across routes only tolerance parity holds, and the
-  parity tests state their tolerances.
+- Bits are not equal across routes: `F32` against `Tf32`, Inference
+  against Triad, either against cuBLAS, and, inside one precision, the
+  scalar and tensor-core kernels or the tiled and stream-K weight-gradient
+  kernels, which the mode chooses by shape and board. Across routes only
+  tolerance parity holds, and the parity tests state their tolerances.
 - Bits are not equal across GPU architectures, drivers or CUDA toolkits.
   A frozen route is identified by its board, toolkit and compiled artifact.
 - Whole-model eager and graph outputs are bit-equal only where the tests
@@ -186,15 +181,15 @@ after this one lists what is not claimed.
 ## Graphs
 
 A graph captured through `capture_graph` on a model, LM or trainer records
-the numeric route of every GEMM in it. Changing the mode, the family or a
-policy after the capture prints a warning, and the next replay fails with
+the numeric route of every GEMM in it. Changing the mode after the capture
+prints a warning, and the next replay fails with
 `GEMM route changed since capture; re-capture before replay`. Changing the
 mode during a capture is refused outright.
 
 The split training step (`trainer.forward()` followed by
 `trainer.backward_step()`) runs eagerly and pins the route between the two
-calls: a mode or policy change in between is an error, and the pending
-forward must be re-run.
+calls: a mode change in between is an error, and the pending forward must
+be re-run.
 
 On an RTX 5090 (compute capability 12.0) the qualified kernels use tensor
 maps that must be built outside a capture, so the first step of a model
@@ -211,7 +206,7 @@ timed cell by cell and the winners were frozen with the board, the toolkit
 and the compiled artifact; the driver build is not part of that identity.
 "Portable" means the generic kernels serve and no timing claim is made.
 
-| GPU | bf16 and f16 | exact f32 | deterministic TF32 |
+| GPU | bf16 and f16 | exact f32 (`F32`) | deterministic TF32 (`Tf32`) |
 |---|---|---|---|
 | RTX 6000 Ada (SM89) | measured on CUDA 13.2 for the large shapes; portable kernels for the small ones | measured on CUDA 13.2; scalar kernels elsewhere | measured joint kernels on CUDA 13.2; portable kernels elsewhere |
 | RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension | scalar kernels plus qualified TMA-fed FMA kernels | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 |
@@ -222,8 +217,8 @@ and the compiled artifact; the driver build is not part of that identity.
 
 The Hopper and Blackwell native kernels are guarded by a numeric self-check
 against the portable kernels at first use; if it fails, the portable
-kernels serve for the rest of the process. `MAMBA_RS_ARCH_RUNG=off` skips
-them. They are not measured winners on any board.
+kernels serve for the rest of the process. They are not measured winners
+on any board.
 
 Toolkits outside CUDA 12.8, 13.0 and 13.2 are not rejected. A frozen kernel
 whose recorded toolkit does not match the running one is simply not
@@ -238,9 +233,6 @@ instead:
 
 ```text
 MAMBA_RS_GEMM_MODE="fast" is not a recognized GEMM mode (use deterministic, cublas-fast, or cublas-pedantic)
-MAMBA_RS_BI_GEMM_FAMILY="fixed" ...; only inference or triad are accepted
-deterministic GEMM controls MAMBA_RS_BI_TENSOR_CORES cannot be set while the resolved GEMM mode is cublas-fast; remove them or select deterministic
-MAMBA_RS_BI_HALF_POLICY=streamk requires MAMBA_RS_BI_TENSOR_CORES=1; stream-K routes are in the deterministic tensor-core tier
 cannot change GEMM mode while CUDA stream capture state is ...
 M1 f32 inference graph replay: GEMM route changed since capture; re-capture before replay
 gpu_gemm_bi_forward_grad: deterministic GEMM mode reached a cuBLAS dispatch boundary

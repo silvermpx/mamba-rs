@@ -100,7 +100,7 @@ fn select_inference_bundle_route(
     let mixed_available = match operands.x.dtype {
         WeightDtype::Bf16 => stack.half_bf16_available,
         WeightDtype::F16 => stack.half_f16_available,
-        WeightDtype::F32 => false,
+        WeightDtype::F32 | WeightDtype::Tf32 => false,
     };
     if mixed_inputs
         && mixed_available

@@ -2039,10 +2039,11 @@ mod cuda_qualification {
         quiet.require_pre_context("live-copyplan-auto-fast/pre")?;
         let mut runtime = new_ada_runtime(false)?;
         let ctx = GpuCtx::new(&runtime._device)?;
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        ctx.route_controls().set_tensor_cores(false);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::ExactScalarFma);
         runtime.stream = ctx.stream.clone();
         runtime.live_copyplan = Some(
             ctx.kernels

@@ -751,7 +751,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     //          master grad, accumulate=1).
     // Dispatch: bf16/f16 → dual-dtype f32in kernel; f32 → pure-f32 rmsnorm_bwd.
     let rmsnorm_bwd = match dtype {
-        WeightDtype::F32 => &k.rmsnorm_bwd,
+        WeightDtype::F32 | WeightDtype::Tf32 => &k.rmsnorm_bwd,
         WeightDtype::Bf16 | WeightDtype::F16 => k.rmsnorm_bwd_f32in_typed.get(dtype),
     };
     {
@@ -928,7 +928,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
             let cast = match dtype {
                 WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                 WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("mixed backward: unexpected f32 compute dtype".into());
                 }
             };

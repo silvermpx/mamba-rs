@@ -32,7 +32,7 @@ fn quantize(v: &[f32], dt: WeightDtype) -> Vec<f32> {
     match dt {
         WeightDtype::Bf16 => v.iter().map(|&x| bf16::from_f32(x).to_f32()).collect(),
         WeightDtype::F16 => v.iter().map(|&x| f16::from_f32(x).to_f32()).collect(),
-        WeightDtype::F32 => v.to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => v.to_vec(),
     }
 }
 struct Ctx {
@@ -46,7 +46,7 @@ impl Ctx {
         // MAMBA_RS_BI_TENSOR_CORES exported used to silently reroute this
         // suite through the TC kernels, testing a different contract.
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_tensor_cores(false);
+        ctx.route_controls().set_tensor_cores(false);
         Self { ctx }
     }
 

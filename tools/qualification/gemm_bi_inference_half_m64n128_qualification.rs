@@ -185,7 +185,7 @@ fn dtype_name(dtype: WeightDtype) -> &'static str {
     match dtype {
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
-        WeightDtype::F32 => "f32",
+        WeightDtype::F32 | WeightDtype::Tf32 => "f32",
     }
 }
 
@@ -685,8 +685,8 @@ fn synth_values(len: usize, seed: u64) -> Vec<f32> {
 }
 
 fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
     match arm {
         Arm::Candidate | Arm::ProductionAuto => {
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -976,7 +976,9 @@ fn half_symbol(tile: InferenceSm120HalfTile, dtype: WeightDtype) -> &'static str
         (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
             "nn_sm120_tma_128x128_bk32_s3_f16"
         }
-        (_, WeightDtype::F32) => panic!("SM120 half qualification cannot use F32"),
+        (_, WeightDtype::F32 | WeightDtype::Tf32) => {
+            panic!("SM120 half qualification cannot use F32")
+        }
     }
 }
 

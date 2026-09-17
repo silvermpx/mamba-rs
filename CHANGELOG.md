@@ -2,8 +2,56 @@
 
 ## Unreleased
 
-Names only. No kernel, route or numeric change: every bit-ledger key is
-the one 0.7.1 and 0.7.2 printed.
+Two settings, and names. No kernel change: every bit-ledger key is the one
+0.7.1 and 0.7.2 printed, and a program that set none of the withdrawn
+controls runs the same route it ran before.
+
+### The GEMM contract is two settings
+
+A GPU context is now described by `WeightDtype` and `GemmMode` and by
+nothing else. `WeightDtype` gains `Tf32`: f32 storage whose products run
+on the deterministic TF32 kernels where a measured one exists and on the
+exact f32 kernel elsewhere, the same route 0.7.0 spelled as
+`set_f32_triad_policy(AllowDeterministicTf32)` or
+`MAMBA_RS_BI_F32_POLICY=tf32`; the `--dtype tf32` of the `generate`
+binary selects it too. Everything that tuned the deterministic mode from
+outside is withdrawn: `set_batch_invariant`, `set_fast_gemm` and
+`disable_tf32` (deprecated since 0.7.0), `set_bi_gemm_family`,
+`set_bi_tensor_cores`, `set_f32_triad_policy`, `set_half_triad_policy`,
+their getters and `gemm_flags`, the public use of `BiGemmFamily`,
+`F32TriadPolicy` and `HalfTriadPolicy`, and the variables
+`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_FAST_GEMM`, `MAMBA_RS_BI_GEMM_FAMILY`,
+`MAMBA_RS_BI_TENSOR_CORES`, `MAMBA_RS_BI_F32_POLICY`,
+`MAMBA_RS_BI_HALF_POLICY` and `MAMBA_RS_ARCH_RUNG`. `MAMBA_RS_GEMM_MODE`
+is the one variable left, and the withdrawn ones are no longer read at
+all. Every one of them named a way to make the kernels slower or to
+reproduce an older bit family, and none was a choice a user of the crate
+should have to make: the family follows the context's role (Inference
+for a model, Triad for a trainer or a plain context), tensor cores serve
+every half-precision product a shape and board gate admits, the stream-K
+weight gradient serves every deep reduction, and the architecture rungs
+stay behind their first-use self-check. The qualification instruments
+and the tests that pin one tier against another reach the derived
+controls through `GpuCtx::route_controls()`, which is hidden from the
+documentation and is not part of the API. One route moves for one kind
+of program: a context built from the environment in a cuBLAS mode and
+switched to `Deterministic` afterwards used to run its half-precision
+weight gradients on the tiled kernels; it now runs them on the stream-K
+kernels like every other deterministic context.
+
+| you had | you do now |
+|---|---|
+| `WeightDtype::F32` + `set_f32_triad_policy(AllowDeterministicTf32)` or `MAMBA_RS_BI_F32_POLICY=tf32` | `WeightDtype::Tf32` |
+| `MAMBA_RS_BI_F32_POLICY=exact` (or unset) | nothing; `WeightDtype::F32` is exact |
+| `set_batch_invariant(true)` / `MAMBA_RS_BATCH_INVARIANT=1` | nothing; it is the default |
+| `set_batch_invariant(false)` / `MAMBA_RS_BATCH_INVARIANT=0` | `GemmMode::CublasPedantic` / `MAMBA_RS_GEMM_MODE=cublas-pedantic` |
+| `set_fast_gemm(true)` / `MAMBA_RS_FAST_GEMM=1` | `GemmMode::CublasFast` / `MAMBA_RS_GEMM_MODE=cublas-fast` |
+| `disable_tf32()` | `set_gemm_mode(GemmMode::CublasPedantic)` |
+| `set_bi_gemm_family(...)` / `MAMBA_RS_BI_GEMM_FAMILY` | nothing; the role picks the family |
+| `set_bi_tensor_cores(false)` / `MAMBA_RS_BI_TENSOR_CORES=0` | no replacement; the scalar half kernels are not selectable |
+| `set_half_triad_policy(TiledParity)` / `MAMBA_RS_BI_HALF_POLICY=tiled` | no replacement; the stream-K weight gradient is the route |
+| `MAMBA_RS_ARCH_RUNG=off` | no replacement; the rung's self-check decides |
+| `gemm_flags()`, `batch_invariant()`, `fast_gemm()`, `tf32()`, `bi_gemm_family()`, `gemm_policy()` | `gemm_mode()`, the model's or trainer's `dtype()`, and `gemm_route()` for the complete identity |
 
 ### Changed
 

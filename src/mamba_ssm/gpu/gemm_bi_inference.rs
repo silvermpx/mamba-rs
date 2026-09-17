@@ -4072,38 +4072,21 @@ fn launch_f32out_ladder<O: PhysicalLaunchObserver>(
 /// runs a tolerance probe against the portable ladder (they are
 /// separate numeric families, so byte equality is not expected - but a
 /// staging or descriptor defect is orders of magnitude, not ulps). A
-/// failed probe disables the rung for the process and says so loudly;
-/// MAMBA_RS_ARCH_RUNG=off disables it up front. Run-to-run and replay
-/// bit identity hold either way: the verdict is fixed at first use.
+/// failed probe disables the rung for the process and says so loudly.
+/// Run-to-run and replay bit identity hold either way: the verdict is
+/// fixed at first use.
 static ARCH_RUNG_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn probe_arch_rung(ctx: &GpuCtx, tile: InferenceTile) -> bool {
-    *ARCH_RUNG_OK.get_or_init(|| {
-        match std::env::var("MAMBA_RS_ARCH_RUNG") {
-            Ok(value) if value.trim().eq_ignore_ascii_case("off") => {
-                eprintln!("gemm_bi: architecture rung disabled by MAMBA_RS_ARCH_RUNG=off");
-                return false;
-            }
-            Ok(value) if !value.trim().is_empty() => {
-                // A context built without the env route reaches here with the
-                // flag unchecked; say so rather than run as if it were unset.
-                eprintln!(
-                    "gemm_bi WARNING: MAMBA_RS_ARCH_RUNG={value:?} is not a recognized \
-                     value (only off is); the rung runs its self-check as if unset"
-                );
-            }
-            _ => {}
-        }
-        match arch_rung_self_check(ctx, tile) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!(
-                    "gemm_bi: architecture rung FAILED its self-check and is \
+    *ARCH_RUNG_OK.get_or_init(|| match arch_rung_self_check(ctx, tile) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "gemm_bi: architecture rung FAILED its self-check and is \
                      disabled for this process ({e}); the portable ladder serves \
                      instead"
-                );
-                false
-            }
+            );
+            false
         }
     })
 }

@@ -411,7 +411,7 @@ impl PhysicalQualificationRoute {
             | Self::Sm89ExactF32TnForced(_)
             | Self::Sm89ExactF32D128TnForced(_) => PolicyDtype::F32,
             Self::HalfPolicy { dtype, .. } | Self::HalfForced { dtype, .. } => match dtype {
-                WeightDtype::F32 => PolicyDtype::F32,
+                WeightDtype::F32 | WeightDtype::Tf32 => PolicyDtype::F32,
                 WeightDtype::Bf16 => PolicyDtype::Bf16,
                 WeightDtype::F16 => PolicyDtype::F16,
             },
@@ -743,7 +743,7 @@ impl PhysicalQualificationRequest {
 
 fn weight_dtype_name(dtype: WeightDtype) -> &'static [u8] {
     match dtype {
-        WeightDtype::F32 => b"f32",
+        WeightDtype::F32 | WeightDtype::Tf32 => b"f32",
         WeightDtype::Bf16 => b"bf16",
         WeightDtype::F16 => b"f16",
     }
@@ -2368,7 +2368,9 @@ fn half_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
     match dtype {
         WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
         WeightDtype::F16 => Ok(PolicyDtype::F16),
-        WeightDtype::F32 => Err("half production branch seal does not accept f32".into()),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            Err("half production branch seal does not accept f32".into())
+        }
     }
 }
 

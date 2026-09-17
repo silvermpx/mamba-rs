@@ -372,7 +372,7 @@ fn backbone_grad_parity(dtype: WeightDtype) {
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::Bf16 => (0.995_f32, 0.05_f32),
         WeightDtype::F16 => (0.998_f32, 0.02_f32),
-        WeightDtype::F32 => unreachable!("f32 mixed path unsupported"),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("f32 mixed path unsupported"),
     };
 
     eprintln!("backbone_grad_parity {dtype:?}:");
@@ -433,7 +433,7 @@ fn backbone_grad_parity_multi_layer(dtype: WeightDtype) {
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::Bf16 => (0.99_f32, 0.10_f32),
         WeightDtype::F16 => (0.995_f32, 0.05_f32),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     };
 
     eprintln!("backbone_grad_parity_multi_layer (n_layers=3) {dtype:?}:");

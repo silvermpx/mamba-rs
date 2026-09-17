@@ -22,8 +22,8 @@ Fresh measurements on September 14, 2026: released `v0.7.0`
 
 Both versions run the public trainer in the default `Deterministic`
 GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
-separate storage modes; the F32 row uses the default exact policy.
-TF32-permitted training is measured in the next section; the separate
+separate storage precisions; the F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section; the separate
 [GEMM tables](gemm-benchmarks-0.7.1-ada.md) cover kernel timings.
 
 Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
@@ -65,7 +65,7 @@ setting `MAMBA_RS_BENCH_DM=384`, `MAMBA_RS_BENCH_LAYERS=24`,
 `MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
 `MAMBA_RS_BENCH_SCAN=par`, and `MAMBA_RS_BENCH_DTYPE` to one of
 `bf16`, `f16`, `f32`. Leave `MAMBA_RS_SCAN_TAPE`,
-`MAMBA_RS_BENCH_IEEE_F32` and the GEMM mode/policy overrides unset.
+`MAMBA_RS_BENCH_IEEE_F32` and `MAMBA_RS_GEMM_MODE` unset.
 The instrument's iteration counts are fixed, not read from
 `MAMBA_RS_BENCH_ITERS`.
 
@@ -98,19 +98,19 @@ comparison. These bit checks and the whole-step timings are separate
 evidence. Earlier prefill/decode tables below remain historical
 measurements; the RTX 5090 training step is measured in its own section.
 
-## Mamba-1 supplemental TF32-permitted F32 training
+## Mamba-1 supplemental F32 training with deterministic TF32
 
-Separate TF32-permitted measurements compare released `v0.7.0`
+Separate measurements with deterministic TF32 permitted compare released `v0.7.0`
 (`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) with assembled `0.7.1`
 (`83079104fe1efa7ad5dca0a28c5b48bcd86c5b14`). The same F32 measurement
 fixture is compiled against each version; runs use separate
 kernel caches on an RTX 6000 Ada in the same CUDA 13.2 environment.
 
-`MAMBA_RS_GEMM_MODE=deterministic` resolves the Triad family and
-`MAMBA_RS_BI_F32_POLICY=tf32` resolves
-`AllowDeterministicTf32`. That policy permits deterministic TF32 where a
-qualified route applies; it does not force every GEMM to use TF32, and an
-exact deterministic fallback remains valid.
+Both trees ran in the deterministic mode with the 0.7.x opt-in
+`MAMBA_RS_BI_F32_POLICY=tf32`, the route that `WeightDtype::Tf32` now
+names. The route permits deterministic TF32 where a qualified kernel
+exists and stays exact everywhere else; it does not force every GEMM to
+use TF32.
 
 Shape: d_model 384, 24 layers, B=8, T=1300, parallel scan,
 capacity-16 context; ten eager and thirty graph timed steps per process.
@@ -145,7 +145,8 @@ judged by resident memory and the compute-process list instead.
 Same shape, fixtures, timers and instrument as the Ada section above:
 d_model 384, 24 layers, B=8, T=1300, parallel scan, capacity-16 context,
 default `Deterministic` mode with the Triad family; the TF32 rows use
-`MAMBA_RS_BI_F32_POLICY=tf32`. Each dtype ran as old, new, new, old with
+`MAMBA_RS_BI_F32_POLICY=tf32`, the 0.7.x spelling of `WeightDtype::Tf32`.
+Each dtype ran as old, new, new, old with
 separate trees and kernel caches. Entries are the median of the two
 process-average step times, parentheses their range. `old/new` above 1
 means 0.7.1 is faster.

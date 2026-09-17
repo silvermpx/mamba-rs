@@ -76,7 +76,7 @@ fn census_wmma_vs_mma_sync() {
         let c_tc = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Ct");
 
         // Route 1: the Fixed family's WMMA tile.
-        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        ctx.route_controls().set_family(BiGemmFamily::Inference);
         let run_wmma = |c: &DtypedBuf| {
             gemm_bi_forward_raw(
                 &ctx,
@@ -373,7 +373,7 @@ fn census_matvec_vs_thin16() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     // Force matvec through the typed route: the Fixed check is first, so
     // flip family to Triad only for the matvec launch below.
 
@@ -405,7 +405,7 @@ fn census_matvec_vs_thin16() {
         let c_mv = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Cm");
         let c_tc = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Ct");
 
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
         gpu_gemm_typed_forward_raw(
             &ctx,
             TypedPtr {

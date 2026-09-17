@@ -3,7 +3,7 @@
 //! Architecture (PyTorch-AMP convention):
 //! - **Master weights** = f32, owned by [`GpuMambaTrainWeights`] (existing
 //!   per-tensor allocation). All optimizer updates touch only the master.
-//! - **Compute copies** = bf16/f16 (or f32 for `WeightDtype::F32`), owned by
+//! - **Compute copies** = bf16/f16 (or f32 for `WeightDtype::F32` and `Tf32`), owned by
 //!   [`GpuMambaMixedWeights`] (existing inference structure: bulk_arena +
 //!   f32_arena). All forward/backward GEMMs read these.
 //! - **Sync** after every optimizer step: cast f32 master → typed compute

@@ -148,7 +148,7 @@ mod hf {
         // some op besides our batch-invariant GEMM has B-dependent
         // reduction (new rmsnorm variant added? new path hit?).
         let limit = match dtype {
-            WeightDtype::F32 => 1e-5,
+            WeightDtype::F32 | WeightDtype::Tf32 => 1e-5,
             _ => 1e-4,
         };
         assert!(

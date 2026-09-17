@@ -149,7 +149,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
             let cast = match dtype {
                 WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
                 WeightDtype::F16 => &m3k.cast_f32_to_f16,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("m3_mixed backward: unexpected f32 compute dtype".into());
                 }
             };
@@ -1001,7 +1001,7 @@ fn cast_f32_to_typed(
     use crate::mamba_ssm::gpu::dtype::WeightDtype as WD;
     let n_i = n as i32;
     let kernel = match dst.dtype() {
-        WD::F32 => {
+        WD::F32 | WD::Tf32 => {
             // Identity D2D copy.
             let bytes = n * 4;
             let stream = ctx.stream.cu_stream();
@@ -1041,7 +1041,7 @@ fn cast_typed_to_f32(
     use crate::mamba_ssm::gpu::dtype::WeightDtype as WD;
     let n_i = n as i32;
     let kernel = match src.dtype() {
-        WD::F32 => {
+        WD::F32 | WD::Tf32 => {
             let bytes = n * 4;
             let stream = ctx.stream.cu_stream();
             unsafe {

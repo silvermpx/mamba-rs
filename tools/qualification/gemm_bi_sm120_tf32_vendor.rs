@@ -812,8 +812,9 @@ mod gpu {
     fn context(device: &GpuDevice) -> Result<GpuCtx, String> {
         let ctx = GpuCtx::new(device)?;
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
         Ok(ctx)
     }
     fn binding(ctx: &GpuCtx) -> Result<String, String> {

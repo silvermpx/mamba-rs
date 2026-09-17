@@ -610,7 +610,7 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
                         .matches(match spec.dtype {
                             WeightDtype::F16 => "SM89_HALF_NT_S3_EXPORT(__half, f16)",
                             WeightDtype::Bf16 => "SM89_HALF_NT_S3_EXPORT(__nv_bfloat16, bf16)",
-                            WeightDtype::F32 => {
+                            WeightDtype::F32 | WeightDtype::Tf32 => {
                                 return Err("TriadSm89Half owns no f32 export".into());
                             }
                         })

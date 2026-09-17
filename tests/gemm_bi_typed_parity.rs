@@ -74,7 +74,7 @@ fn quantize(v: &[f32], dt: WeightDtype) -> Vec<f32> {
     match dt {
         WeightDtype::Bf16 => v.iter().map(|&x| bf16::from_f32(x).to_f32()).collect(),
         WeightDtype::F16 => v.iter().map(|&x| f16::from_f32(x).to_f32()).collect(),
-        WeightDtype::F32 => v.to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => v.to_vec(),
     }
 }
 
@@ -95,7 +95,7 @@ impl Ctx {
         // MAMBA_RS_BI_TENSOR_CORES exported used to silently reroute this
         // suite through the TC kernels, testing a different contract.
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_tensor_cores(false);
+        ctx.route_controls().set_tensor_cores(false);
         Self { ctx }
     }
 
@@ -378,7 +378,7 @@ fn typed_full_coverage_bit_match_f32_triad() {
 #[test]
 fn fixed_family_keeps_uncovered_typed_scalar_fallbacks() {
     let t = Ctx::new();
-    t.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    t.ctx.route_controls().set_family(BiGemmFamily::Inference);
     let dims = (64, 128, 128);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         check_forward(&t, dtype, dims, true, true);
@@ -577,7 +577,7 @@ impl TypedSubview {
         let bits = |value: f32| match self.dtype {
             WeightDtype::Bf16 => bf16::from_f32(value).to_bits(),
             WeightDtype::F16 => f16::from_f32(value).to_bits(),
-            WeightDtype::F32 => unreachable!("TC typed output must be 16-bit"),
+            WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("TC typed output must be 16-bit"),
         };
         let guard = bits(GUARD);
         let mut logical = Vec::with_capacity(self.rows * self.cols);

@@ -372,7 +372,7 @@ fn gpu_prefill_graph_replay_is_bitwise_for_family(family: BiGemmFamily) {
     let cfg = tiny_cfg();
     let w = identity_weights(&cfg, 33);
     let rig = rig();
-    rig.ctx.set_bi_gemm_family(family);
+    rig.ctx.route_controls().set_family(family);
     let seq_len = 192usize;
     let dims = gpu_dims(&cfg, 1, seq_len);
     let input = det_input(seq_len * cfg.d_model, 55);

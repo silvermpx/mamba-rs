@@ -371,7 +371,7 @@ fn check_cfg_weights(
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::Bf16 => (0.99_f32, 0.05_f32),
         WeightDtype::F16 => (0.999_f32, 0.02_f32),
-        WeightDtype::F32 => unreachable!("f32 mixed path unsupported"),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("f32 mixed path unsupported"),
     };
 
     eprintln!("m3_backward_mixed_parity {dtype:?} T={t}:");

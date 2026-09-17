@@ -101,6 +101,7 @@
 "gemm_denominator_probe" = "qualification"
 "gemm_inference_route_inventory" = "contract"
 "gemm_ladder_sweep" = "qualification"
+"tf32_storage_precision" = "gate"
 "gemm_mode_api" = "contract"
 "gemm_mode_live" = "contract"
 "gemm_model_mode_api" = "gate"

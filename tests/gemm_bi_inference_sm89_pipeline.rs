@@ -375,7 +375,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                     let specials = match dtype {
                         WeightDtype::Bf16 => [0, 0x8000, 0x7f80, 0xff80, 0x7f81, 0xffff],
                         WeightDtype::F16 => [0, 0x8000, 0x7c00, 0xfc00, 0x7c01, 0xffff],
-                        WeightDtype::F32 => unreachable!(),
+                        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
                     };
                     for r in 0..rows {
                         a_host[r * k] = specials[r % specials.len()];
@@ -696,7 +696,7 @@ fn half_bits(value: f32, dtype: WeightDtype) -> u16 {
     match dtype {
         WeightDtype::Bf16 => half::bf16::from_f32(value).to_bits(),
         WeightDtype::F16 => half::f16::from_f32(value).to_bits(),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     }
 }
 
@@ -1060,7 +1060,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                         [0, 0x8000, 0x7f80, 0xff80, 0x7f81, 0xff81, 0x7fff, 0xffff]
                     }
                     WeightDtype::F16 => [0, 0x8000, 0x7c00, 0xfc00, 0x7c01, 0xfc01, 0x7fff, 0xffff],
-                    WeightDtype::F32 => unreachable!(),
+                    WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
                 };
                 if k != 0 && corpus == 1 {
                     for row in 0..rows {
@@ -1276,7 +1276,7 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
             WeightDtype::F16 => [
                 0x0001, 0x03ff, 0x0400, 0x7bff, 0x8001, 0x83ff, 0x8400, 0xfbff, 0x3c00, 0xbc00,
             ],
-            WeightDtype::F32 => unreachable!(),
+            WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
         };
         for (m, k, n) in [(129, 64, 136), (17, 65, 131)] {
             let mut a_host: Vec<_> = (0..m * k).map(|i| edges[i % edges.len()]).collect();
@@ -1393,7 +1393,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                         [0, 0x8000, 0x7f80, 0xff80, 0x7f81, 0xff81, 0x7fff, 0xffff]
                     }
                     WeightDtype::F16 => [0, 0x8000, 0x7c00, 0xfc00, 0x7c01, 0xfc01, 0x7fff, 0xffff],
-                    WeightDtype::F32 => unreachable!(),
+                    WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
                 };
                 for row in 0..rows {
                     a_host[HALF_GUARD + row * k] = special[row % special.len()];

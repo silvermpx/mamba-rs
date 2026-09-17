@@ -383,7 +383,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let cast = match dt {
                 WeightDtype::Bf16 => &k.cast_f32_to_bf16,
                 WeightDtype::F16 => &k.cast_f32_to_f16,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("mixed forward: unexpected f32 compute dtype".into());
                 }
             };
@@ -418,7 +418,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let cast = match dt {
                 WeightDtype::Bf16 => &k.cast_bf16_to_f32,
                 WeightDtype::F16 => &k.cast_f16_to_f32,
-                WeightDtype::F32 => {
+                WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("mixed forward: unexpected f32 compute dtype".into());
                 }
             };
@@ -664,7 +664,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                     k.state_cap
                 );
                 let kernel = match dt {
-                    WeightDtype::F32 => &k.ssm_burnin_fwd,
+                    WeightDtype::F32 | WeightDtype::Tf32 => &k.ssm_burnin_fwd,
                     WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,
                     WeightDtype::F16 => &k.ssm_burnin_fwd_f16,
                 };

@@ -21,8 +21,8 @@ Fresh measurements on September 14, 2026: released `v0.7.0`
 
 Both versions run the public trainer in the default `Deterministic`
 GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
-separate storage modes; the F32 row uses the default exact policy.
-TF32-permitted training is measured in the next section; the separate
+separate storage precisions; the F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section; the separate
 [GEMM tables](gemm-benchmarks-0.7.1-ada.md) cover kernel timings.
 
 Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
@@ -68,9 +68,8 @@ between storage modes.
 Reproduce with `m3_prefill_bench::m3_train_step_at_multichunk_shape`,
 setting `MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
 `MAMBA_RS_BENCH_ITERS=5`, and `MAMBA_RS_BENCH_DTYPE` to one of
-`bf16`, `f16`, `f32`. Leave scan-tape, IEEE-F32 and GEMM mode/policy
-overrides unset; the remaining model configuration is fixed in the
-instrument.
+`bf16`, `f16`, `f32`. Leave scan-tape, IEEE-F32 and `MAMBA_RS_GEMM_MODE`
+unset; the remaining model configuration is fixed in the instrument.
 
 Run the instrument as an exact ignored test:
 
@@ -101,19 +100,19 @@ comparison. These bit checks and the whole-step timings are separate
 evidence. Earlier prefill/decode tables below remain historical
 measurements; the RTX 5090 training step is measured in its own section.
 
-## Mamba-3 supplemental TF32-permitted F32 training
+## Mamba-3 supplemental F32 training with deterministic TF32
 
-Separate TF32-permitted measurements compare released `v0.7.0`
+Separate measurements with deterministic TF32 permitted compare released `v0.7.0`
 (`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) with assembled `0.7.1`
 (`83079104fe1efa7ad5dca0a28c5b48bcd86c5b14`). The same F32 measurement
 fixture is compiled against each version; runs use separate
 kernel caches on an RTX 6000 Ada in the same CUDA 13.2 environment.
 
-`MAMBA_RS_GEMM_MODE=deterministic` resolves the Triad family and
-`MAMBA_RS_BI_F32_POLICY=tf32` resolves
-`AllowDeterministicTf32`. That policy permits deterministic TF32 where a
-qualified route applies; it does not force every GEMM to use TF32, and an
-exact deterministic fallback remains valid.
+Both trees ran in the deterministic mode with the 0.7.x opt-in
+`MAMBA_RS_BI_F32_POLICY=tf32`, the route that `WeightDtype::Tf32` now
+names. The route permits deterministic TF32 where a qualified kernel
+exists and stays exact everywhere else; it does not force every GEMM to
+use TF32.
 
 Shape: d_model 384, 24 layers, B=8, T=1300, Auto parallel scan,
 capacity-64 context; five eager and five graph timed steps per process.
@@ -183,8 +182,9 @@ judged by resident memory and the compute-process list instead.
 
 Same shape and fixtures as the Ada section above: B=8, T=1300, 24 layers,
 five timed eager and five timed graph steps, default `Deterministic` mode
-with the Triad family; the TF32 rows use `MAMBA_RS_BI_F32_POLICY=tf32`.
-Each dtype ran as old, new, new, old with separate trees and kernel caches.
+with the Triad family; the TF32 rows use `MAMBA_RS_BI_F32_POLICY=tf32`,
+the 0.7.x spelling of `WeightDtype::Tf32`. Each dtype ran as old, new,
+new, old with separate trees and kernel caches.
 Entries are the median of the two process-average step times, parentheses
 their range. `old/new` above 1 means 0.7.1 is faster.
 
@@ -207,8 +207,8 @@ sample per process: 6834 MiB for BF16 and F16, 10066 MiB for F32.
 
 0.7.1 is neutral on this board: its Mamba-3 gains on Ada came from the
 retained sm89 routes, which the dispatcher does not select here, so both
-releases run the same routes. The TF32-permitted policy changes nothing
-on this board at this shape either. The bit ledger of both tags on this
+releases run the same routes. Deterministic TF32 changes nothing on this
+board at this shape either. The bit ledger of both tags on this
 board matched on all 161 original Mamba keys, none moved, none missing.
 
 ## Historical measurements
@@ -416,7 +416,7 @@ cargo test --release --features "cuda hf qualification" --test bench_bf16_vs_f32
 
 Mamba-3 shares the GEMM layer with Mamba SSM: the trainer, the inference
 prefill and the decode step all multiply through the context, so the
-context's `GemmMode` and its settings apply to inference exactly as to
-training, with the same graph guards. The modes are described in
+context's `GemmMode` and storage precision apply to inference exactly as
+to training, with the same graph guards. The modes are described in
 [gemm-modes.md](gemm-modes.md) and the kernel measurements in
 [determinism-benchmarks.md](determinism-benchmarks.md).

@@ -114,7 +114,7 @@ fn tn_tc64_streamk_versus_tiled_timing_census() {
                 match dtype {
                     WeightDtype::Bf16 => "bf16",
                     WeightDtype::F16 => "f16",
-                    WeightDtype::F32 => "f32",
+                    WeightDtype::F32 | WeightDtype::Tf32 => "f32",
                 }
             );
             for (label, tile) in [

@@ -75,7 +75,7 @@ fn deterministic_triad_public_forward_ptr_records_nn_route() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     let x = GpuBuffer::zeros(&ctx.stream, BATCH * D_MODEL).expect("allocate X[3,37]");
     let w = GpuBuffer::zeros(&ctx.stream, D_MODEL * VOCAB_PADDED).expect("allocate W[37,96]");
@@ -113,7 +113,7 @@ fn deterministic_triad_tied_f32_raw_records_nt_route_and_strides() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
 
     let hidden = GpuBuffer::zeros(&ctx.stream, BATCH * D_MODEL).expect("allocate hidden[3,37]");
     let embedding =
@@ -160,7 +160,7 @@ fn f32_nn_buffer_and_interior_pointer_wrappers_match_cpu_and_repeat_for_both_fam
         let ctx = GpuCtx::new(&device).expect("GPU context");
         ctx.set_gemm_mode(GemmMode::Deterministic)
             .expect("select deterministic GEMM mode");
-        ctx.set_bi_gemm_family(family);
+        ctx.route_controls().set_family(family);
 
         let x = GpuBuffer::from_cpu(&ctx.stream, &x_host).expect("upload contiguous NN input");
         let mut guarded_x = vec![101.0f32; INPUT_PREFIX + x_host.len() + INPUT_SUFFIX];
@@ -249,7 +249,7 @@ fn tied_f32_guarded_output_matches_cpu_and_repeats_with_nt_routes_for_both_famil
         let ctx = GpuCtx::new(&device).expect("GPU context");
         ctx.set_gemm_mode(GemmMode::Deterministic)
             .expect("select deterministic GEMM mode");
-        ctx.set_bi_gemm_family(family);
+        ctx.route_controls().set_family(family);
 
         let hidden =
             GpuBuffer::from_cpu(&ctx.stream, &hidden_host).expect("upload tied hidden input");
@@ -335,7 +335,7 @@ fn tied_f32_zero_reduction_zeros_only_the_guarded_output_subspan_for_both_famili
         let ctx = GpuCtx::new(&device).expect("GPU context");
         ctx.set_gemm_mode(GemmMode::Deterministic)
             .expect("select deterministic GEMM mode");
-        ctx.set_bi_gemm_family(family);
+        ctx.route_controls().set_family(family);
         let initial = vec![GUARD; PREFIX + active_len + SUFFIX];
         let output = GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded zero-K output");
 
@@ -381,7 +381,7 @@ fn all_f32_typed_nn_zero_reduction_applies_bias_once_inside_output_guards() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let initial = vec![GUARD; PREFIX + expected.len() + SUFFIX];
     let output = GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded typed NN output");
     let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("typed NN bias");
@@ -427,7 +427,7 @@ fn tied_f32_raw_rejects_null_and_overflowing_spans_before_launch() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic)
         .expect("select deterministic GEMM mode");
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     let hidden = GpuBuffer::zeros(&ctx.stream, BATCH * D_MODEL).expect("hidden owner");
     let embedding = GpuBuffer::zeros(&ctx.stream, VOCAB_PADDED * D_MODEL).expect("embedding owner");
     let output = GpuBuffer::zeros(&ctx.stream, BATCH * VOCAB_PADDED).expect("output owner");

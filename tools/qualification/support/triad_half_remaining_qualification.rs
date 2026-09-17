@@ -213,7 +213,9 @@ fn policy_dtype(dtype: WeightDtype) -> mamba_rs::mamba_ssm::gpu::kernel_identity
     match dtype {
         WeightDtype::F16 => PolicyDtype::F16,
         WeightDtype::Bf16 => PolicyDtype::Bf16,
-        WeightDtype::F32 => panic!("remaining-half qualification requires a half dtype"),
+        WeightDtype::F32 | WeightDtype::Tf32 => {
+            panic!("remaining-half qualification requires a half dtype")
+        }
     }
 }
 
@@ -236,7 +238,7 @@ fn qualify_and_print_auto_evidence(
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores: true,
-            half_policy: t.ctx.half_triad_policy(),
+            half_policy: t.ctx.route_controls().half_policy(),
         },
     );
     let qualified = gemm_bi_triad::qualify_physical_launch(&t.ctx, request)?;
@@ -1146,7 +1148,7 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let _pre = quiet.require_pre_context("half-remaining-actual-auto/pre-context")?;
     let t = Ctx::new_ada()?;
-    t.ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    t.ctx.route_controls().set_family(BiGemmFamily::Triad);
     let compiler = t.ctx.kernels.compiler_identity();
     if compiler.nvrtc_version != (13, 2) {
         return Err(format!(
@@ -1163,7 +1165,7 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
                 gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
                     dtype: weight_dtype(case.dtype),
                     tensor_cores: true,
-                    half_policy: t.ctx.half_triad_policy(),
+                    half_policy: t.ctx.route_controls().half_policy(),
                 },
             )
         })
@@ -1175,7 +1177,7 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype: weight_dtype(nn.dtype),
             tensor_cores: true,
-            half_policy: t.ctx.half_triad_policy(),
+            half_policy: t.ctx.route_controls().half_policy(),
         },
     ));
     gemm_bi_triad::presize_physical_qualification_suite(&t.ctx, &actual_auto_requests)?;

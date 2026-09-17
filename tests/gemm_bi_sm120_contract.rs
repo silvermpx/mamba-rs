@@ -215,7 +215,7 @@ fn sm120_kernel_specs_cover_every_forced_route_once() {
                         assert_eq!(spec.dtype, dtype);
                         assert_eq!(spec.physical, requested.physical);
                         let dtype_tag = match dtype {
-                            WeightDtype::F32 => 0,
+                            WeightDtype::F32 | WeightDtype::Tf32 => 0,
                             WeightDtype::F16 => 1,
                             WeightDtype::Bf16 => 2,
                         };

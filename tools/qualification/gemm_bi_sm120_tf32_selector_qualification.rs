@@ -700,8 +700,8 @@ fn request(cell: Cell, route: PhysicalQualificationRoute) -> PhysicalQualificati
 fn configure(device: &GpuDevice, policy: F32TriadPolicy) -> Result<GpuCtx, String> {
     let ctx = GpuCtx::new(device)?;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(policy);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_f32_policy(policy);
     Ok(ctx)
 }
 

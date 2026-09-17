@@ -27,12 +27,12 @@ shapes ran 1.13 to 1.63 times faster than 0.6.9 on an RTX 6000 Ada.
   against the 0.6.9 kernels: on the large training and serving shapes the
   new kernels are 1.26 to 1.43 times faster on average, single kernels up
   to 3 times.
-- **Deterministic TF32**, a new precision setting for f32: the products run
-  on the tensor cores in TF32 with one fixed rounding and a fixed
-  summation order, the accumulation stays f32, and the bits are
-  reproducible like the rest of the deterministic mode. 0.6.9 had no such
-  setting. Stream-K weight-gradient kernels serve the deep reductions by
-  default.
+- **Deterministic TF32**, a fourth storage precision, `WeightDtype::Tf32`:
+  f32 storage whose products run on the tensor cores in TF32 with one fixed
+  rounding and a fixed summation order, the accumulation stays f32, and the
+  bits are reproducible like the rest of the deterministic mode. 0.6.9 had
+  no such precision. Stream-K weight-gradient kernels serve the deep
+  reductions by default.
 - **Explicit-mode constructors** beside every environment-reading one, and
   a recorded numeric route on every captured graph.
 
@@ -53,7 +53,7 @@ datacenter Blackwell, CC 12.1) get measured kernels in later releases.
 - Inference and training: full backward pass through the recurrent SSM
   state, AdamW, CUDA Graph capture for inference steps, prefill and
   training steps.
-- f32, bf16 and f16 storage through one `WeightDtype` selector; every
+- f32, tf32, bf16 and f16 storage through one `WeightDtype` selector; every
   kernel accumulates in f32.
 - Three GEMM modes, deterministic by default. See below.
 - Bring-your-own-loss training: `trainer.forward()` returns the full
@@ -87,7 +87,13 @@ datacenter Blackwell, CC 12.1) get measured kernels in later releases.
 | `qualification` | the hardware and toolkit instruments under `tools/qualification/` | maintainers measuring kernels on a chosen board |
 | `cuda-cublaslt-qualification` | cuBLASLt in the vendor-comparison harness | maintainers only; production routing does not use cuBLASLt |
 
-## GEMM modes
+## GEMM modes and storage precision
+
+A GPU context has two settings. `GemmMode` decides who multiplies;
+`WeightDtype` decides how the weights are stored and, with it, the
+precision of every product. There is nothing else to set: inside the
+deterministic mode the kernels are chosen from the two, and from whether
+the context serves a model or a trainer.
 
 | you want | use |
 |---|---|
@@ -95,12 +101,18 @@ datacenter Blackwell, CC 12.1) get measured kernels in later releases.
 | the fastest vendor path, TF32 permitted for f32 | `GemmMode::CublasFast` |
 | the numbers 0.6.9 produced, or the vendor's most careful f32 accumulation as a reference | `GemmMode::CublasPedantic` |
 
-Storage precision and mode are separate choices: `WeightDtype` decides how
-the weights are stored, `GemmMode` decides who multiplies. Every GPU entry
-point has a plain constructor that reads `MAMBA_RS_GEMM_MODE`
+| `WeightDtype` | storage | products in the deterministic mode |
+|---|---|---|
+| `F32` (default) | f32 | exact: one fused multiply-add per step in a fixed order, f32 throughout |
+| `Tf32` | f32 | deterministic TF32: each operand rounded to TF32 once, a fixed summation order, f32 accumulation; a shape or board without a measured TF32 kernel takes the exact f32 kernel. This is not the vendor's Fast TF32; it reproduces its bits like the rest of the mode |
+| `Bf16` | bf16 | tensor-core kernels with f32 accumulation |
+| `F16` | f16 | tensor-core kernels with f32 accumulation; training runs the dynamic loss scaler |
+
+Every GPU entry point has a plain constructor that reads `MAMBA_RS_GEMM_MODE`
 (`deterministic`, `cublas-fast`, `cublas-pedantic`; default
-`deterministic`) and a `*_with_mode` twin that takes the mode as its last
-argument and ignores the environment.
+`deterministic`), the one environment variable the crate reads for its
+GEMMs, and a `*_with_mode` twin that takes the mode as its last argument
+and ignores the environment. The storage precision is always an argument.
 
 ```rust
 use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -114,9 +126,8 @@ ctx.set_gemm_mode(GemmMode::CublasPedantic)?; // refused while a graph is being 
 ```
 
 Inside the deterministic mode a model context uses the Inference kernels
-and a trainer the Triad kernels; tensor cores, deterministic TF32 and
-stream-K are settings on the context. What each mode guarantees, what it
-does not, the environment variables and the architecture coverage are in
+and a trainer the Triad kernels. What each mode guarantees, what it does
+not, and the architecture coverage are in
 [docs/gemm-modes.md](docs/gemm-modes.md).
 
 ## Use cases and API choice
@@ -255,7 +266,8 @@ and run with `--ignored`.
 
 `MambaTrainer` and `Mamba3Trainer` run forward, backward, AdamW and the
 master-weight sync behind one `step()` call. The `WeightDtype` argument
-selects the f32 or the mixed bf16/f16 engine.
+selects the f32 engine (`F32`, or `Tf32` for f32 storage with deterministic
+TF32 products) or the mixed bf16/f16 engine.
 
 ```rust
 use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -362,7 +374,7 @@ geometric mean, eager path):
 | BF16 → BF16 | cuBLAS Fast | 1.19× | 1.24× |
 | F16 → F16 | cuBLAS Fast | 1.17× | 1.23× |
 | BF16 → F32 | cuBLAS Fast | 0.83× | 1.29× |
-| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.90× | 1.13× |
+| F32 stored as `Tf32` (deterministic TF32) | cuBLAS Fast TF32 | 0.90× | 1.13× |
 | F32, exact | cuBLAS Pedantic | 1.00× | 1.08× |
 
 Training kernels (the Triad family, the large shapes, geometric mean,
@@ -373,7 +385,7 @@ cuBLAS on both boards):
 |---|---|---:|---:|
 | BF16 | cuBLAS Fast | 1.07× | 1.06× |
 | F16 | cuBLAS Fast | 1.08× | 1.06× |
-| F32, deterministic TF32 | cuBLAS Fast TF32 | 0.84× | 1.07× |
+| F32 stored as `Tf32` (deterministic TF32) | cuBLAS Fast TF32 | 0.84× | 1.07× |
 | F32, exact | cuBLAS Pedantic | 0.94× | 1.17× |
 
 Whole training step on the RTX 6000 Ada, 0.7.0 against 0.6.9, same shapes
@@ -419,9 +431,9 @@ the release order.
 
 For users:
 
-- [GEMM modes](docs/gemm-modes.md): the three modes, which to choose, how
-  to set them, what is guaranteed, environment variables, architecture
-  coverage
+- [GEMM modes](docs/gemm-modes.md): the three modes and the four storage
+  precisions, which to choose, how to set them, what is guaranteed, the
+  one environment variable, architecture coverage
 - [GEMM benchmarks](docs/determinism-benchmarks.md): kernel-by-kernel
   timings on both boards against cuBLAS Fast and Pedantic, the 0.6.9
   comparison, the protocol
@@ -429,8 +441,9 @@ For users:
   [benchmarks](docs/mamba1-benchmarks.md)
 - [Mamba-3 SISO architecture](docs/mamba3-architecture.md) and
   [benchmarks](docs/mamba3-benchmarks.md)
-- Rustdoc: `GemmMode`, `GpuCtx::new_with_mode`, `GpuCtx::set_gemm_mode`
-  and the `*_with_mode` constructors carry the API contract
+- Rustdoc: `GemmMode`, `WeightDtype`, `GpuCtx::new_with_mode`,
+  `GpuCtx::set_gemm_mode` and the `*_with_mode` constructors carry the API
+  contract
 
 For contributors:
 
@@ -444,7 +457,7 @@ For contributors:
 - Multi-GPU inference for models larger than one device (pipeline
   sharding), beside the data-parallel training that ships now.
 - Reduced-precision tiers (fp8, int8) under the same bit discipline as
-  the f32, bf16 and f16 paths.
+  the f32, tf32, bf16 and f16 paths.
 - The Mamba-2 generation beside Mamba-1 and Mamba-3, with the same
   determinism and testing discipline.
 

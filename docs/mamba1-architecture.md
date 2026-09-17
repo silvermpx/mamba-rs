@@ -106,8 +106,8 @@ scan is also the faster path.
 The GEMM is chosen by the context's `GemmMode`. In the default
 `Deterministic` mode a model context uses the Inference kernels and a
 trainer the Triad kernels; `CublasFast` and `CublasPedantic` select cuBLAS.
-The modes, the settings inside the deterministic mode, the environment
-variables and the graph rules are described in
+The modes, the storage precisions, the environment variable and the
+graph rules are described in
 [gemm-modes.md](gemm-modes.md), and the measurements in
 [determinism-benchmarks.md](determinism-benchmarks.md).
 

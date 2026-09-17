@@ -35,7 +35,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     gpu_device: usize,
 
-    /// Weight storage dtype on GPU: f32 (default), bf16 (half VRAM), f16
+    /// Weight storage precision on GPU: f32 (default), tf32 (f32 storage,
+    /// deterministic TF32 products), bf16 (half VRAM), f16
     #[arg(long, default_value = "f32")]
     dtype: String,
 
@@ -173,10 +174,11 @@ fn parse_dtype(s: &str) -> mamba_rs::mamba_ssm::gpu::dtype::WeightDtype {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     match s.to_lowercase().as_str() {
         "f32" | "fp32" | "float32" => WeightDtype::F32,
+        "tf32" => WeightDtype::Tf32,
         "bf16" | "bfloat16" => WeightDtype::Bf16,
         "f16" | "fp16" | "float16" | "half" => WeightDtype::F16,
         other => {
-            eprintln!("error: unknown dtype '{other}', expected f32/bf16/f16");
+            eprintln!("error: unknown dtype '{other}', expected f32/tf32/bf16/f16");
             std::process::exit(1);
         }
     }

@@ -50,15 +50,19 @@ fn assert_mode(ctx: &GpuCtx, expected: GemmMode) {
         GemmMode::CublasFast => (false, true, true, cublasMath_t::CUBLAS_TF32_TENSOR_OP_MATH),
         GemmMode::CublasPedantic => (false, false, false, cublasMath_t::CUBLAS_PEDANTIC_MATH),
     };
-    let policy = ctx.gemm_policy();
+    let policy = ctx.route_controls().policy();
     assert_eq!(ctx.gemm_mode(), expected, "canonical mode");
     assert_eq!(
-        ctx.batch_invariant(),
+        ctx.route_controls().batch_invariant(),
         batch_invariant,
         "batch-invariant mapping"
     );
-    assert_eq!(ctx.fast_gemm(), fast_gemm, "fast-GEMM mapping");
-    assert_eq!(ctx.tf32(), tf32, "TF32 mapping");
+    assert_eq!(
+        ctx.route_controls().fast_gemm(),
+        fast_gemm,
+        "fast-GEMM mapping"
+    );
+    assert_eq!(ctx.route_controls().tf32(), tf32, "TF32 mapping");
     assert_eq!(
         policy.batch_invariant, batch_invariant,
         "policy batch-invariant mapping"
@@ -79,14 +83,17 @@ fn gpu_context_constructors_use_explicit_modes_and_deterministic_defaults() {
 
     let ctx = GpuCtx::new(&device).expect("default GPU context");
     assert_mode(&ctx, GemmMode::Deterministic);
-    assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Triad);
+    assert_eq!(ctx.route_controls().family(), BiGemmFamily::Triad);
     assert!(
-        ctx.bi_tensor_cores(),
+        ctx.route_controls().tensor_cores(),
         "deterministic tensor-core permission default"
     );
-    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
     assert_eq!(
-        ctx.half_triad_policy(),
+        ctx.route_controls().f32_policy(),
+        F32TriadPolicy::ExactScalarFma
+    );
+    assert_eq!(
+        ctx.route_controls().half_policy(),
         HalfTriadPolicy::AllowStreamKFixedOrder,
         "the tensor-core tier takes the stream-K weight gradient by default"
     );
@@ -127,52 +134,15 @@ fn gpu_context_supports_all_nine_canonical_mode_transitions() {
 
 #[test]
 #[ignore = "needs a CUDA device"]
-#[expect(
-    deprecated,
-    reason = "this regression freezes the legacy migration adapters"
-)]
-fn legacy_mode_adapters_preserve_the_documented_call_order() {
-    let device = GpuDevice::new(0).expect("CUDA device");
-    let ctx = GpuCtx::new(&device).expect("GPU context");
-
-    ctx.set_batch_invariant(true);
-    ctx.set_fast_gemm(false);
-    assert_mode(&ctx, GemmMode::Deterministic);
-
-    ctx.set_gemm_mode(GemmMode::CublasPedantic)
-        .expect("reset to Pedantic");
-    ctx.set_fast_gemm(false);
-    ctx.set_batch_invariant(true);
-    assert_mode(&ctx, GemmMode::Deterministic);
-
-    ctx.set_gemm_mode(GemmMode::Deterministic)
-        .expect("reset to Deterministic");
-    ctx.set_fast_gemm(true);
-    ctx.set_batch_invariant(false);
-    assert_mode(&ctx, GemmMode::CublasFast);
-
-    ctx.set_gemm_mode(GemmMode::CublasPedantic)
-        .expect("reset to Pedantic");
-    ctx.set_batch_invariant(false);
-    ctx.set_fast_gemm(true);
-    assert_mode(&ctx, GemmMode::CublasFast);
-
-    ctx.disable_tf32();
-    assert_mode(&ctx, GemmMode::CublasPedantic);
-    ctx.set_batch_invariant(true);
-    ctx.disable_tf32();
-    assert_mode(&ctx, GemmMode::Deterministic);
-}
-
-#[test]
-#[ignore = "needs a CUDA device"]
 fn vendor_mode_round_trip_preserves_custom_deterministic_policy() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(true);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
-    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(true);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
 
     for vendor_mode in [GemmMode::CublasFast, GemmMode::CublasPedantic] {
         ctx.set_gemm_mode(vendor_mode).expect("select vendor mode");
@@ -180,14 +150,14 @@ fn vendor_mode_round_trip_preserves_custom_deterministic_policy() {
         ctx.set_gemm_mode(GemmMode::Deterministic)
             .expect("restore Deterministic mode");
         assert_mode(&ctx, GemmMode::Deterministic);
-        assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Inference);
-        assert!(ctx.bi_tensor_cores());
+        assert_eq!(ctx.route_controls().family(), BiGemmFamily::Inference);
+        assert!(ctx.route_controls().tensor_cores());
         assert_eq!(
-            ctx.f32_triad_policy(),
+            ctx.route_controls().f32_policy(),
             F32TriadPolicy::AllowDeterministicTf32
         );
         assert_eq!(
-            ctx.half_triad_policy(),
+            ctx.route_controls().half_policy(),
             HalfTriadPolicy::AllowStreamKFixedOrder
         );
     }

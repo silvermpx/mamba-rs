@@ -47,8 +47,9 @@ change; an intentional change re-records its cells in the same commit that
 makes it.
 
 Every performance table that is published records the board, driver,
-toolkit, source hash, GEMM mode and family, comparator (Fast TF32, Fast f32
-compute or Pedantic f32), storage and output dtype, eager or graph path, and
+toolkit, source hash, GEMM mode, storage precision and the family that
+served, comparator (Fast TF32, Fast f32 compute or Pedantic f32), output
+dtype, eager or graph path, and
 the window count and aggregation. Boards are reported separately.
 
 ## Order

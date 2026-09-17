@@ -79,14 +79,14 @@ fn bench_gemm_bi_vs_tf32() {
                 }
                 let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
                 tr.ctx().set_gemm_mode(mode).unwrap();
-                tr.ctx().set_bi_tensor_cores(tc);
+                tr.ctx().route_controls().set_tensor_cores(tc);
                 if mode == GemmMode::Deterministic {
-                    tr.ctx().set_f32_triad_policy(if tf32 {
+                    tr.ctx().route_controls().set_f32_policy(if tf32 {
                         F32TriadPolicy::AllowDeterministicTf32
                     } else {
                         F32TriadPolicy::ExactScalarFma
                     });
-                    tr.ctx().set_half_triad_policy(if streamk {
+                    tr.ctx().route_controls().set_half_policy(if streamk {
                         HalfTriadPolicy::AllowStreamKFixedOrder
                     } else {
                         HalfTriadPolicy::TiledParity

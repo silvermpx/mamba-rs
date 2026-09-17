@@ -48,10 +48,9 @@ fn main() {
         )
         .expect("GPU init failed");
         println!(
-            "storage {:?}, mode {:?}, family {:?}",
+            "storage {:?}, mode {:?}",
             gpu_bb.dtype(),
-            gpu_bb.ctx().gemm_mode(),
-            gpu_bb.ctx().bi_gemm_family()
+            gpu_bb.ctx().gemm_mode()
         );
 
         // Capture the per-step execution plan: one graph launch per step
@@ -97,11 +96,7 @@ fn main() {
         vendor_bb
             .step(&vec![0.1; input_dim], &mut output)
             .expect("step failed");
-        println!(
-            "second backbone: mode {:?}, family {:?} (the family is stored but idle in a cuBLAS mode)",
-            vendor_bb.ctx().gemm_mode(),
-            vendor_bb.ctx().bi_gemm_family()
-        );
+        println!("second backbone: mode {:?}", vendor_bb.ctx().gemm_mode());
     }
 
     #[cfg(not(feature = "cuda"))]

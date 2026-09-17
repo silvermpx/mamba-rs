@@ -277,7 +277,7 @@ const SHAPES: &[(usize, usize)] = &[
 fn fixed_f32_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for &(k, n) in SHAPES {
         let fx = Fixture::new(&ctx, k, n);
         let mut launch = |m: usize| -> Vec<u32> {
@@ -314,7 +314,7 @@ fn fixed_f32_is_strictly_invariant() {
 fn fixed_bf16_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     for &(k, n) in &[(64usize, 64usize), (384, 384), (768, 2304)] {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
@@ -358,7 +358,7 @@ fn fixed_bf16_is_strictly_invariant() {
 fn triad_f32_boundaries_match_the_declared_table() {
     let (dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     // (K, N) -> the first-m-of-a-new-bucket set, one table per arch.
     const DECLARED: &ArchTables<'static> = &[(
         "sm_89",
@@ -419,12 +419,12 @@ fn triad_f32_boundaries_match_the_declared_table() {
 fn typed_route_tc_tier_boundaries_match_the_declared_table() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     // The C2<->C4 family switch is a TC-tier phenomenon: with the tensor
     // cores ON, M>=128 runs the mma.sync K-slab while M<128 stays on the
     // scalar matvec. (The first run of this suite discovered that WITHOUT
     // the TC tier the two sides agree bitwise - see the scalar arm below.)
-    ctx.set_bi_tensor_cores(true);
+    ctx.route_controls().set_tensor_cores(true);
     for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
@@ -464,10 +464,10 @@ fn typed_route_tc_tier_boundaries_match_the_declared_table() {
 fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     let (dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
     // Tensor cores are permitted by default since 0.7.0; this arm declares
     // the scalar tier's buckets, so it must switch them off explicitly.
-    ctx.set_bi_tensor_cores(false);
+    ctx.route_controls().set_tensor_cores(false);
     // Declared per (K, N) under the 128-row prefix comparison, one
     // table per arch. Re-record (do not hand-edit) on change.
     const DECLARED: &ArchTables<'static> = &[(
@@ -517,7 +517,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
 fn fixed_f32_row_position_invariance() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
     let (k, n, m) = (384usize, 384usize, 129usize);
     let probe: Vec<f32> = (0..k).map(|i| ((i % 17) as f32 - 8.0) * 0.03).collect();
     let positions = [0usize, 1, m / 2, m - 1];

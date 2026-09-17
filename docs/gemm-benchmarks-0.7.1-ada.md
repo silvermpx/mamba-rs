@@ -915,6 +915,9 @@ the current checkout; create a separate one in the v0.7.0 checkout.
 `git rev-parse HEAD` binds every record to the source actually being run.
 
 ```sh
+# The MAMBA_RS_BATCH_INVARIANT, MAMBA_RS_FAST_GEMM, MAMBA_RS_BI_* and
+# MAMBA_RS_ARCH_RUNG names are read by the 0.7.0 to 0.7.2 checkouts this
+# run compares; the current source reads MAMBA_RS_GEMM_MODE alone.
 unset MAMBA_RS_GEMM_MODE MAMBA_RS_BATCH_INVARIANT MAMBA_RS_FAST_GEMM \
   MAMBA_RS_BI_TENSOR_CORES MAMBA_RS_BI_F32_POLICY MAMBA_RS_BI_HALF_POLICY \
   MAMBA_RS_BI_GEMM_FAMILY MAMBA_RS_ARCH_RUNG MAMBA_RS_BENCH_IEEE_F32 \

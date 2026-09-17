@@ -166,7 +166,8 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 != Some(match dtype {
                     mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16 => PolicyDtype::Bf16,
                     mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16 => PolicyDtype::F16,
-                    mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32 => unreachable!(),
+                    mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32
+                    | mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Tf32 => unreachable!(),
                 })
             || evidence.single_launch_tile() != Some(spec.tile)
             || !evidence.eager_graph_equal()

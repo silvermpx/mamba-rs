@@ -602,16 +602,17 @@ fn synth_values(len: usize, seed: u64) -> Vec<f32> {
 }
 
 fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
-    ctx.set_bi_gemm_family(BiGemmFamily::Inference);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     match arm {
         Arm::Candidate | Arm::ProductionAuto => {
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         }
         Arm::FastCublas => {
             ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
-            if !ctx.tf32() {
+            if !ctx.route_controls().tf32() {
                 return Err("fast cuBLAS comparator requires TF32 to remain enabled".into());
             }
         }

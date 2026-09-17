@@ -29,6 +29,8 @@ use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::gpu_lm3::{GpuMamba3LM, Mamba3LmBuild};
 
 const CHILD_CASE: &str = "MAMBA_RS_TEST_MODEL_MODE_CASE";
+/// The one variable the crate reads, and the seven it used to read: the
+/// children scrub all of them so a stale shell cannot leak into a case.
 const GEMM_ENV: [&str; 8] = [
     "MAMBA_RS_GEMM_MODE",
     "MAMBA_RS_BATCH_INVARIANT",
@@ -38,6 +40,18 @@ const GEMM_ENV: [&str; 8] = [
     "MAMBA_RS_BI_HALF_POLICY",
     "MAMBA_RS_BI_GEMM_FAMILY",
     "MAMBA_RS_ARCH_RUNG",
+];
+/// Every withdrawn variable set to a value that once changed the route.
+/// A constructor that still read any of them would build a different
+/// context or fail; the role defaults must come back untouched.
+const STALE_KNOBS: [(&str, &str); 7] = [
+    ("MAMBA_RS_BATCH_INVARIANT", "0"),
+    ("MAMBA_RS_FAST_GEMM", "true"),
+    ("MAMBA_RS_BI_TENSOR_CORES", "0"),
+    ("MAMBA_RS_BI_F32_POLICY", "tf32"),
+    ("MAMBA_RS_BI_HALF_POLICY", "tiled"),
+    ("MAMBA_RS_BI_GEMM_FAMILY", "triad"),
+    ("MAMBA_RS_ARCH_RUNG", "off"),
 ];
 
 fn small_m1_cfg() -> MambaConfig {
@@ -103,7 +117,7 @@ fn session(d_model: usize) -> TrainSessionCfg {
 
 fn assert_route(ctx: &GpuCtx, mode: GemmMode, family: BiGemmFamily) {
     assert_eq!(ctx.gemm_mode(), mode);
-    assert_eq!(ctx.bi_gemm_family(), family);
+    assert_eq!(ctx.route_controls().family(), family);
 }
 
 fn construction_error<T>(result: Result<T, String>, label: &str) -> String {
@@ -122,24 +136,22 @@ fn m1_default_constructor_uses_inference_family() {
         .expect("construct M1 F32 backbone from owned weights");
 
     assert_eq!(backbone.ctx().gemm_mode(), GemmMode::Deterministic);
-    assert_eq!(backbone.ctx().bi_gemm_family(), BiGemmFamily::Inference);
+    assert_eq!(
+        backbone.ctx().route_controls().family(),
+        BiGemmFamily::Inference
+    );
 }
 
 #[test]
 fn constructor_environment_cases_are_process_isolated() {
-    let cases: [(&str, &[(&str, &str)]); 6] = [
+    let cases: [(&str, &[(&str, &str)]); 5] = [
         ("absent", &[]),
-        ("empty_family", &[("MAMBA_RS_BI_GEMM_FAMILY", "")]),
+        ("stale_knobs", &STALE_KNOBS),
         (
             "conflict_explicit",
-            &[
-                ("MAMBA_RS_GEMM_MODE", "deterministic"),
-                ("MAMBA_RS_FAST_GEMM", "true"),
-                ("MAMBA_RS_BI_GEMM_FAMILY", "triad"),
-            ],
+            &[("MAMBA_RS_GEMM_MODE", "cublas-pedantic")],
         ),
         ("invalid_mode", &[("MAMBA_RS_GEMM_MODE", "invalid")]),
-        ("invalid_family", &[("MAMBA_RS_BI_GEMM_FAMILY", "invalid")]),
         ("errors", &[]),
     ];
     for (case, vars) in cases {
@@ -179,11 +191,9 @@ fn constructor_environment_cases_are_process_isolated() {
 fn constructor_env_child() {
     let case = std::env::var(CHILD_CASE).expect("isolated constructor child case marker");
     match case.as_str() {
-        "absent" => absent_environment_uses_role_defaults(),
-        "empty_family" => empty_family_preserves_triad_compatibility(),
+        "absent" | "stale_knobs" => absent_environment_uses_role_defaults(),
         "conflict_explicit" => explicit_overloads_bypass_conflicting_environment(),
         "invalid_mode" => explicit_overload_bypasses_invalid_mode(),
-        "invalid_family" => explicit_overload_bypasses_invalid_family(),
         "errors" => explicit_overloads_preserve_validation_errors(),
         other => panic!("unknown constructor child case {other}"),
     }
@@ -240,18 +250,6 @@ fn absent_environment_uses_role_defaults() {
             .expect("M3 default trainer");
         assert_route(trainer.ctx(), GemmMode::Deterministic, BiGemmFamily::Triad);
     }
-}
-
-fn empty_family_preserves_triad_compatibility() {
-    let m1_cfg = small_m1_cfg();
-    let m1 = GpuMambaBackbone::new(0, &m1_weights(&m1_cfg, true), m1_cfg, m1_cfg.d_model, 1)
-        .expect("M1 empty-family model");
-    assert_route(m1.ctx(), GemmMode::Deterministic, BiGemmFamily::Triad);
-
-    let m3_cfg = small_m3_cfg();
-    let m3 = GpuMamba3Backbone::new(0, &m3_weights(&m3_cfg, true), m3_cfg, m3_cfg.d_model, 1)
-        .expect("M3 empty-family model");
-    assert_route(m3.ctx(), GemmMode::Deterministic, BiGemmFamily::Triad);
 }
 
 fn explicit_overloads_bypass_conflicting_environment() {
@@ -440,13 +438,12 @@ fn explicit_overloads_bypass_conflicting_environment() {
     #[cfg(feature = "hf")]
     exercise_lm_overloads();
 
-    let conflict = construction_error(
-        GpuMambaBackbone::new(0, &m1_model, m1_cfg, m1_cfg.d_model, 1),
-        "env-aware construction must reject conflicting selectors",
-    );
-    assert!(
-        conflict.contains("conflicts"),
-        "unexpected conflict: {conflict}"
+    let from_env = GpuMambaBackbone::new(0, &m1_model, m1_cfg, m1_cfg.d_model, 1)
+        .expect("env-aware construction reads the mode the environment names");
+    assert_route(
+        from_env.ctx(),
+        GemmMode::CublasPedantic,
+        BiGemmFamily::Inference,
     );
 }
 
@@ -546,30 +543,6 @@ fn explicit_overload_bypasses_invalid_mode() {
         "env lane rejects invalid mode",
     );
     assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
-}
-
-fn explicit_overload_bypasses_invalid_family() {
-    let cfg = small_m3_cfg();
-    let weights = m3_weights(&cfg, true);
-    let explicit = GpuMamba3Backbone::new_with_mode(
-        0,
-        &weights,
-        cfg,
-        cfg.d_model,
-        1,
-        GemmMode::CublasPedantic,
-    )
-    .expect("explicit mode ignores invalid family env");
-    assert_route(
-        explicit.ctx(),
-        GemmMode::CublasPedantic,
-        BiGemmFamily::Inference,
-    );
-    let error = construction_error(
-        GpuMamba3Backbone::new(0, &weights, cfg, cfg.d_model, 1),
-        "env lane rejects invalid family",
-    );
-    assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
 }
 
 fn explicit_overloads_preserve_validation_errors() {

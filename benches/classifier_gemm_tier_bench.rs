@@ -61,7 +61,7 @@ fn classifier_shapes_cublas_vs_triad_vs_fixed() {
 
             let mut timed = |tag: &str, mode: GemmMode, family: BiGemmFamily| -> (f64, Vec<f32>) {
                 ctx.set_gemm_mode(mode).unwrap();
-                ctx.set_bi_gemm_family(family);
+                ctx.route_controls().set_family(family);
                 let once = |y: &mut GpuBuffer| {
                     gpu_gemm_bi_forward_raw(&ctx, y, &x, w.raw_ptr(&stream), None, (m, k, n))
                         .expect("forward")

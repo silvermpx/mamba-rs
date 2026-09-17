@@ -14,9 +14,9 @@ is for contributors who change kernels; users do not need it.
 - Keep a per-kernel ledger in ms/step terms (per-launch time times layers)
   and rank by it, not by how suspicious the code looks.
 - Compile bench kernels at the production state capacity and flags.
-- Print the resolved route in every reading: mode, family, tensor-core
-  permission and numeric policy (`ctx.gemm_mode()`, `ctx.bi_gemm_family()`,
-  `ctx.gemm_route()`; the shared `STAMP` line of the benches). A number
+- Print the resolved route in every reading: mode, storage precision and
+  the route (`ctx.gemm_mode()`, the model's `dtype()`, `ctx.gemm_route()`;
+  the shared `STAMP` line of the benches). A number
   without its route is not a reading; readings have been taken on the wrong
   tier because a selector was assumed rather than printed.
 - Name the comparator literally. Fast TF32, Fast f32 compute and Pedantic

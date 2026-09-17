@@ -75,7 +75,7 @@ struct Inputs {
 
 fn encode(values: &[f32], dtype: WeightDtype) -> Vec<u8> {
     match dtype {
-        WeightDtype::F32 => bytemuck::cast_slice(values).to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => bytemuck::cast_slice(values).to_vec(),
         WeightDtype::Bf16 => values
             .iter()
             .flat_map(|&value| half::bf16::from_f32(value).to_bits().to_ne_bytes())

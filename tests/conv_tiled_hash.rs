@@ -40,7 +40,7 @@ fn run(dtype: WeightDtype) {
     let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
     let k = &ctx.kernels;
     let lane = match dtype {
-        WeightDtype::F32 => "f32",
+        WeightDtype::F32 | WeightDtype::Tf32 => "f32",
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
     };

@@ -1162,7 +1162,7 @@ fn verify_inference_holder(
             state_capacity: ctx.state_cap(),
             nvrtc: compiler.nvrtc_version,
             nvrtc_library_known: compiler.nvrtc_library_known,
-            policy: ctx.f32_triad_policy(),
+            policy: ctx.route_controls().f32_policy(),
         },
         &routes
             .iter()

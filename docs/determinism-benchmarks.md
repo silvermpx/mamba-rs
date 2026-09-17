@@ -111,8 +111,9 @@ tree runs as its own process, in mirrored blocks (old, new, new, old);
 the table shows the median of the four runs of each tree. Before timing,
 every arm's output is compared with the pedantic arm's (relative L2 below
 5e-2 in every cell, below 1e-4 for the exact-f32 kernels). Deterministic
-means the tree's own kernels with `batch_invariant` on; half precision
-runs with tensor cores on both trees, f32 on the exact kernels. The
+means the tree's own kernels (the 0.6.9 tree's `MAMBA_RS_BATCH_INVARIANT`
+flag; 0.7.x has no such switch); half precision runs with tensor cores on
+both trees, f32 on the exact kernels. The
 speedup is 0.6.9 time divided by 0.7.0 time.
 
 The 0.6.9 tree has no deterministic TF32, so there is no old kernel to put
@@ -267,13 +268,14 @@ comparison.
 
 The whole-step gain is the GEMM kernels, the Mamba kernel pass and the
 two route changes of this release together: the stream-K weight gradient
-on every deep reduction, on by default in the tensor-core tier, and the
-parallel scan route from 65 steps on (the changelog's Performance section
-has the parts). The cuBLAS arms moved with them, since they share every
-kernel but the products. One setting stays off by default: with
-`MAMBA_RS_BI_F32_POLICY=tf32` the d768 f32 step takes the deterministic
-TF32 kernels (the only shape of the four with a measured one; the others
-keep the exact kernels and the same time).
+on every deep reduction, on by default, and the parallel scan route from
+65 steps on (the changelog's Performance section has the parts). The
+cuBLAS arms moved with them, since they share every kernel but the
+products. The f32 rows are exact f32; with the weights stored as
+`WeightDtype::Tf32` (`MAMBA_RS_BI_F32_POLICY=tf32` in the 0.7.x spelling)
+the d768 f32 step takes the deterministic TF32 kernels (the only shape of
+the four with a measured one; the others keep the exact kernels and the
+same time).
 
 ### Inference step
 
@@ -281,8 +283,9 @@ keep the exact kernels and the same time).
 3 layers, 366 K parameters), batches 1 to 128, twenty warmups, 2000 to
 5000 eager and 5000 to 10000 graph steps per batch, median of the four
 alternating runs of each tree, microseconds per step. Both trees run the
-inference family with `batch_invariant` on (`Fixed` in 0.6.9, `Inference`
-in 0.7.0); bf16 uses an identity input projection on both sides. The
+inference family (`Fixed` with the batch-invariant flag in 0.6.9,
+`Inference` in 0.7.0); bf16 uses an identity input projection on both
+sides. The
 outputs of the two trees are bit-identical at every batch, step and path,
 and the CPU reference agrees (cosine 1.000000 in f32, at least 0.99998 in
 bf16).

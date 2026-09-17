@@ -65,7 +65,7 @@ enum Corpus {
 
 fn encode(values: &[f32], dtype: WeightDtype) -> Vec<u8> {
     match dtype {
-        WeightDtype::F32 => values
+        WeightDtype::F32 | WeightDtype::Tf32 => values
             .iter()
             .flat_map(|value| value.to_ne_bytes())
             .collect(),

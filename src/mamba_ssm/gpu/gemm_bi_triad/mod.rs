@@ -4,8 +4,8 @@
 //! Covers f32, bf16 and f16, on CUDA cores and on Tensor Cores. Physical
 //! exports and Triad-specific identifiers use the `gemm_bi` family name.
 //!
-//! A warptiled GEMM family of our own. Three entry points used when
-//! `ctx.batch_invariant()` is enabled:
+//! A warptiled GEMM family of our own. Three entry points used in the
+//! deterministic GEMM mode:
 //!
 //!   - [`gemm_bi_forward`]      NN: `Y = X @ W + bias`
 //!   - [`gemm_bi_backward_dw`]  TN: `dW += X^T @ dY` (accumulated)

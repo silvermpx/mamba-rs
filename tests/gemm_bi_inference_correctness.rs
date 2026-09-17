@@ -80,12 +80,12 @@ fn fixed_tile_matches_cpu_across_tails() {
         let mut y = GpuBuffer::zeros(&stream, m * n).expect("y");
 
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Inference);
+        ctx.route_controls().set_family(BiGemmFamily::Inference);
         gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
             .expect("fixed forward");
         let got = y.to_cpu(&stream).expect("d2h");
         ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
-        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.route_controls().set_family(BiGemmFamily::Triad);
 
         let mut worst = 0.0f32;
         let mut worst_at = (0usize, 0usize);
@@ -133,7 +133,8 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let compiler = ctx.kernels.compiler_identity();
     assert!(compiler.nvrtc_library_known, "known NVRTC library required");
     assert!(
@@ -661,7 +662,8 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
     let compiler = ctx.kernels.compiler_identity();
     assert!(compiler.nvrtc_library_known, "known NVRTC library required");
     assert!(

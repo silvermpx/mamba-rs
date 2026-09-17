@@ -95,11 +95,15 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f
         .ctx()
         .set_gemm_mode(GemmMode::Deterministic)
         .unwrap();
-    trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
-    trainer.ctx().set_bi_tensor_cores(false);
     trainer
         .ctx()
-        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        .route_controls()
+        .set_family(BiGemmFamily::Triad);
+    trainer.ctx().route_controls().set_tensor_cores(false);
+    trainer
+        .ctx()
+        .route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     trainer
         .step(&input, &d_temporal)
         .expect("eager warmup step");
@@ -235,11 +239,15 @@ fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
         .ctx()
         .set_gemm_mode(GemmMode::Deterministic)
         .unwrap();
-    trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
-    trainer.ctx().set_bi_tensor_cores(false);
     trainer
         .ctx()
-        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        .route_controls()
+        .set_family(BiGemmFamily::Triad);
+    trainer.ctx().route_controls().set_tensor_cores(false);
+    trainer
+        .ctx()
+        .route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     // B*T=128 enters the scalar typed fallback while tensor cores are disabled.
     let warmup = trainer
         .step(&input, &d_temporal)

@@ -16,10 +16,12 @@ const OUTPUT_POISON_BITS: u32 = 0x7fc0_d00d;
 
 fn configure_decode_route(ctx: &GpuCtx, tensor_cores: bool, family: BiGemmFamily) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(family);
-    ctx.set_bi_tensor_cores(tensor_cores);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
+    ctx.route_controls().set_family(family);
+    ctx.route_controls().set_tensor_cores(tensor_cores);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::TiledParity);
 }
 
 fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool, family: BiGemmFamily) {

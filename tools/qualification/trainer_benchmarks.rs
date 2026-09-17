@@ -11,6 +11,12 @@
 //! All tests are `#[ignore]` — opt-in:
 //!   cargo test --release --features cuda --test trainer_benchmarks -- --ignored --nocapture
 //!
+//! The GEMM tier of a reading is `MAMBA_RS_BENCH_TIER`: `bi+tc` (the
+//! deterministic mode as shipped, the default), `bi` (the deterministic
+//! scalar tier, an instrument-only route), `cublas` (Pedantic) or
+//! `cublas+tf32` (Fast). The instrument sets it on the trainer's context
+//! after construction; the crate itself has no such knob.
+//!
 //! The outputs are eager-vs-graph timing tables for each dtype, written
 //! to stderr. Use these to track the real cost of a training step at
 //! release-realistic shapes.
@@ -25,7 +31,28 @@ mod timed;
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+
+/// Apply `MAMBA_RS_BENCH_TIER` to a freshly built context; unset means the
+/// deterministic mode as shipped.
+fn apply_bench_tier(ctx: &GpuCtx) -> Result<(), String> {
+    let tier = std::env::var("MAMBA_RS_BENCH_TIER").unwrap_or_else(|_| "bi+tc".to_string());
+    let (mode, tensor_cores) = match tier.as_str() {
+        "bi+tc" => (GemmMode::Deterministic, true),
+        "bi" => (GemmMode::Deterministic, false),
+        "cublas" => (GemmMode::CublasPedantic, true),
+        "cublas+tf32" => (GemmMode::CublasFast, true),
+        other => {
+            return Err(format!(
+                "MAMBA_RS_BENCH_TIER={other:?}: use bi+tc, bi, cublas or cublas+tf32"
+            ));
+        }
+    };
+    ctx.set_gemm_mode(mode)?;
+    ctx.route_controls().set_tensor_cores(tensor_cores);
+    Ok(())
+}
 
 const WARMUP: usize = 3;
 const STEPS_EAGER: usize = 10;
@@ -109,6 +136,7 @@ fn run_lm_shape(
         },
         dtype,
     )?;
+    apply_bench_tier(trainer.ctx())?;
     // The default row runs the deterministic kernels; the IEEE row measures
     // exact cuBLAS instead, the closest match to torch's f32.
     if std::env::var("MAMBA_RS_BENCH_IEEE_F32").as_deref() == Ok("1") {
@@ -124,10 +152,10 @@ fn run_lm_shape(
         cfg.scan_mode,
         cfg.scan_mode.use_parallel(seq_len, cfg.d_state),
         trainer.ctx().gemm_mode(),
-        trainer.ctx().bi_gemm_family(),
+        trainer.ctx().route_controls().family(),
         trainer.ctx().gemm_route(),
-        trainer.ctx().bi_tensor_cores(),
-        trainer.ctx().f32_triad_policy(),
+        trainer.ctx().route_controls().tensor_cores(),
+        trainer.ctx().route_controls().f32_policy(),
         cfg.n_layers,
     );
 
@@ -193,12 +221,10 @@ fn run_lm_shape(
         "train metrics {dtype:?} graph skipped={graph_skips}/{STEPS_GRAPH} last_used_loss_scale={graph_scale:?}"
     );
 
-    // Self-describing measurement: the GEMM tier rides TWO env flags
-    // (MAMBA_RS_BATCH_INVARIANT and MAMBA_RS_BI_TENSOR_CORES on top of
-    // it); printing the resolved tier makes a missing base flag visible
-    // in the reading itself.
-    let tier = if trainer.ctx().batch_invariant() {
-        if trainer.ctx().bi_tensor_cores() {
+    // Self-describing measurement: printing the resolved tier makes a
+    // mistyped MAMBA_RS_BENCH_TIER visible in the reading itself.
+    let tier = if trainer.ctx().route_controls().batch_invariant() {
+        if trainer.ctx().route_controls().tensor_cores() {
             "bi+tc"
         } else {
             "bi"
@@ -267,7 +293,7 @@ fn bench_lm_train_bf16_parallel_scan() {
 ///   MAMBA_RS_BENCH_T (seq_len, default 1300)
 ///   MAMBA_RS_BENCH_DTYPE (f32|bf16|f16, default bf16)
 ///   MAMBA_RS_BENCH_SCAN (auto|seq|par, default auto)
-/// Combine with MAMBA_RS_BATCH_INVARIANT=1 (+_TC=1) for the BI tiers.
+/// MAMBA_RS_BENCH_TIER picks the GEMM tier (see the module head).
 #[test]
 #[ignore]
 fn bench_lm_train_production_shape() {
@@ -361,6 +387,7 @@ fn bench_production_split_fwd_bwd() {
         dtype,
     )
     .unwrap();
+    apply_bench_tier(trainer.ctx()).unwrap();
     let inp = det(n, 0xA1, 0.01);
     let dt = det(n, 0xB1, 0.01);
     let mut out = vec![0f32; n];
@@ -393,8 +420,8 @@ fn bench_production_split_fwd_bwd() {
 }
 
 /// One point OFF the batch-invariant `batch >= 128` dispatch boundary
-/// (B2 x T64 lands exactly ON it): run under MAMBA_RS_BATCH_INVARIANT=1
-/// to see the small-M bucket family.
+/// (B2 x T64 lands exactly ON it): the deterministic mode shows the
+/// small-M bucket family.
 #[test]
 #[ignore]
 fn bench_lm_train_f32_t60() {
@@ -1123,7 +1150,7 @@ fn bench_bwd_kernels_isolated() {
 
 /// The four backward GEMM classes at exact production shapes,
 /// through the SAME typed BI wrappers the trainer uses (TC tier on/off
-/// via MAMBA_RS_BI_TENSOR_CORES).
+/// via MAMBA_RS_BENCH_TIER=bi+tc or bi).
 #[test]
 #[ignore]
 fn bench_bwd_gemms_isolated() {
@@ -1136,7 +1163,7 @@ fn bench_bwd_gemms_isolated() {
 
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
-    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+    apply_bench_tier(&ctx).unwrap();
     let dtype = WeightDtype::Bf16;
     let bt = 8usize * 1300;
 

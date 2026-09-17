@@ -358,7 +358,7 @@ fn check_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype) {
 
     eprintln!("ssm_parallel_scan_bwd ({dtype:?}, B={b} T={t} di={di} ds={ds}):");
     let (cos_min, norm_tol) = match dtype {
-        WeightDtype::F32 => (1.0 - 1e-4, 0.02),
+        WeightDtype::F32 | WeightDtype::Tf32 => (1.0 - 1e-4, 0.02),
         WeightDtype::Bf16 => (0.99, 0.05),
         WeightDtype::F16 => (0.999, 0.02),
     };
@@ -646,7 +646,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
 
     eprintln!("ssm_parallel_bwd_fold+slim ({dtype:?}, B={b} T={t} di={di} ds={ds}):");
     let (cos_min, norm_tol) = match dtype {
-        WeightDtype::F32 => (1.0 - 1e-4, 0.02),
+        WeightDtype::F32 | WeightDtype::Tf32 => (1.0 - 1e-4, 0.02),
         WeightDtype::Bf16 => (0.99, 0.05),
         WeightDtype::F16 => (0.999, 0.02),
     };

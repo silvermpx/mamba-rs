@@ -306,8 +306,9 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
     }
     let ctx = GpuCtx::new(&device)?;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     let specialized = ctx
         .kernels
         .f32_triad_availability()

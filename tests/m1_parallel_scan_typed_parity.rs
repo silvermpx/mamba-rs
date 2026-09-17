@@ -272,7 +272,7 @@ fn check_at_t(dtype: WeightDtype, seq_len: usize) {
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::Bf16 => (0.99_f32, 0.10_f32),
         WeightDtype::F16 => (0.995_f32, 0.05_f32),
-        WeightDtype::F32 => unreachable!(),
+        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
     };
     assert!(
         cos_g >= cos_min,

@@ -76,7 +76,7 @@ fn upload_typed(
     // just-uploaded bytes.
     stream.synchronize().unwrap();
     let bytes: Vec<u8> = match dtype {
-        WeightDtype::F32 => bytemuck::cast_slice(src).to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => bytemuck::cast_slice(src).to_vec(),
         WeightDtype::Bf16 => {
             let v: Vec<half::bf16> = src.iter().map(|&x| half::bf16::from_f32(x)).collect();
             bytemuck::cast_slice(&v).to_vec()
@@ -126,7 +126,7 @@ fn download_typed(
     assert_eq!(res, cudarc::driver::sys::CUresult::CUDA_SUCCESS);
     stream.synchronize().unwrap();
     match dtype {
-        WeightDtype::F32 => bytemuck::cast_slice(&bytes).to_vec(),
+        WeightDtype::F32 | WeightDtype::Tf32 => bytemuck::cast_slice(&bytes).to_vec(),
         WeightDtype::Bf16 => {
             let v: &[half::bf16] = bytemuck::cast_slice(&bytes);
             v.iter().map(|x| x.to_f32()).collect()

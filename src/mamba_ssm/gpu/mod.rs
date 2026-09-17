@@ -6,7 +6,7 @@
 //! explicit alternatives.
 //!
 //! - `context` — the GPU context: stream, kernels, cuBLAS handle and the
-//!   GEMM route (mode, family, numeric policies)
+//!   GEMM route (mode, storage precision and the context's role)
 //! - `device` — CUDA device and cuBLAS handle
 //! - `buffers` — GPU memory management
 //! - `kernels`, `kernel_identity` — NVRTC compilation and the frozen

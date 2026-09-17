@@ -13,10 +13,10 @@
 //! - Mamba SSM and Mamba-3 SISO architectures
 //! - CPU and GPU (CUDA) paths for both
 //! - Full training with BPTT through the recurrent SSM state + AdamW
-//! - `WeightDtype::{F32, Bf16, F16}` with f32 master state and accumulation;
-//!   GEMM product precision follows the selected numeric route
+//! - `WeightDtype::{F32, Tf32, Bf16, F16}` with f32 master state and
+//!   accumulation; the storage precision decides the product precision
 //! - CUDA Graph capture for inference and training steps
-//! - Deterministic f32/bf16/f16 GEMM kernels for inference and training,
+//! - Deterministic f32/tf32/bf16/f16 GEMM kernels for inference and training,
 //!   the default since 0.7.0; the inference kernels are batch-invariant,
 //!   the training kernels within one dispatch bucket
 //! - HuggingFace safetensors loader for Mamba SSM checkpoints
@@ -39,8 +39,9 @@
 //! trainer `*_with_mode` constructors, or `MAMBA_RS_GEMM_MODE` for the
 //! environment-reading constructors) or change it with
 //! `GpuCtx::set_gemm_mode`, which is refused while a graph is being captured.
-//! Storage dtype, mode, family and the f32/half policies are separate
-//! settings. The guide is
+//! Storage precision (`WeightDtype`) and mode are the two settings; inside
+//! the deterministic mode the kernels are chosen from them and from whether
+//! the context serves a model or a trainer. The guide is
 //! <https://github.com/silvermpx/mamba-rs/blob/main/docs/gemm-modes.md> and
 //! the measurements are in
 //! <https://github.com/silvermpx/mamba-rs/blob/main/docs/determinism-benchmarks.md>.

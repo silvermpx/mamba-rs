@@ -1016,7 +1016,7 @@ fn width(dtype: PolicyDtype) -> u64 {
 
 pub(in crate::mamba_ssm::gpu) fn policy_dtype(dtype: super::WeightDtype) -> PolicyDtype {
     match dtype {
-        super::WeightDtype::F32 => PolicyDtype::F32,
+        super::WeightDtype::F32 | super::WeightDtype::Tf32 => PolicyDtype::F32,
         super::WeightDtype::Bf16 => PolicyDtype::Bf16,
         super::WeightDtype::F16 => PolicyDtype::F16,
     }

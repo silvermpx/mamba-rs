@@ -355,6 +355,11 @@ path = "tests/gemm_inference_route_inventory.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "tf32_storage_precision"
+path = "tests/tf32_storage_precision.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_mode_api"
 path = "tests/gemm_mode_api.rs"
 required-features = ["cuda"]

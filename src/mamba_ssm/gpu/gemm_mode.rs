@@ -2,11 +2,11 @@ use cudarc::cublas::sys::{cublasComputeType_t, cublasMath_t};
 
 /// Selects the GEMM implementation and cuBLAS numeric policy for a GPU context.
 ///
-/// [`GemmMode::Deterministic`] is the default. It selects the context's custom
-/// batch-invariant GEMM routes. The two cuBLAS modes select vendor GEMMs with
-/// either ordinary or pedantic f32 compute. Changing the mode does not change
-/// the custom deterministic family, tensor-core permission, or f32/half
-/// policies stored on the context.
+/// [`GemmMode::Deterministic`] is the default. It selects the context's own
+/// fixed-reduction-order GEMM kernels. The two cuBLAS modes select vendor
+/// GEMMs with either ordinary or pedantic f32 compute. The storage precision
+/// ([`WeightDtype`](crate::mamba_ssm::gpu::dtype::WeightDtype)) is the other
+/// setting and is independent of the mode.
 ///
 /// Use [`crate::mamba_ssm::gpu::context::GpuCtx::new_with_mode`] when the mode
 /// is known at construction, or
@@ -14,17 +14,16 @@ use cudarc::cublas::sys::{cublasComputeType_t, cublasMath_t};
 /// existing usable context.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GemmMode {
-    /// Use the context's custom batch-invariant GEMM routes.
-    ///
-    /// The default f32 policy is exact scalar FMA. Custom deterministic TF32
-    /// is a separate opt-in policy; this variant does not enable it.
+    /// Use the context's own deterministic GEMM kernels: the same bits run
+    /// to run, eager or graph. `WeightDtype::F32` multiplies exactly;
+    /// `WeightDtype::Tf32` takes the deterministic TF32 kernels where one is
+    /// measured.
     #[default]
     Deterministic,
     /// Use cuBLAS with ordinary f32 GemmEx compute and TF32 handle math.
     ///
-    /// This permits vendor TF32 and other cuBLAS optimizations. It does not
-    /// change the custom deterministic TF32 permission, which is dormant while
-    /// this mode is selected.
+    /// This permits vendor TF32 and other cuBLAS optimizations for every f32
+    /// product, whichever of `F32` and `Tf32` the weights were stored as.
     CublasFast,
     /// Use cuBLAS with pedantic f32 GemmEx compute and pedantic handle math.
     CublasPedantic,
@@ -83,34 +82,6 @@ impl GemmMode {
             }
             Self::CublasFast => Ok(cublasComputeType_t::CUBLAS_COMPUTE_32F),
             Self::CublasPedantic => Ok(cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC),
-        }
-    }
-
-    pub(crate) const fn legacy_batch_invariant(self, on: bool) -> Self {
-        if on {
-            Self::Deterministic
-        } else if matches!(self, Self::Deterministic) {
-            Self::CublasPedantic
-        } else {
-            self
-        }
-    }
-
-    pub(crate) const fn legacy_fast_gemm(self, on: bool) -> Self {
-        if on {
-            Self::CublasFast
-        } else if matches!(self, Self::Deterministic) {
-            Self::Deterministic
-        } else {
-            Self::CublasPedantic
-        }
-    }
-
-    pub(crate) const fn legacy_disable_tf32(self) -> Self {
-        if matches!(self, Self::Deterministic) {
-            Self::Deterministic
-        } else {
-            Self::CublasPedantic
         }
     }
 }
@@ -289,22 +260,6 @@ mod tests {
                 if error.contains("update failed") && error.contains("restore failed")
         ));
         backend.finish();
-    }
-
-    #[test]
-    fn legacy_adapter_table_is_complete() {
-        use GemmMode::{CublasFast as Fast, CublasPedantic as Pedantic, Deterministic as D};
-        for (from, bi_true, bi_false, fast_true, fast_false, disable_tf32) in [
-            (D, D, Pedantic, Fast, D, D),
-            (Fast, D, Fast, Fast, Pedantic, Pedantic),
-            (Pedantic, D, Pedantic, Fast, Pedantic, Pedantic),
-        ] {
-            assert_eq!(from.legacy_batch_invariant(true), bi_true);
-            assert_eq!(from.legacy_batch_invariant(false), bi_false);
-            assert_eq!(from.legacy_fast_gemm(true), fast_true);
-            assert_eq!(from.legacy_fast_gemm(false), fast_false);
-            assert_eq!(from.legacy_disable_tf32(), disable_tf32);
-        }
     }
 
     #[test]

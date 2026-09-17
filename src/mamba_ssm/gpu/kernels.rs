@@ -33,7 +33,7 @@ pub struct TypedKernel {
 impl TypedKernel {
     pub fn get(&self, dt: WeightDtype) -> &CudaFunction {
         match dt {
-            WeightDtype::F32 => &self.f32,
+            WeightDtype::F32 | WeightDtype::Tf32 => &self.f32,
             WeightDtype::Bf16 => &self.bf16,
             WeightDtype::F16 => &self.f16,
         }
@@ -53,7 +53,7 @@ impl HalfKernel {
         match dt {
             WeightDtype::Bf16 => &self.bf16,
             WeightDtype::F16 => &self.f16,
-            WeightDtype::F32 => {
+            WeightDtype::F32 | WeightDtype::Tf32 => {
                 panic!("HalfKernel has no f32 variant (use the TypedKernel f32 path instead)")
             }
         }

@@ -43,26 +43,51 @@ fn next_gpu_ctx_token() -> Result<u64, String> {
 
 struct GemmEnvValues {
     mode: Result<String, std::env::VarError>,
-    batch_invariant: Result<String, std::env::VarError>,
-    fast_gemm: Result<String, std::env::VarError>,
-    tensor_cores: Result<String, std::env::VarError>,
-    f32_policy: Result<String, std::env::VarError>,
-    half_policy: Result<String, std::env::VarError>,
-    family: Result<String, std::env::VarError>,
-    arch_rung: Result<String, std::env::VarError>,
 }
 
 impl GemmEnvValues {
     fn read() -> Self {
         Self {
             mode: std::env::var("MAMBA_RS_GEMM_MODE"),
-            batch_invariant: std::env::var("MAMBA_RS_BATCH_INVARIANT"),
-            fast_gemm: std::env::var("MAMBA_RS_FAST_GEMM"),
-            tensor_cores: std::env::var("MAMBA_RS_BI_TENSOR_CORES"),
-            f32_policy: std::env::var("MAMBA_RS_BI_F32_POLICY"),
-            half_policy: std::env::var("MAMBA_RS_BI_HALF_POLICY"),
-            family: std::env::var("MAMBA_RS_BI_GEMM_FAMILY"),
-            arch_rung: std::env::var("MAMBA_RS_ARCH_RUNG"),
+        }
+    }
+}
+
+/// What a context serves and how its f32 products round. The constructor
+/// that knows the role sets it once: a model context serves the Inference
+/// family, a trainer or a plain context the Triad family, and the storage
+/// precision the caller asked for decides whether f32 products stay exact
+/// or take the deterministic TF32 kernels where one is measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GemmRole {
+    pub(crate) family: BiGemmFamily,
+    pub(crate) f32_numeric: F32TriadPolicy,
+}
+
+impl GemmRole {
+    pub(crate) fn triad(dtype: WeightDtype) -> Self {
+        Self {
+            family: BiGemmFamily::Triad,
+            f32_numeric: dtype.f32_numeric(),
+        }
+    }
+
+    pub(crate) fn inference(dtype: WeightDtype) -> Self {
+        Self {
+            family: BiGemmFamily::Inference,
+            f32_numeric: dtype.f32_numeric(),
+        }
+    }
+}
+
+impl WeightDtype {
+    /// The f32 numeric contract a storage precision asks for: `Tf32` permits
+    /// the deterministic TF32 kernels, everything else keeps every f32
+    /// product exact.
+    pub(crate) fn f32_numeric(self) -> F32TriadPolicy {
+        match self {
+            Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32,
+            Self::F32 | Self::Bf16 | Self::F16 => F32TriadPolicy::ExactScalarFma,
         }
     }
 }
@@ -76,124 +101,41 @@ struct ResolvedGemmEnv {
     half_policy: HalfTriadPolicy,
 }
 
-fn explicit_gemm_config(mode: GemmMode, family: BiGemmFamily) -> ResolvedGemmEnv {
+fn explicit_gemm_config(mode: GemmMode, role: GemmRole) -> ResolvedGemmEnv {
     ResolvedGemmEnv {
         mode,
-        family,
+        family: role.family,
         tensor_cores: true,
-        f32_policy: F32TriadPolicy::ExactScalarFma,
+        f32_policy: role.f32_numeric,
         half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
     }
 }
 
-fn env_value_is_present(value: &Result<String, std::env::VarError>) -> bool {
-    !matches!(value, Err(std::env::VarError::NotPresent))
-}
-
-fn gemm_mode_from_results(
-    mode: Result<String, std::env::VarError>,
-    batch_invariant: Result<String, std::env::VarError>,
-    fast_gemm: Result<String, std::env::VarError>,
-) -> Result<GemmMode, String> {
-    let canonical_present = env_value_is_present(&mode);
-    let batch_invariant_present = env_value_is_present(&batch_invariant);
-    let fast_gemm_present = env_value_is_present(&fast_gemm);
-    if canonical_present && (batch_invariant_present || fast_gemm_present) {
-        return Err(
-            "MAMBA_RS_GEMM_MODE conflicts with deprecated MAMBA_RS_BATCH_INVARIANT and \
-             MAMBA_RS_FAST_GEMM selectors; remove the old selector"
-                .into(),
-        );
-    }
-    if canonical_present {
-        return match mode {
-            Ok(value) => GemmMode::parse_env_value(&value),
-            Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-                "MAMBA_RS_GEMM_MODE={value:?} is not valid Unicode \
-                 (use deterministic, cublas-fast, or cublas-pedantic)"
-            )),
-            Err(std::env::VarError::NotPresent) => unreachable!("presence checked above"),
-        };
-    }
-
-    let batch_invariant =
-        optional_tier_flag_from_result("MAMBA_RS_BATCH_INVARIANT", batch_invariant)?;
-    let fast_gemm = optional_tier_flag_from_result("MAMBA_RS_FAST_GEMM", fast_gemm)?;
-    match (batch_invariant, fast_gemm) {
-        (None, None) | (Some(true), None | Some(false)) => Ok(GemmMode::Deterministic),
-        (Some(true), Some(true)) => Err(
-            "MAMBA_RS_BATCH_INVARIANT=true conflicts with MAMBA_RS_FAST_GEMM=true; \
-             use MAMBA_RS_GEMM_MODE to select one mode"
-                .into(),
-        ),
-        (None | Some(false), Some(true)) => Ok(GemmMode::CublasFast),
-        (None, Some(false)) | (Some(false), None | Some(false)) => Ok(GemmMode::CublasPedantic),
+/// The mode `MAMBA_RS_GEMM_MODE` names; unset means the default,
+/// [`GemmMode::Deterministic`].
+fn gemm_mode_from_env(mode: Result<String, std::env::VarError>) -> Result<GemmMode, String> {
+    match mode {
+        Ok(value) => GemmMode::parse_env_value(&value),
+        Err(std::env::VarError::NotPresent) => Ok(GemmMode::Deterministic),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "MAMBA_RS_GEMM_MODE={value:?} is not valid Unicode \
+             (use deterministic, cublas-fast, or cublas-pedantic)"
+        )),
     }
 }
 
-fn resolve_gemm_env(
-    values: GemmEnvValues,
-    default_family: BiGemmFamily,
-) -> Result<ResolvedGemmEnv, String> {
-    validate_arch_rung_flag(values.arch_rung)?;
-    let deterministic_controls = [
-        ("MAMBA_RS_BI_TENSOR_CORES", &values.tensor_cores),
-        ("MAMBA_RS_BI_F32_POLICY", &values.f32_policy),
-        ("MAMBA_RS_BI_HALF_POLICY", &values.half_policy),
-        ("MAMBA_RS_BI_GEMM_FAMILY", &values.family),
-    ];
-    let mode = gemm_mode_from_results(values.mode, values.batch_invariant, values.fast_gemm)?;
-    if mode != GemmMode::Deterministic {
-        let present: Vec<_> = deterministic_controls
-            .into_iter()
-            .filter_map(|(name, value)| env_value_is_present(value).then_some(name))
-            .collect();
-        if !present.is_empty() {
-            return Err(format!(
-                "deterministic GEMM controls {} cannot be set while the resolved GEMM mode is {}; \
-                 remove them or select deterministic",
-                present.join(", "),
-                mode.as_str()
-            ));
-        }
-        return Ok(ResolvedGemmEnv {
-            mode,
-            tensor_cores: true,
-            family: default_family,
-            f32_policy: F32TriadPolicy::ExactScalarFma,
-            half_policy: HalfTriadPolicy::TiledParity,
-        });
-    }
-
-    let tensor_cores =
-        optional_tier_flag_from_result("MAMBA_RS_BI_TENSOR_CORES", values.tensor_cores)?
-            .unwrap_or(true);
-    let f32_policy = f32_triad_policy_from_result(values.f32_policy)?;
-    // The deterministic tensor-core tier takes the stream-K dW schedule by
-    // default; the scalar tier has no stream-K route and stays tiled.
-    let half_policy =
-        half_triad_policy_from_result(values.half_policy)?.unwrap_or(if tensor_cores {
-            HalfTriadPolicy::AllowStreamKFixedOrder
-        } else {
-            HalfTriadPolicy::TiledParity
-        });
-    let family = bi_gemm_family_from_result(values.family, default_family)?;
-    validate_custom_policy(tensor_cores, half_policy)?;
-    Ok(ResolvedGemmEnv {
-        mode,
-        tensor_cores,
-        family,
-        f32_policy,
-        half_policy,
-    })
+fn resolve_gemm_env(values: GemmEnvValues, role: GemmRole) -> Result<ResolvedGemmEnv, String> {
+    Ok(explicit_gemm_config(gemm_mode_from_env(values.mode)?, role))
 }
 
-/// Which batch-invariant GEMM family serves the forward while
-/// [`GpuCtx::batch_invariant`] is on. Both are deterministic; they are
-/// named for the STRUCTURE that produces their differing guarantee, not
-/// for a role (either can serve a forward) and not for a tensor-core
-/// tier (both instantiate on Tensor Cores for bf16/f16 and on CUDA cores
-/// for f32).
+/// Which deterministic GEMM family serves the forward. Both are
+/// deterministic; they are named for the STRUCTURE that produces their
+/// differing guarantee, not for a tensor-core tier (both instantiate on
+/// Tensor Cores for bf16/f16 and on CUDA cores for f32). The context's role
+/// chooses: a model context serves Inference, a trainer Triad. Not a user
+/// setting; the qualification instruments reach it through
+/// [`GpuCtx::route_controls`].
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum BiGemmFamily {
     /// The multi-tile dispatcher (`kernels/gemm_bi_triad/`) - the default.
@@ -213,80 +155,11 @@ pub enum BiGemmFamily {
     Inference,
 }
 
-/// `MAMBA_RS_ARCH_RUNG` knows one value, `off`; any other spelling would
-/// leave the architecture rung running as if the flag were unset, so it is
-/// refused here instead.
-fn validate_arch_rung_flag(value: Result<String, std::env::VarError>) -> Result<(), String> {
-    match value {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "off" => Ok(()),
-            other => Err(format!(
-                "MAMBA_RS_ARCH_RUNG={other:?} is not a recognized value; only off is \
-                 (leave it unset to keep the rung on)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(()),
-        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-            "MAMBA_RS_ARCH_RUNG={value:?} is not valid Unicode; only off is recognized"
-        )),
-    }
-}
-
-fn bi_gemm_family_from_result(
-    value: Result<String, std::env::VarError>,
-    default_family: BiGemmFamily,
-) -> Result<BiGemmFamily, String> {
-    match value {
-        Ok(value) => match value.trim() {
-            "" => Ok(BiGemmFamily::Triad),
-            value if value.eq_ignore_ascii_case("triad") => Ok(BiGemmFamily::Triad),
-            value if value.eq_ignore_ascii_case("inference") => Ok(BiGemmFamily::Inference),
-            value => Err(format!(
-                "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not a recognized family; \
-                 only inference or triad are accepted"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default_family),
-        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-            "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not valid Unicode; \
-             only inference or triad are accepted"
-        )),
-    }
-}
-
-fn tier_flag_from_result(
-    name: &str,
-    value: Result<String, std::env::VarError>,
-) -> Result<bool, String> {
-    match value {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Ok(true),
-            "0" | "false" | "no" | "off" | "" => Ok(false),
-            other => Err(format!(
-                "{name}={other:?} is not a recognized flag value \
-                 (use 1/true/yes/on or 0/false/no/off)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-            "{name}={value:?} is not valid Unicode \
-             (use 1/true/yes/on or 0/false/no/off)"
-        )),
-    }
-}
-
-fn optional_tier_flag_from_result(
-    name: &str,
-    value: Result<String, std::env::VarError>,
-) -> Result<Option<bool>, String> {
-    if matches!(value, Err(std::env::VarError::NotPresent)) {
-        Ok(None)
-    } else {
-        tier_flag_from_result(name, value).map(Some)
-    }
-}
-
-/// Numeric policy for deterministic batch-invariant f32 GEMMs.
+/// Numeric policy for deterministic f32 GEMMs, set by the storage precision
+/// the context was built for ([`WeightDtype::Tf32`] permits TF32). Not a
+/// user setting; the qualification instruments reach it through
+/// [`GpuCtx::route_controls`].
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum F32TriadPolicy {
@@ -300,33 +173,11 @@ pub enum F32TriadPolicy {
     AllowDeterministicTf32 = 1,
 }
 
-impl F32TriadPolicy {
-    /// Parse the strict public environment spelling for this policy.
-    pub fn parse_env_value(value: &str) -> Result<Self, String> {
-        match value.trim_ascii() {
-            "exact" => Ok(Self::ExactScalarFma),
-            "tf32" => Ok(Self::AllowDeterministicTf32),
-            _ => Err(format!(
-                "MAMBA_RS_BI_F32_POLICY={value:?} is not a recognized f32 triad policy \
-                 (use exact or tf32)"
-            )),
-        }
-    }
-}
-
-fn f32_triad_policy_from_result(
-    value: Result<String, std::env::VarError>,
-) -> Result<F32TriadPolicy, String> {
-    match value {
-        Ok(value) => F32TriadPolicy::parse_env_value(&value),
-        Err(std::env::VarError::NotPresent) => Ok(F32TriadPolicy::ExactScalarFma),
-        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-            "MAMBA_RS_BI_F32_POLICY={value:?} is not valid Unicode (use exact or tf32)"
-        )),
-    }
-}
-
-/// Numeric policy for batch-invariant half-precision (bf16/f16) Triad GEMMs.
+/// Numeric policy for deterministic half-precision (bf16/f16) Triad GEMMs.
+/// Every context permits the measured stream-K weight-gradient routes; the
+/// shape gates decide per call. Not a user setting; the qualification
+/// instruments reach it through [`GpuCtx::route_controls`].
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum HalfTriadPolicy {
@@ -345,53 +196,9 @@ pub enum HalfTriadPolicy {
     AllowStreamKFixedOrder = 1,
 }
 
-impl HalfTriadPolicy {
-    /// Parse the strict public environment spelling for this policy.
-    pub fn parse_env_value(value: &str) -> Result<Self, String> {
-        match value.trim_ascii() {
-            "tiled" => Ok(Self::TiledParity),
-            "streamk" => Ok(Self::AllowStreamKFixedOrder),
-            _ => Err(format!(
-                "MAMBA_RS_BI_HALF_POLICY={value:?} is not a recognized half triad policy \
-                 (use tiled or streamk)"
-            )),
-        }
-    }
-}
-
-/// The explicit half policy, `None` when the environment names none. The
-/// resolver then keeps the tiled policy, which reproduces the portable
-/// tensor-core kernels bit for bit; `streamk` is the explicit opt-in to the
-/// measured stream-K routes and their own fold order.
-fn half_triad_policy_from_result(
-    value: Result<String, std::env::VarError>,
-) -> Result<Option<HalfTriadPolicy>, String> {
-    match value {
-        Ok(value) => HalfTriadPolicy::parse_env_value(&value).map(Some),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
-            "MAMBA_RS_BI_HALF_POLICY={value:?} is not valid Unicode (use tiled or streamk)"
-        )),
-    }
-}
-
-fn validate_custom_policy(
-    bi_tensor_cores: bool,
-    half_policy: HalfTriadPolicy,
-) -> Result<(), String> {
-    if half_policy == HalfTriadPolicy::AllowStreamKFixedOrder && !bi_tensor_cores {
-        return Err(
-            "MAMBA_RS_BI_HALF_POLICY=streamk requires MAMBA_RS_BI_TENSOR_CORES=1; \
-             stream-K routes are in the deterministic tensor-core tier"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-pub use super::kernel_identity::{
-    BackendSet as GemmBackendSet, GemmPolicy, GemmRouteIdentity, NumericContractSet,
-};
+pub use super::kernel_identity::GemmRouteIdentity;
+#[doc(hidden)]
+pub use super::kernel_identity::{BackendSet as GemmBackendSet, GemmPolicy, NumericContractSet};
 
 /// Complete policy, compiler, artifact, and device identity pinned by graphs.
 pub type GemmRoute = GemmRouteIdentity;
@@ -524,21 +331,21 @@ pub struct GpuCtx {
     gemm_mode: Cell<GemmMode>,
     /// Diagnostic retained after an unverified cuBLAS math rollback.
     gemm_unusable: RefCell<Option<String>>,
-    /// Opt-in tensor-core tier for the batch-invariant typed GEMMs.
-    /// SEPARATE numeric contract: mma.sync f32 accumulation
-    /// differs from the scalar __fmaf_rn chain, so outputs do not bit-match
-    /// the scalar triad — but the TC kernels are fully deterministic and
-    /// batch-invariant for their admitted shapes. Effective only together
-    /// with `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
+    /// The tensor-core tier of the deterministic typed GEMMs, granted to
+    /// every context; the shape and device gates decide per call. Its
+    /// numeric contract is its own: mma.sync f32 accumulation differs from
+    /// the scalar __fmaf_rn chain, so outputs do not bit-match the scalar
+    /// triad, but the TC kernels are fully deterministic and
+    /// batch-invariant for their admitted shapes. The qualification
+    /// instruments turn it off to measure the scalar tier.
     bi_tensor_cores: std::cell::Cell<bool>,
-    /// Which deterministic family serves the forward while
-    /// `batch_invariant` is on. Env: MAMBA_RS_BI_GEMM_FAMILY
-    /// (`triad` | `inference`). Part of the numeric route, so it rides
-    /// [`GpuCtx::gemm_route`] into every capture identity.
+    /// Which deterministic family serves the forward: the context's role
+    /// (a model serves Inference, a trainer Triad). Part of the numeric
+    /// route, so it rides [`GpuCtx::gemm_route`] into every capture identity.
     bi_gemm_family: std::cell::Cell<BiGemmFamily>,
-    /// Explicit numeric policy for deterministic batch-invariant f32 GEMMs.
+    /// The f32 numeric contract the storage precision asked for.
     f32_triad_policy: std::cell::Cell<F32TriadPolicy>,
-    /// Explicit numeric policy for batch-invariant half-precision GEMMs.
+    /// The half-precision numeric contract: stream-K permitted.
     half_triad_policy: std::cell::Cell<HalfTriadPolicy>,
     /// The state capacity the kernels were compiled with — part of the
     /// numeric-route identity a bench stamp must carry.
@@ -610,11 +417,10 @@ impl MathModeBackend for CublasMathBackend<'_> {
 impl GpuCtx {
     /// Create a GPU context, compile its kernels, and initialize cuBLAS.
     ///
-    /// The context starts in [`GemmMode::Deterministic`] with the
-    /// [`BiGemmFamily::Triad`] family, exact f32 policy, tiled half policy,
-    /// and tensor-core permission enabled. This constructor ignores GEMM
-    /// environment variables; use [`Self::new_from_env`] to read them.
-    /// The kernel state capacity is 64.
+    /// The context starts in [`GemmMode::Deterministic`] and serves the
+    /// Triad kernels with exact f32 products, the role of a plain context.
+    /// This constructor ignores `MAMBA_RS_GEMM_MODE`; use
+    /// [`Self::new_from_env`] to read it. The kernel state capacity is 64.
     ///
     /// ```no_run
     /// # use mamba_rs::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
@@ -649,22 +455,16 @@ impl GpuCtx {
         Self::new_with_state_cap_and_mode(device, 64, mode)
     }
 
-    /// Create a context from the `MAMBA_RS_*` GEMM environment variables.
+    /// Create a context in the mode `MAMBA_RS_GEMM_MODE` names.
     ///
-    /// `MAMBA_RS_GEMM_MODE` accepts the canonical names returned by
-    /// [`GemmMode::as_str`]. Its presence conflicts with either legacy
-    /// `MAMBA_RS_BATCH_INVARIANT` or `MAMBA_RS_FAST_GEMM`. Without the
-    /// canonical variable, the legacy variables are resolved together:
-    /// batch-invariant true selects Deterministic unless fast is also true;
-    /// fast true with batch-invariant absent or false selects CublasFast; and
-    /// an explicit false without a positive selector selects CublasPedantic.
-    /// Their joint absence defaults to Deterministic, while joint true values
-    /// are an error. Deterministic family, precision, and tensor-core variables
-    /// are rejected by presence under a cuBLAS mode. All values are resolved
-    /// and validated before GPU resources are constructed. Invalid,
-    /// conflicting, or non-Unicode values return an error.
+    /// The variable accepts the canonical names returned by
+    /// [`GemmMode::as_str`] (`deterministic`, `cublas-fast`,
+    /// `cublas-pedantic`); unset means [`GemmMode::Deterministic`]. It is
+    /// the only variable the crate reads for its GEMMs. The value is
+    /// resolved before GPU resources are constructed; an invalid or
+    /// non-Unicode value returns an error.
     pub fn new_from_env(device: &GpuDevice) -> Result<Self, String> {
-        Self::new_from_env_with_state_cap_and_family(device, 64, BiGemmFamily::Triad)
+        Self::new_from_env_with_state_cap_and_role(device, 64, GemmRole::triad(WeightDtype::F32))
     }
 
     /// [`Self::new_from_env`] with an explicit kernel state capacity.
@@ -675,7 +475,11 @@ impl GpuCtx {
         device: &GpuDevice,
         state_cap: usize,
     ) -> Result<Self, String> {
-        Self::new_from_env_with_state_cap_and_family(device, state_cap, BiGemmFamily::Triad)
+        Self::new_from_env_with_state_cap_and_role(
+            device,
+            state_cap,
+            GemmRole::triad(WeightDtype::F32),
+        )
     }
 
     /// Create a GPU context whose kernels are compiled with the given
@@ -690,32 +494,37 @@ impl GpuCtx {
     /// Create a GPU context with an explicit kernel state capacity and mode.
     ///
     /// `state_cap` controls the compiled SSM state capacity. `mode` controls
-    /// GEMM dispatch and cuBLAS numeric settings. Environment mode selectors
-    /// are ignored. Invalid resource or cuBLAS setup returns an error.
+    /// GEMM dispatch and cuBLAS numeric settings. `MAMBA_RS_GEMM_MODE` is
+    /// ignored. Invalid resource or cuBLAS setup returns an error.
     pub fn new_with_state_cap_and_mode(
         device: &GpuDevice,
         state_cap: usize,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_with_state_cap_mode_and_family(device, state_cap, mode, BiGemmFamily::Triad)
+        Self::new_with_state_cap_mode_and_role(
+            device,
+            state_cap,
+            mode,
+            GemmRole::triad(WeightDtype::F32),
+        )
     }
 
-    pub(crate) fn new_from_env_with_state_cap_and_family(
+    pub(crate) fn new_from_env_with_state_cap_and_role(
         device: &GpuDevice,
         state_cap: usize,
-        default_family: BiGemmFamily,
+        role: GemmRole,
     ) -> Result<Self, String> {
-        let config = resolve_gemm_env(GemmEnvValues::read(), default_family)?;
+        let config = resolve_gemm_env(GemmEnvValues::read(), role)?;
         Self::new_with_state_cap_and_config(device, state_cap, config)
     }
 
-    pub(crate) fn new_with_state_cap_mode_and_family(
+    pub(crate) fn new_with_state_cap_mode_and_role(
         device: &GpuDevice,
         state_cap: usize,
         mode: GemmMode,
-        family: BiGemmFamily,
+        role: GemmRole,
     ) -> Result<Self, String> {
-        Self::new_with_state_cap_and_config(device, state_cap, explicit_gemm_config(mode, family))
+        Self::new_with_state_cap_and_config(device, state_cap, explicit_gemm_config(mode, role))
     }
 
     fn new_with_state_cap_and_config(
@@ -764,7 +573,6 @@ impl GpuCtx {
             .default_stream()
             .synchronize()
             .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
-        validate_custom_policy(config.tensor_cores, config.half_policy)?;
         let (blas, ws) = device.create_cublas(&stream, config.mode)?;
         // Numeric routing defaults are nonambient. Explicit setters or the
         // `new_from_env*` constructors are the only ways to change them.
@@ -1135,10 +943,7 @@ impl GpuCtx {
         }
     }
 
-    /// Return the context's canonical GEMM mode.
-    ///
-    /// Custom family and precision settings are separate and may be dormant
-    /// while a cuBLAS mode is selected; they are preserved across mode changes.
+    /// The context's GEMM mode.
     pub fn gemm_mode(&self) -> GemmMode {
         self.gemm_mode.get()
     }
@@ -1172,22 +977,8 @@ impl GpuCtx {
         }
     }
 
-    /// Compatibility adapter for the pre-0.7 batch-invariant flag.
-    ///
-    /// New code should call [`Self::set_gemm_mode`]. `true` selects
-    /// [`GemmMode::Deterministic`]. `false` changes Deterministic to
-    /// [`GemmMode::CublasPedantic`] and leaves an existing cuBLAS mode
-    /// unchanged. A failed transition panics because this legacy signature
-    /// cannot return the error.
-    #[deprecated(since = "0.7.0", note = "use GpuCtx::set_gemm_mode")]
-    pub fn set_batch_invariant(&self, on: bool) {
-        let mode = self.gemm_mode().legacy_batch_invariant(on);
-        self.set_gemm_mode(mode)
-            .unwrap_or_else(|error| panic!("set_batch_invariant migration failed: {error}"));
-    }
-
-    /// Return whether [`GemmMode::Deterministic`] is selected.
-    pub fn batch_invariant(&self) -> bool {
+    /// Whether [`GemmMode::Deterministic`] is selected.
+    pub(crate) fn batch_invariant(&self) -> bool {
         self.gemm_mode().batch_invariant()
     }
 
@@ -1195,7 +986,7 @@ impl GpuCtx {
     ///
     /// The value is dormant in either cuBLAS mode and is preserved across
     /// mode changes. See [`BiGemmFamily`] for the available custom routes.
-    pub fn set_bi_gemm_family(&self, family: BiGemmFamily) {
+    pub(crate) fn set_bi_gemm_family(&self, family: BiGemmFamily) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
                 "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
@@ -1205,7 +996,7 @@ impl GpuCtx {
     }
 
     /// The deterministic family currently selected.
-    pub fn bi_gemm_family(&self) -> BiGemmFamily {
+    pub(crate) fn bi_gemm_family(&self) -> BiGemmFamily {
         self.bi_gemm_family.get()
     }
 
@@ -1217,7 +1008,7 @@ impl GpuCtx {
     /// Inference's native half ladder uses its own dispatch and is unaffected.
     /// This permission does not enable vendor TF32 and does not implicitly
     /// select the stream-K half policy.
-    pub fn set_bi_tensor_cores(&self, on: bool) {
+    pub(crate) fn set_bi_tensor_cores(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
                 "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
@@ -1226,39 +1017,14 @@ impl GpuCtx {
         self.bi_tensor_cores.set(on);
     }
 
-    /// Compatibility adapter for the pre-0.7 fast-GEMM flag.
-    ///
-    /// New code should call [`Self::set_gemm_mode`]. `true` selects
-    /// [`GemmMode::CublasFast`]. `false` leaves Deterministic unchanged and
-    /// selects [`GemmMode::CublasPedantic`] from either cuBLAS mode. A failed
-    /// transition panics because this legacy signature cannot return the error.
-    #[deprecated(since = "0.7.0", note = "use GpuCtx::set_gemm_mode")]
-    pub fn set_fast_gemm(&self, on: bool) {
-        let mode = self.gemm_mode().legacy_fast_gemm(on);
-        self.set_gemm_mode(mode)
-            .unwrap_or_else(|error| panic!("set_fast_gemm migration failed: {error}"));
-    }
-
-    /// Return whether [`GemmMode::CublasFast`] is selected.
-    pub fn fast_gemm(&self) -> bool {
+    /// Whether [`GemmMode::CublasFast`] is selected.
+    pub(crate) fn fast_gemm(&self) -> bool {
         self.gemm_mode().fast_gemm()
     }
 
     /// Record that a CUDA graph was captured on this context.
     pub(crate) fn note_graph_capture(&self) {
         self.graphs_captured.set(self.graphs_captured.get() + 1);
-    }
-
-    /// Compact view of the three boolean GEMM controls.
-    ///
-    /// Use [`Self::gemm_route`] when complete policy, artifact, compiler, and
-    /// device identity is required.
-    pub fn gemm_flags(&self) -> (bool, bool, bool) {
-        (
-            self.batch_invariant(),
-            self.bi_tensor_cores.get(),
-            self.fast_gemm(),
-        )
     }
 
     pub(crate) fn begin_gemm_route_recording(
@@ -1805,26 +1571,24 @@ impl GpuCtx {
         Ok(())
     }
 
-    /// Return the GEMM policy used by eager launches and graph guards.
-    ///
-    /// The compatibility booleans are derived from [`Self::gemm_mode`]. The
-    /// deterministic family, tensor-core permission, and f32/half policies are
-    /// stored separately so vendor-mode round trips preserve them.
-    pub fn gemm_policy(&self) -> GemmPolicy {
-        let (bi, tc, fast) = self.gemm_flags();
-        let family = self.bi_gemm_family.get();
+    /// The GEMM policy used by eager launches and graph guards: the mode's
+    /// booleans and the role's family and numeric contracts.
+    pub(crate) fn gemm_policy(&self) -> GemmPolicy {
         GemmPolicy {
-            batch_invariant: bi,
-            bi_tensor_cores: tc,
-            fast_gemm: fast,
+            batch_invariant: self.batch_invariant(),
+            bi_tensor_cores: self.bi_tensor_cores.get(),
+            fast_gemm: self.fast_gemm(),
             cublas_tf32: self.tf32(),
             f32_triad_policy: self.f32_triad_policy.get(),
             half_triad_policy: self.half_triad_policy.get(),
-            bi_gemm_family: family,
+            bi_gemm_family: self.bi_gemm_family.get(),
         }
     }
 
-    /// Complete route identity used by eager launches and graph guards.
+    /// The complete route identity: mode, storage precision and role, the
+    /// kernels selected, compiler and artifact identity, device identity.
+    /// Eager launches record it and graph replays compare it; a program
+    /// pins a numeric route by keeping this value.
     pub fn gemm_route(&self) -> GemmRoute {
         let policy = self.gemm_policy();
         let (backend_set, numeric_contracts) =
@@ -1846,20 +1610,19 @@ impl GpuCtx {
         }
     }
 
-    /// Return the requested deterministic tensor-core permission.
-    ///
-    /// The value affects dispatch only in [`GemmMode::Deterministic`]; use
-    /// [`Self::gemm_policy`] for the complete effective configuration.
-    pub fn bi_tensor_cores(&self) -> bool {
+    /// The deterministic tensor-core permission; every context grants it,
+    /// the shape and device gates decide per call.
+    pub(crate) fn bi_tensor_cores(&self) -> bool {
         self.bi_tensor_cores.get()
     }
 
     /// Select the numeric policy used by deterministic f32 Triad GEMMs.
     ///
-    /// [`F32TriadPolicy::ExactScalarFma`] is the default. The deterministic
-    /// TF32 permission is independent of vendor TF32 and is dormant in cuBLAS
+    /// The constructor sets it from the storage precision
+    /// ([`WeightDtype::Tf32`] permits TF32). The deterministic TF32
+    /// permission is independent of vendor TF32 and is dormant in cuBLAS
     /// modes.
-    pub fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
+    pub(crate) fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
                 "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
@@ -1868,18 +1631,27 @@ impl GpuCtx {
         self.f32_triad_policy.set(policy);
     }
 
-    /// Return the stored deterministic f32 Triad policy.
-    pub fn f32_triad_policy(&self) -> F32TriadPolicy {
+    /// The deterministic f32 Triad policy.
+    pub(crate) fn f32_triad_policy(&self) -> F32TriadPolicy {
         self.f32_triad_policy.get()
+    }
+
+    /// The storage precision an f32 engine on this context was built for:
+    /// `Tf32` when its products may take the deterministic TF32 kernels,
+    /// `F32` otherwise.
+    pub(crate) fn f32_storage_dtype(&self) -> WeightDtype {
+        match self.f32_triad_policy.get() {
+            F32TriadPolicy::AllowDeterministicTf32 => WeightDtype::Tf32,
+            F32TriadPolicy::ExactScalarFma => WeightDtype::F32,
+        }
     }
 
     /// Select the numeric policy used by deterministic half-precision Triad GEMMs.
     ///
     /// [`HalfTriadPolicy::AllowStreamKFixedOrder`] is the default. The
     /// stream-K routes live in the tensor-core tier, so the permission is
-    /// dormant while tensor cores are off; requesting the pair from the
-    /// environment or the explicit configuration is refused.
-    pub fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
+    /// dormant while tensor cores are off.
+    pub(crate) fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
                 "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
@@ -1888,34 +1660,26 @@ impl GpuCtx {
         self.half_triad_policy.set(policy);
     }
 
-    /// Return the stored deterministic half-precision Triad policy.
-    pub fn half_triad_policy(&self) -> HalfTriadPolicy {
+    /// The deterministic half-precision Triad policy.
+    pub(crate) fn half_triad_policy(&self) -> HalfTriadPolicy {
         self.half_triad_policy.get()
     }
 
-    /// Compatibility adapter that removes vendor TF32.
-    ///
-    /// New code should call [`Self::set_gemm_mode`]. In
-    /// [`GemmMode::CublasFast`] this selects [`GemmMode::CublasPedantic`]. It
-    /// leaves Deterministic and CublasPedantic unchanged. In particular it does
-    /// not change [`F32TriadPolicy::AllowDeterministicTf32`], which controls
-    /// custom deterministic TF32 rather than vendor TF32. A failed transition
-    /// panics because this legacy signature cannot return the error.
-    #[deprecated(since = "0.7.0", note = "use GpuCtx::set_gemm_mode")]
-    pub fn disable_tf32(&self) {
-        let mode = self.gemm_mode().legacy_disable_tf32();
-        self.set_gemm_mode(mode)
-            .unwrap_or_else(|error| panic!("disable_tf32 migration failed: {error}"));
+    /// Whether vendor TF32 handle math is selected: true only in
+    /// [`GemmMode::CublasFast`]. Independent of [`WeightDtype::Tf32`], the
+    /// crate's own deterministic TF32.
+    pub(crate) fn tf32(&self) -> bool {
+        self.gemm_mode().tf32()
     }
 
-    /// Return whether vendor TF32 handle math is selected.
-    ///
-    /// This is true only in [`GemmMode::CublasFast`]. It is independent of
-    /// [`Self::f32_triad_policy`]: custom deterministic TF32 permission does
-    /// not enable vendor TF32, and vendor TF32 does not change the custom
-    /// policy.
-    pub fn tf32(&self) -> bool {
-        self.gemm_mode().tf32()
+    /// The route controls of this context, for the qualification
+    /// instruments and the tests that pin one tier against another. Every
+    /// value here is derived by the constructor from the mode, the storage
+    /// precision and the context's role; a program has no reason to touch
+    /// it, and it is not part of the documented API.
+    #[doc(hidden)]
+    pub fn route_controls(&self) -> RouteControls<'_> {
+        RouteControls { ctx: self }
     }
 
     /// The state capacity this context's kernels were compiled with.
@@ -2154,6 +1918,63 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
     )
 }
 
+/// See [`GpuCtx::route_controls`].
+#[doc(hidden)]
+pub struct RouteControls<'a> {
+    ctx: &'a GpuCtx,
+}
+
+#[doc(hidden)]
+impl RouteControls<'_> {
+    pub fn family(&self) -> BiGemmFamily {
+        self.ctx.bi_gemm_family()
+    }
+
+    pub fn set_family(&self, family: BiGemmFamily) {
+        self.ctx.set_bi_gemm_family(family);
+    }
+
+    pub fn tensor_cores(&self) -> bool {
+        self.ctx.bi_tensor_cores()
+    }
+
+    pub fn set_tensor_cores(&self, on: bool) {
+        self.ctx.set_bi_tensor_cores(on);
+    }
+
+    pub fn f32_policy(&self) -> F32TriadPolicy {
+        self.ctx.f32_triad_policy()
+    }
+
+    pub fn set_f32_policy(&self, policy: F32TriadPolicy) {
+        self.ctx.set_f32_triad_policy(policy);
+    }
+
+    pub fn half_policy(&self) -> HalfTriadPolicy {
+        self.ctx.half_triad_policy()
+    }
+
+    pub fn set_half_policy(&self, policy: HalfTriadPolicy) {
+        self.ctx.set_half_triad_policy(policy);
+    }
+
+    pub fn policy(&self) -> GemmPolicy {
+        self.ctx.gemm_policy()
+    }
+
+    pub fn tf32(&self) -> bool {
+        self.ctx.tf32()
+    }
+
+    pub fn batch_invariant(&self) -> bool {
+        self.ctx.batch_invariant()
+    }
+
+    pub fn fast_gemm(&self) -> bool {
+        self.ctx.fast_gemm()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2174,18 +1995,16 @@ mod tests {
     }
 
     use super::{
-        BiGemmFamily, F32TriadPolicy, GemmEnvValues, GemmMode, HalfTriadPolicy, ResolvedGemmEnv,
-        bi_gemm_family_from_result, expected_route_module, expected_route_schedule_revision,
-        expected_route_tuning_revision, explicit_gemm_config, f32_triad_policy_from_result,
-        m1_mixed_graph_max_dim, resolve_gemm_env, scalar_backend_supports_logical_f32,
-        tier_flag_from_result, validate_multiprocessor_identity,
+        BiGemmFamily, F32TriadPolicy, GemmEnvValues, GemmMode, GemmRole, HalfTriadPolicy,
+        ResolvedGemmEnv, WeightDtype, expected_route_module, expected_route_schedule_revision,
+        expected_route_tuning_revision, explicit_gemm_config, m1_mixed_graph_max_dim,
+        resolve_gemm_env, scalar_backend_supports_logical_f32, validate_multiprocessor_identity,
     };
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
     use crate::mamba_ssm::gpu::kernel_identity::{
         ModuleKind, PhysicalGemmBackend, SCHEDULE_REVISION,
     };
-    #[cfg(unix)]
     use std::ffi::OsString;
 
     #[test]
@@ -2371,126 +2190,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn f32_triad_policy_environment_is_strict_and_defaults_to_exact() {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        assert_eq!(
-            f32_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
-            F32TriadPolicy::ExactScalarFma
-        );
-        assert_eq!(
-            f32_triad_policy_from_result(Ok("tf32".into())).unwrap(),
-            F32TriadPolicy::AllowDeterministicTf32
-        );
-        let error = f32_triad_policy_from_result(Err(std::env::VarError::NotUnicode(
-            OsString::from_vec(vec![b't', b'f', 0xff, b'3', b'2']),
-        )))
-        .expect_err("non-Unicode policy must fail");
-        assert!(error.contains("MAMBA_RS_BI_F32_POLICY"), "{error}");
-        assert!(error.contains("exact") && error.contains("tf32"), "{error}");
-    }
-
-    #[test]
-    fn tier_flag_environment_is_strict_and_fail_closed() {
-        assert!(!tier_flag_from_result("TEST_FLAG", Err(std::env::VarError::NotPresent)).unwrap());
-        for value in ["1", " true ", "YES", "on"] {
-            assert!(tier_flag_from_result("TEST_FLAG", Ok(value.into())).unwrap());
-        }
-        for value in ["0", " false ", "NO", "off", ""] {
-            assert!(!tier_flag_from_result("TEST_FLAG", Ok(value.into())).unwrap());
-        }
-        let error = tier_flag_from_result("TEST_FLAG", Ok("enabled".into()))
-            .expect_err("unknown flag values must fail");
-        assert!(error.contains("TEST_FLAG"), "{error}");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt as _;
-
-            let error = tier_flag_from_result(
-                "TEST_FLAG",
-                Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
-                    b't', b'r', 0xff, b'u', b'e',
-                ]))),
-            )
-            .expect_err("non-Unicode flag values must fail");
-            assert!(error.contains("TEST_FLAG"), "{error}");
-            assert!(error.contains("not valid Unicode"), "{error}");
-        }
-    }
-
-    #[test]
-    fn bi_gemm_family_environment_accepts_only_semantic_family_names() {
-        assert_eq!(
-            bi_gemm_family_from_result(
-                Err(std::env::VarError::NotPresent),
-                BiGemmFamily::Inference,
-            )
-            .unwrap(),
-            BiGemmFamily::Inference
-        );
-        for value in ["", " \t\n", "triad", "  TrIaD\t"] {
-            assert_eq!(
-                bi_gemm_family_from_result(Ok(value.into()), BiGemmFamily::Inference).unwrap(),
-                BiGemmFamily::Triad,
-                "{value:?}"
-            );
-        }
-        for value in ["inference", " \nInFeReNcE\t"] {
-            assert_eq!(
-                bi_gemm_family_from_result(Ok(value.into()), BiGemmFamily::Triad).unwrap(),
-                BiGemmFamily::Inference,
-                "{value:?}"
-            );
-        }
-        for value in [
-            "fixed",
-            "gemm_bi",
-            "batch_invariant",
-            "warptile",
-            "wmma",
-            "other",
-        ] {
-            let error = bi_gemm_family_from_result(Ok(value.into()), BiGemmFamily::Triad)
-                .expect_err("unknown family names must fail");
-            assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
-            assert!(error.contains("only inference or triad"), "{error}");
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt as _;
-
-            let error = bi_gemm_family_from_result(
-                Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
-                    b't', b'r', 0xff, b'i', b'a', b'd',
-                ]))),
-                BiGemmFamily::Triad,
-            )
-            .expect_err("non-Unicode family names must fail");
-            assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
-            assert!(error.contains("only inference or triad"), "{error}");
-        }
-    }
-
-    #[test]
-    fn explicit_gemm_config_preserves_mode_role_and_numeric_defaults() {
+    fn explicit_gemm_config_carries_mode_role_and_numeric_defaults() {
         for mode in [
             GemmMode::Deterministic,
             GemmMode::CublasFast,
             GemmMode::CublasPedantic,
         ] {
-            for family in [BiGemmFamily::Inference, BiGemmFamily::Triad] {
-                assert_eq!(
-                    explicit_gemm_config(mode, family),
-                    ResolvedGemmEnv {
-                        mode,
-                        family,
-                        tensor_cores: true,
-                        f32_policy: F32TriadPolicy::ExactScalarFma,
-                        half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
-                    }
-                );
+            for (dtype, f32_policy) in [
+                (WeightDtype::F32, F32TriadPolicy::ExactScalarFma),
+                (WeightDtype::Tf32, F32TriadPolicy::AllowDeterministicTf32),
+                (WeightDtype::Bf16, F32TriadPolicy::ExactScalarFma),
+                (WeightDtype::F16, F32TriadPolicy::ExactScalarFma),
+            ] {
+                for (role, family) in [
+                    (GemmRole::inference(dtype), BiGemmFamily::Inference),
+                    (GemmRole::triad(dtype), BiGemmFamily::Triad),
+                ] {
+                    assert_eq!(
+                        explicit_gemm_config(mode, role),
+                        ResolvedGemmEnv {
+                            mode,
+                            family,
+                            tensor_cores: true,
+                            f32_policy,
+                            half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
+                        }
+                    );
+                }
             }
         }
     }
@@ -2500,177 +2226,49 @@ mod tests {
     }
 
     fn empty_gemm_env() -> GemmEnvValues {
-        GemmEnvValues {
-            mode: absent_env(),
-            batch_invariant: absent_env(),
-            fast_gemm: absent_env(),
-            tensor_cores: absent_env(),
-            f32_policy: absent_env(),
-            half_policy: absent_env(),
-            family: absent_env(),
-            arch_rung: absent_env(),
-        }
+        GemmEnvValues { mode: absent_env() }
     }
 
     #[test]
-    fn gemm_mode_environment_resolves_canonical_and_legacy_tables() {
-        for (mode, expected) in [
+    fn gemm_mode_environment_reads_one_variable() {
+        for (value, expected) in [
             ("deterministic", GemmMode::Deterministic),
             ("cublas-fast", GemmMode::CublasFast),
             ("cublas-pedantic", GemmMode::CublasPedantic),
         ] {
-            let mut values = empty_gemm_env();
-            values.mode = Ok(format!(" \t{mode}\n"));
+            let values = GemmEnvValues {
+                mode: Ok(value.into()),
+            };
+            let resolved = resolve_gemm_env(values, GemmRole::triad(WeightDtype::Tf32)).unwrap();
+            assert_eq!(resolved.mode, expected);
+            assert_eq!(resolved.family, BiGemmFamily::Triad);
+            assert_eq!(resolved.f32_policy, F32TriadPolicy::AllowDeterministicTf32);
+            assert!(resolved.tensor_cores);
             assert_eq!(
-                resolve_gemm_env(values, BiGemmFamily::Triad).unwrap().mode,
-                expected
+                resolved.half_policy,
+                HalfTriadPolicy::AllowStreamKFixedOrder
             );
         }
-
-        for (batch_invariant, fast_gemm, expected) in [
-            (None, None, GemmMode::Deterministic),
-            (Some(true), None, GemmMode::Deterministic),
-            (Some(true), Some(false), GemmMode::Deterministic),
-            (Some(false), None, GemmMode::CublasPedantic),
-            (Some(false), Some(false), GemmMode::CublasPedantic),
-            (None, Some(false), GemmMode::CublasPedantic),
-            (None, Some(true), GemmMode::CublasFast),
-            (Some(false), Some(true), GemmMode::CublasFast),
-        ] {
-            let mut values = empty_gemm_env();
-            values.batch_invariant = batch_invariant
-                .map(|value| Ok(value.to_string()))
-                .unwrap_or_else(absent_env);
-            values.fast_gemm = fast_gemm
-                .map(|value| Ok(value.to_string()))
-                .unwrap_or_else(absent_env);
-            assert_eq!(
-                resolve_gemm_env(values, BiGemmFamily::Triad).unwrap().mode,
-                expected,
-                "BI={batch_invariant:?} FAST={fast_gemm:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn gemm_mode_environment_rejects_conflicts_and_vendor_custom_controls() {
-        for legacy_name in ["batch", "fast"] {
-            let mut values = empty_gemm_env();
-            values.mode = Ok("deterministic".into());
-            if legacy_name == "batch" {
-                values.batch_invariant = Ok("false".into());
-            } else {
-                values.fast_gemm = Ok("false".into());
-            }
-            let error = resolve_gemm_env(values, BiGemmFamily::Triad).unwrap_err();
-            assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
-            assert!(error.contains("MAMBA_RS_BATCH_INVARIANT"), "{error}");
-            assert!(error.contains("MAMBA_RS_FAST_GEMM"), "{error}");
-        }
-
-        let mut values = empty_gemm_env();
-        values.batch_invariant = Ok("true".into());
-        values.fast_gemm = Ok("true".into());
-        assert!(resolve_gemm_env(values, BiGemmFamily::Triad).is_err());
-
-        for custom in ["tensor", "f32", "half", "family"] {
-            let mut values = empty_gemm_env();
-            values.mode = Ok("cublas-fast".into());
-            match custom {
-                "tensor" => values.tensor_cores = Ok("false".into()),
-                "f32" => values.f32_policy = Ok("exact".into()),
-                "half" => values.half_policy = Ok("tiled".into()),
-                "family" => values.family = Ok("triad".into()),
-                _ => unreachable!(),
-            }
-            let error = resolve_gemm_env(values, BiGemmFamily::Triad).unwrap_err();
-            assert!(error.contains("deterministic GEMM controls"), "{error}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gemm_mode_environment_rejects_non_unicode_canonical_value() {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        let mut values = empty_gemm_env();
-        values.mode = Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
-            b'f', b'a', 0xff, b's', b't',
-        ])));
-        let error = resolve_gemm_env(values, BiGemmFamily::Triad).unwrap_err();
-        assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
-        assert!(error.contains("not valid Unicode"), "{error}");
-    }
-
-    #[test]
-    fn deterministic_environment_defaults_and_validates_custom_policy() {
-        let resolved = resolve_gemm_env(empty_gemm_env(), BiGemmFamily::Inference).unwrap();
+        let resolved =
+            resolve_gemm_env(empty_gemm_env(), GemmRole::inference(WeightDtype::F32)).unwrap();
         assert_eq!(resolved.mode, GemmMode::Deterministic);
-        assert!(resolved.tensor_cores);
         assert_eq!(resolved.family, BiGemmFamily::Inference);
         assert_eq!(resolved.f32_policy, F32TriadPolicy::ExactScalarFma);
-        assert_eq!(
-            resolved.half_policy,
-            HalfTriadPolicy::AllowStreamKFixedOrder
-        );
-
-        let mut values = empty_gemm_env();
-        values.tensor_cores = Ok("false".into());
-        values.half_policy = Ok("streamk".into());
-        let error = resolve_gemm_env(values, BiGemmFamily::Triad).unwrap_err();
-        assert!(error.contains("MAMBA_RS_BI_HALF_POLICY=streamk"), "{error}");
-        assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES=1"), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn half_triad_policy_environment_is_strict_and_absent_means_unset() {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        assert_eq!(
-            super::half_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
-            None
-        );
-        assert_eq!(
-            super::half_triad_policy_from_result(Ok(" tiled ".into())).unwrap(),
-            Some(super::HalfTriadPolicy::TiledParity)
-        );
-        assert_eq!(
-            super::half_triad_policy_from_result(Ok("streamk".into())).unwrap(),
-            Some(super::HalfTriadPolicy::AllowStreamKFixedOrder)
-        );
-        for wrong in ["", "stream-k", "StreamK", "1", "on"] {
-            let error = super::half_triad_policy_from_result(Ok(wrong.into()))
-                .expect_err("unknown half policy spelling must fail");
-            assert!(error.contains("MAMBA_RS_BI_HALF_POLICY"), "{error}");
-            assert!(
-                error.contains("tiled") && error.contains("streamk"),
-                "{error}"
-            );
-        }
-        let error = super::half_triad_policy_from_result(Err(std::env::VarError::NotUnicode(
-            OsString::from_vec(vec![b's', b't', 0xff, b'k']),
-        )))
-        .expect_err("non-Unicode policy must fail");
-        assert!(error.contains("MAMBA_RS_BI_HALF_POLICY"), "{error}");
-        assert!(
-            error.contains("tiled") && error.contains("streamk"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn arch_rung_flag_knows_only_off() {
-        assert!(super::validate_arch_rung_flag(Err(std::env::VarError::NotPresent)).is_ok());
-        for value in ["", "off", " OFF\n"] {
-            assert!(
-                super::validate_arch_rung_flag(Ok(value.into())).is_ok(),
-                "{value:?}"
-            );
-        }
-        for value in ["on", "1", "0", "disabled"] {
-            let error = super::validate_arch_rung_flag(Ok(value.into())).unwrap_err();
-            assert!(error.contains("MAMBA_RS_ARCH_RUNG"), "{error}");
-        }
+        let error = resolve_gemm_env(
+            GemmEnvValues {
+                mode: Ok("fast".into()),
+            },
+            GemmRole::triad(WeightDtype::F32),
+        )
+        .unwrap_err();
+        assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
+        let error = resolve_gemm_env(
+            GemmEnvValues {
+                mode: Err(std::env::VarError::NotUnicode(OsString::from("x"))),
+            },
+            GemmRole::triad(WeightDtype::F32),
+        )
+        .unwrap_err();
+        assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
     }
 }

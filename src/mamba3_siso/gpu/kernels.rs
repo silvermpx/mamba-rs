@@ -270,7 +270,7 @@ impl Mamba3Kernels {
         match dtype {
             WeightDtype::Bf16 => &self.m3_burnin_fwd_typed_bf16,
             WeightDtype::F16 => &self.m3_burnin_fwd_typed_f16,
-            WeightDtype::F32 => unreachable!("F32 uses its own selector"),
+            WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("F32 uses its own selector"),
         }
     }
 

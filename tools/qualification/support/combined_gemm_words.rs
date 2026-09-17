@@ -726,7 +726,6 @@ impl Runtime {
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy();
             if key == "NVIDIA_TF32_OVERRIDE"
-                || key == "MAMBA_RS_ARCH_RUNG"
                 || (key.starts_with("MAMBA")
                     && (key.contains("FORCE") || key.contains("CANDIDATE")))
             {
@@ -833,14 +832,17 @@ pub(super) fn dtype(storage: &str) -> Result<WeightDtype, String> {
 
 pub(super) fn configure(ctx: &GpuCtx, case: &AcceptanceCase) -> Result<(), String> {
     ctx.set_gemm_mode(GemmMode::Deterministic)?;
-    ctx.set_bi_gemm_family(if case.family == "inference" {
-        BiGemmFamily::Inference
-    } else {
-        BiGemmFamily::Triad
-    });
-    ctx.set_bi_tensor_cores(case.storage[0] != "f32");
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
-    ctx.set_f32_triad_policy(if case.row == "tf32" {
+    ctx.route_controls()
+        .set_family(if case.family == "inference" {
+            BiGemmFamily::Inference
+        } else {
+            BiGemmFamily::Triad
+        });
+    ctx.route_controls()
+        .set_tensor_cores(case.storage[0] != "f32");
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::TiledParity);
+    ctx.route_controls().set_f32_policy(if case.row == "tf32" {
         F32TriadPolicy::AllowDeterministicTf32
     } else {
         F32TriadPolicy::ExactScalarFma

@@ -59,9 +59,10 @@ fn det_input(n: usize, seed: u32) -> Vec<f32> {
 fn triad_ctx(device: &GpuDevice) -> GpuCtx {
     let ctx = GpuCtx::new(device).unwrap();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.route_controls().set_family(BiGemmFamily::Triad);
+    ctx.route_controls().set_tensor_cores(false);
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     ctx
 }
 
@@ -95,11 +96,15 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
         .ctx()
         .set_gemm_mode(GemmMode::Deterministic)
         .unwrap();
-    trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
-    trainer.ctx().set_bi_tensor_cores(false);
     trainer
         .ctx()
-        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        .route_controls()
+        .set_family(BiGemmFamily::Triad);
+    trainer.ctx().route_controls().set_tensor_cores(false);
+    trainer
+        .ctx()
+        .route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactScalarFma);
     let warmup = trainer
         .step(&input, &d_temporal)
         .expect("warm up M1 Triad graph resources");

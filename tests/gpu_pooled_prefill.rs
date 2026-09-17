@@ -195,7 +195,7 @@ fn pooled_graph_replays_bitwise() {
 fn pooled_graph_replays_bitwise_for_family(family: BiGemmFamily) {
     let t = 333usize;
     let mut r = rig(t);
-    r.ctx.set_bi_gemm_family(family);
+    r.ctx.route_controls().set_family(family);
     let dm = r.dims.d_model;
     // Eager reference.
     let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
@@ -288,11 +288,13 @@ fn pooled_graph_refuses_route_drift() {
             "family",
             &|| {
                 r.ctx
-                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Inference)
+                    .route_controls()
+                    .set_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Inference)
             },
             &|| {
                 r.ctx
-                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Triad)
+                    .route_controls()
+                    .set_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Triad)
             },
         ),
     ];
