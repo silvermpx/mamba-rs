@@ -5,7 +5,7 @@ mod production;
 
 use frozen_vec2::regpipe::compact as frozen_compact;
 
-const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
 
 #[test]
 #[cfg(feature = "cuda")]
@@ -48,16 +48,16 @@ fn triad_retained_half_public_registry_and_getter_api_remain_compatible() {
     assert_eq!(
         SM89_HALF_KERNEL_SPECS.map(|spec| spec.symbol),
         [
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16",
-            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16",
-            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16",
-            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
-            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16",
+            "nn_sm89_m128n128_bk64_s3_f16",
+            "nn_sm89_m128n128_bk64_s3_bf16",
+            "tn_sm89_m64n64_bk64_s2_compact_bxor_f16",
+            "tn_sm89_m64n64_bk64_s2_compact_bxor_bf16",
+            "tn_sm89_m64n64_bk64_s2_regpipe_vec2_f16",
+            "tn_sm89_m64n64_bk64_s2_regpipe_vec2_bf16",
+            "nt_sm89_m128n128_bk64_s3_bxor_f16",
+            "nt_sm89_m128n128_bk64_s3_bxor_bf16",
+            "nt_sm89_m96n128_bk64_s3_f16",
+            "nt_sm89_m96n128_bk64_s3_bf16",
         ],
     );
     assert_eq!(
@@ -139,7 +139,7 @@ fn triad_retained_half_owner_exports_all_six_retained_kernels() {
     for forbidden in [
         "_test_",
         "_exp_",
-        "gemm_bi_tn_tc64_",
+        "tn_tc64_",
         "bk32",
         "m96n64",
         "m64n96",
@@ -157,11 +157,11 @@ fn standalone_composition_supplies_each_retained_dependency_once() {
         "float to_f(float v)",
         "float to_f(__nv_bfloat16 v)",
         "float to_f(__half v)",
-        "bool gemm_bi_is_aligned_16(const void* ptr)",
-        "int gemm_bi_cp_async_valid_elems(",
-        "const T* gemm_bi_cp_async_source(",
-        "void gemm_bi_cp_async_16_zfill(",
-        "void gemm_bi_accumulate_float2_or_scalar(",
+        "bool is_aligned_16(const void* ptr)",
+        "int cp_async_valid_elems(",
+        "const T* cp_async_source(",
+        "void cp_async_16_zfill(",
+        "void accumulate_float2_or_scalar(",
     ] {
         assert_eq!(
             source.matches(definition).count(),
@@ -172,10 +172,10 @@ fn standalone_composition_supplies_each_retained_dependency_once() {
     let fragment = production::compose_fragment_for_sm89_half()
         .expect("compose half-TN fragment for existing owner");
     assert!(!fragment.contains("float to_f(float v)"));
-    assert_eq!(fragment.matches("bool gemm_bi_is_aligned_16").count(), 1);
+    assert_eq!(fragment.matches("bool is_aligned_16").count(), 1);
     assert_eq!(
         fragment
-            .matches("void gemm_bi_accumulate_float2_or_scalar(")
+            .matches("void accumulate_float2_or_scalar(")
             .count(),
         1,
     );
@@ -242,7 +242,7 @@ fn triad_retained_half_specs_pin_small16_geometry_and_resource_bounds() {
         assert_eq!(spec.abi_parameter_count, 7);
         assert_eq!(spec.abi_parameter_bytes, 40);
     }
-    assert!(production::kernel_spec("gemm_bi_tn_tc64_f16").is_none());
+    assert!(production::kernel_spec("tn_tc64_f16").is_none());
     assert!(production::kernel_spec("").is_none());
 }
 
@@ -257,9 +257,9 @@ fn validation_rejects_duplicate_foreign_and_placeholder_exports() {
     assert!(production::validate_source_text(&duplicate).is_err());
 
     for foreign in [
-        "gemm_bi_tn_sm89_m64n64_bk64_s2_plain_regpipe_v1_f16",
-        "gemm_bi_tn_test_leak_f16",
-        "gemm_bi_tn_sm89_m96n64_bk64_s2_v1_bf16",
+        "tn_sm89_m64n64_bk64_s2_plain_regpipe_f16",
+        "tn_test_leak_f16",
+        "tn_sm89_m96n64_bk64_s2_bf16",
     ] {
         let mutated = format!(
             "{source}\nextern \"C\" __global__ void {foreign}(float* output) {{ output[0] = 0.0f; }}\n"

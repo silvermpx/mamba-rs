@@ -102,7 +102,7 @@ pub(crate) use launch::{
     launch_cached_f32_backward_dx_ptrs, launch_cached_f32_forward_ptrs,
 };
 #[doc(hidden)]
-pub use modules::GemmBiKernels;
+pub use modules::{GemmBiKernels, MintedModuleIdentity, mint_module_identity};
 #[doc(hidden)]
 pub use qualification::{
     PhysicalPaddedNnLayout, PhysicalQualificationF32Epilogue, PhysicalQualificationOffset,

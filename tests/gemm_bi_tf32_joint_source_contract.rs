@@ -19,10 +19,10 @@ mod tn_raw;
 
 const NT_A_LDMATRIX_N96_SECTION: &str = "NT_A_LDMATRIX_N96";
 
-const FIXED_N96: &str = include_str!("../kernels/gemm_bi_inference/tf32_rna_n96.cu");
+const FIXED_N96: &str = include_str!("../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
 const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_inference/tf32.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
-const SM80_TF32: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+const SM80_TF32: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
 
 const TN_N96_SECTION: &str = "TN_N96";
 const TN_M64N64_SECTION: &str = "TN_M64N64";
@@ -77,10 +77,10 @@ fn retained_nt_a_ldmatrix_n96() -> String {
         .expect("measured NT N96 raw string must begin with one newline")
         .replace(nt_a_ldmatrix_n96::SYMBOL, joint::NT_A_LDMATRIX_N96_SYMBOL)
         .replace("Sm80Tf32KernelParams", "GbfTf32NtN96Params")
-        .replace("gemm_bi_cp_async_source", "nt_n96_cp_async_source")
-        .replace("gemm_bi_tf32_cp_async_zfill", "nt_n96_cp_async_zfill")
-        .replace("gemm_bi_tf32_rna", "nt_n96_rna")
-        .replace("gemm_bi_tf32_mma_m16n8k8", "gbf_tf32_mma_m16n8k8")
+        .replace("cp_async_source", "nt_n96_cp_async_source")
+        .replace("tf32_cp_async_zfill", "nt_n96_cp_async_zfill")
+        .replace("tf32_rna", "nt_n96_rna")
+        .replace("tf32_mma_m16n8k8", "gbf_tf32_mma_m16n8k8")
 }
 
 fn retained_nt_a_ldmatrix_n96_production_body() -> String {
@@ -200,7 +200,7 @@ fn finalist_maps_all_dispatch_admitted_nt_cells_to_a_only_ldmatrix_body() {
         "                    && params.lda == 1928 && params.ldb == 1928 && params.ldc == 384);"
     );
     assert!(source.contains(expected_gate));
-    let generic_compute = extract_device_function(&source, "gemm_bi_tf32_compute_stage");
+    let generic_compute = extract_device_function(&source, "tf32_compute_stage");
     assert!(generic_compute.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));
     assert!(
         generic_compute
@@ -440,7 +440,7 @@ fn nt_a_ldmatrix_n96_materialization_matches_the_measured_body_after_normalizati
 
 #[test]
 fn retained_nn_d768_out_body_is_not_lost_from_joint_source() {
-    let symbol = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
+    let symbol = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
     assert!(
         joint::export_inventory(joint::SOURCE)
             .unwrap()
@@ -592,7 +592,7 @@ fn typed_params_match_the_frozen_driver_abi() {
     );
     assert_eq!(joint::GEMM_TERMINAL_ARGUMENT, 5);
     assert!(joint::SOURCE.contains(
-        "void gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1(\n    const unsigned* input, unsigned* output, GbfTf32TnTransposeParams params)"
+        "void tn_sm89_tf32_pre_rna_transpose_32x32(\n    const unsigned* input, unsigned* output, GbfTf32TnTransposeParams params)"
     ));
 }
 
@@ -706,7 +706,7 @@ fn nt_a_ldmatrix_n96_is_a_sealed_joint_export_with_the_direct_nt_layout() {
 
     assert_eq!(
         joint::NT_A_LDMATRIX_N96_SYMBOL,
-        "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1"
+        "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3"
     );
     let body = extract_section(joint::SOURCE, NT_A_LDMATRIX_N96_SECTION);
     assert!(body.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));

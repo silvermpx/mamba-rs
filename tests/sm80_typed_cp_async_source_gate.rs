@@ -1,8 +1,10 @@
 use std::{fs, path::Path};
 
 fn sm80_source() -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_triad/sm80.cu"))
-        .expect("read SM80 triad source")
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_triad/sm80/mma.cu"),
+    )
+    .expect("read SM80 triad source")
 }
 
 #[test]

@@ -21,11 +21,10 @@ use sha2::{Digest as _, Sha256};
 #[path = "../../tests/support/fixed_full_mantissa.rs"]
 mod fixed_full_mantissa;
 
-const SM89_NT_FINALIST_SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
-const SM89_NN_PORTABLE_M128N128_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
-const SM89_NN_JOINT_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
-const SM89_NN_JOINT_DIRECT_N96_SYMBOL: &str =
-    "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
+const SM89_NT_FINALIST_SYMBOL: &str = "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2";
+const SM89_NN_PORTABLE_M128N128_SYMBOL: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
+const SM89_NN_JOINT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
+const SM89_NN_JOINT_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
 
 fn sm89_ada_nn_wide_winner(
     dims: (usize, usize, usize),
@@ -63,140 +62,140 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ResolvedGemmOp::Nn,
         (2048, 768, 3072),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "tn_d768_in_proj",
         ResolvedGemmOp::Tn,
         (2048, 768, 3072),
         ModuleKind::TriadSm120,
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
         "nt_d768_in_proj",
         ResolvedGemmOp::Nt,
         (2048, 768, 3072),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "nn_d768_out_proj",
         ResolvedGemmOp::Nn,
         (2048, 1536, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "tn_d768_out_proj",
         ResolvedGemmOp::Tn,
         (2048, 1536, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
         "nt_d768_out_proj",
         ResolvedGemmOp::Nt,
         (2048, 1536, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "nn_prism_in_proj",
         ResolvedGemmOp::Nn,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "tn_prism_in_proj",
         ResolvedGemmOp::Tn,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
         "nt_prism_in_proj",
         ResolvedGemmOp::Nt,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "nn_large_deep",
         ResolvedGemmOp::Nn,
         (4096, 3072, 1536),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "tn_large_deep",
         ResolvedGemmOp::Tn,
         (4096, 3072, 1536),
         ModuleKind::TriadSm120,
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
         "nt_large_deep",
         ResolvedGemmOp::Nt,
         (4096, 3072, 1536),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "nn_large",
         ResolvedGemmOp::Nn,
         (2048, 3072, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "tn_large",
         ResolvedGemmOp::Tn,
         (2048, 3072, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
         "nt_large",
         ResolvedGemmOp::Nt,
         (2048, 3072, 768),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "nn_d128_in_proj",
         ResolvedGemmOp::Nn,
         (1024, 128, 512),
         ModuleKind::TriadSm80,
-        "gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3",
+        "nn_sm80_mma_tf32_m64n64_bk32_s3",
     ),
     sm120_case(
         "tn_d128_in_proj",
         ResolvedGemmOp::Tn,
         (1024, 128, 512),
         ModuleKind::TriadSm80,
-        "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        "tn_sm80_mma_tf32_m16n32_bk32_s4",
     ),
     sm120_case(
         "nt_d128_in_proj",
         ResolvedGemmOp::Nt,
         (1024, 128, 512),
         ModuleKind::TriadSm80,
-        "gemm_bi_nt_sm80_mma_tf32_v1_m16n16_bk32_s4",
+        "nt_sm80_mma_tf32_m16n16_bk32_s4",
     ),
     sm120_case(
         "tn_d128_out_proj",
         ResolvedGemmOp::Tn,
         (1024, 256, 128),
         ModuleKind::TriadSm80,
-        "gemm_bi_tn_sm80_mma_tf32_v1_m16n16_bk32_s4",
+        "tn_sm80_mma_tf32_m16n16_bk32_s4",
     ),
     sm120_case(
         "nn_batch_in_proj",
         ResolvedGemmOp::Nn,
         (10400, 384, 1536),
         ModuleKind::TriadSm120,
-        "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
     ),
     Sm120CurrentCohortCase {
         id: "tn_m8192_k128_n128",
@@ -209,21 +208,21 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ResolvedGemmOp::Nt,
         (128, 8192, 128),
         ModuleKind::TriadSm80,
-        "gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2",
+        "nt_sm80_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "nt_batch_in_proj",
         ResolvedGemmOp::Nt,
         (10400, 384, 1536),
         ModuleKind::TriadSm120,
-        "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "tn_underfill",
         ResolvedGemmOp::Tn,
         (256, 512, 384),
         ModuleKind::TriadSm80,
-        "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        "tn_sm80_mma_tf32_m16n32_bk32_s4",
     ),
 ];
 
@@ -245,7 +244,7 @@ const fn sm120_case(
 fn configure_deterministic_tf32(ctx: &GpuCtx) {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
 }
 
 fn nt_finalist_request(
@@ -255,7 +254,7 @@ fn nt_finalist_request(
     PhysicalQualificationRequest::contiguous_f32(
         ResolvedGemmOp::Nt,
         dims,
-        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8V1),
+        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8),
         epilogue,
     )
 }
@@ -267,12 +266,10 @@ fn nt_portable_request(
     PhysicalQualificationRequest::contiguous_f32(
         ResolvedGemmOp::Nt,
         dims,
-        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32RnaV1(
-            Tf32PortableRoute {
-                tile: Tf32PortableTile::M128N64,
-                stages: Tf32PortableStages::S2,
-            },
-        )),
+        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+            tile: Tf32PortableTile::M128N64,
+            stages: Tf32PortableStages::S2,
+        })),
         epilogue,
     )
 }
@@ -313,7 +310,7 @@ fn assert_sm89_nt_finalist_manifest(
     assert_eq!(node.tile, Some((128, 64)));
     assert_eq!(
         node.numeric_contract,
-        Some(ResolvedNumericContract::MmaTf32RnaV1)
+        Some(ResolvedNumericContract::MmaTf32Rna)
     );
     assert_eq!(node.launch.grid_dim, expected_grid);
     assert_eq!(node.launch.block_dim, (256, 1, 1));
@@ -419,7 +416,7 @@ fn nt_auto_request(dims: (usize, usize, usize)) -> PhysicalQualificationRequest 
     PhysicalQualificationRequest::contiguous_f32(
         ResolvedGemmOp::Nt,
         dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
         PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
     )
 }
@@ -568,7 +565,7 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
         PhysicalQualificationRequest::contiguous_f32(
             case.op,
             case.dims,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
             PhysicalQualificationF32Epilogue::new(
                 1.0,
                 if case.op == ResolvedGemmOp::Tn {
@@ -600,11 +597,11 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
             Some((module, symbol)) => {
                 tf32_served += 1;
                 let numeric_contract = match module {
-                    ModuleKind::TriadSm80 => ResolvedNumericContract::MmaTf32RnaV1,
+                    ModuleKind::TriadSm80 => ResolvedNumericContract::MmaTf32Rna,
                     ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => {
                         ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
                     }
-                    ModuleKind::TriadSm120 => ResolvedNumericContract::Sm120TmaMmaTf32RnaV1,
+                    ModuleKind::TriadSm120 => ResolvedNumericContract::Sm120TmaMmaTf32Rna,
                     _ => panic!("{} has an unsupported TF32 module {module:?}", case.id),
                 };
                 assert!(
@@ -635,9 +632,9 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
                         matches!(
                             node.numeric_contract,
                             Some(
-                                ResolvedNumericContract::ScalarFmaV1
-                                    | ResolvedNumericContract::ScalarFmaTnSplitMPartialV1
-                                    | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
+                                ResolvedNumericContract::ScalarFma
+                                    | ResolvedNumericContract::ScalarFmaTnSplitMPartial
+                                    | ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce
                             )
                         ) && !node.symbol.contains("tf32")
                     }),
@@ -681,7 +678,7 @@ fn tf32_cohort_binds_on_this_board() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     if device.compute_capability == (12, 0) && device.multiprocessor_count() == 170 {
         run_sm120_current_cohort_binding(&ctx);
         return;
@@ -708,7 +705,7 @@ fn tf32_cohort_binds_on_this_board() {
         let request = PhysicalQualificationRequest::contiguous_f32(
             ResolvedGemmOp::Nn,
             dims,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
             PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
         );
         let qualified = qualify_physical_launch(&ctx, request)
@@ -764,7 +761,7 @@ fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     for dims in [
         (2048, 768, 3072),
         (2048, 1536, 768),
@@ -775,14 +772,14 @@ fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
         let request = PhysicalQualificationRequest::contiguous_f32(
             ResolvedGemmOp::Nn,
             dims,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
             PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
         );
         let launch = qualify_physical_launch(&ctx, request).expect("qualify Ada bias AUTO");
         assert!(
             launch.evidence().nodes().iter().any(|node| {
                 node.module_kind == ModuleKind::TriadSm80
-                    && node.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3"
+                    && node.symbol == "nn_sm80_mma_tf32_m128n128_bk32_s3"
             }),
             "qualified bias AUTO served the wrong body for {dims:?}"
         );

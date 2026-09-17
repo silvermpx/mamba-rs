@@ -173,9 +173,9 @@ fn certificate(corpus: Corpus, words: [u32; 4], input: ProofInput<'_>) -> Result
     Ok(proof)
 }
 
-const CANDIDATE: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
-const LEGACY: &str = "gemm_bi_f32_f32_s2";
-const ORACLE: &str = "gemm_bi_f32_f32";
+const CANDIDATE: &str = "nn_sm89_f32_n64_copyplan";
+const LEGACY: &str = "f32_f32_s2";
+const ORACLE: &str = "f32_f32";
 const GUARD: usize = 32;
 const CANARY: u32 = 0x419a0000; // 19.25, checked as raw words.
 
@@ -1936,7 +1936,7 @@ fn run_checked() -> Result<(), String> {
     let preflight = telemetry("exact N64 run preflight")?;
     let device = GpuDevice::new(0)?;
     let ctx = GpuCtx::new(&device)?;
-    super::configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::ExactScalarFmaV1);
+    super::configure_fixed_auto_vendor_custom(&ctx, F32TriadPolicy::ExactScalarFma);
     let identity = identity(&ctx, &device)?;
     let initial_resources = resource_snapshot(&ctx)?;
     let mut evidence = Evidence::new()?;

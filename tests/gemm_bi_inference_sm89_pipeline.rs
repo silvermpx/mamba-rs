@@ -27,7 +27,7 @@ const RUNGS: [InferenceTile; 5] = [
     InferenceTile::TcWn64,
 ];
 
-fn expected_ada_half_auto_v45(
+fn expected_ada_half_auto(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
     shape: InferenceShape,
@@ -465,7 +465,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                             if let Some(forced) = forced {
                                 assert_eq!(picked, forced);
                             } else if m == hot_m && output_offset == 8 {
-                                let expected = expected_ada_half_auto_v45(
+                                let expected = expected_ada_half_auto(
                                     ctx.kernels.compiler_identity().nvrtc_version,
                                     dtype,
                                     InferenceShape { m, k, n },
@@ -764,21 +764,21 @@ fn assert_half_graph_params(
     );
     let (expected, threads, bm, bn, shared) = match tile {
         InferenceTile::Tc128Sm89Pipeline => (
-            format!("gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_{}", dtype.as_str()),
+            format!("nn_sm89_tc128_pipeline_{}", dtype.as_str()),
             256,
             128,
             128,
             71_680,
         ),
         InferenceTile::Tc128Sm89Swizzle => (
-            format!("gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_{}", dtype.as_str()),
+            format!("nn_sm89_tc128_swizzle_{}", dtype.as_str()),
             256,
             128,
             128,
             69_632,
         ),
         InferenceTile::Tc128Sm89S3 => (
-            format!("gemm_bi_nn_fixed_sm89_tc128_s3_v1_{}", dtype.as_str()),
+            format!("nn_sm89_tc128_s3_{}", dtype.as_str()),
             256,
             128,
             128,
@@ -786,23 +786,11 @@ fn assert_half_graph_params(
         ),
         InferenceTile::TcM64N64Sm89S3 => {
             assert_eq!(dtype, WeightDtype::F16);
-            (
-                "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16".into(),
-                128,
-                64,
-                64,
-                49_152,
-            )
+            ("nn_sm89_m64n64_bk64_s3_f16".into(), 128, 64, 64, 49_152)
         }
         InferenceTile::TcM128N64Sm89S2 => {
             assert_eq!(dtype, WeightDtype::F16);
-            (
-                "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16".into(),
-                128,
-                128,
-                64,
-                49_152,
-            )
+            ("nn_sm89_m128n64_bk64_s2_f16".into(), 128, 128, 64, 49_152)
         }
         _ => panic!("not an Ada half physical route: {tile:?}"),
     };

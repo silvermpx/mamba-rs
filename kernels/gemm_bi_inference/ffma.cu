@@ -160,7 +160,7 @@ NAME(                                                                           
     } while (0)
 
 extern "C" __global__ __launch_bounds__(GBF_F32_THREADS, 2) void
-gemm_bi_f32_f32_s2(
+f32_f32_s2(
     float* __restrict__ c,
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -361,7 +361,7 @@ gemm_bi_f32_f32_s2(
     } while (0)
 
 extern "C" __global__ __launch_bounds__(GBF_F32_N128_THREADS, 2) void
-gemm_bi_f32_f32_n128_s2(
+f32_f32_n128_s2(
     float* __restrict__ c,
     const float* __restrict__ a,
     const float* __restrict__ b,

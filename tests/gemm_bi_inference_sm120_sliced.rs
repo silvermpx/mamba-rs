@@ -18,8 +18,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
-const SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
-const LEGACY_SYMBOL: &str = "gemm_bi_f32_f32_s2";
+const SYMBOL: &str = "nn_sm120_f32_n64_sliced";
+const LEGACY_SYMBOL: &str = "f32_f32_s2";
 const CANDIDATE: InferenceTile = InferenceTile::F32Sm120N64Sliced;
 const GUARD: usize = 64;
 const POISON: u32 = 0xa5a5_a5a5;
@@ -579,17 +579,11 @@ fn assert_exact_n64_graph(
 ) {
     let (symbol, compact, tma, tile_m, tile_n, threads, dynamic_shared) = match tile {
         CANDIDATE => (SYMBOL, true, false, 64, 64, 128, 0),
-        InferenceTile::F32Sm120N64CopyPlan => (
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-            true,
-            false,
-            64,
-            64,
-            128,
-            0,
-        ),
+        InferenceTile::F32Sm120N64CopyPlan => {
+            ("nn_sm120_f32_n64_copyplan", true, false, 64, 64, 128, 0)
+        }
         InferenceTile::F32Sm120TmaFmaM128N64 => (
-            "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+            "nn_sm120_tma_fma_m128n64_bk16_s2",
             false,
             true,
             128,
@@ -597,7 +591,7 @@ fn assert_exact_n64_graph(
             128,
             24_592,
         ),
-        InferenceTile::F32N128S2 => ("gemm_bi_f32_f32_n128_s2", false, false, 64, 128, 256, 0),
+        InferenceTile::F32N128S2 => ("f32_f32_n128_s2", false, false, 64, 128, 256, 0),
         InferenceTile::Legacy => (LEGACY_SYMBOL, false, false, 64, 64, 128, 0),
         _ => panic!("unqualified exact N64 force graph tile: {tile:?}"),
     };
@@ -1289,13 +1283,13 @@ fn run_auto_view(
     }
     drop(graph);
     inputs.unchanged(ctx);
-    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
     let actual_symbol = match actual_tile {
         CANDIDATE => SYMBOL,
         InferenceTile::Legacy => LEGACY_SYMBOL,
-        InferenceTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-        InferenceTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
-        InferenceTile::F32N128S2 => "gemm_bi_f32_f32_n128_s2",
+        InferenceTile::F32Sm120N64CopyPlan => "nn_sm120_f32_n64_copyplan",
+        InferenceTile::F32Sm120TmaFmaM128N64 => "nn_sm120_tma_fma_m128n64_bk16_s2",
+        InferenceTile::F32N128S2 => "f32_f32_n128_s2",
         _ => unreachable!("graph contract already rejects other AUTO symbols"),
     };
     println!(
@@ -1341,7 +1335,7 @@ fn fixed_sm120_sliced_auto_prefix_view_graph_bits() {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     // Sliced is force-only: full-hot raw batch/view gate uses exact-TMA at B0
     // and retains copyplan for E0/E1/B1.
     // This is not a replacement for independent numerical or paired timing gates.

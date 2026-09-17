@@ -1,8 +1,7 @@
-pub const CANDIDATE_GEMM_SYMBOL: &str =
-    "gemm_bi_tn_test_transpose_pre_rna_n96_sm89_m128n96_bk32_s3";
-pub const RETAINED_GEMM_SYMBOL: &str = "gemm_bi_tn_test_transpose_rna_n96_sm89_m128n96_bk32_s3";
-pub const CANDIDATE_TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_test_transpose_rna_u32_32x32_v1";
-pub const RETAINED_TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_test_transpose_raw_u32_32x32_v1";
+pub const CANDIDATE_GEMM_SYMBOL: &str = "tn_test_transpose_pre_rna_n96_sm89_m128n96_bk32_s3";
+pub const RETAINED_GEMM_SYMBOL: &str = "tn_test_transpose_rna_n96_sm89_m128n96_bk32_s3";
+pub const CANDIDATE_TRANSPOSE_SYMBOL: &str = "tn_test_transpose_rna_u32_32x32";
+pub const RETAINED_TRANSPOSE_SYMBOL: &str = "tn_test_transpose_raw_u32_32x32";
 
 pub fn compose_candidate_source(retained_source: &str) -> Result<String, String> {
     let mut source = retained_source.to_owned();

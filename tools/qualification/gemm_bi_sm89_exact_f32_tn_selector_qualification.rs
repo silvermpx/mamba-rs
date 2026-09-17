@@ -101,7 +101,7 @@ mod live {
     use serde_json::json;
 
     const OPS_PER_WINDOW: usize = 20;
-    const PRIOR_SYMBOLS: [&str; 2] = ["gemm_bi_tn_splitm_partial_aligned", "gemm_bi_splitm_reduce"];
+    const PRIOR_SYMBOLS: [&str; 2] = ["tn_splitm_partial_aligned", "splitm_reduce"];
 
     #[derive(Clone, Copy)]
     struct Case {
@@ -130,18 +130,18 @@ mod live {
                 chunks: 2,
                 m_chunk: 1_024,
             },
-            symbols: ["gemm_bi_transpose_f32_32x16_d768_v1", D768_IN_FUSED_SYMBOL],
+            symbols: ["transpose_f32_32x16_d768", D768_IN_FUSED_SYMBOL],
             grids: [(24, 64, 1), (576, 1, 1)],
             blocks: [(32, 16, 1), (128, 1, 1)],
             modules: [ModuleKind::TriadScalar, ModuleKind::TriadSm89ExactF32],
             tiles: [(32, 32), (64, 64)],
             numeric: [
-                ResolvedNumericContract::ScalarFmaV1,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                ResolvedNumericContract::ScalarFma,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
             ],
             ownership: [
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
             ],
         },
         Case {
@@ -156,18 +156,18 @@ mod live {
                 chunks: 4,
                 m_chunk: 512,
             },
-            symbols: [D768_OUT_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+            symbols: [D768_OUT_RAW_SYMBOL, "splitm_reduce"],
             grids: [(288, 1, 4), (4_608, 1, 1)],
             blocks: [(128, 1, 1), (256, 1, 1)],
             modules: [ModuleKind::TriadSm89ExactF32, ModuleKind::TriadScalar],
             tiles: [(64, 64), (1, 1)],
             numeric: [
-                ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                ResolvedNumericContract::ScalarFmaTnSplitMPartial,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
             ],
             ownership: [
-                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
-                ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduceV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
+                ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
             ],
         },
         Case {
@@ -182,18 +182,18 @@ mod live {
                 chunks: 6,
                 m_chunk: 784,
             },
-            symbols: [PRISM_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+            symbols: [PRISM_RAW_SYMBOL, "splitm_reduce"],
             grids: [(186, 1, 6), (2_892, 1, 1)],
             blocks: [(128, 1, 1), (256, 1, 1)],
             modules: [ModuleKind::TriadSm89ExactF32, ModuleKind::TriadScalar],
             tiles: [(64, 64), (1, 1)],
             numeric: [
-                ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+                ResolvedNumericContract::ScalarFmaTnSplitMPartial,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
             ],
             ownership: [
-                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
-                ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduceV1,
+                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
+                ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
             ],
         },
     ];
@@ -251,7 +251,7 @@ mod live {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         Ok(ctx)
     }
 
@@ -409,12 +409,12 @@ mod live {
         ];
         let expected_tiles = [(128, 128), (1, 1)];
         let expected_numeric = [
-            ResolvedNumericContract::ScalarFmaV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+            ResolvedNumericContract::ScalarFma,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
         ];
         let expected_ownership = [
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
-            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduceV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
+            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
         ];
         if node_symbols(launch) != PRIOR_SYMBOLS
             || evidence.route_identity() != &ctx.gemm_route()
@@ -542,7 +542,7 @@ mod live {
         );
         let words = raw_seed_words(cell, exceptional)?;
         let auto_request = request(
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
             cell.dims,
             alpha,
         );
@@ -638,7 +638,7 @@ mod live {
         let mut auto = qualify_physical_launch(
             auto_ctx,
             request(
-                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                 case.target.dims,
                 1.0,
             ),
@@ -746,7 +746,7 @@ mod live {
             let mut auto = qualify_physical_launch(
                 auto_ctx,
                 request(
-                    PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                    PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                     case.target.dims,
                     1.0,
                 ),
@@ -947,7 +947,7 @@ mod live {
             let mut auto = qualify_physical_launch(
                 &ctx,
                 request(
-                    PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                    PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                     case.target.dims,
                     1.0,
                 ),

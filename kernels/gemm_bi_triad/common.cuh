@@ -12,14 +12,14 @@ __device__ __forceinline__ float4 ld_global_L2_128B(const float* p) {
         : "l"(p));
     return v;
 }
-__device__ __forceinline__ bool gemm_bi_is_aligned_4(const void* ptr) {
+__device__ __forceinline__ bool is_aligned_4(const void* ptr) {
     return ((unsigned long long)ptr & 3ULL) == 0;
 }
 
-__device__ __forceinline__ bool gemm_bi_is_aligned_8(const void* ptr) {
+__device__ __forceinline__ bool is_aligned_8(const void* ptr) {
     return ((unsigned long long)ptr & 7ULL) == 0;
 }
 
-__device__ __forceinline__ bool gemm_bi_is_aligned_16(const void* ptr) {
+__device__ __forceinline__ bool is_aligned_16(const void* ptr) {
     return ((unsigned long long)ptr & 15ULL) == 0;
 }

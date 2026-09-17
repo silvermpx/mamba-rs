@@ -8,7 +8,7 @@ use crate::mamba_ssm::gpu::{
 
 use super::contract::{F32TriadOperands, F32TriadRequest, F32TriadShape};
 
-const BASE_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_half.cu");
+const BASE_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half.cu");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Sm89HalfRoute {
@@ -40,7 +40,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NnM128N128Bk64S3,
         op: ResolvedGemmOp::Nn,
         dtype: WeightDtype::F16,
-        symbol: "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
+        symbol: "nn_sm89_m128n128_bk64_s3_f16",
         tile: (128, 128),
         bk: 64,
         stages: 3,
@@ -54,7 +54,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NnM128N128Bk64S3,
         op: ResolvedGemmOp::Nn,
         dtype: WeightDtype::Bf16,
-        symbol: "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
+        symbol: "nn_sm89_m128n128_bk64_s3_bf16",
         tile: (128, 128),
         bk: 64,
         stages: 3,
@@ -124,7 +124,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NtM128N128Bk64S3Bxor,
         op: ResolvedGemmOp::Nt,
         dtype: WeightDtype::F16,
-        symbol: "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16",
+        symbol: "nt_sm89_m128n128_bk64_s3_bxor_f16",
         tile: (128, 128),
         bk: 64,
         stages: 3,
@@ -138,7 +138,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NtM128N128Bk64S3Bxor,
         op: ResolvedGemmOp::Nt,
         dtype: WeightDtype::Bf16,
-        symbol: "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16",
+        symbol: "nt_sm89_m128n128_bk64_s3_bxor_bf16",
         tile: (128, 128),
         bk: 64,
         stages: 3,
@@ -152,7 +152,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NtM96N128Bk64S3,
         op: ResolvedGemmOp::Nt,
         dtype: WeightDtype::F16,
-        symbol: "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
+        symbol: "nt_sm89_m96n128_bk64_s3_f16",
         tile: (96, 128),
         bk: 64,
         stages: 3,
@@ -166,7 +166,7 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
         route: Sm89HalfRoute::NtM96N128Bk64S3,
         op: ResolvedGemmOp::Nt,
         dtype: WeightDtype::Bf16,
-        symbol: "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16",
+        symbol: "nt_sm89_m96n128_bk64_s3_bf16",
         tile: (96, 128),
         bk: 64,
         stages: 3,
@@ -449,20 +449,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            78, 2, 201, 10, 198, 58, 141, 177, 143, 96, 18, 102, 120, 205, 197, 234, 107, 29, 235,
-            157, 20, 31, 87, 36, 218, 116, 173, 119, 29, 170, 153, 136,
+            53, 88, 65, 230, 45, 14, 201, 183, 247, 226, 214, 102, 144, 121, 155, 158, 171, 74,
+            215, 231, 20, 233, 129, 192, 56, 63, 212, 253, 130, 161, 215, 223,
         ],
         artifact_digest: [
-            16, 106, 128, 33, 183, 85, 92, 168, 200, 85, 209, 92, 243, 119, 10, 117, 116, 90, 191,
-            207, 171, 67, 133, 128, 42, 197, 211, 240, 162, 150, 225, 138,
+            105, 101, 89, 217, 145, 231, 253, 49, 68, 241, 63, 238, 53, 183, 251, 140, 203, 212,
+            135, 137, 147, 113, 57, 50, 48, 6, 116, 137, 82, 190, 211, 123,
         ],
         source_digest: [
-            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
-            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
+            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
+            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
         ],
         header_manifest_digest: [
-            205, 102, 54, 109, 97, 1, 150, 98, 93, 201, 231, 167, 158, 171, 38, 235, 249, 163, 100,
-            144, 81, 45, 156, 83, 246, 104, 17, 161, 125, 178, 135, 190,
+            22, 87, 107, 243, 151, 28, 253, 49, 242, 12, 194, 42, 91, 0, 77, 36, 127, 52, 18, 137,
+            4, 139, 202, 102, 4, 163, 21, 132, 25, 25, 209, 30,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -472,20 +472,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            77, 53, 182, 23, 33, 91, 10, 125, 143, 27, 90, 102, 26, 20, 20, 176, 241, 12, 177, 132,
-            165, 120, 0, 145, 88, 158, 244, 244, 124, 156, 134, 73,
+            65, 65, 203, 117, 136, 145, 250, 24, 36, 71, 155, 185, 173, 182, 193, 13, 226, 32, 12,
+            56, 26, 29, 37, 231, 223, 124, 129, 142, 182, 183, 227, 116,
         ],
         artifact_digest: [
-            15, 42, 163, 213, 227, 176, 47, 17, 114, 151, 175, 98, 52, 148, 191, 140, 73, 87, 27,
-            21, 134, 26, 13, 104, 208, 144, 42, 39, 95, 127, 244, 245,
+            103, 139, 45, 1, 147, 23, 36, 71, 36, 139, 182, 27, 193, 230, 132, 93, 75, 43, 85, 5,
+            173, 112, 30, 188, 224, 87, 251, 56, 133, 10, 247, 127,
         ],
         source_digest: [
-            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
-            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
+            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
+            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
         ],
         header_manifest_digest: [
-            73, 235, 188, 209, 96, 117, 26, 203, 45, 100, 12, 24, 203, 74, 84, 93, 202, 186, 155,
-            139, 115, 142, 238, 151, 138, 190, 83, 49, 194, 41, 185, 37,
+            242, 235, 68, 21, 160, 216, 233, 162, 18, 142, 9, 52, 72, 241, 130, 135, 159, 123, 44,
+            26, 14, 135, 237, 109, 93, 33, 180, 4, 11, 182, 177, 226,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -495,20 +495,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            234, 138, 214, 36, 186, 230, 152, 30, 234, 5, 200, 174, 109, 242, 44, 186, 88, 101,
-            123, 211, 243, 58, 214, 39, 118, 3, 225, 60, 95, 131, 165, 231,
+            206, 165, 241, 150, 102, 4, 108, 38, 147, 144, 42, 227, 187, 156, 10, 246, 252, 102,
+            71, 126, 117, 23, 202, 241, 78, 142, 200, 27, 199, 21, 109, 173,
         ],
         artifact_digest: [
-            121, 252, 100, 248, 101, 25, 21, 199, 140, 242, 96, 95, 109, 21, 228, 244, 235, 230,
-            73, 179, 113, 221, 10, 167, 220, 5, 245, 203, 237, 63, 48, 130,
+            46, 14, 19, 187, 72, 120, 118, 238, 197, 130, 145, 21, 142, 84, 215, 9, 116, 224, 25,
+            29, 152, 19, 97, 51, 65, 21, 9, 204, 206, 152, 222, 82,
         ],
         source_digest: [
-            4, 97, 56, 95, 150, 70, 234, 8, 38, 28, 26, 230, 206, 83, 49, 145, 86, 189, 135, 244,
-            2, 246, 230, 177, 223, 219, 147, 178, 32, 152, 63, 196,
+            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
+            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
         ],
         header_manifest_digest: [
-            145, 106, 110, 57, 212, 231, 162, 98, 10, 141, 99, 105, 186, 183, 100, 119, 228, 117,
-            92, 79, 204, 82, 50, 118, 118, 39, 30, 228, 145, 168, 215, 211,
+            102, 251, 184, 239, 126, 11, 177, 44, 8, 222, 75, 16, 227, 229, 86, 208, 35, 131, 183,
+            95, 193, 160, 100, 5, 18, 117, 67, 208, 14, 27, 201, 237,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -603,7 +603,7 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
         let represented_once = match spec.route {
             Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::NtM128N128Bk64S3Bxor) => {
                 source
-                    .matches("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_##SUFFIX")
+                    .matches("nt_sm89_m128n128_bk64_s3_bxor_##SUFFIX")
                     .count()
                     == 1
                     && source
@@ -634,11 +634,7 @@ pub(super) fn compose_sm89_half_source() -> Result<String, String> {
             ));
         }
     }
-    for forbidden in [
-        "_test_",
-        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_",
-        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_",
-    ] {
+    for forbidden in ["_test_", "nn_sm89_tc128_s3_", "nn_sm89_tc128_swizzle_"] {
         if source.contains(forbidden) {
             return Err(format!(
                 "TriadSm89Half source retained non-production marker {forbidden}"
@@ -666,16 +662,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (12, 8),
                 compile_key: digest(
-                    "4e02c90ac63a8db18f60126678cdc5ea6b1deb9d141f5724da74ad771daa9988",
+                    "355841e62d0ec9b7f7e2d66690799b9eab4ad7e714e981c0383fd4fd82a1d7df",
                 ),
                 artifact_digest: digest(
-                    "106a8021b7555ca8c855d15cf3770a75745abfcfab4385802ac5d3f0a296e18a",
+                    "696559d991e7fd3144f13fee35b7fb8ccbd48789937139323006748952bed37b",
                 ),
                 source_digest: digest(
-                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
                 ),
                 header_manifest_digest: digest(
-                    "cd66366d610196625dc9e7a79eab26ebf9a36490512d9c53f66811a17db287be",
+                    "16576bf3971cfd31f20cc22a5b004d247f341289048bca6604a315841919d11e",
                 ),
                 nvrtc_library_domain: digest(
                     "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
@@ -684,16 +680,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (13, 0),
                 compile_key: digest(
-                    "4d35b617215b0a7d8f1b5a661a1414b0f10cb184a5780091589ef4f47c9c8649",
+                    "4141cb758891fa1824479bb9adb6c10de2200c381a1d25e7df7c818eb6b7e374",
                 ),
                 artifact_digest: digest(
-                    "0f2aa3d5e3b02f117297af623494bf8c49571b15861a0d68d0902a275f7ff4f5",
+                    "678b2d0193172447248bb61bc1e6845d4b2b5505ad701ebce057fb38850af77f",
                 ),
                 source_digest: digest(
-                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
                 ),
                 header_manifest_digest: digest(
-                    "49ebbcd160751acb2d640c18cb4a545dcaba9b8b738eee978abe5331c229b925",
+                    "f2eb4415a0d8e9a2128e093448f182879f7b2c1a0e87ed6d5d21b4040bb6b1e2",
                 ),
                 nvrtc_library_domain: digest(
                     "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
@@ -702,16 +698,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (13, 2),
                 compile_key: digest(
-                    "ea8ad624bae6981eea05c8ae6df22cba58657bd3f33ad6277603e13c5f83a5e7",
+                    "cea5f19666046c2693902ae3bb9c0af6fc66477e7517caf14e8ec81bc7156dad",
                 ),
                 artifact_digest: digest(
-                    "79fc64f8651915c78cf2605f6d15e4f4ebe649b371dd0aa7dc05f5cbed3f3082",
+                    "2e0e13bb487876eec58291158e54d70974e0191d98136133411509ccce98de52",
                 ),
                 source_digest: digest(
-                    "0461385f9646ea08261c1ae6ce53319156bd87f402f6e6b1dfdb93b220983fc4",
+                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
                 ),
                 header_manifest_digest: digest(
-                    "916a6e39d4e7a2620a8d6369bab76477e4755c4fcc52327676271ee491a8d7d3",
+                    "66fbb8ef7e0bb12c08de4b10e3e556d02383b75fc1a06405127543d00e1bc9ed",
                 ),
                 nvrtc_library_domain: digest(
                     "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
@@ -866,7 +862,7 @@ mod tests {
                 .len(),
             5
         );
-        assert!(!source.contains("gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_"));
+        assert!(!source.contains("nn_sm89_tc128_swizzle_"));
     }
 
     #[test]

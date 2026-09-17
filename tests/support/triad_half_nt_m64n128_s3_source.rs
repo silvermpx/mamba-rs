@@ -6,7 +6,7 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     for anchor in [
         "} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
         "} // namespace sm89_test_half_nt_s3",
-        "void gemm_bi_nt_test_fixed_s3_bxor_##SUFFIX",
+        "void nt_test_fixed_s3_bxor_##SUFFIX",
         "sm89_test_half_nt_s3::kernel<TYPE>",
     ] {
         require_count(&source, anchor, 1)?;
@@ -102,8 +102,8 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     )?;
     replace_exact(
         &mut source,
-        "void gemm_bi_nt_test_fixed_s3_bxor_##SUFFIX",
-        "void gemm_bi_nt_test_fixed_s3_m64n128_##SUFFIX",
+        "void nt_test_fixed_s3_bxor_##SUFFIX",
+        "void nt_test_fixed_s3_m64n128_##SUFFIX",
     )?;
     replace_exact(
         &mut source,
@@ -382,8 +382,8 @@ fn require_count(source: &str, anchor: &str, expected: usize) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_s3.cu");
 
     fn index(row: usize, k: usize) -> usize {
         row * 64 + (k ^ ((row & 7) * 8))
@@ -482,10 +482,10 @@ mod tests {
         assert!(source.contains("static_assert(3 * (64 * 64 + 128 * 64) * 2 == kSharedBytes"));
         assert!(source.contains("float acc[2][4][4];"));
         assert!(source.contains("for (int fm = 0; fm < 2; ++fm)"));
-        assert!(source.contains("void gemm_bi_nt_test_fixed_s3_m64n128_##SUFFIX"));
+        assert!(source.contains("void nt_test_fixed_s3_m64n128_##SUFFIX"));
         assert!(source.contains("gbf_store_pair_rne(destination, first, second);"));
         assert!(source.contains("*output = HalfOps<T>::from_float(value);"));
-        assert!(!source.contains("void gemm_bi_nt_test_fixed_s3_bxor_##SUFFIX"));
+        assert!(!source.contains("void nt_test_fixed_s3_bxor_##SUFFIX"));
     }
 
     #[test]

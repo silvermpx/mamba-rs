@@ -174,7 +174,7 @@ fn certificate(corpus: Corpus, words: [u32; 4], input: ProofInput<'_>) -> Result
     Ok(proof)
 }
 
-const CANDIDATE: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
+const CANDIDATE: &str = "nn_sm120_f32_n64_copyplan";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Candidate {
@@ -203,7 +203,7 @@ impl Candidate {
     fn symbol(self) -> &'static str {
         match self {
             Self::CopyPlan => CANDIDATE,
-            Self::Sliced => "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1",
+            Self::Sliced => "nn_sm120_f32_n64_sliced",
         }
     }
 }
@@ -233,15 +233,9 @@ fn exact_n64_candidate_cpu_selection_defaults_and_rejects_unknown_values() {
         Candidate::CopyPlan.tile(),
         InferenceTile::F32Sm120N64CopyPlan
     );
-    assert_eq!(
-        Candidate::CopyPlan.symbol(),
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
-    );
+    assert_eq!(Candidate::CopyPlan.symbol(), "nn_sm120_f32_n64_copyplan");
     assert_eq!(Candidate::Sliced.tile(), InferenceTile::F32Sm120N64Sliced);
-    assert_eq!(
-        Candidate::Sliced.symbol(),
-        "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"
-    );
+    assert_eq!(Candidate::Sliced.symbol(), "nn_sm120_f32_n64_sliced");
 }
 
 fn candidate_own_admission(
@@ -420,9 +414,9 @@ fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
         &self_noise
     ));
 }
-const LEGACY: &str = "gemm_bi_f32_f32_s2";
-const N128: &str = "gemm_bi_f32_f32_n128_s2";
-const ORACLE: &str = "gemm_bi_f32_f32";
+const LEGACY: &str = "f32_f32_s2";
+const N128: &str = "f32_f32_n128_s2";
+const ORACLE: &str = "f32_f32";
 const GUARD: usize = 32;
 const CANARY: u32 = 0x419a0000; // 19.25, checked as raw words.
 
@@ -1589,53 +1583,37 @@ fn own_kernel_for_candidate(
     match (arm, auto) {
         (0, _) => Ok((candidate.symbol(), 64, 128)),
         (1, Some(InferenceTile::F32Sm120N64CopyPlan)) => Ok((CANDIDATE, 64, 128)),
-        (1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)) => Ok((
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
-            64,
-            256,
-        )),
+        (1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)) => {
+            Ok(("nn_sm120_f32_n64_copyplan_m128n64_t256", 64, 256))
+        }
         (1, Some(InferenceTile::F32Sm120N64CopyPlanT256)) => {
-            Ok(("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256))
+            Ok(("nn_sm120_f32_n64_copyplan_t256", 64, 256))
         }
-        (1, Some(InferenceTile::F32Sm120N64Sliced)) => {
-            Ok(("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128))
-        }
+        (1, Some(InferenceTile::F32Sm120N64Sliced)) => Ok(("nn_sm120_f32_n64_sliced", 64, 128)),
         (1, Some(InferenceTile::F32Sm120TmaFmaM128N64)) => {
-            Ok(("gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2", 64, 128))
+            Ok(("nn_sm120_tma_fma_m128n64_bk16_s2", 64, 128))
         }
         (1, Some(InferenceTile::F32Sm120TmaFmaM64N128)) => {
-            Ok(("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128))
+            Ok(("nn_sm120_tma_fma_m64n128_bk16_s2", 128, 128))
         }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
-            64,
-            128,
-        )),
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
-            64,
-            128,
-        )),
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
-            64,
-            256,
-        )),
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
-            64,
-            256,
-        )),
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
-            96,
-            256,
-        )),
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => Ok((
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
-            128,
-            128,
-        )),
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => {
+            Ok(("nn_sm120_tma_fma_postbias_m128n64_bk16_s2", 64, 128))
+        }
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => {
+            Ok(("nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4", 64, 128))
+        }
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => {
+            Ok(("nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2", 64, 256))
+        }
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => {
+            Ok(("nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2", 64, 256))
+        }
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => {
+            Ok(("nn_sm120_tma_fma_postbias_m128n96_bk16_s2", 96, 256))
+        }
+        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => {
+            Ok(("nn_sm120_tma_fma_postbias_m64n128_bk16_s2", 128, 128))
+        }
         (1, Some(InferenceTile::F32N128S2)) => Ok((N128, 128, 256)),
         (1, Some(InferenceTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
         (4, _) => Ok((ORACLE, 64, 256)),
@@ -1647,15 +1625,11 @@ fn own_kernel_for_candidate(
 fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)).unwrap(),
-        (
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
-            64,
-            256
-        )
+        ("nn_sm120_f32_n64_copyplan_m128n64_t256", 64, 256)
     );
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120N64CopyPlanT256)).unwrap(),
-        ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256)
+        ("nn_sm120_f32_n64_copyplan_t256", 64, 256)
     );
     assert_eq!(
         expected_auto(
@@ -1677,11 +1651,7 @@ fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
 fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)).unwrap(),
-        (
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
-            64,
-            256
-        )
+        ("nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2", 64, 256)
     );
     assert_eq!(
         expected_auto(
@@ -1702,7 +1672,7 @@ fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
 #[test]
 fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
     let (symbol, tile_n, threads) = own_kernel(1, Some(InferenceTile::F32N128S2)).unwrap();
-    assert_eq!(symbol, "gemm_bi_f32_f32_n128_s2");
+    assert_eq!(symbol, "f32_f32_n128_s2");
     assert_eq!(tile_n, 128);
     assert_eq!(threads, 256);
     assert_eq!(4621usize.div_ceil(64) * 2304usize.div_ceil(tile_n), 1314);
@@ -1716,15 +1686,11 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
     );
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaM64N128)).unwrap(),
-        ("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128)
+        ("nn_sm120_tma_fma_m64n128_bk16_s2", 128, 128)
     );
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)).unwrap(),
-        (
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
-            64,
-            128
-        )
+        ("nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4", 64, 128)
     );
     assert!(own_kernel(1, None).is_err());
     assert_eq!(
@@ -1733,19 +1699,11 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
             Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)
         )
         .unwrap(),
-        (
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
-            64,
-            256
-        )
+        ("nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2", 64, 256)
     );
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)).unwrap(),
-        (
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
-            96,
-            256
-        )
+        ("nn_sm120_tma_fma_postbias_m128n96_bk16_s2", 96, 256)
     );
     let expected = LaunchProof {
         symbol: symbol.into(),
@@ -1808,9 +1766,9 @@ fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallba
         assert_eq!(
             symbol,
             if loaded {
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
+                "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2"
             } else {
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
+                "nn_sm120_tma_fma_postbias_m128n64_bk16_s2"
             }
         );
     }
@@ -1857,30 +1815,21 @@ fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
     }
     assert_eq!(
         own_kernel(1, Some(InferenceTile::F32Sm120N64Sliced)).unwrap(),
-        ("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128)
+        ("nn_sm120_f32_n64_sliced", 64, 128)
     );
     // Explicit candidate stays old copyplan. A different AUTO is not a self comparison.
     assert_eq!(
         own_kernel(0, None).unwrap(),
-        ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1", 64, 128)
+        ("nn_sm120_f32_n64_copyplan", 64, 128)
     );
-    assert_eq!(
-        own_kernel(2, None).unwrap(),
-        ("gemm_bi_f32_f32_s2", 64, 128)
-    );
+    assert_eq!(own_kernel(2, None).unwrap(), ("f32_f32_s2", 64, 128));
 }
 
 #[test]
 fn exact_n64_candidate_cpu_graph_candidate_and_auto_are_independent() {
     for (candidate, symbol) in [
-        (
-            Candidate::CopyPlan,
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-        ),
-        (
-            Candidate::Sliced,
-            "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1",
-        ),
+        (Candidate::CopyPlan, "nn_sm120_f32_n64_copyplan"),
+        (Candidate::Sliced, "nn_sm120_f32_n64_sliced"),
     ] {
         assert_eq!(
             own_kernel_for_candidate(0, None, candidate).unwrap(),
@@ -1888,16 +1837,16 @@ fn exact_n64_candidate_cpu_graph_candidate_and_auto_are_independent() {
         );
         assert_eq!(
             own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64Sliced), candidate).unwrap(),
-            ("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128)
+            ("nn_sm120_f32_n64_sliced", 64, 128)
         );
         assert_eq!(
             own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64CopyPlan), candidate)
                 .unwrap(),
-            ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1", 64, 128)
+            ("nn_sm120_f32_n64_copyplan", 64, 128)
         );
         assert_eq!(
             own_kernel_for_candidate(2, None, candidate).unwrap(),
-            ("gemm_bi_f32_f32_s2", 64, 128)
+            ("f32_f32_s2", 64, 128)
         );
         assert!(own_kernel_for_candidate(1, None, candidate).is_err());
         assert!(own_kernel_for_candidate(1, Some(InferenceTile::Tf32M128S2), candidate).is_err());
@@ -1921,14 +1870,14 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let (expected_symbol, tile_n, threads) =
         own_kernel_for_candidate(arm, case.auto.get(), case.candidate)?;
     let exact_tma_tile = match expected_symbol {
-        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2" => Some((128usize, 64usize)),
-        "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2" => Some((64, 128)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2" => Some((128, 64)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4" => Some((128, 64)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2" => Some((128, 64)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => Some((128, 64)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => Some((128, 96)),
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => Some((64, 128)),
+        "nn_sm120_tma_fma_m128n64_bk16_s2" => Some((128usize, 64usize)),
+        "nn_sm120_tma_fma_m64n128_bk16_s2" => Some((64, 128)),
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2" => Some((128, 64)),
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4" => Some((128, 64)),
+        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2" => Some((128, 64)),
+        "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => Some((128, 64)),
+        "nn_sm120_tma_fma_postbias_m128n96_bk16_s2" => Some((128, 96)),
+        "nn_sm120_tma_fma_postbias_m64n128_bk16_s2" => Some((64, 128)),
         _ => None,
     };
     if let Some((tile_m, tile_n)) = exact_tma_tile {
@@ -2004,9 +1953,9 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         ));
     }
     let compact = expected_symbol == CANDIDATE
-        || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1"
-        || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1"
-        || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+        || expected_symbol == "nn_sm120_f32_n64_copyplan_m128n64_t256"
+        || expected_symbol == "nn_sm120_f32_n64_copyplan_t256"
+        || expected_symbol == "nn_sm120_f32_n64_sliced";
     let expected_abi = if compact {
         vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
     } else {
@@ -2045,7 +1994,7 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         symbol: expected_symbol.into(),
         grid: (
             (s.m.div_ceil(
-                if expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1" {
+                if expected_symbol == "nn_sm120_f32_n64_copyplan_m128n64_t256" {
                     128
                 } else {
                     64
@@ -3052,7 +3001,7 @@ fn run_checked() -> Result<(), String> {
         return Err("SM120 paired qualification requires exact CC12.0/170 SMs".into());
     }
     let ctx = GpuCtx::new(&device)?;
-    super::configure_sm120_exact_custom(&ctx, F32TriadPolicy::ExactScalarFmaV1);
+    super::configure_sm120_exact_custom(&ctx, F32TriadPolicy::ExactScalarFma);
     let identity = identity(&ctx, &device)?;
     let initial_resources = resource_snapshot(&ctx, candidate)?;
     let mut evidence = Evidence::new(&preflight, candidate, protocol.diagnostic_fast)?;

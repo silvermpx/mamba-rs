@@ -5,7 +5,7 @@
 //! finalist regression composes it here, hands it to the A-only ldmatrix
 //! adapter, and compares the result with the production finalist body.
 
-const PRODUCTION_CUDA: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+const PRODUCTION_CUDA: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
 const CANDIDATE_CUDA: &str = include_str!("../gemm_bi_tf32_nt_compact_xor.cu");
 fn replace_exact(
     source: &mut String,
@@ -63,7 +63,7 @@ pub fn candidate_source() -> Result<String, String> {
             "        return storage->a[stage][reduction][row];\n",
             "    }\n",
             "    if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {\n",
-            "        return storage->a[stage][row][gemm_bi_nt_test_compact_xor_k(row, reduction)];\n",
+            "        return storage->a[stage][row][nt_test_compact_xor_k(row, reduction)];\n",
             "    }\n",
             "    return storage->a[stage][row][reduction];"
         ),
@@ -81,7 +81,7 @@ pub fn candidate_source() -> Result<String, String> {
         concat!(
             "    if constexpr (Op == SgbTf32Nt) {\n",
             "        if constexpr (BM == 128 && BN == 64 && Stages == 2) {\n",
-            "            return storage->b[stage][column][gemm_bi_nt_test_compact_xor_k(column, reduction)];\n",
+            "            return storage->b[stage][column][nt_test_compact_xor_k(column, reduction)];\n",
             "        }\n",
             "        return storage->b[stage][column][reduction];\n",
             "    }\n",
@@ -100,13 +100,13 @@ pub fn candidate_source() -> Result<String, String> {
     replace_exact(
         &mut source,
         concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);"
         ),
         concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr bool compact_eight_warp_s2 =\n",
@@ -137,12 +137,12 @@ pub fn candidate_source() -> Result<String, String> {
         &mut source,
         concat!(
             "GEMM_BI_TF32_DEFINE_KERNEL(",
-            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "nt_sm80_mma_tf32_m128n64_bk32_s2, ",
             "SgbTf32Nt, 128, 64, 2, 256, 1)"
         ),
         concat!(
             "GEMM_BI_TF32_DEFINE_KERNEL(",
-            "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "nt_test_compact_eight_warp_sm80_mma_tf32_m128n64_bk32_s2, ",
             "SgbTf32Nt, 128, 64, 2, 256, 1)"
         ),
         1,
@@ -150,8 +150,8 @@ pub fn candidate_source() -> Result<String, String> {
     )?;
     replace_exact(
         &mut source,
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2);",
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_m128n64_bk32_s2);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(nt_test_compact_eight_warp_sm80_mma_tf32_m128n64_bk32_s2);",
         1,
         "compact eight-warp S2 target signature",
     )?;

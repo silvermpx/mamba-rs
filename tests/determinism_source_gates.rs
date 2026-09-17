@@ -94,7 +94,7 @@ fn tn_narrow_release_surface_excludes_measurement_only_routes() {
         ),
         (
             "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs",
-            &["gemm_bi_tn_narrow_splitm_fused", "tn_splitm_counter"][..],
+            &["tn_narrow_splitm_fused", "tn_splitm_counter"][..],
         ),
         (
             "src/mamba_ssm/gpu/kernel_identity.rs",
@@ -109,7 +109,7 @@ fn tn_narrow_release_surface_excludes_measurement_only_routes() {
         ),
         (
             "kernels/gemm_bi_triad/scalar.cu",
-            &["gemm_bi_tn_narrow_splitm_fused", "atomicInc"][..],
+            &["tn_narrow_splitm_fused", "atomicInc"][..],
         ),
     ];
     let mut offenders = Vec::new();

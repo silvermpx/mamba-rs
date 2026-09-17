@@ -45,31 +45,31 @@ const CELLS: [Cell; 5] = [
         id: "tn_r49_c129_k65",
         op: ResolvedGemmOp::Tn,
         dims: (65, 49, 129),
-        symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
     },
     Cell {
         id: "tn_r65_c129_k49",
         op: ResolvedGemmOp::Tn,
         dims: (49, 65, 129),
-        symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
     },
     Cell {
         id: "tn_r131_c100_k129",
         op: ResolvedGemmOp::Tn,
         dims: (129, 131, 100),
-        symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
     },
     Cell {
         id: "nt_r49_c65_k129",
         op: ResolvedGemmOp::Nt,
         dims: (49, 65, 129),
-        symbol: "gemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        symbol: "nt_sm80_mma_tf32_m16n32_bk32_s4",
     },
     Cell {
         id: "nt_r65_c49_k129",
         op: ResolvedGemmOp::Nt,
         dims: (65, 49, 129),
-        symbol: "gemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4",
+        symbol: "nt_sm80_mma_tf32_m16n32_bk32_s4",
     },
 ];
 
@@ -89,8 +89,8 @@ impl Arm {
 
     const fn policy(self) -> F32TriadPolicy {
         match self {
-            Self::Candidate => F32TriadPolicy::AllowDeterministicTf32V1,
-            Self::Incumbent => F32TriadPolicy::ExactScalarFmaV1,
+            Self::Candidate => F32TriadPolicy::AllowDeterministicTf32,
+            Self::Incumbent => F32TriadPolicy::ExactScalarFma,
         }
     }
 }

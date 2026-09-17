@@ -2539,7 +2539,7 @@ pub enum PolicyDtype {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Sm80TcPolicyV4 {
+pub struct Sm80TcPolicy {
     pub reject_zero_axes: bool,
     pub square_tile_min: usize,
     pub large_tile_min: usize,
@@ -2576,7 +2576,7 @@ pub struct Sm80TcPolicyV4 {
     pub stream_k_min_slabs_per_cta: u64,
 }
 
-impl Sm80TcPolicyV4 {
+impl Sm80TcPolicy {
     pub const fn current() -> Self {
         Self {
             reject_zero_axes: true,
@@ -2716,7 +2716,7 @@ impl Sm80TcPolicyV4 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ScalarWavePolicyV1 {
+pub struct ScalarWavePolicy {
     pub thin_split_wave_numerator: u64,
     pub thin_split_wave_denominator: u64,
     pub slim_split_wave_numerator: u64,
@@ -2725,7 +2725,7 @@ pub struct ScalarWavePolicyV1 {
     pub tn_split_m_wave_denominator: u64,
 }
 
-impl ScalarWavePolicyV1 {
+impl ScalarWavePolicy {
     pub const fn current() -> Self {
         Self {
             thin_split_wave_numerator: 1,
@@ -2769,8 +2769,8 @@ impl ScalarWavePolicyV1 {
 }
 
 pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
-    let tensor_core = Sm80TcPolicyV4::current().digest(multiprocessor_count);
-    let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
+    let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
+    let scalar = ScalarWavePolicy::current().digest(multiprocessor_count);
     FramedSha256::new(b"gemm-dispatch-policy.v5")
         .required(
             b"vendor-policy-revision",
@@ -2814,21 +2814,21 @@ impl BackendSet {
 pub struct NumericContractSet(u16);
 
 impl NumericContractSet {
-    pub const CUBLAS_POLICY_V1: Self = Self(1 << 0);
-    pub const TRIAD_SCALAR_FMA_V1: Self = Self(1 << 1);
-    pub const TRIAD_MMA_SYNC_V1: Self = Self(1 << 2);
-    pub const FIXED_SCALAR_FMA_V1: Self = Self(1 << 3);
-    pub const FIXED_MMA_SYNC_V1: Self = Self(1 << 4);
-    pub const FIXED_MATVEC_TREE_V1: Self = Self(1 << 5);
-    pub const TRIAD_DETERMINISTIC_TF32_V1: Self = Self(1 << 6);
-    pub const TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1: Self = Self(1 << 7);
+    pub const CUBLAS_ONE_CONTRACT: Self = Self(1 << 0);
+    pub const TRIAD_SCALAR_FMA: Self = Self(1 << 1);
+    pub const TRIAD_MMA_SYNC: Self = Self(1 << 2);
+    pub const FIXED_SCALAR_FMA: Self = Self(1 << 3);
+    pub const FIXED_MMA_SYNC: Self = Self(1 << 4);
+    pub const FIXED_MATVEC_TREE: Self = Self(1 << 5);
+    pub const TRIAD_DETERMINISTIC_TF32: Self = Self(1 << 6);
+    pub const TRIAD_DETERMINISTIC_TF32_SPLIT_K: Self = Self(1 << 7);
     /// The stream-K half routes: a persistent grid whose per-CTA partials
     /// fold in a fixed order, distinct from the tiled `mma.sync` reduction.
-    pub const TRIAD_MMA_SYNC_STREAM_K_V1: Self = Self(1 << 8);
+    pub const TRIAD_MMA_SYNC_STREAM_K: Self = Self(1 << 8);
     /// Context-aware cuBLAS policy with distinct Fast and Pedantic contracts.
-    pub const CUBLAS_POLICY_V2: Self = Self(1 << 9);
+    pub const CUBLAS_FAST_AND_PEDANTIC: Self = Self(1 << 9);
     /// Fixed-module explicit deterministic TF32, independent of the Triad tier.
-    pub const FIXED_DETERMINISTIC_TF32_V1: Self = Self(1 << 10);
+    pub const FIXED_DETERMINISTIC_TF32: Self = Self(1 << 10);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2841,52 +2841,55 @@ impl NumericContractSet {
 
 pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericContractSet) {
     if !policy.batch_invariant {
-        return (BackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V2);
+        return (
+            BackendSet::CUBLAS,
+            NumericContractSet::CUBLAS_FAST_AND_PEDANTIC,
+        );
     }
     let (backends, contracts) = match (policy.bi_gemm_family, policy.bi_tensor_cores) {
         (BiGemmFamily::Triad, false) => (
             BackendSet::TRIAD.union(BackendSet::FIXED),
-            NumericContractSet::TRIAD_SCALAR_FMA_V1.union(NumericContractSet::FIXED_MATVEC_TREE_V1),
+            NumericContractSet::TRIAD_SCALAR_FMA.union(NumericContractSet::FIXED_MATVEC_TREE),
         ),
         (BiGemmFamily::Triad, true) => (
             BackendSet::TRIAD.union(BackendSet::FIXED),
-            NumericContractSet::TRIAD_SCALAR_FMA_V1
-                .union(NumericContractSet::TRIAD_MMA_SYNC_V1)
-                .union(NumericContractSet::FIXED_MATVEC_TREE_V1),
+            NumericContractSet::TRIAD_SCALAR_FMA
+                .union(NumericContractSet::TRIAD_MMA_SYNC)
+                .union(NumericContractSet::FIXED_MATVEC_TREE),
         ),
         (BiGemmFamily::Inference, false) => (
             BackendSet::FIXED.union(BackendSet::TRIAD),
-            NumericContractSet::FIXED_SCALAR_FMA_V1
-                .union(NumericContractSet::FIXED_MMA_SYNC_V1)
-                .union(NumericContractSet::TRIAD_SCALAR_FMA_V1),
+            NumericContractSet::FIXED_SCALAR_FMA
+                .union(NumericContractSet::FIXED_MMA_SYNC)
+                .union(NumericContractSet::TRIAD_SCALAR_FMA),
         ),
         (BiGemmFamily::Inference, true) => (
             BackendSet::FIXED.union(BackendSet::TRIAD),
-            NumericContractSet::FIXED_SCALAR_FMA_V1
-                .union(NumericContractSet::FIXED_MMA_SYNC_V1)
-                .union(NumericContractSet::TRIAD_SCALAR_FMA_V1)
-                .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
+            NumericContractSet::FIXED_SCALAR_FMA
+                .union(NumericContractSet::FIXED_MMA_SYNC)
+                .union(NumericContractSet::TRIAD_SCALAR_FMA)
+                .union(NumericContractSet::TRIAD_MMA_SYNC),
         ),
     };
     let contracts = if policy.bi_gemm_family == BiGemmFamily::Triad
-        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32V1
+        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
     {
         contracts
-            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
-            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1)
+            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32)
+            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K)
     } else if policy.bi_gemm_family == BiGemmFamily::Inference
-        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32V1
+        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
     {
-        contracts.union(NumericContractSet::FIXED_DETERMINISTIC_TF32_V1)
+        contracts.union(NumericContractSet::FIXED_DETERMINISTIC_TF32)
     } else {
         contracts
     };
     // The stream-K half routes are reachable only through the tensor-core
     // tier, under either family, and only with the half policy's permission.
     let contracts = if policy.bi_tensor_cores
-        && policy.half_triad_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1
+        && policy.half_triad_policy == HalfTriadPolicy::AllowStreamKFixedOrder
     {
-        contracts.union(NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1)
+        contracts.union(NumericContractSet::TRIAD_MMA_SYNC_STREAM_K)
     } else {
         contracts
     };
@@ -2932,44 +2935,44 @@ pub enum ResolvedGemmOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PhysicalGemmBackend {
-    Sm80Mma16V1 = 1,
-    Sm90aWgmmaV1 = 2,
-    Sm100Tcgen05V1 = 3,
-    Sm120TmaMma16V1 = 4,
-    MmaTf32RnaV1 = 5,
-    Sm90aWgmmaTf32TmaV1 = 6,
-    Sm100Tcgen05Tf32TmaV1 = 7,
-    Sm120TmaMmaTf32RnaV1 = 8,
-    ScalarFmaV1 = 9,
-    MmaTf32RnaSplitK4V1 = 10,
-    MmaTf32RnaSplitK2V1 = 11,
-    ScalarFmaTnNarrowSplitMPartialV1 = 13,
-    ScalarFmaTnSplitMF64ReduceV1 = 15,
-    MmaTf32RnaSplitK8V1 = 16,
-    ScalarFmaSplitKPartialV1 = 17,
-    ScalarFmaSplitKF32ReduceV1 = 18,
+    Sm80Mma16 = 1,
+    Sm90aWgmma = 2,
+    Sm100Tcgen05 = 3,
+    Sm120TmaMma16 = 4,
+    MmaTf32Rna = 5,
+    Sm90aWgmmaTf32Tma = 6,
+    Sm100Tcgen05Tf32Tma = 7,
+    Sm120TmaMmaTf32Rna = 8,
+    ScalarFma = 9,
+    MmaTf32RnaSplitK4 = 10,
+    MmaTf32RnaSplitK2 = 11,
+    ScalarFmaTnNarrowSplitMPartial = 13,
+    ScalarFmaTnSplitMF64Reduce = 15,
+    MmaTf32RnaSplitK8 = 16,
+    ScalarFmaSplitKPartial = 17,
+    ScalarFmaSplitKF32Reduce = 18,
     Sm120TmaMmaTf32RnaStreamKV1 = 19,
-    Sm120TmaFmaExactV1 = 20,
-    Sm89MmaTf32Compact8V1 = 21,
-    ScalarFmaSm89FixedCopyPlanV1 = 22,
-    Sm89Mma16HalfS3V1 = 23,
-    ScalarFmaSm89ExactF32DualChunkFusedV1 = 24,
-    ScalarFmaSm89ExactF32DirectSplitMPartialV1 = 25,
-    Sm89MmaTf32PreRnaV1 = 26,
-    Sm89MmaTf32AddHalfV1 = 27,
-    Sm89Mma16HalfS2V1 = 28,
-    Sm89MmaTf32NtALdmatrixV1 = 29,
-    ScalarFmaTnDirectF64FoldSm89V1 = 30,
-    InferenceScalarFmaV1 = 31,
-    InferenceWmmaV1 = 32,
-    InferenceMma16V1 = 33,
-    InferenceSm90aWgmmaV1 = 34,
-    InferenceSm100Tcgen05V1 = 35,
-    InferenceMmaTf32RnaV1 = 36,
-    InferenceSm120TmaFmaV1 = 37,
-    InferenceSm120TmaMma16V1 = 38,
-    InferenceSm120TmaMmaTf32RnaV1 = 39,
-    FixedMatvecEightWarpV1 = 40,
+    Sm120TmaFmaExact = 20,
+    Sm89MmaTf32Compact8 = 21,
+    ScalarFmaSm89FixedCopyPlan = 22,
+    Sm89Mma16HalfS3 = 23,
+    ScalarFmaSm89ExactF32DualChunkFused = 24,
+    ScalarFmaSm89ExactF32DirectSplitMPartial = 25,
+    Sm89MmaTf32PreRna = 26,
+    Sm89MmaTf32AddHalf = 27,
+    Sm89Mma16HalfS2 = 28,
+    Sm89MmaTf32NtALdmatrix = 29,
+    ScalarFmaTnDirectF64FoldSm89 = 30,
+    InferenceScalarFma = 31,
+    InferenceWmma = 32,
+    InferenceMma16 = 33,
+    InferenceSm90aWgmma = 34,
+    InferenceSm100Tcgen05 = 35,
+    InferenceMmaTf32Rna = 36,
+    InferenceSm120TmaFma = 37,
+    InferenceSm120TmaMma16 = 38,
+    InferenceSm120TmaMmaTf32Rna = 39,
+    FixedMatvecEightWarp = 40,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
@@ -2985,39 +2988,39 @@ pub(crate) const SM89_EXACT_F32_D128_ROUTE_REVISION: u16 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ResolvedNumericContract {
-    ScalarFmaV1 = 1,
-    MmaSyncF32V1 = 2,
-    WgmmaF32V1 = 3,
-    Tcgen05F32V1 = 4,
-    MmaTf32RnaV1 = 5,
-    Sm90aWgmmaTf32TmaV1 = 6,
-    Sm100Tcgen05Tf32TmaV1 = 7,
-    Sm120TmaMmaTf32RnaV1 = 8,
-    ZeroReductionEpilogueF32V1 = 9,
-    MmaTf32RnaSplitK4V1 = 10,
-    MmaTf32RnaSplitK2V1 = 11,
-    ScalarFmaTnSplitMF64ReduceV1 = 12,
-    ScalarFmaTnNarrowSplitMPartialV1 = 13,
-    ScalarFmaTnNarrowSplitMF64ReduceV1 = 14,
-    MmaTf32RnaSplitK8V1 = 15,
-    ScalarFmaSplitKPartialV1 = 16,
-    ScalarFmaSplitKF32ReduceV1 = 17,
+    ScalarFma = 1,
+    MmaSyncF32 = 2,
+    WgmmaF32 = 3,
+    Tcgen05F32 = 4,
+    MmaTf32Rna = 5,
+    Sm90aWgmmaTf32Tma = 6,
+    Sm100Tcgen05Tf32Tma = 7,
+    Sm120TmaMmaTf32Rna = 8,
+    ZeroReductionEpilogueF32 = 9,
+    MmaTf32RnaSplitK4 = 10,
+    MmaTf32RnaSplitK2 = 11,
+    ScalarFmaTnSplitMF64Reduce = 12,
+    ScalarFmaTnNarrowSplitMPartial = 13,
+    ScalarFmaTnNarrowSplitMF64Reduce = 14,
+    MmaTf32RnaSplitK8 = 15,
+    ScalarFmaSplitKPartial = 16,
+    ScalarFmaSplitKF32Reduce = 17,
     Sm120TmaMmaTf32RnaStreamKV1 = 18,
-    ScalarFmaFixedSplitFoldV1 = 19,
+    ScalarFmaFixedSplitFold = 19,
     /// `mma.sync` FP32 accumulation over a persistent stream-K grid whose
     /// partial slabs fold in a fixed order: bit-stable for a shape on a
     /// device, not bit-equal to the one-CTA-per-tile ladder.
-    MmaSyncF32StreamKFixedOrderV1 = 20,
-    ScalarFmaTnSplitMPartialV1 = 21,
+    MmaSyncF32StreamKFixedOrder = 20,
+    ScalarFmaTnSplitMPartial = 21,
     MmaTf32PreRnaAV1 = 22,
-    MmaTf32AddHalfUlpV1 = 23,
-    Tf32RnaPreprocessV1 = 24,
+    MmaTf32AddHalfUlp = 23,
+    Tf32RnaPreprocess = 24,
     /// Ascending scalar FMA from zero, then alpha, bias, beta, and one store conversion.
-    ScalarFmaPostDotBiasV1 = 25,
+    ScalarFmaPostDotBias = 25,
     /// Ascending WMMA fragments from zero with the post-dot scalar epilogue.
-    WmmaF32PostDotBiasV1 = 26,
+    WmmaF32PostDotBias = 26,
     /// Eight contiguous warp dots folded by a fixed binary tree, then post-dot epilogue.
-    ScalarFmaEightWarpTreePostDotBiasV1 = 27,
+    ScalarFmaEightWarpTreePostDotBias = 27,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3041,16 +3044,16 @@ pub struct ResolvedInstructionShape {
 #[repr(u8)]
 pub enum ResolvedOperandConversion {
     None = 0,
-    RegisterCvtRnaTf32F32V1 = 1,
-    TensorMapTfloat32V1 = 2,
-    TensorMapUint32ThenCvtRnaTf32F32V1 = 3,
+    RegisterCvtRnaTf32F32 = 1,
+    TensorMapTfloat32 = 2,
+    TensorMapUint32ThenCvtRnaTf32F32 = 3,
     /// TF32 rounding as one integer add of half an ulp of the ten-bit
     /// mantissa (0x1000) in registers, with no finiteness guard: the tensor
     /// core reads only the upper 19 bits of an operand, so every finite
     /// value and both infinities multiply exactly as after cvt.rna.tf32.f32,
     /// and a NaN whose payload sits in the low bits stays a NaN instead of
     /// turning into an infinity.
-    RegisterAddHalfUlpTf32V1 = 4,
+    RegisterAddHalfUlpTf32 = 4,
     /// A is rounded once by an explicit transform; B is rounded in the GEMM.
     PreRnaAThenRegisterCvtRnaBV1 = 5,
 }
@@ -3058,16 +3061,16 @@ pub enum ResolvedOperandConversion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ResolvedOutputOwnership {
-    OneCtaPerOutputTileV1 = 1,
-    LastCtaPerOutputTileFixedSplitK4ReduceV1 = 4,
-    LastCtaPerOutputTileFixedSplitK2ReduceV1 = 5,
-    OneThreadPerOutputElementFixedSplitMReduceV1 = 7,
-    LastCtaPerOutputTileFixedSplitK8ReduceV1 = 8,
-    OneCtaPerOutputTilePerSplitKPartitionV1 = 9,
-    OneThreadPerOutputElementFixedSplitKReduceV1 = 10,
-    OwnerCtaPerOutputTileStreamKFixedOrderV1 = 11,
-    OwnerCtaPerOutputTileFixedSplitFoldV1 = 12,
-    OneCtaPerOutputTilePerSplitMPartitionV1 = 13,
+    OneCtaPerOutputTile = 1,
+    LastCtaPerOutputTileFixedSplitK4Reduce = 4,
+    LastCtaPerOutputTileFixedSplitK2Reduce = 5,
+    OneThreadPerOutputElementFixedSplitMReduce = 7,
+    LastCtaPerOutputTileFixedSplitK8Reduce = 8,
+    OneCtaPerOutputTilePerSplitKPartition = 9,
+    OneThreadPerOutputElementFixedSplitKReduce = 10,
+    OwnerCtaPerOutputTileStreamKFixedOrder = 11,
+    OwnerCtaPerOutputTileFixedSplitFold = 12,
+    OneCtaPerOutputTilePerSplitMPartition = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3145,7 +3148,7 @@ pub enum PhysicalLaunchKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ResolvedTransformOutputOwnership {
-    PreparedScratchAllocationV1 = 1,
+    PreparedScratchAllocation = 1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -4773,7 +4776,7 @@ pub fn build_resolved_gemm_launch_set(
 pub(crate) fn build_zero_reduction_route_identity(
     route: ResolvedGemmRoute,
 ) -> Result<ResolvedGemmLaunchSet, String> {
-    if route.numeric_contract != ResolvedNumericContract::ZeroReductionEpilogueF32V1 {
+    if route.numeric_contract != ResolvedNumericContract::ZeroReductionEpilogueF32 {
         return Err("zero-reduction route identity requires the zero epilogue contract".into());
     }
     if route.tensor_map_revision == 0 || route.tensor_maps_digest == [0; 32] {
@@ -5048,18 +5051,18 @@ fn validate_physical_launch(
     let inference_route = node.gemm_route.filter(|route| {
         matches!(
             route.backend,
-            PhysicalGemmBackend::InferenceScalarFmaV1
-                | PhysicalGemmBackend::InferenceWmmaV1
-                | PhysicalGemmBackend::InferenceMma16V1
-                | PhysicalGemmBackend::InferenceSm90aWgmmaV1
-                | PhysicalGemmBackend::InferenceSm100Tcgen05V1
-                | PhysicalGemmBackend::InferenceMmaTf32RnaV1
-                | PhysicalGemmBackend::InferenceSm120TmaFmaV1
-                | PhysicalGemmBackend::InferenceSm120TmaMma16V1
-                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
-                | PhysicalGemmBackend::FixedMatvecEightWarpV1
-        ) || (route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
-            && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBiasV1)
+            PhysicalGemmBackend::InferenceScalarFma
+                | PhysicalGemmBackend::InferenceWmma
+                | PhysicalGemmBackend::InferenceMma16
+                | PhysicalGemmBackend::InferenceSm90aWgmma
+                | PhysicalGemmBackend::InferenceSm100Tcgen05
+                | PhysicalGemmBackend::InferenceMmaTf32Rna
+                | PhysicalGemmBackend::InferenceSm120TmaFma
+                | PhysicalGemmBackend::InferenceSm120TmaMma16
+                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
+                | PhysicalGemmBackend::FixedMatvecEightWarp
+        ) || (route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBias)
     });
     if let Some(route) = inference_route {
         let spec = super::gemm_bi_inference::identity::terminal(node.symbol)
@@ -5160,11 +5163,10 @@ fn validate_physical_launch(
                 || transform.compiler.target != transform.target
                 || transform.device.target != transform.target
                 || transform.device_caps.accepted_target != Some(transform.target)
-                || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocessV1
-                || transform.operand_conversion
-                    != ResolvedOperandConversion::RegisterCvtRnaTf32F32V1
+                || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocess
+                || transform.operand_conversion != ResolvedOperandConversion::RegisterCvtRnaTf32F32
                 || transform.output_ownership
-                    != ResolvedTransformOutputOwnership::PreparedScratchAllocationV1
+                    != ResolvedTransformOutputOwnership::PreparedScratchAllocation
                 || transform.output_elements == 0
                 || transform.output_stride == 0
             {
@@ -5338,44 +5340,44 @@ mod physical_launch_tests {
     fn inference_appends_tags_without_reencoding_any_existing_contract() {
         assert_eq!(
             [
-                PhysicalGemmBackend::Sm80Mma16V1 as u8,
-                PhysicalGemmBackend::Sm90aWgmmaV1 as u8,
-                PhysicalGemmBackend::Sm100Tcgen05V1 as u8,
-                PhysicalGemmBackend::Sm120TmaMma16V1 as u8,
-                PhysicalGemmBackend::MmaTf32RnaV1 as u8,
-                PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 as u8,
-                PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 as u8,
-                PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1 as u8,
-                PhysicalGemmBackend::ScalarFmaV1 as u8,
-                PhysicalGemmBackend::MmaTf32RnaSplitK4V1 as u8,
-                PhysicalGemmBackend::MmaTf32RnaSplitK2V1 as u8,
-                PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1 as u8,
-                PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 as u8,
-                PhysicalGemmBackend::MmaTf32RnaSplitK8V1 as u8,
-                PhysicalGemmBackend::ScalarFmaSplitKPartialV1 as u8,
-                PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1 as u8,
+                PhysicalGemmBackend::Sm80Mma16 as u8,
+                PhysicalGemmBackend::Sm90aWgmma as u8,
+                PhysicalGemmBackend::Sm100Tcgen05 as u8,
+                PhysicalGemmBackend::Sm120TmaMma16 as u8,
+                PhysicalGemmBackend::MmaTf32Rna as u8,
+                PhysicalGemmBackend::Sm90aWgmmaTf32Tma as u8,
+                PhysicalGemmBackend::Sm100Tcgen05Tf32Tma as u8,
+                PhysicalGemmBackend::Sm120TmaMmaTf32Rna as u8,
+                PhysicalGemmBackend::ScalarFma as u8,
+                PhysicalGemmBackend::MmaTf32RnaSplitK4 as u8,
+                PhysicalGemmBackend::MmaTf32RnaSplitK2 as u8,
+                PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial as u8,
+                PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce as u8,
+                PhysicalGemmBackend::MmaTf32RnaSplitK8 as u8,
+                PhysicalGemmBackend::ScalarFmaSplitKPartial as u8,
+                PhysicalGemmBackend::ScalarFmaSplitKF32Reduce as u8,
                 PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1 as u8,
-                PhysicalGemmBackend::Sm120TmaFmaExactV1 as u8,
-                PhysicalGemmBackend::Sm89MmaTf32Compact8V1 as u8,
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 as u8,
-                PhysicalGemmBackend::Sm89Mma16HalfS3V1 as u8,
-                PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
-                PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
-                PhysicalGemmBackend::Sm89MmaTf32PreRnaV1 as u8,
-                PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 as u8,
-                PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8,
-                PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 as u8,
-                PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 as u8,
-                PhysicalGemmBackend::InferenceScalarFmaV1 as u8,
-                PhysicalGemmBackend::InferenceWmmaV1 as u8,
-                PhysicalGemmBackend::InferenceMma16V1 as u8,
-                PhysicalGemmBackend::InferenceSm90aWgmmaV1 as u8,
-                PhysicalGemmBackend::InferenceSm100Tcgen05V1 as u8,
-                PhysicalGemmBackend::InferenceMmaTf32RnaV1 as u8,
-                PhysicalGemmBackend::InferenceSm120TmaFmaV1 as u8,
-                PhysicalGemmBackend::InferenceSm120TmaMma16V1 as u8,
-                PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1 as u8,
-                PhysicalGemmBackend::FixedMatvecEightWarpV1 as u8
+                PhysicalGemmBackend::Sm120TmaFmaExact as u8,
+                PhysicalGemmBackend::Sm89MmaTf32Compact8 as u8,
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan as u8,
+                PhysicalGemmBackend::Sm89Mma16HalfS3 as u8,
+                PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused as u8,
+                PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial as u8,
+                PhysicalGemmBackend::Sm89MmaTf32PreRna as u8,
+                PhysicalGemmBackend::Sm89MmaTf32AddHalf as u8,
+                PhysicalGemmBackend::Sm89Mma16HalfS2 as u8,
+                PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix as u8,
+                PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8,
+                PhysicalGemmBackend::InferenceScalarFma as u8,
+                PhysicalGemmBackend::InferenceWmma as u8,
+                PhysicalGemmBackend::InferenceMma16 as u8,
+                PhysicalGemmBackend::InferenceSm90aWgmma as u8,
+                PhysicalGemmBackend::InferenceSm100Tcgen05 as u8,
+                PhysicalGemmBackend::InferenceMmaTf32Rna as u8,
+                PhysicalGemmBackend::InferenceSm120TmaFma as u8,
+                PhysicalGemmBackend::InferenceSm120TmaMma16 as u8,
+                PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna as u8,
+                PhysicalGemmBackend::FixedMatvecEightWarp as u8
             ],
             [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
@@ -5384,33 +5386,33 @@ mod physical_launch_tests {
         );
         assert_eq!(
             [
-                ResolvedNumericContract::ScalarFmaV1 as u8,
-                ResolvedNumericContract::MmaSyncF32V1 as u8,
-                ResolvedNumericContract::WgmmaF32V1 as u8,
-                ResolvedNumericContract::Tcgen05F32V1 as u8,
-                ResolvedNumericContract::MmaTf32RnaV1 as u8,
-                ResolvedNumericContract::Sm90aWgmmaTf32TmaV1 as u8,
-                ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1 as u8,
-                ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 as u8,
-                ResolvedNumericContract::ZeroReductionEpilogueF32V1 as u8,
-                ResolvedNumericContract::MmaTf32RnaSplitK4V1 as u8,
-                ResolvedNumericContract::MmaTf32RnaSplitK2V1 as u8,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1 as u8,
-                ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1 as u8,
-                ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1 as u8,
-                ResolvedNumericContract::MmaTf32RnaSplitK8V1 as u8,
-                ResolvedNumericContract::ScalarFmaSplitKPartialV1 as u8,
-                ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1 as u8,
+                ResolvedNumericContract::ScalarFma as u8,
+                ResolvedNumericContract::MmaSyncF32 as u8,
+                ResolvedNumericContract::WgmmaF32 as u8,
+                ResolvedNumericContract::Tcgen05F32 as u8,
+                ResolvedNumericContract::MmaTf32Rna as u8,
+                ResolvedNumericContract::Sm90aWgmmaTf32Tma as u8,
+                ResolvedNumericContract::Sm100Tcgen05Tf32Tma as u8,
+                ResolvedNumericContract::Sm120TmaMmaTf32Rna as u8,
+                ResolvedNumericContract::ZeroReductionEpilogueF32 as u8,
+                ResolvedNumericContract::MmaTf32RnaSplitK4 as u8,
+                ResolvedNumericContract::MmaTf32RnaSplitK2 as u8,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce as u8,
+                ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial as u8,
+                ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce as u8,
+                ResolvedNumericContract::MmaTf32RnaSplitK8 as u8,
+                ResolvedNumericContract::ScalarFmaSplitKPartial as u8,
+                ResolvedNumericContract::ScalarFmaSplitKF32Reduce as u8,
                 ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1 as u8,
-                ResolvedNumericContract::ScalarFmaFixedSplitFoldV1 as u8,
-                ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1 as u8,
-                ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
+                ResolvedNumericContract::ScalarFmaFixedSplitFold as u8,
+                ResolvedNumericContract::MmaSyncF32StreamKFixedOrder as u8,
+                ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8,
                 ResolvedNumericContract::MmaTf32PreRnaAV1 as u8,
-                ResolvedNumericContract::MmaTf32AddHalfUlpV1 as u8,
-                ResolvedNumericContract::Tf32RnaPreprocessV1 as u8,
-                ResolvedNumericContract::ScalarFmaPostDotBiasV1 as u8,
-                ResolvedNumericContract::WmmaF32PostDotBiasV1 as u8,
-                ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBiasV1 as u8
+                ResolvedNumericContract::MmaTf32AddHalfUlp as u8,
+                ResolvedNumericContract::Tf32RnaPreprocess as u8,
+                ResolvedNumericContract::ScalarFmaPostDotBias as u8,
+                ResolvedNumericContract::WmmaF32PostDotBias as u8,
+                ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBias as u8
             ],
             [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -5427,8 +5429,8 @@ mod physical_launch_tests {
             ],
             [1, 2, 3, 4, 5]
         );
-        assert_eq!(NumericContractSet::FIXED_DETERMINISTIC_TF32_V1.0, 1 << 10);
-        assert_eq!(NumericContractSet::CUBLAS_POLICY_V2.0, 1 << 9);
+        assert_eq!(NumericContractSet::FIXED_DETERMINISTIC_TF32.0, 1 << 10);
+        assert_eq!(NumericContractSet::CUBLAS_FAST_AND_PEDANTIC.0, 1 << 9);
     }
 
     fn physical_launch(
@@ -5483,12 +5485,12 @@ mod physical_launch_tests {
                 bi_tensor_cores: true,
                 fast_gemm: false,
                 cublas_tf32: false,
-                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+                half_triad_policy: HalfTriadPolicy::TiledParity,
                 bi_gemm_family: BiGemmFamily::Triad,
             },
             backend_set: BackendSet::TRIAD,
-            numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA_V1,
+            numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA,
             compiler,
             artifacts: build_artifact_set(&[
                 artifact(ModuleKind::Fixed, 5),
@@ -5584,35 +5586,29 @@ mod physical_launch_tests {
             "the artifact set accepted two optional modules"
         );
         assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
-        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8V1 as u8, 21);
-        assert_eq!(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 as u8, 22);
-        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3V1 as u8, 23);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8 as u8, 21);
+        assert_eq!(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan as u8, 22);
+        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3 as u8, 23);
         assert_eq!(
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused as u8,
             24
         );
         assert_eq!(
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial as u8,
             25
         );
-        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32PreRnaV1 as u8, 26);
-        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32AddHalfV1 as u8, 27);
-        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8, 28);
-        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 as u8, 29);
-        assert_eq!(
-            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 as u8,
-            30
-        );
-        assert_eq!(
-            ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
-            21
-        );
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32PreRna as u8, 26);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32AddHalf as u8, 27);
+        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2 as u8, 28);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix as u8, 29);
+        assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8, 30);
+        assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8, 21);
         assert_eq!(ResolvedNumericContract::MmaTf32PreRnaAV1 as u8, 22);
-        assert_eq!(ResolvedNumericContract::MmaTf32AddHalfUlpV1 as u8, 23);
-        assert_eq!(ResolvedNumericContract::Tf32RnaPreprocessV1 as u8, 24);
+        assert_eq!(ResolvedNumericContract::MmaTf32AddHalfUlp as u8, 23);
+        assert_eq!(ResolvedNumericContract::Tf32RnaPreprocess as u8, 24);
         assert_eq!(PhysicalLaunchKind::InputTransform as u8, 4);
         assert_eq!(
-            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1 as u8,
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition as u8,
             13
         );
     }
@@ -5790,13 +5786,13 @@ mod physical_launch_tests {
         ResolvedGemmRoute {
             op: ResolvedGemmOp::Nn,
             dtype: PolicyDtype::F32,
-            backend: PhysicalGemmBackend::ScalarFmaV1,
-            numeric_contract: ResolvedNumericContract::ScalarFmaV1,
+            backend: PhysicalGemmBackend::ScalarFma,
+            numeric_contract: ResolvedNumericContract::ScalarFma,
             instruction_family: ResolvedInstructionFamily::ScalarFma,
             instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
             operand_conversion: ResolvedOperandConversion::None,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
-            symbol: "gemm_bi_nn",
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
+            symbol: "nn_big",
             module_kind: ModuleKind::TriadScalar,
             target: context.compiler.target,
             artifact: context.artifacts.triad_scalar,
@@ -5857,9 +5853,9 @@ mod physical_launch_tests {
         let mut device_caps = context.device_caps;
         device_caps.accepted_target = Some(target);
         let transform = ResolvedInputTransform {
-            numeric_contract: ResolvedNumericContract::Tf32RnaPreprocessV1,
-            operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
-            output_ownership: ResolvedTransformOutputOwnership::PreparedScratchAllocationV1,
+            numeric_contract: ResolvedNumericContract::Tf32RnaPreprocess,
+            operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
+            output_ownership: ResolvedTransformOutputOwnership::PreparedScratchAllocation,
             target,
             artifact,
             compiler,
@@ -5873,7 +5869,7 @@ mod physical_launch_tests {
         };
         ResolvedPhysicalKernelLaunch {
             kind: PhysicalLaunchKind::InputTransform,
-            symbol: "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1",
+            symbol: "tn_sm89_tf32_pre_rna_transpose_32x32",
             module_kind: ModuleKind::TriadSm89Tf32Joint,
             logical_op: ResolvedGemmOp::Tn,
             logical_dtype: PolicyDtype::F32,
@@ -6332,7 +6328,7 @@ mod physical_launch_tests {
     #[test]
     fn native_half_manifest_rejects_unsuffixed_and_post_hoc_selector_metadata() {
         let mut native = physical_gemm_launch();
-        native.symbol = "gemm_bi_nn_big_bf16";
+        native.symbol = "nn_big_bf16";
         native.logical_dtype = PolicyDtype::Bf16;
         native.execution_dtype = PolicyDtype::Bf16;
         let route = native.gemm_route.as_mut().unwrap();
@@ -6341,7 +6337,7 @@ mod physical_launch_tests {
         ResolvedPhysicalLaunchSet::from_nodes(&[native]).unwrap();
 
         let mut unsuffixed = native;
-        unsuffixed.symbol = "gemm_bi_nn_big";
+        unsuffixed.symbol = "nn_big";
         unsuffixed.gemm_route.as_mut().unwrap().symbol = unsuffixed.symbol;
         assert!(ResolvedPhysicalLaunchSet::from_nodes(&[unsuffixed]).is_err());
 
@@ -6478,7 +6474,7 @@ mod physical_launch_tests {
     }
 
     #[test]
-    fn physical_launch_ordered_digest_is_pinned_to_v1_framing() {
+    fn physical_launch_ordered_digest_is_pinned_to_framing() {
         let nodes = [
             physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in"),
             physical_launch(PhysicalLaunchKind::OutputDowncast, "cast_out"),
@@ -6554,9 +6550,9 @@ mod cache_and_header_tests {
         let context = ctx.gemm_route();
         let compiler = ctx.kernels.triad_scalar_compiler_identity();
         let symbol = match op {
-            ResolvedGemmOp::Nn => "gemm_bi_nn",
-            ResolvedGemmOp::Tn => "gemm_bi_tn",
-            ResolvedGemmOp::Nt => "gemm_bi_nt",
+            ResolvedGemmOp::Nn => "nn_big",
+            ResolvedGemmOp::Tn => "tn_big",
+            ResolvedGemmOp::Nt => "nt_big",
         };
         let arguments_digest = FramedSha256::new(b"scalar-test-kernel-arguments.v1")
             .required(b"symbol", symbol.as_bytes())
@@ -6565,12 +6561,12 @@ mod cache_and_header_tests {
         ResolvedGemmRoute {
             op,
             dtype: PolicyDtype::F32,
-            backend: PhysicalGemmBackend::ScalarFmaV1,
-            numeric_contract: ResolvedNumericContract::ScalarFmaV1,
+            backend: PhysicalGemmBackend::ScalarFma,
+            numeric_contract: ResolvedNumericContract::ScalarFma,
             instruction_family: ResolvedInstructionFamily::ScalarFma,
             instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
             operand_conversion: ResolvedOperandConversion::None,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
             symbol,
             module_kind: ModuleKind::TriadScalar,
             target: compiler.target,
@@ -6605,10 +6601,10 @@ mod cache_and_header_tests {
         };
 
         enum PreparedMapMode {
-            ZeroReductionV1,
-            EncodedV1,
+            ZeroReduction,
+            Encoded,
         }
-        let modes = [PreparedMapMode::ZeroReductionV1, PreparedMapMode::EncodedV1];
+        let modes = [PreparedMapMode::ZeroReduction, PreparedMapMode::Encoded];
         assert_ne!(
             std::mem::discriminant(&modes[0]),
             std::mem::discriminant(&modes[1])
@@ -6620,13 +6616,13 @@ mod cache_and_header_tests {
             .required(b"revision", &TF32_TENSOR_MAP_REVISION.to_le_bytes())
             .finish();
         let mut zero = super::physical_launch_tests::synthetic_scalar_route();
-        zero.numeric_contract = ResolvedNumericContract::ZeroReductionEpilogueF32V1;
+        zero.numeric_contract = ResolvedNumericContract::ZeroReductionEpilogueF32;
         zero.tensor_map_revision = ZERO_REDUCTION_MAP_REVISION;
         zero.tensor_maps_digest = mapless_digest;
         zero.launch.arguments_digest = FramedSha256::bytes(b"zero-reduction-args");
         let zero_identity = build_zero_reduction_route_identity(zero).unwrap();
         let mut encoded = zero;
-        encoded.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+        encoded.numeric_contract = ResolvedNumericContract::ScalarFma;
         encoded.tensor_map_revision = TF32_TENSOR_MAP_REVISION;
         encoded.tensor_maps_digest = encoded_digest;
         let encoded_identity = build_resolved_gemm_launch_set(&[encoded]).unwrap();
@@ -6642,7 +6638,7 @@ mod cache_and_header_tests {
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         ctx
     }
 
@@ -6657,7 +6653,7 @@ mod cache_and_header_tests {
         }
 
         let mut tf32 = scalar_test_route(&ctx, ResolvedGemmOp::Nn);
-        tf32.numeric_contract = ResolvedNumericContract::MmaTf32RnaV1;
+        tf32.numeric_contract = ResolvedNumericContract::MmaTf32Rna;
         let error = ctx
             .validate_resolved_gemm_route(&tf32, "fixed TF32")
             .expect_err("Fixed policy must not admit a Triad TF32 contract");
@@ -6697,7 +6693,7 @@ mod cache_and_header_tests {
         let mut plan = guard.finish().unwrap();
         let attempts = Cell::new(0_u64);
 
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
         let result = plan.with_validated_launch(&ctx, "mutated graph policy", || {
             attempts.set(attempts.get() + 1);
             Ok(())
@@ -6705,7 +6701,7 @@ mod cache_and_header_tests {
         assert!(result.is_err());
         assert_eq!(attempts.get(), 0);
 
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         plan.routes.swap(0, 1);
         let result = plan.with_validated_launch(&ctx, "mutated route order", || {
             attempts.set(attempts.get() + 1);

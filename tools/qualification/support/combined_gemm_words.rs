@@ -839,11 +839,11 @@ pub(super) fn configure(ctx: &GpuCtx, case: &AcceptanceCase) -> Result<(), Strin
         BiGemmFamily::Triad
     });
     ctx.set_bi_tensor_cores(case.storage[0] != "f32");
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
     ctx.set_f32_triad_policy(if case.row == "tf32" {
-        F32TriadPolicy::AllowDeterministicTf32V1
+        F32TriadPolicy::AllowDeterministicTf32
     } else {
-        F32TriadPolicy::ExactScalarFmaV1
+        F32TriadPolicy::ExactScalarFma
     });
     Ok(())
 }
@@ -1210,7 +1210,7 @@ impl Fixture {
     }
 
     fn logical_metadata(&self, exceptional: bool) -> Value {
-        json!({"case_id":self.case.id,"case_key":self.case.key(),"family":self.case.family,"operation":self.case.op,"storage":self.case.storage,"dimensions_mkn":self.case.dims,"strides":self.case.strides(),"row":self.case.row,"mode":"Deterministic","f32_policy":if self.case.row=="tf32" {"AllowDeterministicTf32V1"}else{"ExactScalarFmaV1"},"half_policy":"TiledParityV1","tensor_cores":self.case.storage[0]!="f32","alpha_bits":0x3f800000_u32,"beta_bits":if self.case.op=="tn" {0x3f800000_u32}else{0},"bias":self.case.bias,"corpus":if exceptional {"sparse-exceptional.v1"}else{"full-mantissa-finite.v1"},"input_sha256":[sha(self.a.payload()),sha(self.b.payload())],"initial_c_sha256":sha(self.c.payload()),"bias_sha256":self.bias.as_ref().map(|b|sha(b.payload())),"output_words":self.c.active/self.c.width,"word_width":self.c.width,"encoding":if self.c.width==2 {"original-u16-le"}else{"raw-u32-le"}})
+        json!({"case_id":self.case.id,"case_key":self.case.key(),"family":self.case.family,"operation":self.case.op,"storage":self.case.storage,"dimensions_mkn":self.case.dims,"strides":self.case.strides(),"row":self.case.row,"mode":"Deterministic","f32_policy":if self.case.row=="tf32" {"AllowDeterministicTf32"}else{"ExactScalarFma"},"half_policy":"TiledParity","tensor_cores":self.case.storage[0]!="f32","alpha_bits":0x3f800000_u32,"beta_bits":if self.case.op=="tn" {0x3f800000_u32}else{0},"bias":self.case.bias,"corpus":if exceptional {"sparse-exceptional.v1"}else{"full-mantissa-finite.v1"},"input_sha256":[sha(self.a.payload()),sha(self.b.payload())],"initial_c_sha256":sha(self.c.payload()),"bias_sha256":self.bias.as_ref().map(|b|sha(b.payload())),"output_words":self.c.active/self.c.width,"word_width":self.c.width,"encoding":if self.c.width==2 {"original-u16-le"}else{"raw-u32-le"}})
     }
 }
 

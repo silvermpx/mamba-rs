@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased
+
+Names only. No kernel, route or numeric change: every bit-ledger key is
+the one 0.7.1 and 0.7.2 printed.
+
+### Changed
+
+- **No version stamps in names.** Every identifier that carried a `V1`,
+  `V2` or `_v1` stamp is renamed to say what it is: `F32TriadPolicy::
+  {ExactScalarFma, AllowDeterministicTf32}`, `HalfTriadPolicy::{TiledParity,
+  AllowStreamKFixedOrder}`, `Sm80TcPolicy`, `ScalarWavePolicy`, the
+  `TRIAD_*`/`FIXED_*` numeric contracts, the `cublas` policy constants
+  (`CUBLAS_ONE_CONTRACT`, `CUBLAS_FAST_AND_PEDANTIC`), the Ada half-auto
+  expectations (`expected_ada_half_auto`, `expected_ada_half_auto_before_streamk`),
+  and every kernel symbol whose name ended in `_v1`. Test decoys that
+  used a stamp to differ from the real symbol now end in `_decoy`. The
+  two split-K helpers whose `_v2` meant a float2 vector width are
+  `tf32_partial_load_cg_float2` and `tf32_partial_store_cg_float2`.
+  A new `names` rule of `make ci-fast` (xtask) keeps the tree at zero
+  stamps; vendor entry points (`cuMemAlloc_v2`, `CUDA_KERNEL_NODE_PARAMS_v2`)
+  are exempt, and string literals are not scanned, so wire-format schema
+  tags such as `MambaBiTf32QualificationV5` stay as the data format they
+  name.
+- **Kernel symbols name the product, not the family.** The `gemm_bi_`
+  prefix and the `fixed`/`inference` family tokens are gone from every
+  kernel: `gemm_bi_nn_fixed_sm89_tc128_pipeline_bf16` is
+  `nn_sm89_tc128_pipeline_bf16`, `gemm_bi_tn_sm120_tma_128x64_bk32_s3_f16`
+  is `tn_sm120_tma_128x64_bk32_s3_f16`, the three base scalar kernels
+  `gemm_bi_{nn,tn,nt}` are `{nn,tn,nt}_big` beside their typed twins
+  `nn_big_bf16`, the SM120 post-bias kernels drop their `fixed` infix,
+  and the device helpers follow (`cp_async_16_zfill`, `is_aligned_16`,
+  `splitk_reduce`). The family is the module that composes a kernel;
+  the two families never share a PTX module.
+- **Kernels by card.** Architecture-specific kernels moved into per-card
+  folders under each family: `kernels/gemm_bi_triad/{sm80,sm89,sm90a,sm100,sm120}/`
+  and `kernels/gemm_bi_inference/{sm89,sm90a,sm100,sm120}/`, with the
+  file names shortened to what the folder does not already say
+  (`sm89/half_tn.cu`, `sm120/tma.cu`, `sm80/mma.cu` for the portable
+  mma.sync tier). Portable kernels and shared headers stay in the family
+  root. The composed-source manifests name the real paths (the inference
+  family's fragments were still logged under the pre-0.7.0
+  `kernels/gemm_bi_fixed/` name).
+- **Frozen identities re-pinned in one pass.** A rename moves every
+  composed-source, compile-key, artifact and header digest the
+  dispatcher's cohorts are frozen against, and a cohort that no longer
+  matches declines silently. `tools/qualification/identity_mint.rs`
+  prints those identities for the toolkit on PATH without a device
+  (so the compute_120 and sm_90a modules mint on any box with the
+  toolkit), and `tools/identity_repin.py` substitutes the reference
+  tree's values for this tree's. Every Ada cohort (CUDA 12.8, 13.0,
+  13.2) and the SM120 cohorts for 12.8 and 13.0 carry the same NVRTC
+  library identity as before and are re-minted exactly; the SM120 13.2
+  cohort is re-minted against the 13.2 build on the Ada box, since the
+  board it was first minted on ran a different 13.2 build. The Mamba-1
+  fold fixture `legacy_fixed.cu` is regenerated from the capacity-32
+  composition it stands for.
+
+### Measurements and verification
+
+RTX 6000 Ada, CUDA 13.2, this tree against the v0.7.1 ledger recorded on
+the same board: all 263 ledger keys identical (the 161 original Mamba keys
+and the 102 decode keys), none moved, none missing. The crate builds and
+lints clean with `-D warnings` without the `cuda` feature and with
+`cuda,hf,qualification`; every host-side test target is green
+(280 tests).
+
 ## 0.7.2 (2026-09-16)
 
 Two verification instruments that ship with the crate were red on the
@@ -28,10 +94,6 @@ the generation of a real checkpoint and the consumer build are the ones
   bind that identity; the gate now expects the legacy digest at 32 and the
   qualified capacity-64 digest at 64. The raw byte-for-byte comparison of
   the new fold kernels at capacity 16 was never affected.
-- The lockfile moves `rustls` to 0.23.45 (RUSTSEC-2026-0285, a TLS 1.3
-  handshake message accepted at the wrong encryption level). It is reached
-  only through the HuggingFace hub client behind the `cli` feature; the
-  scheduled security audit had gone red on the released tree.
 
 ### Measurements and verification
 
@@ -1753,7 +1815,7 @@ smem strides, f32 accumulators, no atomics or splits.
 
 `ctx.stream` is NON_BLOCKING and never orders against the legacy
 stream; several host↔device copies used synchronous legacy-stream
-`cuMemcpyHtoD_v2`/`DtoH_v2`, whose tail DMA can race kernels launched
+`cuMemcpyHtoD_v2`/`DtoH_decoy`, whose tail DMA can race kernels launched
 right after. All converted to stream-ordered async copies + sync:
 `DtypedBuf::{upload,download}_f32`, `WeightSliceDyn` weight uploads
 (M1 + M3 + gpu_lm/gpu_lm3 embeddings), `GradSlice` copies (bracketed

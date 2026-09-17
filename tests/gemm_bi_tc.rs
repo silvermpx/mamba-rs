@@ -549,9 +549,9 @@ fn tc64_kernel_geometry_is_128_threads() {
     let t = Ctx::new();
     let k = &t.ctx.kernels;
     let tc64 = [
-        ("gemm_bi_nn_tc64", &k.gemm_bi_nn_tc64_typed),
-        ("gemm_bi_tn_tc64", &k.gemm_bi_tn_tc64_typed),
-        ("gemm_bi_nt_tc64", &k.gemm_bi_nt_tc64_typed),
+        ("nn_tc64", &k.gemm_bi_nn_tc64_typed),
+        ("tn_tc64", &k.gemm_bi_tn_tc64_typed),
+        ("nt_tc64", &k.gemm_bi_nt_tc64_typed),
     ];
     for (name, kern) in tc64 {
         for (dt, f) in [("bf16", &kern.bf16), ("f16", &kern.f16)] {
@@ -560,9 +560,9 @@ fn tc64_kernel_geometry_is_128_threads() {
         }
     }
     let tc128 = [
-        ("gemm_bi_nn_tc", &k.gemm_bi_nn_tc_typed),
-        ("gemm_bi_tn_tc", &k.gemm_bi_tn_tc_typed),
-        ("gemm_bi_nt_tc", &k.gemm_bi_nt_tc_typed),
+        ("nn_tc", &k.gemm_bi_nn_tc_typed),
+        ("tn_tc", &k.gemm_bi_tn_tc_typed),
+        ("nt_tc", &k.gemm_bi_nt_tc_typed),
     ];
     for (name, kern) in tc128 {
         for (dt, f) in [("bf16", &kern.bf16), ("f16", &kern.f16)] {
@@ -1739,18 +1739,18 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
             );
         };
         assert!(
-            node.symbol.starts_with("gemm_bi_tn_tc64_streamk"),
+            node.symbol.starts_with("tn_tc64_streamk"),
             "{dtype:?}: {}",
             node.symbol
         );
         assert_eq!(
             node.numeric_contract,
-            Some(ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1),
+            Some(ResolvedNumericContract::MmaSyncF32StreamKFixedOrder),
             "{dtype:?}"
         );
         assert_eq!(
             node.ownership,
-            Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1),
+            Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder),
             "{dtype:?}"
         );
         // 36 tiles by 32 slabs: a persistent grid of one CTA per
@@ -1766,7 +1766,7 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
     // the tensor-core tier.
     assert_eq!(
         t.ctx.half_triad_policy(),
-        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrderV1
+        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrder
     );
 }
 
@@ -1840,17 +1840,17 @@ fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
         "the two schedules must be distinguishable on this shape for the route proof"
     );
     assert_eq!(
-        automatic(HalfTriadPolicy::TiledParityV1),
+        automatic(HalfTriadPolicy::TiledParity),
         tiled,
         "the default policy must launch the tiled tc64 kernel"
     );
     assert_eq!(
-        automatic(HalfTriadPolicy::AllowStreamKFixedOrderV1),
+        automatic(HalfTriadPolicy::AllowStreamKFixedOrder),
         stream_k,
         "the permitting policy must launch the stream-K kernel"
     );
-    t.ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
-    assert_eq!(automatic(HalfTriadPolicy::TiledParityV1), tiled);
+    t.ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
+    assert_eq!(automatic(HalfTriadPolicy::TiledParity), tiled);
     // The stream-K fold differs in order, not in value: accumulation tolerance.
     let worst = tiled
         .iter()

@@ -152,7 +152,7 @@
 
 #define DEFINE_GEMM_BI_NN_TCW64(SUFFIX, T_ACT, FROM_F, MMA_T)                 \
 extern "C" __global__ __launch_bounds__(GBFW64_THREADS, 1)                    \
-void gemm_bi_nn_tcw64_##SUFFIX(                                               \
+void nn_tcw64_##SUFFIX(                                               \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -442,7 +442,7 @@ DEFINE_GEMM_BI_NN_TCW64(f16,  __half,        from_f_f16,  "f16")
 
 #define DEFINE_GEMM_BI_NN_TCWN64(SUFFIX, T_ACT, FROM_F, MMA_T)                 \
 extern "C" __global__ __launch_bounds__(GBFWN64_THREADS, 1)                    \
-void gemm_bi_nn_tcwn64_##SUFFIX(                                               \
+void nn_tcwn64_##SUFFIX(                                               \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \

@@ -1,9 +1,9 @@
-pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_pre_rna_m64n96_bk32_s2_prism_v1";
-pub const RETAINED_GEMM_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
+pub const GEMM_SYMBOL: &str = "tn_test_pre_rna_m64n96_bk32_s2_prism";
+pub const RETAINED_GEMM_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
 pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 
 const EXPECTED_PRIMITIVES_FNV64: u64 = 0x0247_c603_860d_c16f;
-const EXPECTED_PARENT_FNV64: u64 = 0x2b23_ece9_5ee3_e546;
+const EXPECTED_PARENT_FNV64: u64 = 0x0327_a80f_17d3_bd55;
 const SECTION_BEGIN: &str = "// BEGIN RETAINED TN_M64N64\n";
 const SECTION_END: &str = "// END RETAINED TN_M64N64";
 
@@ -502,8 +502,8 @@ mod tests {
     use super::*;
 
     const PRIMITIVES: &str =
-        include_str!("../../kernels/gemm_bi_triad/sm89_tf32_joint_primitives.cuh");
-    const JOINT_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm89_tf32_joint.cu");
+        include_str!("../../kernels/gemm_bi_triad/sm89/tf32_joint_primitives.cuh");
+    const JOINT_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm89/tf32_joint.cu");
 
     #[test]
     fn changed_parent_or_boundaries_fail_closed() {

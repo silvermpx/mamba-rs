@@ -133,7 +133,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     let compiler = ctx.kernels.compiler_identity();
     assert!(compiler.nvrtc_library_known, "known NVRTC library required");
     assert!(
@@ -162,11 +162,7 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     };
     launch().expect("hot A actual AUTO");
     let graph = unsafe { capture_into_graph(&ctx.stream, launch) }.expect("AUTO capture");
-    assert_wide_graph(
-        &graph,
-        b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-        shape,
-    );
+    assert_wide_graph(&graph, b"nn_rna_wide_tf32_m128n128_bk32_s3", shape);
 }
 
 fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: InferenceShape) {
@@ -374,11 +370,7 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                     // All captured buffers and the context outlive every replay.
                     let graph = unsafe { capture_into_graph(&ctx.stream, run) }
                         .expect("wide graph capture");
-                    assert_wide_graph(
-                        &graph,
-                        b"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
-                        shape,
-                    );
+                    assert_wide_graph(&graph, b"nn_sm80_mma_tf32_m128n128_bk32_s3", shape);
                     for replay in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -529,8 +521,8 @@ fn fixed_sm89_rna_n96_forced_prefix_views_and_graph_bits() {
 
 fn rna_qualification_symbol(tile: InferenceTile) -> &'static [u8] {
     match tile {
-        InferenceTile::Tf32RnaM128N128S3 => b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-        InferenceTile::Tf32RnaM128N96S3 => b"gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        InferenceTile::Tf32RnaM128N128S3 => b"nn_rna_wide_tf32_m128n128_bk32_s3",
+        InferenceTile::Tf32RnaM128N96S3 => b"nn_sm89_rna_tf32_m128n96_bk32_s3",
         _ => panic!("not an RNA qualification tile: {tile:?}"),
     }
 }
@@ -669,7 +661,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     let compiler = ctx.kernels.compiler_identity();
     assert!(compiler.nvrtc_library_known, "known NVRTC library required");
     assert!(

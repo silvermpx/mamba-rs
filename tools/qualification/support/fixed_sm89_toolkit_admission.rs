@@ -559,8 +559,8 @@ impl Family {
 
     fn policy(self) -> F32TriadPolicy {
         match self {
-            Self::Exact => F32TriadPolicy::ExactScalarFmaV1,
-            Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32V1,
+            Self::Exact => F32TriadPolicy::ExactScalarFma,
+            Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32,
         }
     }
 
@@ -992,7 +992,7 @@ fn inspect_custom_graph(
             match (case.family, arm) {
                 (Family::Exact, 0) => (
                     12,
-                    "gemm_bi_f32_f32_s2",
+                    "f32_f32_s2",
                     (
                         (case.shape.m.div_ceil(64) * case.shape.n.div_ceil(64)) as u32,
                         1,
@@ -1017,7 +1017,7 @@ fn inspect_custom_graph(
                 ),
                 (Family::Exact, 1) => (
                     5,
-                    "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+                    "nn_sm89_f32_n64_copyplan",
                     (
                         (case.shape.m.div_ceil(64) * case.shape.n.div_ceil(64)) as u32,
                         1,
@@ -1039,7 +1039,7 @@ fn inspect_custom_graph(
                 ),
                 (Family::Tf32, 0) => (
                     5,
-                    "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                    "nn_rna_wide_tf32_m128n128_bk32_s3",
                     (111, 1, 1),
                     (256, 1, 1),
                     98_304,
@@ -1048,7 +1048,7 @@ fn inspect_custom_graph(
                 ),
                 (Family::Tf32, 1) => (
                     5,
-                    "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+                    "nn_tf32_m64n64_bk32_s2",
                     (438, 1, 1),
                     (128, 1, 1),
                     32_768,
@@ -2224,7 +2224,7 @@ mod tests {
     #[test]
     fn launch_contract_rejects_every_physical_field() {
         let expected = LaunchContract {
-            symbol: "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+            symbol: "nn_tf32_m64n64_bk32_s2",
             grid: (438, 1, 1),
             block: (128, 1, 1),
             dynamic_shared: 32_768,
@@ -2278,7 +2278,7 @@ mod tests {
         let bundle = [1.0f32.to_bits(), 0, 4621, 1928, 384, 1928, 384, 384];
         fixed_explicit_vendor_rna_wide_graph_contract(
             1,
-            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+            "nn_rna_wide_tf32_m128n128_bk32_s3",
             (111, 1, 1),
             (256, 1, 1),
             98_304,
@@ -2286,7 +2286,7 @@ mod tests {
         )
         .unwrap();
         let expected = LaunchContract {
-            symbol: "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+            symbol: "nn_rna_wide_tf32_m128n128_bk32_s3",
             grid: (111, 1, 1),
             block: (256, 1, 1),
             dynamic_shared: 98_304,
@@ -2296,7 +2296,7 @@ mod tests {
             terminal_rejected: true,
         };
         let old_incumbent = LaunchContract {
-            symbol: "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+            symbol: "nn_tf32_m128n64_bk32_s2",
             grid: (222, 1, 1),
             dynamic_shared: 55_296,
             parameters: vec![4621, 1928, 384, 1928, 384, 384],

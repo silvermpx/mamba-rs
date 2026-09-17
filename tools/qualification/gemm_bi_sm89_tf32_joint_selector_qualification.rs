@@ -55,16 +55,16 @@ struct LiteralCase {
     gemm_shared_bytes: u32,
 }
 
-const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
-const TN_N96_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1";
-const TN_M64N96_S2_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1";
-const LOWER_TN_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
-const NN_DIRECT_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
-const NN_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
-const NT_A_LDMATRIX_N96_SYMBOL: &str = "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1";
-const OLD_TN_M64N64_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2";
-const OLD_TN_M128N64_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3";
-const OLD_NN_M128N128_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+const TRANSPOSE_SYMBOL: &str = "tn_sm89_tf32_pre_rna_transpose_32x32";
+const TN_N96_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m128n96_bk32_s3";
+const TN_M64N96_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n96_bk32_s2";
+const LOWER_TN_M64N64_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
+const NN_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
+const NN_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
+const NT_A_LDMATRIX_N96_SYMBOL: &str = "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3";
+const OLD_TN_M64N64_SYMBOL: &str = "tn_sm80_mma_tf32_m64n64_bk32_s2";
+const OLD_TN_M128N64_SYMBOL: &str = "tn_sm80_mma_tf32_m128n64_bk32_s3";
+const OLD_NN_M128N128_SYMBOL: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
 
 const CASES: [LiteralCase; 6] = [
     LiteralCase {
@@ -138,7 +138,7 @@ const CASES: [LiteralCase; 6] = [
         dims: (2_048, 768, 3_072),
         route: LiteralRoute::NtALdmatrixN96,
         gemm_symbol: NT_A_LDMATRIX_N96_SYMBOL,
-        old_auto_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+        old_auto_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         transform_symbol: None,
         transpose_grid: None,
         gemm_grid: (128, 1, 1),
@@ -218,7 +218,7 @@ fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
                 (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
                 (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
                 (
-                    "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+                    "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
                     LiteralModule::Sm89Finalist,
                 ),
             ],
@@ -232,7 +232,7 @@ fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
                 (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
                 (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
                 (
-                    "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+                    "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
                     LiteralModule::Sm89Finalist,
                 ),
             ],
@@ -282,12 +282,12 @@ mod live {
 
     fn route(case: LiteralCase) -> Tf32PhysicalRoute {
         match case.route {
-            LiteralRoute::TnN96 => Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
-            LiteralRoute::TnM64N64 => Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
-            LiteralRoute::TnM64N96S2 => Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
-            LiteralRoute::NnDirectN96 => Tf32PhysicalRoute::Sm89NnDirectN96V1,
-            LiteralRoute::NnN96 => Tf32PhysicalRoute::Sm89NnN96V1,
-            LiteralRoute::NtALdmatrixN96 => Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            LiteralRoute::TnN96 => Tf32PhysicalRoute::Sm89TnPreRnaN96,
+            LiteralRoute::TnM64N64 => Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
+            LiteralRoute::TnM64N96S2 => Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+            LiteralRoute::NnDirectN96 => Tf32PhysicalRoute::Sm89NnDirectN96,
+            LiteralRoute::NnN96 => Tf32PhysicalRoute::Sm89NnN96,
+            LiteralRoute::NtALdmatrixN96 => Tf32PhysicalRoute::Sm89NtALdmatrixN96,
         }
     }
 
@@ -307,12 +307,12 @@ mod live {
             OLD_TN_M64N64_SYMBOL => (Tf32PortableTile::M64N64, Tf32PortableStages::S2),
             OLD_TN_M128N64_SYMBOL => (Tf32PortableTile::M128N64, Tf32PortableStages::S3),
             OLD_NN_M128N128_SYMBOL => (Tf32PortableTile::M128N128, Tf32PortableStages::S3),
-            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2" => {
-                return Tf32PhysicalRoute::Sm89MmaTf32Compact8V1;
+            "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2" => {
+                return Tf32PhysicalRoute::Sm89MmaTf32Compact8;
             }
             symbol => panic!("unknown prior TF32 route symbol {symbol}"),
         };
-        Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute { tile, stages })
+        Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages })
     }
 
     fn literal_module(module: ModuleKind) -> Option<LiteralModule> {
@@ -347,7 +347,7 @@ mod live {
         PhysicalQualificationRequest::contiguous_f32(
             op,
             case.dims,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
             PhysicalQualificationF32Epilogue::new(
                 1.0,
                 if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
@@ -384,8 +384,8 @@ mod live {
             .ok_or_else(|| format!("{} has no GEMM node", case.name))?;
         let expected_numeric = match case.op {
             LiteralOp::Tn => ResolvedNumericContract::MmaTf32PreRnaAV1,
-            LiteralOp::Nn => ResolvedNumericContract::MmaTf32AddHalfUlpV1,
-            LiteralOp::Nt => ResolvedNumericContract::MmaTf32RnaV1,
+            LiteralOp::Nn => ResolvedNumericContract::MmaTf32AddHalfUlp,
+            LiteralOp::Nt => ResolvedNumericContract::MmaTf32Rna,
         };
         if gemm.kind != PhysicalLaunchKind::Gemm
             || gemm.symbol != case.gemm_symbol
@@ -397,7 +397,7 @@ mod live {
             || gemm.strides != logical_strides
             || gemm.tile != Some(case.gemm_tile)
             || gemm.numeric_contract != Some(expected_numeric)
-            || gemm.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTileV1)
+            || gemm.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTile)
             || gemm.launch.grid_dim != case.gemm_grid
             || gemm.launch.block_dim != (256, 1, 1)
             || gemm.launch.shared_mem_bytes != case.gemm_shared_bytes

@@ -4,9 +4,9 @@ use crate::mamba_ssm::gpu::kernel_identity::{ArtifactKind, FramedSha256, ModuleK
 
 use super::{CompiledModule, Tf32DriverAbi};
 
-pub(super) const HALF_BF16_SYMBOL: &str = "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16";
-pub(super) const HALF_F16_SYMBOL: &str = "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16";
-pub(super) const EXACT_SYMBOL: &str = "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1";
+pub(super) const HALF_BF16_SYMBOL: &str = "nn_sm89_tc128_f32out_s3_bf16";
+pub(super) const HALF_F16_SYMBOL: &str = "nn_sm89_tc128_f32out_s3_f16";
+pub(super) const EXACT_SYMBOL: &str = "nn_sm89_f32_m128n64_tail_copyplan";
 
 pub(crate) struct InferenceSm89Bundle {
     pub(crate) half_f32out_s3_bf16: Result<CudaFunction, String>,
@@ -81,7 +81,7 @@ impl InferenceSm89PtxAdmission {
 }
 
 fn validate_inference_sm89_ptx(ptx: &str) -> InferenceSm89PtxAdmission {
-    const PREFIX: &str = "gemm_bi_nn_inference_";
+    const PREFIX: &str = "nn_";
     let parsed = match super::parse_ptx(ptx) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -708,10 +708,7 @@ mod tests {
         );
         assert_all_rejected(validate_inference_sm89_ptx(&duplicate));
 
-        let foreign = valid_ptx().replace(
-            HALF_BF16_SYMBOL,
-            "gemm_bi_nn_inference_sm89_unreviewed_v2_bf16",
-        );
+        let foreign = valid_ptx().replace(HALF_BF16_SYMBOL, "nn_sm89_unreviewed_decoy_bf16");
         assert_all_rejected(validate_inference_sm89_ptx(&foreign));
 
         let malformed = format!("{}\n.visible .entry {HALF_BF16_SYMBOL}", valid_ptx());

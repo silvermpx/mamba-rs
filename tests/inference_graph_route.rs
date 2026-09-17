@@ -18,8 +18,8 @@ fn configure_decode_route(ctx: &GpuCtx, tensor_cores: bool, family: BiGemmFamily
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(family);
     ctx.set_bi_tensor_cores(tensor_cores);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
 }
 
 fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool, family: BiGemmFamily) {
@@ -34,7 +34,7 @@ fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool, family: Bi
     );
     assert_eq!(
         route.policy.f32_triad_policy,
-        F32TriadPolicy::ExactScalarFmaV1,
+        F32TriadPolicy::ExactScalarFma,
         "{label} exact-F32 policy"
     );
     assert_eq!(
@@ -43,7 +43,7 @@ fn assert_decode_route(ctx: &GpuCtx, label: &str, tensor_cores: bool, family: Bi
     );
     assert_eq!(
         route.policy.half_triad_policy,
-        HalfTriadPolicy::TiledParityV1,
+        HalfTriadPolicy::TiledParity,
         "{label} tiled-parity half policy"
     );
     assert!(!route.policy.fast_gemm, "{label} fast GEMM disabled");

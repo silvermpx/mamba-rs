@@ -112,61 +112,61 @@ mod live {
             name: "tn_d768_in",
             op: ResolvedGemmOp::Tn,
             dims: (2_048, 768, 3_072),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaN96,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M64N64,
                 stages: Tf32PortableStages::S2,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+            prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
             name: "tn_d768_out",
             op: ResolvedGemmOp::Tn,
             dims: (2_048, 1_536, 768),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaN96,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M64N64,
                 stages: Tf32PortableStages::S2,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+            prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
             name: "tn_prism",
             op: ResolvedGemmOp::Tn,
             dims: (4_621, 384, 1_928),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m64n64_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N64,
                 stages: Tf32PortableStages::S3,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3",
+            prior_symbol: "tn_sm80_mma_tf32_m128n64_bk32_s3",
         },
         Case {
             name: "nn_prism",
             op: ResolvedGemmOp::Nn,
             dims: (4_621, 384, 1_928),
-            route: Tf32PhysicalRoute::Sm89NnDirectN96V1,
-            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89NnDirectN96,
+            candidate_symbol: "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N128,
                 stages: Tf32PortableStages::S3,
             }),
-            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+            prior_symbol: "nn_sm80_mma_tf32_m128n128_bk32_s3",
         },
         Case {
             name: "nn_d768_out",
             op: ResolvedGemmOp::Nn,
             dims: (2_048, 1_536, 768),
-            route: Tf32PhysicalRoute::Sm89NnN96V1,
-            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89NnN96,
+            candidate_symbol: "nn_sm89_tf32_addhalf_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N128,
                 stages: Tf32PortableStages::S3,
             }),
-            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+            prior_symbol: "nn_sm80_mma_tf32_m128n128_bk32_s3",
         },
     ];
 
@@ -175,19 +175,19 @@ mod live {
             name: "nt_d768_in_new_body",
             op: ResolvedGemmOp::Nt,
             dims: (2_048, 768, 3_072),
-            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
-            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
-            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            candidate_symbol: "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
+            prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
             name: "tn_prism_new_body",
             op: ResolvedGemmOp::Tn,
             dims: (4_621, 384, 1_928),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
-            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
-            prior_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1",
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m64n96_bk32_s2",
+            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
+            prior_symbol: "tn_sm89_tf32_pre_rna_m64n64_bk32_s3",
         },
     ];
 
@@ -200,139 +200,139 @@ mod live {
             name: "tn_d768_in_m64n96",
             op: ResolvedGemmOp::Tn,
             dims: (2_048, 768, 3_072),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
-            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
-            prior_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m64n96_bk32_s2",
+            prior_route: Tf32PhysicalRoute::Sm89TnPreRnaN96,
+            prior_symbol: "tn_sm89_tf32_pre_rna_m128n96_bk32_s3",
         },
         Case {
             name: "tn_large_deep_n96",
             op: ResolvedGemmOp::Tn,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaN96,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M64N64,
                 stages: Tf32PortableStages::S2,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+            prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
             name: "tn_large_deep_m64n96",
             op: ResolvedGemmOp::Tn,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m64n96_bk32_s2",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M64N64,
                 stages: Tf32PortableStages::S2,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+            prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
             name: "tn_large_deep_m64n64",
             op: ResolvedGemmOp::Tn,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
-            candidate_symbol: "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
+            candidate_symbol: "tn_sm89_tf32_pre_rna_m64n64_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M64N64,
                 stages: Tf32PortableStages::S2,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2",
+            prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
             name: "nn_large_deep_n96",
             op: ResolvedGemmOp::Nn,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89NnN96V1,
-            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89NnN96,
+            candidate_symbol: "nn_sm89_tf32_addhalf_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N128,
                 stages: Tf32PortableStages::S3,
             }),
-            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+            prior_symbol: "nn_sm80_mma_tf32_m128n128_bk32_s3",
         },
         Case {
             name: "nn_large_deep_direct_n96",
             op: ResolvedGemmOp::Nn,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89NnDirectN96V1,
-            candidate_symbol: "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::Sm89NnDirectN96,
+            candidate_symbol: "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N128,
                 stages: Tf32PortableStages::S3,
             }),
-            prior_symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+            prior_symbol: "nn_sm80_mma_tf32_m128n128_bk32_s3",
         },
         Case {
             name: "nt_large_deep_a_ldmatrix",
             op: ResolvedGemmOp::Nt,
             dims: (4_096, 3_072, 1_536),
-            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
-            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
-            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            candidate_symbol: "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
+            prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
             name: "tn_d128_in_splitk8_s3",
             op: ResolvedGemmOp::Tn,
             dims: (1_024, 128, 512),
-            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile: Tf32PortableTile::M32N32,
                 stages: Tf32PortableStages::S3,
             }),
-            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            candidate_symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+            prior_symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
         },
         Case {
             name: "tn_d128_in_splitk8_s4",
             op: ResolvedGemmOp::Tn,
             dims: (1_024, 128, 512),
-            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile: Tf32PortableTile::M32N32,
                 stages: Tf32PortableStages::S4,
             }),
-            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            candidate_symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+            prior_symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
         },
         Case {
             name: "tn_d128_out_splitk8_s3",
             op: ResolvedGemmOp::Tn,
             dims: (1_024, 256, 128),
-            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile: Tf32PortableTile::M32N32,
                 stages: Tf32PortableStages::S3,
             }),
-            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            candidate_symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+            prior_symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
         },
         Case {
             name: "tn_d128_out_splitk8_s4",
             op: ResolvedGemmOp::Tn,
             dims: (1_024, 256, 128),
-            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+            route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile: Tf32PortableTile::M32N32,
                 stages: Tf32PortableStages::S4,
             }),
-            candidate_symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
-            prior_route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            candidate_symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
+            prior_route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }),
-            prior_symbol: "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+            prior_symbol: "tn_sm80_mma_tf32_m16n32_bk32_s4",
         },
     ];
 
@@ -344,28 +344,28 @@ mod live {
             name: "nt_d768_in_ldmatrix",
             op: ResolvedGemmOp::Nt,
             dims: (2_048, 768, 3_072),
-            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
-            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
-            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            candidate_symbol: "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
+            prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
             name: "nt_d768_out_ldmatrix",
             op: ResolvedGemmOp::Nt,
             dims: (2_048, 1_536, 768),
-            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
-            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
-            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            candidate_symbol: "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
+            prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
             name: "nt_prism_ldmatrix",
             op: ResolvedGemmOp::Nt,
             dims: (4_621, 384, 1_928),
-            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
-            candidate_symbol: "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
-            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
-            prior_symbol: "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+            route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            candidate_symbol: "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
+            prior_route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
+            prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
     ];
 
@@ -382,7 +382,7 @@ mod live {
     fn configure(ctx: &GpuCtx) {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     }
 
     fn request(case: Case, candidate: bool) -> PhysicalQualificationRequest {

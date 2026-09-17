@@ -25,7 +25,7 @@ fn cells() -> Vec<Cell> {
             grid: 768,
             threads: 256,
             shared: 49_280,
-            symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+            symbol: "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
         },
         Cell {
             name: "d768_out_proj",
@@ -34,7 +34,7 @@ fn cells() -> Vec<Cell> {
             grid: 384,
             threads: 128,
             shared: 32_896,
-            symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+            symbol: "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
         },
         Cell {
             name: "prism_in_proj",
@@ -43,7 +43,7 @@ fn cells() -> Vec<Cell> {
             grid: 1168,
             threads: 256,
             shared: 49_280,
-            symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2",
+            symbol: "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
         },
     ]
 }
@@ -211,7 +211,7 @@ fn vendor_cpu_physical_gate_rejects_wrong_symbol_launch_or_shared() {
         grid: 384,
         threads: 128,
         shared: 32896,
-        symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+        symbol: "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
     };
     validate_manifest(cell, cell.symbol, (384, 1, 1), (128, 1, 1), 32896).unwrap();
     assert!(validate_manifest(cell, "wrong", (384, 1, 1), (128, 1, 1), 32896).is_err());
@@ -460,7 +460,7 @@ mod gpu {
 
     fn request(cell: Cell, forced: bool) -> PhysicalQualificationRequest {
         let route = if forced {
-            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(
+            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(
                 Tf32Sm120Route {
                     tile: if cell.bn == 64 {
                         Tf32Sm120Tile::M64N64
@@ -471,7 +471,7 @@ mod gpu {
                 },
             ))
         } else {
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1)
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32)
         };
         PhysicalQualificationRequest::contiguous_f32(
             ResolvedGemmOp::Nn,
@@ -507,7 +507,7 @@ mod gpu {
             || node.shape != cell.dims
             || node.strides != (cell.dims.1, cell.dims.2, cell.dims.2)
             || node.tile != Some((64, cell.bn))
-            || node.numeric_contract != Some(ResolvedNumericContract::Sm120TmaMmaTf32RnaV1)
+            || node.numeric_contract != Some(ResolvedNumericContract::Sm120TmaMmaTf32Rna)
             || node.launch.arguments_digest == [0; 32]
         {
             return Err(format!(
@@ -813,7 +813,7 @@ mod gpu {
         let ctx = GpuCtx::new(device)?;
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
         Ok(ctx)
     }
     fn binding(ctx: &GpuCtx) -> Result<String, String> {
@@ -826,7 +826,7 @@ mod gpu {
             || bound.compiler.nvrtc_version != (13, 2)
             || !bound.compiler.nvrtc_library_known
             || digest_hex(&bound.artifact.artifact_digest)
-                != "1cbfd2318610ff5e105eed18ec269453246fef30ca23ac94ac4d3378dfe89246"
+                != "6a5feb9e46d25b635ec84e53b39aad644f97d83fa06ccbc8d94c95fa32ad3235"
         {
             return Err(format!("unqualified SM120 module identity: {bound:?}"));
         }

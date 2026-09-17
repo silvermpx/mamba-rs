@@ -1,6 +1,6 @@
-const PARTIAL_SYMBOL: &str = "gemm_bi_tn_splitm_partial";
-const ALIGNED_PARTIAL_SYMBOL: &str = "gemm_bi_tn_splitm_partial_aligned";
-const REDUCER_SYMBOL: &str = "gemm_bi_splitm_reduce";
+const PARTIAL_SYMBOL: &str = "tn_splitm_partial";
+const ALIGNED_PARTIAL_SYMBOL: &str = "tn_splitm_partial_aligned";
+const REDUCER_SYMBOL: &str = "splitm_reduce";
 const SCALAR_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/scalar.cu");
 const TEST_SOURCE: &str = include_str!("gemm_bi_tn_splitm_cp_async_qualification.rs");
 
@@ -35,9 +35,9 @@ const CASES: [Case; 2] = [
 
 fn splitm_impl_body() -> &'static str {
     let (_, body) = SCALAR_SOURCE
-        .split_once("void gemm_bi_tn_splitm_partial_impl(")
+        .split_once("void tn_splitm_partial_impl(")
         .expect("production TN split-M implementation");
-    body.split_once("void gemm_bi_tn_splitm_partial(")
+    body.split_once("void tn_splitm_partial(")
         .map(|(body, _)| body)
         .expect("production TN split-M exports follow the implementation")
 }
@@ -88,9 +88,9 @@ fn production_uses_only_the_qualified_two_stage_body() {
         "int next_tile = tile + 1",
         "int read_stage = 0",
         "int write_stage = 1",
-        "BASES_ALIGNED || gemm_bi_is_aligned_16(A)",
-        "BASES_ALIGNED || gemm_bi_is_aligned_16(B)",
-        "!BASES_ALIGNED && !gemm_bi_is_aligned_16(destination)",
+        "BASES_ALIGNED || is_aligned_16(A)",
+        "BASES_ALIGNED || is_aligned_16(B)",
+        "!BASES_ALIGNED && !is_aligned_16(destination)",
     ] {
         assert!(body.contains(required), "production body lost {required}");
     }
@@ -98,8 +98,8 @@ fn production_uses_only_the_qualified_two_stage_body() {
         assert!(!body.contains(forbidden), "production retained {forbidden}");
     }
     for specialization in [
-        "gemm_bi_tn_splitm_partial_impl<false>(",
-        "gemm_bi_tn_splitm_partial_impl<true>(",
+        "tn_splitm_partial_impl<false>(",
+        "tn_splitm_partial_impl<true>(",
     ] {
         assert!(
             SCALAR_SOURCE.contains(specialization),
@@ -170,7 +170,7 @@ fn qualification_cases_cover_aligned_and_unaligned_tails() {
 fn experimental_export_is_absent_from_production() {
     for forbidden in [
         "GEMM_BI_SCALAR_TN_SPLITM_CP_ASYNC_EXPERIMENT",
-        "gemm_bi_tn_splitm_partial_cp_async_exp_v1",
+        "tn_splitm_partial_cp_async_exp",
     ] {
         assert!(!SCALAR_SOURCE.contains(forbidden));
         for source in [

@@ -234,7 +234,7 @@ fn launch_transpose(ctx: &GpuCtx, cell: RawCell, output: u64, input: u64) -> Res
     let (rows, columns) = (m as i32, k as i32);
     let mut builder = ctx
         .stream
-        .launch_builder(&ctx.kernels.gemm_bi_transpose_f32_32x16_d768_v1);
+        .launch_builder(&ctx.kernels.gemm_bi_transpose_f32_32x16_d768);
     builder.arg(&output);
     builder.arg(&input);
     builder.arg(&rows);

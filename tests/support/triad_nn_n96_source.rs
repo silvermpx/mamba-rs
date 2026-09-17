@@ -1,5 +1,5 @@
-pub const FIXED_N96_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
-pub const TRIAD_NN_N96_SYMBOL: &str = "gemm_bi_nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3";
+pub const FIXED_N96_SYMBOL: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
+pub const TRIAD_NN_N96_SYMBOL: &str = "nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenTarget {
@@ -199,7 +199,7 @@ pub fn expected_nn_auto_grid(
 mod tests {
     use super::*;
 
-    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
+    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
 
     #[test]
     fn triad_nn_n96_transform_is_exact_and_reversible() {

@@ -225,7 +225,7 @@ static_assert(M8N32::Stage == 640,
 } // namespace GemmBiTnUnderfillDirect
 
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_tn_underfill_m32n32_bk16_s2_splitm16_exp_v1(
+void tn_underfill_m32n32_bk16_s2_splitm16_exp(
     float* output,
     const float* a,
     const float* b,
@@ -238,7 +238,7 @@ void gemm_bi_tn_underfill_m32n32_bk16_s2_splitm16_exp_v1(
 }
 
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_exp_v1(
+void tn_underfill_m16n32_bk16_s2_splitm16_exp(
     float* output,
     const float* a,
     const float* b,
@@ -251,7 +251,7 @@ void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_exp_v1(
 }
 
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_apad0_ca_exp_v1(
+void tn_underfill_m16n32_bk16_s2_splitm16_apad0_ca_exp(
     float* output,
     const float* a,
     const float* b,
@@ -264,7 +264,7 @@ void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_apad0_ca_exp_v1(
 }
 
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_apad0_cg_exp_v1(
+void tn_underfill_m16n32_bk16_s2_splitm16_apad0_cg_exp(
     float* output,
     const float* a,
     const float* b,
@@ -277,7 +277,7 @@ void gemm_bi_tn_underfill_m16n32_bk16_s2_splitm16_apad0_cg_exp_v1(
 }
 
 extern "C" __global__ __launch_bounds__(64, 4)
-void gemm_bi_tn_underfill_m16n16_bk16_s2_splitm16_exp_v1(
+void tn_underfill_m16n16_bk16_s2_splitm16_exp(
     float* output,
     const float* a,
     const float* b,
@@ -290,7 +290,7 @@ void gemm_bi_tn_underfill_m16n16_bk16_s2_splitm16_exp_v1(
 }
 
 extern "C" __global__ __launch_bounds__(64, 4)
-void gemm_bi_tn_underfill_m8n32_bk16_s2_splitm16_exp_v1(
+void tn_underfill_m8n32_bk16_s2_splitm16_exp(
     float* output,
     const float* a,
     const float* b,

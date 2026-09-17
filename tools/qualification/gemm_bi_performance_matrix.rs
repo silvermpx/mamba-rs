@@ -55,7 +55,7 @@ const FROZEN_ITERATION_SUITE: &str = "gemm_bi_canonical_performance";
 const EDGE_FROZEN_ITERATION_SUITE: &str = "gemm_bi_deterministic_performance_edges";
 const CANONICAL_INVENTORY_COUNT: usize = 742;
 const CANONICAL_INVENTORY_DIGEST: &str =
-    "2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d";
+    "5718b611e0b9abca1043c767d7f558b45afc5ed01c23763fae9a53199816d1f8";
 const FROZEN_ITERATION_HEADER: &str = "cell_id\teager_iterations\tgraph_iterations";
 const QUALIFICATION_CELL_IDS_ENV: &str = "GEMM_BI_QUAL_CELL_IDS";
 const EDGE_QUALIFICATION_CELL_IDS_ENV: &str = "GEMM_BI_EDGE_QUAL_CELL_IDS";
@@ -3105,10 +3105,10 @@ fn tile_name(tile: TcTile) -> &'static str {
 fn logical_route_name(route: Route) -> String {
     match route {
         Route::F32Policy {
-            policy: F32TriadPolicy::ExactScalarFmaV1,
+            policy: F32TriadPolicy::ExactScalarFma,
         } => "f32_policy_exact".into(),
         Route::F32Policy {
-            policy: F32TriadPolicy::AllowDeterministicTf32V1,
+            policy: F32TriadPolicy::AllowDeterministicTf32,
         } => "f32_policy_allow_tf32".into(),
         Route::HalfPolicy {
             dtype,
@@ -3127,7 +3127,7 @@ fn logical_route_name(route: Route) -> String {
 
 fn tf32_logical_route_name(spec: &Tf32KernelSpec) -> String {
     format!(
-        "f32_tf32_forced_sm80_mma_tf32_v1_m{}n{}_bk{}_s{}",
+        "f32_tf32_forced_sm80_mma_tf32_m{}n{}_bk{}_s{}",
         spec.tile.0, spec.tile.1, spec.bk, spec.stages
     )
 }
@@ -3815,7 +3815,7 @@ fn build_cells() -> Vec<Cell> {
         for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
             cells.push(Cell {
                 route: Route::F32Policy {
-                    policy: F32TriadPolicy::ExactScalarFmaV1,
+                    policy: F32TriadPolicy::ExactScalarFma,
                 },
                 op,
                 shape,
@@ -3823,7 +3823,7 @@ fn build_cells() -> Vec<Cell> {
             });
             cells.push(Cell {
                 route: Route::F32Policy {
-                    policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                    policy: F32TriadPolicy::AllowDeterministicTf32,
                 },
                 op,
                 shape,
@@ -3903,10 +3903,10 @@ fn final_auto_cell_inventory() -> Vec<Cell> {
             let projection = TF32_PROJECTION_SHAPES.contains(&cell.shape.name);
             match cell.route {
                 Route::F32Policy {
-                    policy: F32TriadPolicy::ExactScalarFmaV1,
+                    policy: F32TriadPolicy::ExactScalarFma,
                 } => projection,
                 Route::F32Policy {
-                    policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                    policy: F32TriadPolicy::AllowDeterministicTf32,
                 } => projection || matches!(cell.shape.name, "underfill" | "large_deep"),
                 Route::HalfPolicy {
                     tensor_cores: true, ..
@@ -3923,7 +3923,7 @@ fn next_auto_cell_inventory() -> Vec<Cell> {
         matches!(
             cell.route,
             Route::F32Policy {
-                policy: F32TriadPolicy::ExactScalarFmaV1,
+                policy: F32TriadPolicy::ExactScalarFma,
             }
         ) && matches!(cell.shape.name, "underfill" | "large_deep")
     }));
@@ -3940,7 +3940,7 @@ fn select_final_auto_cells(cells: &[Cell], filter: Option<&str>) -> Result<Vec<C
 fn final_auto_comparator_views(cell: Cell) -> Vec<FinalAutoComparator> {
     match cell.route {
         Route::F32Policy {
-            policy: F32TriadPolicy::ExactScalarFmaV1,
+            policy: F32TriadPolicy::ExactScalarFma,
         } => vec![
             FinalAutoComparator {
                 label: "cublas_fast_tf32",
@@ -3952,7 +3952,7 @@ fn final_auto_comparator_views(cell: Cell) -> Vec<FinalAutoComparator> {
             },
         ],
         Route::F32Policy {
-            policy: F32TriadPolicy::AllowDeterministicTf32V1,
+            policy: F32TriadPolicy::AllowDeterministicTf32,
         } => vec![FinalAutoComparator {
             label: "cublas_fast_tf32",
             mode: CublasDenominatorMode::Fast,
@@ -4060,7 +4060,7 @@ fn half_edge_routes() -> Vec<Route> {
 fn boundary_edge_routes() -> Vec<Route> {
     let mut routes = Vec::with_capacity(9);
     routes.push(Route::F32Policy {
-        policy: F32TriadPolicy::ExactScalarFmaV1,
+        policy: F32TriadPolicy::ExactScalarFma,
     });
     routes.extend(half_edge_routes());
     routes
@@ -4414,7 +4414,7 @@ fn physical_qualification_route(route: Route) -> PhysicalQualificationRoute {
         } => PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
         },
         Route::HalfForced { dtype, tile } => PhysicalQualificationRoute::HalfForced { dtype, tile },
         Route::Tf32Forced(spec) => PhysicalQualificationRoute::Tf32Forced(spec.route),
@@ -6022,9 +6022,9 @@ mod tn_narrow_cublas_pair {
 
     pub(super) const fn candidate_partial_symbol(cell: PairCell) -> &'static str {
         if cell.a_offset == 0 && cell.b_offset == 0 {
-            "gemm_bi_tn_narrow_splitm_partial_aligned"
+            "tn_narrow_splitm_partial_aligned"
         } else {
-            "gemm_bi_tn_narrow_splitm_partial"
+            "tn_narrow_splitm_partial"
         }
     }
 
@@ -6523,10 +6523,10 @@ mod tn_narrow_cublas_pair {
             shared_mem_bytes: 0,
         };
         let partial = match candidate_partial_symbol(cell) {
-            "gemm_bi_tn_narrow_splitm_partial_aligned" => {
+            "tn_narrow_splitm_partial_aligned" => {
                 &ctx.kernels.gemm_bi_tn_narrow_splitm_partial_aligned
             }
-            "gemm_bi_tn_narrow_splitm_partial" => &ctx.kernels.gemm_bi_tn_narrow_splitm_partial,
+            "tn_narrow_splitm_partial" => &ctx.kernels.gemm_bi_tn_narrow_splitm_partial,
             symbol => return Err(format!("unknown paired TN partial symbol {symbol}")),
         };
         let mut partial_builder = ctx.stream.launch_builder(partial);
@@ -6618,9 +6618,9 @@ mod tn_narrow_cublas_pair {
         let a = buffers.candidate_x.raw_ptr_at(&ctx.stream, cell.a_offset);
         let b = buffers.candidate_dy.raw_ptr_at(&ctx.stream, cell.b_offset);
         let observed_symbol = if a.is_multiple_of(16) && b.is_multiple_of(16) {
-            "gemm_bi_tn_narrow_splitm_partial_aligned"
+            "tn_narrow_splitm_partial_aligned"
         } else {
-            "gemm_bi_tn_narrow_splitm_partial"
+            "tn_narrow_splitm_partial"
         };
         let expected_symbol = candidate_partial_symbol(cell);
         if observed_symbol != expected_symbol {
@@ -6634,7 +6634,7 @@ mod tn_narrow_cublas_pair {
         let digest = FramedSha256::new(b"mamba-bi-f32-tn-narrow-cublas-pair-route.v1")
             .required(b"launch-count", &2u64.to_le_bytes())
             .required(b"partial-symbol", expected_symbol.as_bytes())
-            .required(b"reducer-symbol", b"gemm_bi_splitm_reduce")
+            .required(b"reducer-symbol", b"splitm_reduce")
             .required(b"m", &(cell.dims.0 as u64).to_le_bytes())
             .required(b"k", &(cell.dims.1 as u64).to_le_bytes())
             .required(b"n", &(cell.dims.2 as u64).to_le_bytes())
@@ -7057,7 +7057,7 @@ mod tn_narrow_cublas_pair {
                     "\"a_offset_f32\":{},\"b_offset_f32\":{},\"output_offset_f32\":{},",
                     "\"candidate\":\"forced_tn_narrow_splitm_two_launch\",",
                     "\"candidate_partial_symbol\":\"{}\",",
-                    "\"candidate_reduce_symbol\":\"gemm_bi_splitm_reduce\",",
+                    "\"candidate_reduce_symbol\":\"splitm_reduce\",",
                     "\"candidate_m_chunk\":{},\"candidate_chunks\":{},",
                     "\"denominator\":\"cublas_fast_tf32\",\"path\":\"{}\",",
                     "\"windows_per_order\":{},\"warmups\":{},",
@@ -7224,7 +7224,7 @@ mod tn_narrow_cublas_pair {
         let ctx = GpuCtx::new(&device)?;
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         let multiprocessors = device.multiprocessor_count();
         for cell in CELLS {
             run_cell(&ctx, &quiet_gpu, cell, multiprocessors, windows, &mut sink)
@@ -7256,17 +7256,17 @@ impl Tf32TournamentRoute {
             stages: Tf32PortableStages::S4,
         };
         match self {
-            Self::Direct => Tf32PhysicalRoute::MmaTf32RnaV1(portable),
-            Self::SplitK2 => Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(portable),
-            Self::SplitK4 => Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(portable),
+            Self::Direct => Tf32PhysicalRoute::MmaTf32Rna(portable),
+            Self::SplitK2 => Tf32PhysicalRoute::MmaTf32RnaSplitK2(portable),
+            Self::SplitK4 => Tf32PhysicalRoute::MmaTf32RnaSplitK4(portable),
         }
     }
 
     const fn symbol(self) -> &'static str {
         match self {
-            Self::Direct => "gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4",
-            Self::SplitK2 => "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
-            Self::SplitK4 => "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+            Self::Direct => "nn_sm80_mma_tf32_m16n32_bk32_s4",
+            Self::SplitK2 => "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
+            Self::SplitK4 => "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
         }
     }
 
@@ -8625,7 +8625,7 @@ fn run_tf32_tournament_assignment(
     for ctx in [primary_ctx, secondary_ctx] {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     }
     let requests = TF32_TOURNAMENT_SHAPES
         .into_iter()
@@ -8800,7 +8800,7 @@ fn run_gemm_bi_production_auto_paired_cublas(
     let cublas_workspace_bytes = auto_ctx._blas_workspace.len();
     auto_ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     auto_ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    auto_ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    auto_ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     let requests = cells
         .iter()
         .copied()
@@ -8885,7 +8885,7 @@ fn gemm_bi_deterministic_performance_matrix() {
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     let shard = parse_env_usize("GEMM_BI_QUAL_SHARD", 0).expect("parse shard");
     let shards = parse_env_usize("GEMM_BI_QUAL_SHARDS", 1).expect("parse shard count");
@@ -8966,7 +8966,7 @@ fn gemm_bi_sm120_tf32_forced_hot_performance() {
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let windows =
         parse_env_usize("GEMM_BI_QUAL_WINDOWS", DEFAULT_WINDOWS).expect("parse window count");
@@ -9031,7 +9031,7 @@ fn gemm_bi_sm120_tf32_forced_nn_nt_hot_performance() {
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let windows =
         parse_env_usize("GEMM_BI_QUAL_WINDOWS", DEFAULT_WINDOWS).expect("parse window count");
@@ -9162,7 +9162,7 @@ fn gemm_bi_deterministic_performance_edges() {
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     let shard = parse_env_usize("GEMM_BI_QUAL_SHARD", 0).expect("parse edge shard");
     let shards = parse_env_usize("GEMM_BI_QUAL_SHARDS", 1).expect("parse edge shard count");
@@ -9235,11 +9235,11 @@ fn gemm_bi_deterministic_performance_edges() {
 fn tf32_logical_route_survives_physical_symbol_rename() {
     let original = SM80_TF32_ROUTE_SPECS[0];
     let mut renamed = original;
-    renamed.symbol = "gemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s2";
+    renamed.symbol = "nn_sm80_mma_tf32_m128n64_bk32_s2";
 
     assert_eq!(
         tf32_logical_route_name(&original),
-        "f32_tf32_forced_sm80_mma_tf32_v1_m128n64_bk32_s2"
+        "f32_tf32_forced_sm80_mma_tf32_m128n64_bk32_s2"
     );
     assert_eq!(
         tf32_logical_route_name(&original),
@@ -9269,7 +9269,7 @@ fn frozen_iteration_manifest_is_strict_and_round_trips() {
         "format\tgemm-bi-frozen-iterations.v1\n",
         "suite\tgemm_bi_canonical_performance\n",
         "inventory_count\t742\n",
-        "inventory_digest\t2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d\n",
+        "inventory_digest\t5718b611e0b9abca1043c767d7f558b45afc5ed01c23763fae9a53199816d1f8\n",
         "cell_id\teager_iterations\tgraph_iterations\n",
         "f32_policy_exact/nn/sq64/contiguous\t17\t31\n",
     )));
@@ -9414,27 +9414,27 @@ fn tf32_tournament_route_contract_is_exact() {
         [
             (
                 "direct_m16n32_s4",
-                "gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4",
+                "nn_sm80_mma_tf32_m16n32_bk32_s4",
                 (48, 1, 1),
-                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
             ),
             (
                 "splitk2_m16n32_s4",
-                "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+                "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
                 (12, 4, 2),
-                Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+                Tf32PhysicalRoute::MmaTf32RnaSplitK2(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
             ),
             (
                 "splitk4_m16n32_s4",
-                "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
                 (12, 4, 4),
-                Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+                Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
@@ -9609,11 +9609,11 @@ fn canonical_inventory_count_order_and_digest_are_frozen() {
     assert_eq!(ids.first().unwrap(), "f32_policy_exact/nn/sq64/contiguous");
     assert_eq!(
         ids.last().unwrap(),
-        "f32_tf32_forced_sm80_mma_tf32_v1_m16n16_bk32_s4/nt/prism_in_proj/contiguous"
+        "f32_tf32_forced_sm80_mma_tf32_m16n16_bk32_s4/nt/prism_in_proj/contiguous"
     );
     assert_eq!(
         hex_digest(canonical_inventory_digest(&cells)),
-        "2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d"
+        "5718b611e0b9abca1043c767d7f558b45afc5ed01c23763fae9a53199816d1f8"
     );
 }
 
@@ -9653,7 +9653,7 @@ fn f32_policy_comparison_uses_matching_production_call_scopes() {
             matches!(
                 cell.route,
                 Route::F32Policy {
-                    policy: F32TriadPolicy::ExactScalarFmaV1,
+                    policy: F32TriadPolicy::ExactScalarFma,
                 }
             )
         })
@@ -9664,7 +9664,7 @@ fn f32_policy_comparison_uses_matching_production_call_scopes() {
             matches!(
                 cell.route,
                 Route::F32Policy {
-                    policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                    policy: F32TriadPolicy::AllowDeterministicTf32,
                 }
             )
         })
@@ -9805,7 +9805,7 @@ fn edge_inventory_rejects_count_order_route_and_stride_label_mutations() {
 
     let mut route_changed = cells.clone();
     route_changed[0].route = Route::F32Policy {
-        policy: F32TriadPolicy::AllowDeterministicTf32V1,
+        policy: F32TriadPolicy::AllowDeterministicTf32,
     };
     assert!(validate_edge_inventory(&route_changed).is_err());
 
@@ -10323,43 +10323,43 @@ fn tn_narrow_cublas_pair_inventory_and_measurement_modes_are_exact() {
                 "m256_k32_n2",
                 (256, 32, 2),
                 (0, 0, 0),
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
+                "tn_narrow_splitm_partial_aligned",
             ),
             (
                 "m1024_k47_n17",
                 (1_024, 47, 17),
                 (0, 0, 0),
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
+                "tn_narrow_splitm_partial_aligned",
             ),
             (
                 "m1024_k128_n25",
                 (1_024, 128, 25),
                 (0, 0, 0),
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
+                "tn_narrow_splitm_partial_aligned",
             ),
             (
                 "m4096_k64_n64",
                 (4_096, 64, 64),
                 (0, 0, 0),
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
+                "tn_narrow_splitm_partial_aligned",
             ),
             (
                 "m4096_k128_n96",
                 (4_096, 128, 96),
                 (0, 0, 0),
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
+                "tn_narrow_splitm_partial_aligned",
             ),
             (
                 "m4096_k256_n101_offset1",
                 (4_096, 256, 101),
                 (1, 0, 1),
-                "gemm_bi_tn_narrow_splitm_partial",
+                "tn_narrow_splitm_partial",
             ),
             (
                 "m4111_k257_n127_offset1",
                 (4_111, 257, 127),
                 (0, 1, 1),
-                "gemm_bi_tn_narrow_splitm_partial",
+                "tn_narrow_splitm_partial",
             ),
         ]
     );
@@ -10993,8 +10993,8 @@ fn sm120_paired_output_reset_metadata_distinguishes_tn_from_nt() {
 mod sm89_nt_finalist_once21 {
     use super::*;
 
-    const SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
-    const RETAINED_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3";
+    const SYMBOL: &str = "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2";
+    const RETAINED_SYMBOL: &str = "nt_sm80_mma_tf32_m128n64_bk32_s3";
     const WINDOWS: usize = 21;
 
     #[derive(Clone, Copy)]
@@ -11055,7 +11055,7 @@ mod sm89_nt_finalist_once21 {
     fn configure(ctx: &GpuCtx) {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     }
 
     fn request(cell: NtCell, route: PhysicalQualificationRoute) -> PhysicalQualificationRequest {
@@ -11602,11 +11602,11 @@ mod sm89_nt_finalist_once21 {
 
         let candidate_request = request(
             cell,
-            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8V1),
+            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8),
         );
         let current_request = request(
             cell,
-            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32RnaV1(
+            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32Rna(
                 Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N64,
                     stages: Tf32PortableStages::S3,

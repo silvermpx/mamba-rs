@@ -76,7 +76,7 @@ fn routes_specs_and_exports_name_the_same_three_kernels() {
         assert!(exports.contains(&symbol), "{symbol} must be exported");
     }
     assert_eq!(exports.len(), routes.len());
-    assert!(production::kernel_spec("gemm_bi_tn_sm89_f32_unknown_v1").is_none());
+    assert!(production::kernel_spec("tn_sm89_f32_unknown").is_none());
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn production_owner_is_sealed_to_exactly_three_large_tn_exports() {
 #[test]
 fn sealed_validator_rejects_discovery_markers_and_inventory_mutations() {
     let source = production::compose_source().expect("compose sealed production source");
-    let discovery = source.replacen(production::PRISM_RAW_SYMBOL, "gemm_bi_tn_test_leak", 1);
+    let discovery = source.replacen(production::PRISM_RAW_SYMBOL, "tn_test_leak", 1);
     assert!(production::validate_source_text(&discovery).is_err());
 
     let duplicate = source.replacen(
@@ -122,10 +122,7 @@ fn sealed_validator_rejects_discovery_markers_and_inventory_mutations() {
     let missing = source.replacen(prism_unit, "", 1);
     assert!(production::validate_source_text(&missing).is_err());
 
-    for extra in [
-        "gemm_bi_tn_sm89_f32_foreign_v1",
-        "gemm_bi_tn_sm89_f32_d128_m16n16_v1",
-    ] {
+    for extra in ["tn_sm89_f32_foreign", "tn_sm89_f32_d128_m16n16"] {
         let mutated = format!(
             "{source}\nextern \"C\" __global__ void {extra}(float* output) {{ output[0] = 0.0f; }}\n"
         );

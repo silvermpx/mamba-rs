@@ -1,5 +1,5 @@
-pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_transpose_rna_n96_sm89_m128n96_bk32_s3";
-pub const TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_test_transpose_raw_u32_32x32_v1";
+pub const GEMM_SYMBOL: &str = "tn_test_transpose_rna_n96_sm89_m128n96_bk32_s3";
+pub const TRANSPOSE_SYMBOL: &str = "tn_test_transpose_raw_u32_32x32";
 
 pub fn transpose_source() -> &'static str {
     TRANSPOSE_CUDA
@@ -84,7 +84,7 @@ pub fn candidate_source(fixed_n96: &str) -> Result<String, String> {
     let mut source = fixed_n96.to_owned();
     replace_exactly_once(
         &mut source,
-        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        "nn_sm89_rna_tf32_m128n96_bk32_s3",
         GEMM_SYMBOL,
         "N96 export",
     )?;
@@ -187,7 +187,7 @@ static_assert(sizeof(GbfTf32TnTransposeParams) == 12, "TN transpose parameter AB
 static_assert(alignof(GbfTf32TnTransposeParams) == 4, "TN transpose parameter alignment");
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_tn_test_transpose_raw_u32_32x32_v1(
+void tn_test_transpose_raw_u32_32x32(
     const unsigned* input, unsigned* output, GbfTf32TnTransposeParams params) {
     if (params.rows < 0 || params.columns < 0 || params.output_stride < params.rows
         || (params.output_stride & 3) != 0) return;
@@ -222,7 +222,7 @@ void gemm_bi_tn_test_transpose_raw_u32_32x32_v1(
 mod tests {
     use super::*;
 
-    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_inference/tf32_rna_n96.cu");
+    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
 
     #[test]
     fn transpose_stride_and_indices_cover_raw_words_and_padding() {
@@ -267,7 +267,7 @@ mod tests {
         assert!(source.contains("const unsigned* input"));
         assert!(source.contains("unsigned* output"));
         assert!(source.contains("output_stride"));
-        assert!(!source.contains("gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3"));
+        assert!(!source.contains("nn_sm89_rna_tf32_m128n96_bk32_s3"));
     }
 
     #[test]

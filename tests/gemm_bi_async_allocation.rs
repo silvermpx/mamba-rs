@@ -63,7 +63,7 @@ fn ada_async_allocations_prepare_capture_and_replay_portable_f32() {
     let ctx = GpuCtx::new(&device).expect("create GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
 
     let dims = (16, 32, 32);
     let a_host = (0..dims.0 * dims.1)

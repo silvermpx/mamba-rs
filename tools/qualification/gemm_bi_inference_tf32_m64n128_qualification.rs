@@ -23,10 +23,10 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
 use sha2::{Digest as _, Sha256};
 
 const OUTPUT_ENV: &str = "MAMBA_RS_FIXED_TF32_M64N128_JSONL";
-const SCHEMA: &str = "MambaBiFixedTf32M64N128QualificationV1";
-const CANDIDATE_SYMBOL: &str = "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2";
-const PRODUCTION_SYMBOL: &str = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2";
-const PRODUCTION_PAIR_STORE_SYMBOL: &str = "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store";
+const SCHEMA: &str = "MambaBiFixedTf32M64N128Qualification";
+const CANDIDATE_SYMBOL: &str = "nn_sm120_tma_tf32_m64n128_bk32_s2";
+const PRODUCTION_SYMBOL: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2";
+const PRODUCTION_PAIR_STORE_SYMBOL: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store";
 const EAGER_REPEATS: usize = 10;
 const GRAPH_WARMUPS: usize = 1;
 const GRAPH_REPLAYS: usize = 10;
@@ -604,7 +604,7 @@ fn synth_values(len: usize, seed: u64) -> Vec<f32> {
 fn configure_arm(ctx: &GpuCtx, arm: Arm) -> Result<(), String> {
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     match arm {
         Arm::Candidate | Arm::ProductionAuto => {
             ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -2011,7 +2011,7 @@ mod tests {
         };
         assert_eq!(
             cell_json(&metadata, cell),
-            r#""schema":"MambaBiFixedTf32M64N128QualificationV1","run_identity_sha256":"run\"\\\n","cell":"cell\"\\\n","shape_name":"shape\tname","priority":false,"shape":{"m":1,"k":2,"n":3},"dtype":"f32","bias":"none""#
+            r#""schema":"MambaBiFixedTf32M64N128Qualification","run_identity_sha256":"run\"\\\n","cell":"cell\"\\\n","shape_name":"shape\tname","priority":false,"shape":{"m":1,"k":2,"n":3},"dtype":"f32","bias":"none""#
         );
     }
 }

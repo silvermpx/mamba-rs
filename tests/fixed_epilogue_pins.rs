@@ -19,35 +19,44 @@ use std::path::Path;
 fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_inference");
     let mut offenders = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("kernel dir") {
-        let path = entry.expect("dir entry").path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if ext != "cu" && ext != "cuh" {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("kernel source");
-        let stripped = source_scan::strip_comments_lines(&text);
-        for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
-            for var in ["alpha", "beta"] {
-                let mut from = 0;
-                while let Some(pos) = line[from..].find(var) {
-                    let at = from + pos;
-                    from = at + var.len();
-                    // A word boundary on the left keeps identifiers like
-                    // shifted_gamma or halpha out of scope.
-                    if at > 0 && line.as_bytes()[at - 1].is_ascii_alphanumeric() {
-                        continue;
-                    }
-                    let tail = line[at + var.len()..].trim_start();
-                    if tail.starts_with('*') {
-                        offenders.push(format!(
-                            "{}:{}: {}",
-                            path.file_name().unwrap().to_string_lossy(),
-                            i + 1,
-                            raw.trim()
-                        ));
+    // The family keeps its architecture-specific kernels in per-card
+    // folders; the scan must see every one of them.
+    let mut stack = vec![dir];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("kernel dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if ext != "cu" && ext != "cuh" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("kernel source");
+            let stripped = source_scan::strip_comments_lines(&text);
+            for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
+                for var in ["alpha", "beta"] {
+                    let mut from = 0;
+                    while let Some(pos) = line[from..].find(var) {
+                        let at = from + pos;
+                        from = at + var.len();
+                        // A word boundary on the left keeps identifiers like
+                        // shifted_gamma or halpha out of scope.
+                        if at > 0 && line.as_bytes()[at - 1].is_ascii_alphanumeric() {
+                            continue;
+                        }
+                        let tail = line[at + var.len()..].trim_start();
+                        if tail.starts_with('*') {
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.file_name().unwrap().to_string_lossy(),
+                                i + 1,
+                                raw.trim()
+                            ));
+                        }
                     }
                 }
             }

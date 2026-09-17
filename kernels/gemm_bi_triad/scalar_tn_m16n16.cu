@@ -169,7 +169,7 @@ static_assert(GemmBiTnM16N16Kernel::ROW_TILES
               "M16N16 grid contract changed");
 
 extern "C" __global__ __launch_bounds__(64, 4)
-void gemm_bi_tn_m16n16_bk16_s2_splitm16_v1(
+void tn_m16n16_bk16_s2_splitm16(
     float* output,
     const float* a,
     const float* b,

@@ -1,7 +1,7 @@
 #[path = "triad_half_tn_regpipe_source.rs"]
 pub mod regpipe;
 
-pub const SYMBOL_PREFIX: &str = "gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_";
+pub const SYMBOL_PREFIX: &str = "tn_test_tc64_bk64_s2_regpipe_vec2_";
 
 pub fn candidate_source(production: &str) -> Result<String, String> {
     let mut source = regpipe::candidate_source(production)?;
@@ -42,7 +42,7 @@ const NEW_EPILOGUE: &str = r#"    /* epilogue: paired f32 accumulate into dW, sc
                 float* dst = C + (long long)gr * N + gc;                       \
                 bool packed = gc + 1 < N && (((unsigned long long)dst & 7ull) == 0); \
                 if (packed) {                                                  \
-                    gemm_bi_accumulate_float2_or_scalar(                       \
+                    accumulate_float2_or_scalar(                       \
                         dst, alpha * acc[fm][fn][2 * half],                    \
                         alpha * acc[fm][fn][2 * half + 1], true);              \
                 } else {                                                       \
@@ -69,13 +69,13 @@ fn replace_exact(source: &mut String, before: &str, after: &str) -> Result<(), S
 mod tests {
     use super::*;
 
-    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
 
     #[test]
     fn target_epilogue_uses_aligned_pairs_and_scalar_tail() {
         let source = candidate_source(PRODUCTION).unwrap();
-        assert!(source.contains("void gemm_bi_tn_test_tc64_bk64_s2_regpipe_vec2_##SUFFIX"));
-        assert!(source.contains("gemm_bi_accumulate_float2_or_scalar("));
+        assert!(source.contains("void tn_test_tc64_bk64_s2_regpipe_vec2_##SUFFIX"));
+        assert!(source.contains("accumulate_float2_or_scalar("));
         assert!(
             source.contains("bool packed = gc + 1 < N && (((unsigned long long)dst & 7ull) == 0);")
         );

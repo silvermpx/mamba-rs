@@ -690,7 +690,7 @@ mod sm89_pipeline_auto_tests {
     }
 
     #[test]
-    fn sm89_half_auto_v43_promotes_only_measured_cuda132_b0_no_bias_cells() {
+    fn sm89_half_auto_promotes_only_measured_cuda132_b0_no_bias_cells() {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             assert_eq!(
                 select(
@@ -712,7 +712,7 @@ mod sm89_pipeline_auto_tests {
     }
 
     #[test]
-    fn sm89_half_auto_v45_promotes_only_measured_cuda132_f16_n64_cells() {
+    fn sm89_half_auto_promotes_only_measured_cuda132_f16_n64_cells() {
         let device = FixedTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
@@ -743,7 +743,7 @@ mod sm89_pipeline_auto_tests {
     }
 
     #[test]
-    fn sm89_half_auto_v45_declines_unmeasured_or_unavailable_finalist_rows() {
+    fn sm89_half_auto_declines_unmeasured_or_unavailable_finalist_rows() {
         let device = FixedTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
@@ -872,7 +872,7 @@ mod sm89_pipeline_auto_tests {
     }
 
     #[test]
-    fn sm89_half_auto_v43_matches_all_literal_cells_and_availability_states() {
+    fn sm89_half_auto_matches_all_literal_cells_and_availability_states() {
         let cases = [
             ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), false, P),
             ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), true, S),
@@ -978,7 +978,7 @@ mod sm89_pipeline_auto_tests {
     }
 
     #[test]
-    fn sm89_half_auto_v43_declines_every_common_gate_failure() {
+    fn sm89_half_auto_declines_every_common_gate_failure() {
         let device = FixedTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
@@ -3016,7 +3016,7 @@ fn launch_tf32_wide<O: PhysicalLaunchObserver>(
             })?
     } else {
         ctx.kernels
-            .tf32_function("gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3")
+            .tf32_function("nn_sm80_mma_tf32_m128n128_bk32_s3")
             .ok_or("Fixed TF32 wide Triad symbol is not bound")?
     };
     let config = cudarc::driver::LaunchConfig {
@@ -4373,7 +4373,7 @@ fn fixed_sm89_rna_wide_auto_eligible(
     policy: super::context::F32TriadPolicy,
 ) -> bool {
     admitted
-        && policy == super::context::F32TriadPolicy::AllowDeterministicTf32V1
+        && policy == super::context::F32TriadPolicy::AllowDeterministicTf32
         && device.compute_capability == (8, 9)
         && device.multiprocessors == 142
         && matches!(nvrtc_version, (12, 8) | (13, 0) | (13, 2))
@@ -4440,7 +4440,7 @@ mod sm89_rna_auto_tests {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
-        let policy = F32TriadPolicy::AllowDeterministicTf32V1;
+        let policy = F32TriadPolicy::AllowDeterministicTf32;
         let eligible = |o, s, d, v, known, admitted, p| {
             fixed_sm89_rna_wide_auto_eligible(o, s, d, v, known, admitted, p)
         };
@@ -4472,7 +4472,7 @@ mod sm89_rna_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
                 for cc in [(8, 0), (8, 6), (9, 0), (10, 0), (12, 0), (12, 1)] {
                     assert!(!eligible(
@@ -4569,7 +4569,7 @@ mod sm89_rna_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_rna_n96_auto_v45_is_exactly_e0_all_three_toolkits() {
+    fn fixed_sm89_rna_n96_auto_is_exactly_e0_all_three_toolkits() {
         let ptr = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
@@ -4589,7 +4589,7 @@ mod sm89_rna_auto_tests {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
-        let policy = F32TriadPolicy::AllowDeterministicTf32V1;
+        let policy = F32TriadPolicy::AllowDeterministicTf32;
         for nvrtc in [(12, 8), (13, 0), (13, 2)] {
             assert!(fixed_sm89_rna_n96_auto_eligible(
                 operands, shape, device, nvrtc, true, true, policy,
@@ -4677,7 +4677,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         return Ok(runtime_bundle::family_label(route));
     }
     if homogeneous_f32
-        && ctx.f32_triad_policy() == super::context::F32TriadPolicy::AllowDeterministicTf32V1
+        && ctx.f32_triad_policy() == super::context::F32TriadPolicy::AllowDeterministicTf32
     {
         let sm120_tma = ctx.kernels.gemm_bi_nn_tf32_sm120.is_some()
             && super::device::is_sm120_family(ctx.compute_capability())
@@ -5270,7 +5270,7 @@ fn fixed_sm120_tma_fma_force_physical_eligible(
         _ => false,
     };
     device.compute_capability == (12, 0)
-        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && policy == super::context::F32TriadPolicy::ExactScalarFma
         && HOT_ROWS.contains(&shape)
         && bias_contract
         && [operands.c, operands.x, operands.w]
@@ -5324,7 +5324,7 @@ fn fixed_sm120_exact_n64_auto_eligible(
         && nvrtc == (13, 2)
         && device.compute_capability == (12, 0)
         && device.multiprocessors == 170
-        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
             .into_iter()
             .all(|operand| {
@@ -5400,7 +5400,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ),
                 Some(expected)
             );
@@ -5412,7 +5412,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ),
                 None
             );
@@ -5425,7 +5425,7 @@ mod sm120_exact_n64_auto_tests {
                         nvrtc,
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ),
                     None
                 );
@@ -5439,7 +5439,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         known,
                         loaded,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ),
                     None
                 );
@@ -5462,7 +5462,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ),
                     None
                 );
@@ -5513,7 +5513,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ),
                     None
                 );
@@ -5526,7 +5526,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::AllowDeterministicTf32V1
+                    F32TriadPolicy::AllowDeterministicTf32
                 ),
                 None
             );
@@ -5552,7 +5552,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ),
                     None
                 );
@@ -5567,7 +5567,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ),
                 None
             );
@@ -5590,7 +5590,7 @@ mod sm120_exact_n64_auto_tests {
                     multiprocessors,
                     compute_capability: (12, 0),
                 },
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
                 tile,
             ));
         }
@@ -5606,7 +5606,7 @@ mod sm120_exact_n64_auto_tests {
             },
             (13, 0),
             false,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
             tile,
         ));
 
@@ -5617,14 +5617,14 @@ mod sm120_exact_n64_auto_tests {
                 multiprocessors: 170,
                 compute_capability: (8, 9),
             },
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
             tile,
         ));
         assert!(!fixed_sm120_tma_fma_force_physical_eligible(
             operands(true),
             shape,
             DEVICE,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
             tile,
         ));
     }
@@ -5648,7 +5648,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ),
                 want,
                 "{m}/{k}/{n}/{bias}"
@@ -5666,7 +5666,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 true,
-                F32TriadPolicy::ExactScalarFmaV1
+                F32TriadPolicy::ExactScalarFma
             ),
             "B0 copyplan must remain available as the qualified fallback"
         );
@@ -5685,7 +5685,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         assert!(!fixed_sm120_tma_fma_b0_auto_eligible(
             operands(true),
@@ -5693,7 +5693,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         for shape in [
             InferenceShape { m: 4620, ..b0 },
@@ -5714,7 +5714,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ));
         }
     }
@@ -5732,7 +5732,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
             operands(true),
@@ -5740,7 +5740,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
             operands(false),
@@ -5748,7 +5748,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
     }
 
@@ -5791,7 +5791,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
             operands(false),
@@ -5799,7 +5799,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
         assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
             operands(true),
@@ -5807,7 +5807,7 @@ mod sm120_exact_n64_auto_tests {
             DEVICE,
             (13, 2),
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         ));
     }
 
@@ -5828,7 +5828,7 @@ mod sm120_exact_n64_auto_tests {
                         DEVICE,
                         (13, 2),
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1,
+                        F32TriadPolicy::ExactScalarFma,
                         InferenceTile::F32Sm120N64CopyPlanT256,
                     )
                 };
@@ -5879,7 +5879,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1
+                F32TriadPolicy::ExactScalarFma
             ));
             for bias_ptr in [Some(0), Some(0x4004)] {
                 assert!(!eligible(
@@ -5891,7 +5891,7 @@ mod sm120_exact_n64_auto_tests {
                     DEVICE,
                     (13, 2),
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
             }
         }
@@ -5907,7 +5907,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 operands(false),
@@ -5918,7 +5918,7 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 operands(false),
@@ -5929,7 +5929,7 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 operands(false),
@@ -5937,7 +5937,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 1),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 operands(false),
@@ -5945,7 +5945,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 false,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 operands(false),
@@ -5953,7 +5953,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::AllowDeterministicTf32V1,
+                F32TriadPolicy::AllowDeterministicTf32,
             ),
         ] {
             assert!(!eligible(ops, shape, device, nvrtc, known, policy));
@@ -5992,7 +5992,7 @@ mod sm120_exact_n64_auto_tests {
                     DEVICE,
                     (13, 2),
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
             }
         }
@@ -6014,7 +6014,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
                 InferenceTile::F32Sm120TmaFmaM128N64,
             ));
             assert!(!fixed_sm120_tma_fma_force_eligible(
@@ -6023,7 +6023,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
                 InferenceTile::F32Sm120TmaFmaM128N64,
             ));
         }
@@ -6055,7 +6055,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
                 InferenceTile::F32Sm120TmaFmaM128N64,
             ));
         }
@@ -6075,7 +6075,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
                 tile,
             )
         };
@@ -6140,7 +6140,7 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 FixedTileDevice {
@@ -6149,7 +6149,7 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 FixedTileDevice {
@@ -6158,7 +6158,7 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             (
                 FixedTileDevice {
@@ -6167,16 +6167,16 @@ mod sm120_exact_n64_auto_tests {
                 },
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
-            (DEVICE, (12, 8), true, F32TriadPolicy::ExactScalarFmaV1),
-            (DEVICE, (13, 3), true, F32TriadPolicy::ExactScalarFmaV1),
-            (DEVICE, (13, 2), false, F32TriadPolicy::ExactScalarFmaV1),
+            (DEVICE, (12, 8), true, F32TriadPolicy::ExactScalarFma),
+            (DEVICE, (13, 3), true, F32TriadPolicy::ExactScalarFma),
+            (DEVICE, (13, 2), false, F32TriadPolicy::ExactScalarFma),
             (
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::AllowDeterministicTf32V1,
+                F32TriadPolicy::AllowDeterministicTf32,
             ),
         ] {
             assert!(!accept(ops, shape, device, nvrtc, known, policy));
@@ -6197,7 +6197,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1
+                F32TriadPolicy::ExactScalarFma
             ));
         }
         for index in 0..3 {
@@ -6210,7 +6210,7 @@ mod sm120_exact_n64_auto_tests {
                     DEVICE,
                     (13, 2),
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
             }
             for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -6222,7 +6222,7 @@ mod sm120_exact_n64_auto_tests {
                     DEVICE,
                     (13, 2),
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
             }
         }
@@ -6242,7 +6242,7 @@ mod sm120_exact_n64_auto_tests {
                 DEVICE,
                 (13, 2),
                 true,
-                F32TriadPolicy::ExactScalarFmaV1
+                F32TriadPolicy::ExactScalarFma
             ));
         }
     }
@@ -6270,7 +6270,7 @@ mod sm120_exact_n64_auto_tests {
                     (13, 2),
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1,
+                    F32TriadPolicy::ExactScalarFma,
                 ));
             }
         }
@@ -6295,7 +6295,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ));
         }
         for multiprocessors in [0, 1, 142, 169, 171] {
@@ -6309,7 +6309,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ));
         }
         for nvrtc in [(0, 0), (12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
@@ -6320,7 +6320,7 @@ mod sm120_exact_n64_auto_tests {
                 nvrtc,
                 true,
                 true,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ));
         }
         for (known, loaded) in [(false, true), (true, false), (false, false)] {
@@ -6331,7 +6331,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 known,
                 loaded,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ));
         }
         assert!(!eligible(
@@ -6341,7 +6341,7 @@ mod sm120_exact_n64_auto_tests {
             (13, 2),
             true,
             true,
-            F32TriadPolicy::AllowDeterministicTf32V1,
+            F32TriadPolicy::AllowDeterministicTf32,
         ));
     }
 
@@ -6367,7 +6367,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1,
+                        F32TriadPolicy::ExactScalarFma,
                     ));
                 }
                 for pointer in [0, 0x1001, 0x1004, 0x1008, 0x100c] {
@@ -6401,7 +6401,7 @@ mod sm120_exact_n64_auto_tests {
                             (13, 2),
                             true,
                             true,
-                            F32TriadPolicy::ExactScalarFmaV1,
+                            F32TriadPolicy::ExactScalarFma,
                         ));
                     }
                 }
@@ -6413,7 +6413,7 @@ mod sm120_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1,
+                        F32TriadPolicy::ExactScalarFma,
                     ));
                 }
                 for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -6438,7 +6438,7 @@ mod sm120_exact_n64_auto_tests {
                             (13, 2),
                             true,
                             true,
-                            F32TriadPolicy::ExactScalarFmaV1,
+                            F32TriadPolicy::ExactScalarFma,
                         ));
                     }
                 }
@@ -6472,7 +6472,7 @@ fn fixed_sm89_exact_n64_auto_eligible(
         && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         && device.compute_capability == (8, 9)
         && device.multiprocessors == 142
-        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
             .into_iter()
             .all(|operand| {
@@ -6548,7 +6548,7 @@ mod sm89_exact_n64_auto_tests {
             nvrtc,
             true,
             true,
-            F32TriadPolicy::ExactScalarFmaV1,
+            F32TriadPolicy::ExactScalarFma,
         )
     }
 
@@ -6660,7 +6660,7 @@ mod sm89_exact_n64_auto_tests {
                         nvrtc,
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ));
                 }
                 for multiprocessors in [0, 1, 141, 143, 170] {
@@ -6672,7 +6672,7 @@ mod sm89_exact_n64_auto_tests {
                         nvrtc,
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ));
                 }
                 for (known, loaded) in [(false, true), (true, false), (false, false)] {
@@ -6681,7 +6681,7 @@ mod sm89_exact_n64_auto_tests {
                         nvrtc,
                         known,
                         loaded,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ));
                 }
                 assert!(!check(
@@ -6689,7 +6689,7 @@ mod sm89_exact_n64_auto_tests {
                     nvrtc,
                     true,
                     true,
-                    F32TriadPolicy::AllowDeterministicTf32V1
+                    F32TriadPolicy::AllowDeterministicTf32
                 ));
             }
             for version in [(0, 0), (12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
@@ -6698,7 +6698,7 @@ mod sm89_exact_n64_auto_tests {
                     version,
                     true,
                     true,
-                    F32TriadPolicy::ExactScalarFmaV1
+                    F32TriadPolicy::ExactScalarFma
                 ));
             }
         }
@@ -6803,7 +6803,7 @@ mod sm89_exact_n64_auto_tests {
                         (13, 2),
                         true,
                         true,
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     ));
                 }
                 let expected = if cc == (12, 0) {
@@ -8631,9 +8631,9 @@ mod observed_inventory_cuda_tests {
 
     fn run_case(ctx: &GpuCtx, case: Case, bias: bool) {
         ctx.set_f32_triad_policy(if case.tf32 {
-            F32TriadPolicy::AllowDeterministicTf32V1
+            F32TriadPolicy::AllowDeterministicTf32
         } else {
-            F32TriadPolicy::ExactScalarFmaV1
+            F32TriadPolicy::ExactScalarFma
         });
         let shape = case.shape;
         let a_prefix = 256 / case.dtype.size_bytes();
@@ -8756,11 +8756,11 @@ mod observed_inventory_cuda_tests {
         );
         assert_ne!(node.launch.arguments_digest, route.launch.arguments_digest);
         if route.backend
-            == super::super::kernel_identity::PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            == super::super::kernel_identity::PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
         {
             use super::super::kernel_identity::ResolvedNumericContract;
             let mut legacy = route;
-            legacy.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+            legacy.numeric_contract = ResolvedNumericContract::ScalarFma;
             assert!(
                 ctx.validate_resolved_gemm_route(
                     &legacy,
@@ -8816,9 +8816,9 @@ mod observed_inventory_cuda_tests {
         prepare_inference_arch_rung(&ctx).unwrap();
         for (dtype, suffix) in [(WeightDtype::Bf16, "bf16"), (WeightDtype::F16, "f16")] {
             let auto_symbol = if dtype == WeightDtype::Bf16 {
-                "gemm_bi_nn_tc16_bf16"
+                "nn_tc16_bf16"
             } else {
-                "gemm_bi_nn_tc16_f16"
+                "nn_tc16_f16"
             };
             run_case(
                 &ctx,
@@ -8833,9 +8833,9 @@ mod observed_inventory_cuda_tests {
                 false,
             );
             let mixed_symbol = if dtype == WeightDtype::Bf16 {
-                "gemm_bi_nn_tc16_f32out_bf16"
+                "nn_tc16_f32out_bf16"
             } else {
-                "gemm_bi_nn_tc16_f32out_f16"
+                "nn_tc16_f32out_f16"
             };
             run_case(
                 &ctx,
@@ -8850,50 +8850,26 @@ mod observed_inventory_cuda_tests {
                 false,
             );
             for (tile, bf16, f16) in [
-                (
-                    InferenceTile::Legacy,
-                    "gemm_bi_bf16_bf16",
-                    "gemm_bi_f16_f16",
-                ),
-                (
-                    InferenceTile::Tc16,
-                    "gemm_bi_nn_tc16_bf16",
-                    "gemm_bi_nn_tc16_f16",
-                ),
-                (
-                    InferenceTile::Tc64,
-                    "gemm_bi_nn_tc64_bf16",
-                    "gemm_bi_nn_tc64_f16",
-                ),
-                (
-                    InferenceTile::Tc128,
-                    "gemm_bi_nn_tc128_bf16",
-                    "gemm_bi_nn_tc128_f16",
-                ),
-                (
-                    InferenceTile::TcW64,
-                    "gemm_bi_nn_tcw64_bf16",
-                    "gemm_bi_nn_tcw64_f16",
-                ),
-                (
-                    InferenceTile::TcWn64,
-                    "gemm_bi_nn_tcwn64_bf16",
-                    "gemm_bi_nn_tcwn64_f16",
-                ),
+                (InferenceTile::Legacy, "bf16_bf16", "f16_f16"),
+                (InferenceTile::Tc16, "nn_tc16_bf16", "nn_tc16_f16"),
+                (InferenceTile::Tc64, "nn_tc64_bf16", "nn_tc64_f16"),
+                (InferenceTile::Tc128, "nn_tc128_bf16", "nn_tc128_f16"),
+                (InferenceTile::TcW64, "nn_tcw64_bf16", "nn_tcw64_f16"),
+                (InferenceTile::TcWn64, "nn_tcwn64_bf16", "nn_tcwn64_f16"),
                 (
                     InferenceTile::Tc128Sm89Pipeline,
-                    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
-                    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+                    "nn_sm89_tc128_pipeline_bf16",
+                    "nn_sm89_tc128_pipeline_f16",
                 ),
                 (
                     InferenceTile::Tc128Sm89Swizzle,
-                    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
-                    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+                    "nn_sm89_tc128_swizzle_bf16",
+                    "nn_sm89_tc128_swizzle_f16",
                 ),
                 (
                     InferenceTile::Tc128Sm89S3,
-                    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
-                    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+                    "nn_sm89_tc128_s3_bf16",
+                    "nn_sm89_tc128_s3_f16",
                 ),
             ] {
                 let symbol = if suffix == "bf16" { bf16 } else { f16 };
@@ -8917,21 +8893,21 @@ mod observed_inventory_cuda_tests {
                 }
             }
             for (tile, bf16, f16) in [
-                (InferenceTile::Legacy, "gemm_bi_bf16_f32", "gemm_bi_f16_f32"),
+                (InferenceTile::Legacy, "bf16_f32", "f16_f32"),
                 (
                     InferenceTile::Tc16,
-                    "gemm_bi_nn_tc16_f32out_bf16",
-                    "gemm_bi_nn_tc16_f32out_f16",
+                    "nn_tc16_f32out_bf16",
+                    "nn_tc16_f32out_f16",
                 ),
                 (
                     InferenceTile::Tc64,
-                    "gemm_bi_nn_tc64_f32out_bf16",
-                    "gemm_bi_nn_tc64_f32out_f16",
+                    "nn_tc64_f32out_bf16",
+                    "nn_tc64_f32out_f16",
                 ),
                 (
                     InferenceTile::Tc128,
-                    "gemm_bi_nn_tc128_f32out_bf16",
-                    "gemm_bi_nn_tc128_f32out_f16",
+                    "nn_tc128_f32out_bf16",
+                    "nn_tc128_f32out_f16",
                 ),
             ] {
                 for bias in [false, true] {
@@ -8957,57 +8933,37 @@ mod observed_inventory_cuda_tests {
                 dtype: WeightDtype::F32,
                 output: WeightDtype::F32,
                 shape: InferenceShape { m: 3, k: 37, n: 96 },
-                symbol: "gemm_bi_f32_f32_s2",
+                symbol: "f32_f32_s2",
                 tf32: false,
             },
             false,
         );
         for (tile, symbol, tf32) in [
-            (InferenceTile::Legacy, "gemm_bi_f32_f32_s2", false),
-            (InferenceTile::F32N128S2, "gemm_bi_f32_f32_n128_s2", false),
+            (InferenceTile::Legacy, "f32_f32_s2", false),
+            (InferenceTile::F32N128S2, "f32_f32_n128_s2", false),
             (
                 InferenceTile::F32Sm89N64CopyPlan,
-                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+                "nn_sm89_f32_n64_copyplan",
                 false,
             ),
-            (
-                InferenceTile::Tf32M128S2,
-                "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
-                true,
-            ),
-            (
-                InferenceTile::Tf32M128S3,
-                "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
-                true,
-            ),
-            (
-                InferenceTile::Tf32M64S2,
-                "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
-                true,
-            ),
-            (
-                InferenceTile::Tf32M64S3,
-                "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
-                true,
-            ),
-            (
-                InferenceTile::Tf32M16S4,
-                "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
-                true,
-            ),
+            (InferenceTile::Tf32M128S2, "nn_tf32_m128n64_bk32_s2", true),
+            (InferenceTile::Tf32M128S3, "nn_tf32_m128n64_bk32_s3", true),
+            (InferenceTile::Tf32M64S2, "nn_tf32_m64n64_bk32_s2", true),
+            (InferenceTile::Tf32M64S3, "nn_tf32_m64n64_bk32_s3", true),
+            (InferenceTile::Tf32M16S4, "nn_tf32_m16n32_bk32_s4", true),
             (
                 InferenceTile::Tf32RnaM128N128S3,
-                "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                "nn_rna_wide_tf32_m128n128_bk32_s3",
                 true,
             ),
             (
                 InferenceTile::Tf32RnaM128N96S3,
-                "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+                "nn_sm89_rna_tf32_m128n96_bk32_s3",
                 true,
             ),
             (
                 InferenceTile::Tf32M128N128S3,
-                "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+                "nn_sm80_mma_tf32_m128n128_bk32_s3",
                 true,
             ),
         ] {
@@ -9037,13 +8993,13 @@ mod observed_inventory_cuda_tests {
                 InferenceTile::TcM64N64Sm89S3,
                 768,
                 2304,
-                "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+                "nn_sm89_m64n64_bk64_s3_f16",
             ),
             (
                 InferenceTile::TcM128N64Sm89S2,
                 2304,
                 768,
-                "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+                "nn_sm89_m128n64_bk64_s2_f16",
             ),
         ] {
             if ctx.kernels.inference_terminal_function(symbol).is_none() {

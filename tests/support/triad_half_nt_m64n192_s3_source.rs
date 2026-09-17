@@ -1,7 +1,7 @@
 #[path = "triad_half_nt_m64n128_s3_source.rs"]
 pub mod m64n128;
 
-pub const SYMBOL: &str = "gemm_bi_nt_test_fixed_s3_m64n192_f16";
+pub const SYMBOL: &str = "nt_test_fixed_s3_m64n192_f16";
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     let mut source = m64n128::candidate_source(swizzle, s3)?;
@@ -201,7 +201,7 @@ template <typename T>
 static __device__ __forceinline__ void nt_m64n192_scalar_epilogue("#;
 
 const M64N192_EXPORT: &str = r#"extern "C" __global__ __launch_bounds__(384, 1)
-void gemm_bi_nt_test_fixed_s3_m64n192_f16(
+void nt_test_fixed_s3_m64n192_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, float alpha, int M, int N, int K_out) {
     sm89_test_half_nt_m64n192_s3::kernel<__half>(C, A, B, alpha, M, N, K_out);

@@ -121,7 +121,7 @@ fn deterministic_triad_public_half_matvec_records_both_tensor_core_states() {
                     .unwrap();
                 assert_eq!(trace.routes().len(), 1);
                 let route = trace.routes()[0];
-                assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarpV1);
+                assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarp);
                 assert_eq!(
                     route.dtype,
                     if input_dtype == WeightDtype::Bf16 {

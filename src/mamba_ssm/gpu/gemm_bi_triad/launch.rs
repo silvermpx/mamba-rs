@@ -285,9 +285,9 @@ where
 {
     if request.shape.reduction(request.op) == 0 {
         let format = match route {
-            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
-            | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1,
-            _ => Tf32TensorMapFormat::Tfloat32V1,
+            Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
+            | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32,
+            _ => Tf32TensorMapFormat::Tfloat32,
         };
         return Ok(F32PreparedTensorMaps::zero_reduction(
             request,
@@ -2395,24 +2395,24 @@ fn scalar_tn_kernel_symbol(plan: ScalarDispatchPlan, operands: F32TriadOperands)
         ScalarDispatchPlan::TnNarrowSplitM { .. }
             if f32_base_is_vector_aligned(operands.a) && f32_base_is_vector_aligned(operands.b) =>
         {
-            "gemm_bi_tn_narrow_splitm_partial_aligned"
+            "tn_narrow_splitm_partial_aligned"
         }
-        ScalarDispatchPlan::TnNarrowSplitM { .. } => "gemm_bi_tn_narrow_splitm_partial",
+        ScalarDispatchPlan::TnNarrowSplitM { .. } => "tn_narrow_splitm_partial",
         ScalarDispatchPlan::TnSplitM { .. }
             if f32_base_is_vector_aligned(operands.a) && f32_base_is_vector_aligned(operands.b) =>
         {
-            "gemm_bi_tn_splitm_partial_aligned"
+            "tn_splitm_partial_aligned"
         }
-        ScalarDispatchPlan::TnSplitM { .. } => "gemm_bi_tn_splitm_partial",
+        ScalarDispatchPlan::TnSplitM { .. } => "tn_splitm_partial",
         ScalarDispatchPlan::TnFinal { slim: false }
             if f32_base_is_vector_aligned(operands.output)
                 && f32_base_is_vector_aligned(operands.a)
                 && f32_base_is_vector_aligned(operands.b) =>
         {
-            "gemm_bi_tn_aligned"
+            "tn_aligned"
         }
-        ScalarDispatchPlan::TnFinal { slim: false } => "gemm_bi_tn",
-        ScalarDispatchPlan::TnFinal { slim: true } => "gemm_bi_tn_slim",
+        ScalarDispatchPlan::TnFinal { slim: false } => "tn_big",
+        ScalarDispatchPlan::TnFinal { slim: true } => "tn_slim",
         _ => unreachable!("TN vector-aligned symbol requested for a non-Big TN plan"),
     }
 }
@@ -2440,7 +2440,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnUltraThin => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_ultra_thin",
+            "nn_ultra_thin",
             (1, 32),
             (32, 1),
             cfg((n.div_ceil(32), m, 1), (256, 1, 1), k * 4),
@@ -2448,7 +2448,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnNarrowSmall => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_narrow_small",
+            "nn_narrow_small",
             (16, 16),
             (16, 1),
             cfg(
@@ -2464,7 +2464,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnNarrow => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_narrow",
+            "nn_narrow",
             (64, 32),
             (16, 1),
             cfg(
@@ -2480,7 +2480,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnGemv => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_gemv",
+            "nn_gemv",
             (4, 1),
             (32, 1),
             cfg((m.div_ceil(4), 1, 1), (128, 1, 1), 0),
@@ -2495,7 +2495,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk32_partial",
+                "nn_splitk32_partial",
                 (32, 64),
                 (32, 1),
                 cfg(
@@ -2511,7 +2511,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2529,7 +2529,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk_slim_partial",
+                "nn_splitk_slim_partial",
                 (128, 64),
                 (32, 1),
                 cfg(
@@ -2545,7 +2545,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2563,7 +2563,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk32_m32n64_exact_v1",
+                "nn_splitk32_m32n64_exact",
                 (32, 64),
                 (32, 1),
                 cfg((2_048, 1, 1), (128, 1, 1), 0),
@@ -2571,7 +2571,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg((64, 1, 1), (256, 1, 1), 0),
@@ -2580,7 +2580,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnM64N64Qualified => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
+            "nn_m64n64_bk16_s2",
             (64, 64),
             (16, 2),
             cfg(
@@ -2596,7 +2596,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnSm89FixedCopyPlanQualified => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+            "nn_sm89_f32_n64_copyplan",
             (64, 64),
             (32, 2),
             cfg(
@@ -2614,11 +2614,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                if slim {
-                    "gemm_bi_nn_slim"
-                } else {
-                    "gemm_bi_nn"
-                },
+                if slim { "nn_slim" } else { "nn_big" },
                 (128, bn),
                 (if slim { 32 } else { 16 }, if slim { 1 } else { 2 }),
                 cfg(
@@ -2635,7 +2631,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::TnGemv => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_tn_gemv",
+            "tn_gemv",
             (4, 1),
             (32, 1),
             cfg((k.div_ceil(4), 1, 1), (128, 1, 1), 0),
@@ -2643,7 +2639,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::TnNarrow => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_tn_narrow",
+            "tn_narrow",
             (64, 32),
             (16, 1),
             cfg(
@@ -2676,7 +2672,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitm_reduce",
+                "splitm_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2693,7 +2689,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::TnM16N16SplitM16Qualified => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+            "tn_m16n16_bk16_s2_splitm16",
             (16, 16),
             (16, 2),
             cfg(
@@ -2710,7 +2706,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_transpose_f32_32x16_d768_v1",
+                "transpose_f32_32x16_d768",
                 (32, 32),
                 (1, 1),
                 cfg((24, 64, 1), (32, 16, 1), 0),
@@ -2746,7 +2742,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitm_reduce",
+                "splitm_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2799,7 +2795,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitm_reduce",
+                "splitm_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2837,7 +2833,7 @@ fn scalar_physical_nodes(
         | ScalarDispatchPlan::NtMidBatchWide => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nt_narrow",
+            "nt_narrow",
             (64, 32),
             (16, 1),
             cfg(
@@ -2853,7 +2849,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NtGemv => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nt_gemv",
+            "nt_gemv",
             (1, 1),
             (1, 1),
             cfg(
@@ -2869,7 +2865,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NtM2N16SplitK32Qualified => push_scalar_node(
             &mut nodes,
             context,
-            "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+            "nt_m2n16_bk64_splitk32",
             (2, 16),
             (64, 2),
             cfg(
@@ -2890,7 +2886,7 @@ fn scalar_physical_nodes(
             let (m64_symbol, bk, shared_mem_bytes) =
                 if plan == ScalarDispatchPlan::NtPrismVectorQualified {
                     (
-                        "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+                        "nn_prism_m64n64_bk16_s2",
                         16,
                         super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
                     )
@@ -2901,10 +2897,10 @@ fn scalar_physical_nodes(
                         | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
                         | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
                 ) {
-                    ("gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1", 32, 0)
+                    ("nn_sm89_f32_n64_copyplan", 32, 0)
                 } else {
                     (
-                        "gemm_bi_nn_m64n64_bk16_s2_v1",
+                        "nn_m64n64_bk16_s2",
                         16,
                         super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
                     )
@@ -2912,7 +2908,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_transpose_f32_32x16_d768_v1",
+                "transpose_f32_32x16_d768",
                 (32, 32),
                 (1, 1),
                 cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 16, 1), 0),
@@ -2939,7 +2935,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_transpose_f32_2d",
+                "transpose_f32_2d",
                 (32, 32),
                 (1, 1),
                 cfg((n.div_ceil(32), k_main_u32.div_ceil(32), 1), (32, 32, 1), 0),
@@ -2947,7 +2943,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk32_partial",
+                "nn_splitk32_partial",
                 (32, 64),
                 (32, 1),
                 cfg(
@@ -2963,7 +2959,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -2981,7 +2977,7 @@ fn scalar_physical_nodes(
                 push_scalar_node(
                     &mut nodes,
                     context,
-                    "gemm_bi_dx_col_gemv",
+                    "dx_col_gemv",
                     (1, 1),
                     (1, 1),
                     cfg((m.div_ceil(128), 1, 1), (128, 1, 1), 0),
@@ -2993,7 +2989,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_transpose_f32_2d",
+                "transpose_f32_2d",
                 (32, 32),
                 (1, 1),
                 cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 32, 1), 0),
@@ -3001,7 +2997,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk32_partial",
+                "nn_splitk32_partial",
                 (32, 64),
                 (32, 1),
                 cfg(
@@ -3017,7 +3013,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -3035,7 +3031,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_transpose_f32_2d",
+                "transpose_f32_2d",
                 (32, 32),
                 (1, 1),
                 cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 32, 1), 0),
@@ -3043,7 +3039,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_nn_splitk_slim_partial",
+                "nn_splitk_slim_partial",
                 (128, 64),
                 (32, 1),
                 cfg(
@@ -3059,7 +3055,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                "gemm_bi_splitk_reduce",
+                "splitk_reduce",
                 (1, 1),
                 (1, 1),
                 cfg(
@@ -3078,11 +3074,7 @@ fn scalar_physical_nodes(
             push_scalar_node(
                 &mut nodes,
                 context,
-                if slim {
-                    "gemm_bi_nt_slim"
-                } else {
-                    "gemm_bi_nt"
-                },
+                if slim { "nt_slim" } else { "nt_big" },
                 (128, bn),
                 (if slim { 32 } else { 16 }, if slim { 1 } else { 2 }),
                 cfg(
@@ -3114,76 +3106,74 @@ fn scalar_route_contract(
 ) {
     if symbol == super::D128_IN_SYMBOL || symbol == super::D128_OUT_SYMBOL {
         return (
-            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     if symbol == super::D768_IN_FUSED_SYMBOL {
         return (
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     if symbol == super::D768_OUT_RAW_SYMBOL || symbol == super::PRISM_RAW_SYMBOL {
         return (
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
+            ResolvedNumericContract::ScalarFmaTnSplitMPartial,
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
         );
     }
-    if symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" {
+    if symbol == "nn_sm89_f32_n64_copyplan" {
         return (
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
-            ResolvedNumericContract::ScalarFmaV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+            ResolvedNumericContract::ScalarFma,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     if matches!(
         symbol,
-        "gemm_bi_nn_splitk32_partial"
-            | "gemm_bi_nn_splitk_slim_partial"
-            | "gemm_bi_nn_splitk32_m32n64_exact_v1"
+        "nn_splitk32_partial" | "nn_splitk_slim_partial" | "nn_splitk32_m32n64_exact"
     ) {
         return (
-            PhysicalGemmBackend::ScalarFmaSplitKPartialV1,
-            ResolvedNumericContract::ScalarFmaSplitKPartialV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartitionV1,
+            PhysicalGemmBackend::ScalarFmaSplitKPartial,
+            ResolvedNumericContract::ScalarFmaSplitKPartial,
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartition,
         );
     }
-    if symbol == "gemm_bi_splitk_reduce" {
+    if symbol == "splitk_reduce" {
         return (
-            PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
-            ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1,
-            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitKReduceV1,
+            PhysicalGemmBackend::ScalarFmaSplitKF32Reduce,
+            ResolvedNumericContract::ScalarFmaSplitKF32Reduce,
+            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitKReduce,
         );
     }
-    if symbol.contains("_tn_narrow_splitm_partial") {
+    if symbol.starts_with("tn_narrow_splitm_partial") {
         return (
-            PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
-            ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial,
+            ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
-    if symbol == "gemm_bi_splitm_reduce" {
+    if symbol == "splitm_reduce" {
         return (
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduceV1,
+            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
         );
     }
-    if symbol == "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1" {
+    if symbol == "tn_m16n16_bk16_s2_splitm16" {
         return (
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     (
-        PhysicalGemmBackend::ScalarFmaV1,
-        ResolvedNumericContract::ScalarFmaV1,
-        ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        PhysicalGemmBackend::ScalarFma,
+        ResolvedNumericContract::ScalarFma,
+        ResolvedOutputOwnership::OneCtaPerOutputTile,
     )
 }
 
@@ -3201,7 +3191,7 @@ fn scalar_resolved_routes(
     for node in nodes {
         let (backend, numeric_contract, ownership) = scalar_route_contract(node.symbol);
         let (module_kind, artifact, compiler, tuning_table_revision) = if backend
-            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
         {
             (
                 ModuleKind::Fixed,
@@ -3209,7 +3199,7 @@ fn scalar_resolved_routes(
                 ctx.kernels.compiler_identity(),
                 SM89_FIXED_COPYPLAN_ROUTE_REVISION,
             )
-        } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 {
+        } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 {
             (
                 ModuleKind::TriadSm89ExactF32D128,
                 context.artifacts.sm89_exact_f32_d128.ok_or_else(|| {
@@ -3224,8 +3214,8 @@ fn scalar_resolved_routes(
             )
         } else if matches!(
             backend,
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
-                | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
+                | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial
         ) {
             (
                 ModuleKind::TriadSm89ExactF32,
@@ -3362,19 +3352,17 @@ fn validated_allocation_domain(
 
 fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBinding, String> {
     let qualified = match route {
-        Tf32PhysicalRoute::MmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
-            ctx.kernels.f32_triad_availability().portable
-        }
-        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => ctx.kernels.f32_triad_availability().finalist,
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
-        | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => ctx.kernels.f32_triad_availability().joint,
+        Tf32PhysicalRoute::MmaTf32Rna(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => ctx.kernels.f32_triad_availability().portable,
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8 => ctx.kernels.f32_triad_availability().finalist,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+        | Tf32PhysicalRoute::Sm89NnDirectN96
+        | Tf32PhysicalRoute::Sm89NnN96
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => ctx.kernels.f32_triad_availability().joint,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3391,13 +3379,13 @@ fn prepare_specialized_tf32_maps(
     route: Tf32PhysicalRoute,
     binding: Tf32MapBinding,
 ) -> Result<F32PreparedTensorMaps, String> {
-    if matches!(route, Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)) {
+    if matches!(route, Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)) {
         let descriptor = build_sm90a_tf32_descriptor(0, 0, 64);
         if decode_sm90a_tf32_descriptor(descriptor) != (0, 0, 64) {
             return Err("SM90a TF32 descriptor constants changed".into());
         }
     }
-    if matches!(route, Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)) {
+    if matches!(route, Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)) {
         sm100_tf32_instruction_descriptor(request.op, tf32_kernel_spec(request.op, route)?.tile.1)?;
     }
     let capturing = ctx
@@ -3433,31 +3421,29 @@ fn tf32_params(
     let n = checked_i32(shape.n, "N")?;
     let ldc = checked_i32(shape.ldc, "ldc")?;
     Ok(match route {
-        Tf32PhysicalRoute::MmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
-        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-        | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => {
-            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-                alpha: operands.alpha,
-                beta: operands.beta,
-                m,
-                k,
-                n,
-                lda: checked_i32(shape.lda, "lda")?,
-                ldb: checked_i32(shape.ldb, "ldb")?,
-                ldc,
-            })
-        }
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => {
+        Tf32PhysicalRoute::MmaTf32Rna(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::Sm89MmaTf32Compact8
+        | Tf32PhysicalRoute::Sm89NnDirectN96
+        | Tf32PhysicalRoute::Sm89NnN96
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+            alpha: operands.alpha,
+            beta: operands.beta,
+            m,
+            k,
+            n,
+            lda: checked_i32(shape.lda, "lda")?,
+            ldb: checked_i32(shape.ldb, "ldb")?,
+            ldc,
+        }),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => {
             return Err("Ada TF32 TN parameters require the two-node pre-RNA pipeline".into());
         }
-        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
+        Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
             PreparedTf32Params::Sm90a(Sm90aTf32KernelParams {
                 a_x: origins.a_x,
                 a_y: origins.a_y,
@@ -3471,21 +3457,19 @@ fn tf32_params(
                 ldc,
             })
         }
-        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
-            PreparedTf32Params::Sm100(Sm100KernelParams {
-                a_x: origins.a_x,
-                a_y: origins.a_y,
-                b_x: origins.b_x,
-                b_y: origins.b_y,
-                alpha: operands.alpha,
-                beta: operands.beta,
-                m,
-                k,
-                n,
-                ldc,
-            })
-        }
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_) => PreparedTf32Params::Sm100(Sm100KernelParams {
+            a_x: origins.a_x,
+            a_y: origins.a_y,
+            b_x: origins.b_x,
+            b_y: origins.b_y,
+            alpha: operands.alpha,
+            beta: operands.beta,
+            m,
+            k,
+            n,
+            ldc,
+        }),
+        Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
             PreparedTf32Params::Sm120(Sm120KernelParams {
                 a_x: origins.a_x,
@@ -3500,7 +3484,7 @@ fn tf32_params(
                 ldc,
             })
         }
-        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => {
+        Tf32PhysicalRoute::Sm120TmaFmaExact(exact) => {
             // The exact kernels speak in output rows, output columns and the
             // reduction, whatever the operation stores as m, k and n.
             let plan = sm120_fma_launch_plan(request, exact)?;
@@ -3725,20 +3709,20 @@ fn tf32_splitk_resolved_routes(
     let shape = (request.shape.m, request.shape.k, request.shape.n);
     let strides = (request.shape.lda, request.shape.ldb, request.shape.ldc);
     let (backend, numeric_contract, ownership) = match spec.route {
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK2V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK2V1,
-            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2ReduceV1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK2,
+            ResolvedNumericContract::MmaTf32RnaSplitK2,
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2Reduce,
         ),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK4V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK4V1,
-            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK4ReduceV1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK4,
+            ResolvedNumericContract::MmaTf32RnaSplitK4,
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK4Reduce,
         ),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK8V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK8V1,
-            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8ReduceV1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK8,
+            ResolvedNumericContract::MmaTf32RnaSplitK8,
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8Reduce,
         ),
         _ => unreachable!("split-K spec admitted a non-split route"),
     };
@@ -3749,7 +3733,7 @@ fn tf32_splitk_resolved_routes(
         numeric_contract,
         instruction_family: ResolvedInstructionFamily::MmaSync,
         instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
         ownership,
         symbol: spec.symbol,
         module_kind: ModuleKind::TriadSm80,
@@ -3795,74 +3779,74 @@ fn tf32_resolved_route(
     config: cudarc::driver::LaunchConfig,
 ) -> ResolvedGemmRoute {
     let (backend, numeric_contract) = match spec.route {
-        Tf32PhysicalRoute::MmaTf32RnaV1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaV1,
-            ResolvedNumericContract::MmaTf32RnaV1,
+        Tf32PhysicalRoute::MmaTf32Rna(_) => (
+            PhysicalGemmBackend::MmaTf32Rna,
+            ResolvedNumericContract::MmaTf32Rna,
         ),
-        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => (
-            PhysicalGemmBackend::Sm89MmaTf32Compact8V1,
-            ResolvedNumericContract::MmaTf32RnaV1,
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8 => (
+            PhysicalGemmBackend::Sm89MmaTf32Compact8,
+            ResolvedNumericContract::MmaTf32Rna,
         ),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => (
-            PhysicalGemmBackend::Sm89MmaTf32PreRnaV1,
+        Tf32PhysicalRoute::Sm89TnPreRnaN96
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => (
+            PhysicalGemmBackend::Sm89MmaTf32PreRna,
             ResolvedNumericContract::MmaTf32PreRnaAV1,
         ),
-        Tf32PhysicalRoute::Sm89NnDirectN96V1 | Tf32PhysicalRoute::Sm89NnN96V1 => (
-            PhysicalGemmBackend::Sm89MmaTf32AddHalfV1,
-            ResolvedNumericContract::MmaTf32AddHalfUlpV1,
+        Tf32PhysicalRoute::Sm89NnDirectN96 | Tf32PhysicalRoute::Sm89NnN96 => (
+            PhysicalGemmBackend::Sm89MmaTf32AddHalf,
+            ResolvedNumericContract::MmaTf32AddHalfUlp,
         ),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => (
-            PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1,
-            ResolvedNumericContract::MmaTf32AddHalfUlpV1,
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96 => (
+            PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix,
+            ResolvedNumericContract::MmaTf32AddHalfUlp,
         ),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK2V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK2V1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK2,
+            ResolvedNumericContract::MmaTf32RnaSplitK2,
         ),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK4V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK4V1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK4,
+            ResolvedNumericContract::MmaTf32RnaSplitK4,
         ),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => (
-            PhysicalGemmBackend::MmaTf32RnaSplitK8V1,
-            ResolvedNumericContract::MmaTf32RnaSplitK8V1,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => (
+            PhysicalGemmBackend::MmaTf32RnaSplitK8,
+            ResolvedNumericContract::MmaTf32RnaSplitK8,
         ),
-        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => (
-            PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1,
-            ResolvedNumericContract::Sm90aWgmmaTf32TmaV1,
+        Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => (
+            PhysicalGemmBackend::Sm90aWgmmaTf32Tma,
+            ResolvedNumericContract::Sm90aWgmmaTf32Tma,
         ),
-        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => (
-            PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1,
-            ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1,
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_) => (
+            PhysicalGemmBackend::Sm100Tcgen05Tf32Tma,
+            ResolvedNumericContract::Sm100Tcgen05Tf32Tma,
         ),
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => (
-            PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1,
-            ResolvedNumericContract::Sm120TmaMmaTf32RnaV1,
+        Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_) => (
+            PhysicalGemmBackend::Sm120TmaMmaTf32Rna,
+            ResolvedNumericContract::Sm120TmaMmaTf32Rna,
         ),
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => (
             PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1,
             ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1,
         ),
-        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => (
-            PhysicalGemmBackend::Sm120TmaFmaExactV1,
+        Tf32PhysicalRoute::Sm120TmaFmaExact(exact) => (
+            PhysicalGemmBackend::Sm120TmaFmaExact,
             sm120_fma_numeric_contract(exact),
         ),
     };
     let ownership = match spec.route {
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
-            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder
         }
-        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => sm120_fma_ownership(exact),
-        _ => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        Tf32PhysicalRoute::Sm120TmaFmaExact(exact) => sm120_fma_ownership(exact),
+        _ => ResolvedOutputOwnership::OneCtaPerOutputTile,
     };
     ResolvedGemmRoute {
         op: request.op,
         dtype: PolicyDtype::F32,
         backend,
         numeric_contract: if zero_reduction {
-            ResolvedNumericContract::ZeroReductionEpilogueF32V1
+            ResolvedNumericContract::ZeroReductionEpilogueF32
         } else {
             numeric_contract
         },
@@ -3919,9 +3903,9 @@ fn tf32_resolved_route(
 
 fn scalar_zero_symbol(op: ResolvedGemmOp) -> &'static str {
     match op {
-        ResolvedGemmOp::Nn => "gemm_bi_nn_zero_reduction_v1",
-        ResolvedGemmOp::Tn => "gemm_bi_tn_zero_reduction_v1",
-        ResolvedGemmOp::Nt => "gemm_bi_nt_zero_reduction_v1",
+        ResolvedGemmOp::Nn => "nn_zero_reduction",
+        ResolvedGemmOp::Tn => "tn_zero_reduction",
+        ResolvedGemmOp::Nt => "nt_zero_reduction",
     }
 }
 
@@ -3938,12 +3922,12 @@ fn scalar_zero_route(
     ResolvedGemmRoute {
         op: request.op,
         dtype: PolicyDtype::F32,
-        backend: PhysicalGemmBackend::ScalarFmaV1,
-        numeric_contract: ResolvedNumericContract::ZeroReductionEpilogueF32V1,
+        backend: PhysicalGemmBackend::ScalarFma,
+        numeric_contract: ResolvedNumericContract::ZeroReductionEpilogueF32,
         instruction_family: ResolvedInstructionFamily::ScalarFma,
         instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
         operand_conversion: ResolvedOperandConversion::None,
-        ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
         symbol: scalar_zero_symbol(request.op),
         module_kind: ModuleKind::TriadScalar,
         target: compiler.target,
@@ -4231,9 +4215,9 @@ fn prepare_tf32_f32(
     validate_sm89_tf32_joint_operands(request, operands, route)?;
     if matches!(
         route,
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-            | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-            | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+            | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+            | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
     ) {
         return prepare_tf32_splitk_f32(ctx, request, operands, output_resources, route);
     }
@@ -4245,9 +4229,9 @@ fn prepare_tf32_f32(
     }
     if matches!(
         route,
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
+        Tf32PhysicalRoute::Sm89TnPreRnaN96
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
     ) {
         return prepare_sm89_tf32_tn_pre_rna(ctx, request, operands, output_resources, route);
     }
@@ -4266,20 +4250,18 @@ fn prepare_tf32_f32(
             Some(route),
             Some(binding),
             match route {
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
-                | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
-                    Tf32TensorMapFormat::Uint32V1
-                }
-                _ => Tf32TensorMapFormat::Tfloat32V1,
+                Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
+                | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32,
+                _ => Tf32TensorMapFormat::Tfloat32,
             },
         ))
     } else if matches!(
         route,
-        Tf32PhysicalRoute::MmaTf32RnaV1(_)
-            | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-            | Tf32PhysicalRoute::Sm89NnDirectN96V1
-            | Tf32PhysicalRoute::Sm89NnN96V1
-            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
+        Tf32PhysicalRoute::MmaTf32Rna(_)
+            | Tf32PhysicalRoute::Sm89MmaTf32Compact8
+            | Tf32PhysicalRoute::Sm89NnDirectN96
+            | Tf32PhysicalRoute::Sm89NnN96
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96
     ) {
         None
     } else {
@@ -4352,12 +4334,12 @@ fn validate_sm89_tf32_joint_operands(
 ) -> Result<(), String> {
     if !matches!(
         route,
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
-            | Tf32PhysicalRoute::Sm89NnDirectN96V1
-            | Tf32PhysicalRoute::Sm89NnN96V1
-            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
+        Tf32PhysicalRoute::Sm89TnPreRnaN96
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+            | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            | Tf32PhysicalRoute::Sm89NnDirectN96
+            | Tf32PhysicalRoute::Sm89NnN96
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96
     ) {
         return Ok(());
     }
@@ -4479,9 +4461,9 @@ fn prepare_sm89_tf32_tn_pre_rna(
         gemm_config,
     );
     let transform = ResolvedInputTransform {
-        numeric_contract: ResolvedNumericContract::Tf32RnaPreprocessV1,
-        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
-        output_ownership: ResolvedTransformOutputOwnership::PreparedScratchAllocationV1,
+        numeric_contract: ResolvedNumericContract::Tf32RnaPreprocess,
+        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
+        output_ownership: ResolvedTransformOutputOwnership::PreparedScratchAllocation,
         target: binding.qualified.target,
         artifact: binding.qualified.artifact,
         compiler: binding.qualified.compiler,
@@ -4574,7 +4556,7 @@ fn prepare_tf32_streamk_f32(
             request,
             Some(route),
             Some(binding),
-            Tf32TensorMapFormat::Uint32V1,
+            Tf32TensorMapFormat::Uint32,
         )
     } else {
         prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?
@@ -4723,17 +4705,17 @@ fn prepare_sm120_fma_f32(
 /// One split keeps the scalar chain; more splits fold fixed-order partials.
 fn sm120_fma_numeric_contract(route: Sm120FmaRoute) -> ResolvedNumericContract {
     if route.splits == 1 {
-        ResolvedNumericContract::ScalarFmaV1
+        ResolvedNumericContract::ScalarFma
     } else {
-        ResolvedNumericContract::ScalarFmaFixedSplitFoldV1
+        ResolvedNumericContract::ScalarFmaFixedSplitFold
     }
 }
 
 fn sm120_fma_ownership(route: Sm120FmaRoute) -> ResolvedOutputOwnership {
     if route.splits == 1 {
-        ResolvedOutputOwnership::OneCtaPerOutputTileV1
+        ResolvedOutputOwnership::OneCtaPerOutputTile
     } else {
-        ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFoldV1
+        ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFold
     }
 }
 
@@ -4851,7 +4833,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
             request,
             None,
             None,
-            Tf32TensorMapFormat::Tfloat32V1,
+            Tf32TensorMapFormat::Tfloat32,
         );
         let prepared = prepare_scalar_zero_f32(ctx, request, operands, output_resources, maps)?;
         return Ok(prepared);
@@ -4862,7 +4844,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
         operands,
         ctx.kernels.f32_triad_availability(),
     )? {
-        F32TriadSelection::ScalarFmaV1 => {
+        F32TriadSelection::ScalarFma => {
             prepare_scalar_f32(ctx, request, operands, output_resources)
         }
         F32TriadSelection::Tf32(route) => {
@@ -4892,7 +4874,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
                         request,
                         operands,
                         output_resources,
-                        Tf32PhysicalRoute::Sm120TmaFmaExactV1(route),
+                        Tf32PhysicalRoute::Sm120TmaFmaExact(route),
                     ),
                     _ => prepare_scalar_f32(ctx, request, operands, output_resources),
                 };
@@ -4904,7 +4886,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
             request,
             operands,
             output_resources,
-            Tf32PhysicalRoute::Sm120TmaFmaExactV1(route),
+            Tf32PhysicalRoute::Sm120TmaFmaExact(route),
         ),
     }
 }
@@ -4925,7 +4907,7 @@ fn prepare_exact_scalar_f32_triad(
             request,
             None,
             None,
-            Tf32TensorMapFormat::Tfloat32V1,
+            Tf32TensorMapFormat::Tfloat32,
         );
         return prepare_scalar_zero_f32(ctx, request, operands, output_resources, maps);
     }
@@ -5131,7 +5113,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_cached_fixed_sm120_exact_tma<O: Physical
         op: ResolvedGemmOp::Nn,
         shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, shape),
     };
-    let route = Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+    let route = Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
         tile: match tile {
             FixedSm120ExactTmaTile::M128N64 => Sm120FmaTile::M128N64,
             FixedSm120ExactTmaTile::M64N128 => Sm120FmaTile::M64N128,
@@ -5584,11 +5566,11 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
         } => {
             match (*physical_route, *params) {
                 (
-                    Tf32PhysicalRoute::MmaTf32RnaV1(_)
-                    | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-                    | Tf32PhysicalRoute::Sm89NnDirectN96V1
-                    | Tf32PhysicalRoute::Sm89NnN96V1
-                    | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+                    Tf32PhysicalRoute::MmaTf32Rna(_)
+                    | Tf32PhysicalRoute::Sm89MmaTf32Compact8
+                    | Tf32PhysicalRoute::Sm89NnDirectN96
+                    | Tf32PhysicalRoute::Sm89NnN96
+                    | Tf32PhysicalRoute::Sm89NtALdmatrixN96,
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -5607,7 +5589,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                     arguments.push(bias)?;
                     arguments.push(params)?;
                 }
-                (Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_), PreparedTf32Params::Sm90a(params)) => {
+                (Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_), PreparedTf32Params::Sm90a(params)) => {
                     let maps = maps
                         .as_ref()
                         .ok_or_else(|| "SM90a TF32 graph sequence has no tensor maps".to_string())?
@@ -5618,10 +5600,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                     arguments.push(bias)?;
                     arguments.push(params)?;
                 }
-                (
-                    Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_),
-                    PreparedTf32Params::Sm100(params),
-                ) => {
+                (Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_), PreparedTf32Params::Sm100(params)) => {
                     let maps = maps
                         .as_ref()
                         .ok_or_else(|| "SM100 TF32 graph sequence has no tensor maps".to_string())?
@@ -5632,7 +5611,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                     arguments.push(bias)?;
                     arguments.push(params)?;
                 }
-                (Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_), PreparedTf32Params::Sm120(params)) => {
+                (Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_), PreparedTf32Params::Sm120(params)) => {
                     let maps = maps
                         .as_ref()
                         .ok_or_else(|| "SM120 TF32 graph sequence has no tensor maps".to_string())?
@@ -6800,11 +6779,11 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
     let bias = launch.operands.bias.unwrap_or(0);
     match (launch.route, launch.params) {
         (
-            Tf32PhysicalRoute::MmaTf32RnaV1(_)
-            | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-            | Tf32PhysicalRoute::Sm89NnDirectN96V1
-            | Tf32PhysicalRoute::Sm89NnN96V1
-            | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+            Tf32PhysicalRoute::MmaTf32Rna(_)
+            | Tf32PhysicalRoute::Sm89MmaTf32Compact8
+            | Tf32PhysicalRoute::Sm89NnDirectN96
+            | Tf32PhysicalRoute::Sm89NnN96
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96,
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {
@@ -6833,7 +6812,7 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             }
             .map_err(|error| error.with_driver_context(format_args!("{}", launch.symbol)))
         }
-        (Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_), PreparedTf32Params::Sm90a(params)) => {
+        (Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_), PreparedTf32Params::Sm90a(params)) => {
             let maps = launch
                 .maps
                 .ok_or_else(|| "SM90a TF32 launch has no tensor maps".to_string())?
@@ -6854,7 +6833,7 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             }
             .map_err(|error| error.with_driver_context(format_args!("{}", launch.symbol)))
         }
-        (Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_), PreparedTf32Params::Sm100(params)) => {
+        (Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_), PreparedTf32Params::Sm100(params)) => {
             let maps = launch
                 .maps
                 .ok_or_else(|| "SM100 TF32 launch has no tensor maps".to_string())?
@@ -6876,11 +6855,11 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             .map_err(|error| error.with_driver_context(format_args!("{}", launch.symbol)))
         }
         (
-            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+            Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
             | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_),
             PreparedTf32Params::Sm120(_),
         )
-        | (Tf32PhysicalRoute::Sm120TmaFmaExactV1(_), PreparedTf32Params::Sm120Fma(_)) => {
+        | (Tf32PhysicalRoute::Sm120TmaFmaExact(_), PreparedTf32Params::Sm120Fma(_)) => {
             let maps = launch
                 .maps
                 .ok_or_else(|| "SM120 TF32 launch has no tensor maps".to_string())?
@@ -6899,7 +6878,7 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
                     }
                     true
                 }
-                Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => {
+                Tf32PhysicalRoute::Sm120TmaFmaExact(exact) => {
                     if launch.streamk.is_none() && exact.splits != 1 {
                         return Err("exact-F32 SM120 split launch requires a workspace".into());
                     }
@@ -7371,7 +7350,7 @@ fn sm90a_forced_identity(
     }
     let tensor_maps_digest = maps.identity_digest();
     Ok(Sm90aRouteIdentity {
-        numeric_contract: Sm90aNumericContract::WgmmaV1,
+        numeric_contract: Sm90aNumericContract::Wgmma,
         op: route.op,
         dtype: route.dtype,
         schedule: route.schedule,
@@ -7585,7 +7564,7 @@ pub fn prepare_sm100_tcgen_forced(
         ldc: checked_i32(route.shape.ldc, "ldc")?,
     };
     let identity = Sm100RouteIdentity {
-        numeric_contract: Sm100NumericContract::Tcgen05F32V1,
+        numeric_contract: Sm100NumericContract::Tcgen05F32,
         op: route.op,
         dtype: route.dtype,
         physical: route.physical,
@@ -8488,13 +8467,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_ultra_thin",
+            "nn_ultra_thin",
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_ultra_thin forward"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_ultra_thin forward")))?;
         return Ok(());
     }
 
@@ -8537,13 +8514,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_narrow_small",
+            "nn_narrow_small",
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_narrow_small forward"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_narrow_small forward")))?;
         return Ok(());
     }
 
@@ -8583,11 +8558,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_narrow",
+            "nn_narrow",
             cfg,
             &mut builder,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_nn_narrow forward")))?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_narrow forward")))?;
         return Ok(());
     }
 
@@ -8623,11 +8598,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_gemv",
+            "nn_gemv",
             cfg,
             &mut builder,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_nn_gemv forward")))?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_gemv forward")))?;
         return Ok(());
     }
 
@@ -8685,12 +8660,12 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_splitk32_partial",
+            "nn_splitk32_partial",
             partial_cfg,
             &mut pb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_splitk32_partial (K-tail main)"))
+            error.with_driver_context(format_args!("nn_splitk32_partial (K-tail main)"))
         })?;
 
         // Tail fold via reducer: tail_cnt iterations of X[m, K_main+k] · W[K_main+k, n].
@@ -8736,13 +8711,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_splitk_reduce (K-tail)"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("splitk_reduce (K-tail)")))?;
         return Ok(());
     }
 
@@ -8787,14 +8760,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         let (partial_function, partial_symbol) =
             if scalar_plan == ScalarDispatchPlan::NnM32N64SplitK32Qualified {
                 (
-                    &kernels.gemm_bi_nn_splitk32_m32n64_exact_v1,
-                    "gemm_bi_nn_splitk32_m32n64_exact_v1",
+                    &kernels.gemm_bi_nn_splitk32_m32n64_exact,
+                    "nn_splitk32_m32n64_exact",
                 )
             } else {
-                (
-                    &kernels.gemm_bi_nn_splitk32_partial,
-                    "gemm_bi_nn_splitk32_partial",
-                )
+                (&kernels.gemm_bi_nn_splitk32_partial, "nn_splitk32_partial")
             };
         let mut pb = scalar_launch_builder(stream, partial_function, &control);
         pb.arg(&partial_ptr);
@@ -8840,11 +8810,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitk_reduce")))?;
+        .map_err(|error| error.with_driver_context(format_args!("splitk_reduce")))?;
         return Ok(());
     }
 
@@ -8930,13 +8900,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_splitk_slim_partial",
+            "nn_splitk_slim_partial",
             partial_cfg,
             &mut pb,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_splitk_slim_partial"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_splitk_slim_partial")))?;
 
         let total = checked_dims.mn_u32;
         let reduce_cfg = cudarc::driver::LaunchConfig {
@@ -8967,11 +8935,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitk_reduce (slim)")))?;
+        .map_err(|error| error.with_driver_context(format_args!("splitk_reduce (slim)")))?;
         return Ok(());
     }
 
@@ -9009,14 +8977,12 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+            "nn_sm89_f32_n64_copyplan",
             cfg,
             &mut builder,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1 forward"
-            ))
+            error.with_driver_context(format_args!("nn_sm89_f32_n64_copyplan forward"))
         })?;
         return Ok(());
     }
@@ -9039,7 +9005,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             shared_mem_bytes: super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
         };
         let mut builder =
-            scalar_launch_builder(stream, &kernels.gemm_bi_nn_m64n64_bk16_s2_v1, &control);
+            scalar_launch_builder(stream, &kernels.gemm_bi_nn_m64n64_bk16_s2, &control);
         builder.arg_buffer_mut(y);
         builder.arg(&x_ptr);
         builder.arg(&w_ptr);
@@ -9049,13 +9015,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
+            "nn_m64n64_bk16_s2",
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_m64n64_bk16_s2_v1 forward"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("nn_m64n64_bk16_s2 forward")))?;
         return Ok(());
     }
 
@@ -9103,17 +9067,13 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            if slim {
-                "gemm_bi_nn_slim"
-            } else {
-                "gemm_bi_nn"
-            },
+            if slim { "nn_slim" } else { "nn_big" },
             cfg,
             &mut builder,
         )
         .map_err(|error| {
             error.with_driver_context(format_args!(
-                "gemm_bi_nn{} forward",
+                "nn_big{} forward",
                 if slim { "_slim" } else { "" }
             ))
         })?;
@@ -9263,11 +9223,11 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_tn_gemv",
+            "tn_gemv",
             cfg,
             &mut builder,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_tn_gemv backward_dw")))?;
+        .map_err(|error| error.with_driver_context(format_args!("tn_gemv backward_dw")))?;
         return Ok(());
     }
 
@@ -9301,13 +9261,11 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_tn_narrow",
+            "tn_narrow",
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_tn_narrow backward_dw"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("tn_narrow backward_dw")))?;
         return Ok(());
     }
 
@@ -9334,7 +9292,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             shared_mem_bytes: 0,
         };
         let symbol = scalar_tn_kernel_symbol(scalar_plan, operands);
-        let function = if symbol == "gemm_bi_tn_narrow_splitm_partial_aligned" {
+        let function = if symbol == "tn_narrow_splitm_partial_aligned" {
             &kernels.gemm_bi_tn_narrow_splitm_partial_aligned
         } else {
             &kernels.gemm_bi_tn_narrow_splitm_partial
@@ -9373,11 +9331,11 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_splitm_reduce",
+            "splitm_reduce",
             reduce_cfg,
             &mut reducer,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitm_reduce")))?;
+        .map_err(|error| error.with_driver_context(format_args!("splitm_reduce")))?;
         return Ok(());
     }
 
@@ -9393,7 +9351,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         };
         let mut builder = scalar_launch_builder(
             stream,
-            &kernels.gemm_bi_tn_m16n16_bk16_s2_splitm16_v1,
+            &kernels.gemm_bi_tn_m16n16_bk16_s2_splitm16,
             &control,
         );
         builder.arg(&dw_ptr);
@@ -9407,14 +9365,12 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+            "tn_m16n16_bk16_s2_splitm16",
             cfg,
             &mut builder,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1 backward_dw"
-            ))
+            error.with_driver_context(format_args!("tn_m16n16_bk16_s2_splitm16 backward_dw"))
         })?;
         return Ok(());
     }
@@ -9473,11 +9429,8 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         let rows = checked_dims.m_i32;
         let columns = checked_dims.k_i32;
         let x_ptr = x_saved.raw_ptr(stream);
-        let mut transpose = scalar_launch_builder(
-            stream,
-            &kernels.gemm_bi_transpose_f32_32x16_d768_v1,
-            &control,
-        );
+        let mut transpose =
+            scalar_launch_builder(stream, &kernels.gemm_bi_transpose_f32_32x16_d768, &control);
         transpose.arg(&transposed_ptr);
         transpose.arg(&x_ptr);
         transpose.arg(&rows);
@@ -9486,7 +9439,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_transpose_f32_32x16_d768_v1",
+            "transpose_f32_32x16_d768",
             transpose_cfg,
             &mut transpose,
         )
@@ -9587,11 +9540,11 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_splitm_reduce",
+            "splitm_reduce",
             reduce_cfg,
             &mut reducer,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitm_reduce")))?;
+        .map_err(|error| error.with_driver_context(format_args!("splitm_reduce")))?;
         return Ok(());
     }
 
@@ -9628,7 +9581,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             shared_mem_bytes: 0,
         };
         let partial_symbol = scalar_tn_kernel_symbol(scalar_plan, operands);
-        let partial_function = if partial_symbol == "gemm_bi_tn_splitm_partial_aligned" {
+        let partial_function = if partial_symbol == "tn_splitm_partial_aligned" {
             &kernels.gemm_bi_tn_splitm_partial_aligned
         } else {
             &kernels.gemm_bi_tn_splitm_partial
@@ -9668,11 +9621,11 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             &mut control,
             request,
             operands,
-            "gemm_bi_splitm_reduce",
+            "splitm_reduce",
             reduce_cfg,
             &mut rb,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_splitm_reduce")))?;
+        .map_err(|error| error.with_driver_context(format_args!("splitm_reduce")))?;
         return Ok(());
     }
 
@@ -9687,9 +9640,9 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         let n_i = checked_dims.n_i32;
         let symbol = scalar_tn_kernel_symbol(scalar_plan, operands);
         let (func, bn) = match symbol {
-            "gemm_bi_tn_slim" => (&kernels.gemm_bi_tn_slim, 64),
-            "gemm_bi_tn_aligned" => (&kernels.gemm_bi_tn_aligned, 128),
-            "gemm_bi_tn" => (&kernels.gemm_bi_tn, 128),
+            "tn_slim" => (&kernels.gemm_bi_tn_slim, 64),
+            "tn_aligned" => (&kernels.gemm_bi_tn_aligned, 128),
+            "tn_big" => (&kernels.gemm_bi_tn, 128),
             _ => unreachable!("unexpected Big TN symbol"),
         };
         // Opt1: Big uses 256 threads/block; Slim stays 128.
@@ -9714,7 +9667,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         enqueue_scalar_backward(&mut control, request, operands, symbol, cfg, &mut builder)
             .map_err(|error| {
                 error.with_driver_context(format_args!(
-                    "gemm_bi_tn{} backward_dw",
+                    "tn_big{} backward_dw",
                     if slim { "_slim" } else { "" }
                 ))
             })?;
@@ -9808,7 +9761,7 @@ fn gemm_bi_backward_dx_with_control<
             shared_mem_bytes: super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES,
         };
         let mut builder =
-            scalar_launch_builder(stream, &kernels.gemm_bi_nt_m2n16_bk64_splitk32_v1, &control);
+            scalar_launch_builder(stream, &kernels.gemm_bi_nt_m2n16_bk64_splitk32, &control);
         builder.arg_buffer_mut(dx);
         builder.arg_buffer(dy);
         builder.arg(&w_ptr);
@@ -9820,14 +9773,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+            "nt_m2n16_bk64_splitk32",
             cfg,
             &mut builder,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_nt_m2n16_bk64_splitk32_v1 backward_dx"
-            ))
+            error.with_driver_context(format_args!("nt_m2n16_bk64_splitk32 backward_dx"))
         })?;
         return Ok(());
     }
@@ -9870,11 +9821,8 @@ fn gemm_bi_backward_dx_with_control<
             block_dim: (32, 16, 1),
             shared_mem_bytes: 0,
         };
-        let mut transpose = scalar_launch_builder(
-            stream,
-            &kernels.gemm_bi_transpose_f32_32x16_d768_v1,
-            &control,
-        );
+        let mut transpose =
+            scalar_launch_builder(stream, &kernels.gemm_bi_transpose_f32_32x16_d768, &control);
         transpose.arg(&w_t_ptr);
         transpose.arg(&w_ptr);
         transpose.arg(&rows);
@@ -9883,14 +9831,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_transpose_f32_32x16_d768_v1",
+            "transpose_f32_32x16_d768",
             transpose_cfg,
             &mut transpose,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_transpose_f32_32x16_d768_v1 backward_dx"
-            ))
+            error.with_driver_context(format_args!("transpose_f32_32x16_d768 backward_dx"))
         })?;
 
         let params = SgbNnM64N64Params {
@@ -9934,18 +9880,15 @@ fn gemm_bi_backward_dx_with_control<
                     .fixed_sm89_f32_n64_copyplan
                     .as_ref()
                     .ok_or_else(|| "qualified Fixed CopyPlan kernel is unavailable".to_string())?,
-                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+                "nn_sm89_f32_n64_copyplan",
             )
         } else if scalar_plan == ScalarDispatchPlan::NtPrismVectorQualified {
             (
-                &kernels.gemm_bi_nn_prism_m64n64_bk16_s2_v1,
-                "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+                &kernels.gemm_bi_nn_prism_m64n64_bk16_s2,
+                "nn_prism_m64n64_bk16_s2",
             )
         } else {
-            (
-                &kernels.gemm_bi_nn_m64n64_bk16_s2_v1,
-                "gemm_bi_nn_m64n64_bk16_s2_v1",
-            )
+            (&kernels.gemm_bi_nn_m64n64_bk16_s2, "nn_m64n64_bk16_s2")
         };
         let mut m64 = scalar_launch_builder(stream, m64_function, &control);
         m64.arg_buffer_mut(dx);
@@ -9997,13 +9940,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nt_narrow",
+            "nt_narrow",
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nt_narrow backward_dx"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("nt_narrow backward_dx")))?;
         return Ok(());
     }
 
@@ -10040,14 +9981,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nt_narrow",
+            "nt_narrow",
             cfg,
             &mut builder,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_nt_narrow (small-batch wide-N) backward_dx"
-            ))
+            error.with_driver_context(format_args!("nt_narrow (small-batch wide-N) backward_dx"))
         })?;
         return Ok(());
     }
@@ -10082,11 +10021,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nt_gemv",
+            "nt_gemv",
             cfg,
             &mut builder,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_nt_gemv backward_dx")))?;
+        .map_err(|error| error.with_driver_context(format_args!("nt_gemv backward_dx")))?;
         return Ok(());
     }
 
@@ -10141,13 +10080,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_transpose_f32_2d",
+            "transpose_f32_2d",
             t_cfg,
             &mut tb,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_transpose_f32_2d (K-tail)"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("transpose_f32_2d (K-tail)")))?;
 
         // Step 2: Split-K NN partial — A=dY, B=W_T, output [M, k_main].
         let m_i = checked_dims.m_i32;
@@ -10186,12 +10123,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nn_splitk32_partial",
+            "nn_splitk32_partial",
             partial_cfg,
             &mut pb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_splitk32_partial (NT K-tail main)"))
+            error.with_driver_context(format_args!("nn_splitk32_partial (NT K-tail main)"))
         })?;
 
         // Step 3: reducer writes dX[:, 0..k_main] with stride n_in.
@@ -10227,12 +10164,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_splitk_reduce (NT K-tail main)"))
+            error.with_driver_context(format_args!("splitk_reduce (NT K-tail main)"))
         })?;
 
         // Step 4: loop over tail columns. For each k in [0, k_tail_cnt):
@@ -10270,12 +10207,12 @@ fn gemm_bi_backward_dx_with_control<
                 &mut control,
                 request,
                 operands,
-                "gemm_bi_dx_col_gemv",
+                "dx_col_gemv",
                 tail_cfg,
                 &mut gb,
             )
             .map_err(|error| {
-                error.with_driver_context(format_args!("gemm_bi_dx_col_gemv (NT K-tail col={})", k))
+                error.with_driver_context(format_args!("dx_col_gemv (NT K-tail col={})", k))
             })?;
         }
         return Ok(());
@@ -10338,11 +10275,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_transpose_f32_2d",
+            "transpose_f32_2d",
             t_cfg,
             &mut tb,
         )
-        .map_err(|error| error.with_driver_context(format_args!("gemm_bi_transpose_f32_2d")))?;
+        .map_err(|error| error.with_driver_context(format_args!("transpose_f32_2d")))?;
 
         // Step 2: NN Split-K partial on the n_main (32-aligned) prefix.
         // partial = dY[M, n_main] @ W_T[n_main, K_out], reduction over n_main.
@@ -10385,14 +10322,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nn_splitk32_partial",
+            "nn_splitk32_partial",
             partial_cfg,
             &mut pb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_nn_splitk32_partial (NT-via-T N-tail)"
-            ))
+            error.with_driver_context(format_args!("nn_splitk32_partial (NT-via-T N-tail)"))
         })?;
 
         // Step 3: reducer with N-tail fold. Computes
@@ -10449,12 +10384,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_splitk_reduce (NT-via-T N-tail)"))
+            error.with_driver_context(format_args!("splitk_reduce (NT-via-T N-tail)"))
         })?;
         return Ok(());
     }
@@ -10504,13 +10439,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_transpose_f32_2d",
+            "transpose_f32_2d",
             t_cfg,
             &mut tb,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_transpose_f32_2d (slim NT)"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("transpose_f32_2d (slim NT)")))?;
 
         // Step 2: Slim Split-K NN partial on (dY, W_T) with K_chunk split.
         let m_i = checked_dims.m_i32;
@@ -10549,12 +10482,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nn_splitk_slim_partial",
+            "nn_splitk_slim_partial",
             partial_cfg,
             &mut pb,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_nn_splitk_slim_partial (slim NT)"))
+            error.with_driver_context(format_args!("nn_splitk_slim_partial (slim NT)"))
         })?;
 
         // Step 3: reducer writes dX (beta=0, no bias, alpha=1).
@@ -10588,13 +10521,11 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_splitk_reduce",
+            "splitk_reduce",
             reduce_cfg,
             &mut rb,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!("gemm_bi_splitk_reduce (slim NT)"))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("splitk_reduce (slim NT)")))?;
         return Ok(());
     }
 
@@ -10637,14 +10568,12 @@ fn gemm_bi_backward_dx_with_control<
             &mut control,
             request,
             operands,
-            "gemm_bi_nt_narrow",
+            "nt_narrow",
             cfg,
             &mut builder,
         )
         .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "gemm_bi_nt_narrow (gap-fill mid-batch wide-N)"
-            ))
+            error.with_driver_context(format_args!("nt_narrow (gap-fill mid-batch wide-N)"))
         })?;
         return Ok(());
     }
@@ -10685,15 +10614,11 @@ fn gemm_bi_backward_dx_with_control<
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        let symbol = if slim {
-            "gemm_bi_nt_slim"
-        } else {
-            "gemm_bi_nt"
-        };
+        let symbol = if slim { "nt_slim" } else { "nt_big" };
         enqueue_scalar_backward(&mut control, request, operands, symbol, cfg, &mut builder)
             .map_err(|error| {
                 error.with_driver_context(format_args!(
-                    "gemm_bi_nt{} backward_dx",
+                    "nt_big{} backward_dx",
                     if slim { "_slim" } else { "" }
                 ))
             })?;
@@ -10749,112 +10674,104 @@ impl HalfKernelIdentity {
     fn resolve(base: &str, dtype: WeightDtype) -> Result<Self, String> {
         let module_kind = if matches!(
             base,
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
-                | "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1"
-                | "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1"
-                | "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1"
-                | "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1"
-                | "gemm_bi_nt_sm89_m96n128_bk64_s3_v1"
+            "nn_sm89_m128n128_bk64_s3"
+                | "tn_sm89_m64n64_bk64_s2_compact_bxor"
+                | "tn_sm89_m64n64_bk64_s2_regpipe_vec2"
+                | "tn_sm89_m16n16_bk64_s2_ldb72"
+                | "nt_sm89_m128n128_bk64_s3_bxor"
+                | "nt_sm89_m96n128_bk64_s3"
         ) {
             ModuleKind::TriadSm89Half
         } else if matches!(
             base,
-            "gemm_bi_nn_tc"
-                | "gemm_bi_nn_tc64"
-                | "gemm_bi_nn_tc16"
-                | "gemm_bi_tn_tc"
-                | "gemm_bi_tn_tc64"
-                | "gemm_bi_tn_tc64_streamk"
-                | "gemm_bi_tn_tc128x64"
-                | "gemm_bi_nt_tc"
-                | "gemm_bi_nt_tc64"
+            "nn_tc"
+                | "nn_tc64"
+                | "nn_tc16"
+                | "tn_tc"
+                | "tn_tc64"
+                | "tn_tc64_streamk"
+                | "tn_tc128x64"
+                | "nt_tc"
+                | "nt_tc64"
         ) {
             ModuleKind::TriadSm80
         } else {
             ModuleKind::TriadScalar
         };
-        let schedule = if base == "gemm_bi_tn_tc64_streamk" {
+        let schedule = if base == "tn_tc64_streamk" {
             HalfSchedule::StreamKFixedOrder
         } else {
             HalfSchedule::Tiled
         };
         let symbol = match (base, dtype) {
-            ("gemm_bi_nn_gemv", WeightDtype::Bf16) => "gemm_bi_nn_gemv_bf16",
-            ("gemm_bi_nn_gemv", WeightDtype::F16) => "gemm_bi_nn_gemv_f16",
-            ("gemm_bi_nn_ultra_thin", WeightDtype::Bf16) => "gemm_bi_nn_ultra_thin_bf16",
-            ("gemm_bi_nn_ultra_thin", WeightDtype::F16) => "gemm_bi_nn_ultra_thin_f16",
-            ("gemm_bi_nn_narrow", WeightDtype::Bf16) => "gemm_bi_nn_narrow_bf16",
-            ("gemm_bi_nn_narrow", WeightDtype::F16) => "gemm_bi_nn_narrow_f16",
-            ("gemm_bi_nn_narrow_small", WeightDtype::Bf16) => "gemm_bi_nn_narrow_small_bf16",
-            ("gemm_bi_nn_narrow_small", WeightDtype::F16) => "gemm_bi_nn_narrow_small_f16",
-            ("gemm_bi_nn_big", WeightDtype::Bf16) => "gemm_bi_nn_big_bf16",
-            ("gemm_bi_nn_big", WeightDtype::F16) => "gemm_bi_nn_big_f16",
-            ("gemm_bi_tn_gemv", WeightDtype::Bf16) => "gemm_bi_tn_gemv_bf16",
-            ("gemm_bi_tn_gemv", WeightDtype::F16) => "gemm_bi_tn_gemv_f16",
-            ("gemm_bi_tn_narrow", WeightDtype::Bf16) => "gemm_bi_tn_narrow_bf16",
-            ("gemm_bi_tn_narrow", WeightDtype::F16) => "gemm_bi_tn_narrow_f16",
-            ("gemm_bi_tn_big", WeightDtype::Bf16) => "gemm_bi_tn_big_bf16",
-            ("gemm_bi_tn_big", WeightDtype::F16) => "gemm_bi_tn_big_f16",
-            ("gemm_bi_nt_gemv", WeightDtype::Bf16) => "gemm_bi_nt_gemv_bf16",
-            ("gemm_bi_nt_gemv", WeightDtype::F16) => "gemm_bi_nt_gemv_f16",
-            ("gemm_bi_nt_narrow", WeightDtype::Bf16) => "gemm_bi_nt_narrow_bf16",
-            ("gemm_bi_nt_narrow", WeightDtype::F16) => "gemm_bi_nt_narrow_f16",
-            ("gemm_bi_nt_big", WeightDtype::Bf16) => "gemm_bi_nt_big_bf16",
-            ("gemm_bi_nt_big", WeightDtype::F16) => "gemm_bi_nt_big_f16",
-            ("gemm_bi_nn_tc", WeightDtype::Bf16) => "gemm_bi_nn_tc_bf16",
-            ("gemm_bi_nn_tc", WeightDtype::F16) => "gemm_bi_nn_tc_f16",
-            ("gemm_bi_nn_tc64", WeightDtype::Bf16) => "gemm_bi_nn_tc64_bf16",
-            ("gemm_bi_nn_tc64", WeightDtype::F16) => "gemm_bi_nn_tc64_f16",
-            ("gemm_bi_nn_tc16", WeightDtype::Bf16) => "gemm_bi_nn_tc16_bf16",
-            ("gemm_bi_nn_tc16", WeightDtype::F16) => "gemm_bi_nn_tc16_f16",
-            ("gemm_bi_tn_tc", WeightDtype::Bf16) => "gemm_bi_tn_tc_bf16",
-            ("gemm_bi_tn_tc", WeightDtype::F16) => "gemm_bi_tn_tc_f16",
-            ("gemm_bi_tn_tc64", WeightDtype::Bf16) => "gemm_bi_tn_tc64_bf16",
-            ("gemm_bi_tn_tc64", WeightDtype::F16) => "gemm_bi_tn_tc64_f16",
-            ("gemm_bi_tn_tc64_streamk", WeightDtype::Bf16) => "gemm_bi_tn_tc64_streamk_bf16",
-            ("gemm_bi_tn_tc64_streamk", WeightDtype::F16) => "gemm_bi_tn_tc64_streamk_f16",
-            ("gemm_bi_tn_tc128x64", WeightDtype::Bf16) => "gemm_bi_tn_tc128x64_bf16",
-            ("gemm_bi_tn_tc128x64", WeightDtype::F16) => "gemm_bi_tn_tc128x64_f16",
-            ("gemm_bi_nt_tc", WeightDtype::Bf16) => "gemm_bi_nt_tc_bf16",
-            ("gemm_bi_nt_tc", WeightDtype::F16) => "gemm_bi_nt_tc_f16",
-            ("gemm_bi_nt_tc64", WeightDtype::Bf16) => "gemm_bi_nt_tc64_bf16",
-            ("gemm_bi_nt_tc64", WeightDtype::F16) => "gemm_bi_nt_tc64_f16",
-            ("gemm_bi_nn_sm89_m128n128_bk64_s3_v1", WeightDtype::Bf16) => {
-                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16"
+            ("nn_gemv", WeightDtype::Bf16) => "nn_gemv_bf16",
+            ("nn_gemv", WeightDtype::F16) => "nn_gemv_f16",
+            ("nn_ultra_thin", WeightDtype::Bf16) => "nn_ultra_thin_bf16",
+            ("nn_ultra_thin", WeightDtype::F16) => "nn_ultra_thin_f16",
+            ("nn_narrow", WeightDtype::Bf16) => "nn_narrow_bf16",
+            ("nn_narrow", WeightDtype::F16) => "nn_narrow_f16",
+            ("nn_narrow_small", WeightDtype::Bf16) => "nn_narrow_small_bf16",
+            ("nn_narrow_small", WeightDtype::F16) => "nn_narrow_small_f16",
+            ("nn_big", WeightDtype::Bf16) => "nn_big_bf16",
+            ("nn_big", WeightDtype::F16) => "nn_big_f16",
+            ("tn_gemv", WeightDtype::Bf16) => "tn_gemv_bf16",
+            ("tn_gemv", WeightDtype::F16) => "tn_gemv_f16",
+            ("tn_narrow", WeightDtype::Bf16) => "tn_narrow_bf16",
+            ("tn_narrow", WeightDtype::F16) => "tn_narrow_f16",
+            ("tn_big", WeightDtype::Bf16) => "tn_big_bf16",
+            ("tn_big", WeightDtype::F16) => "tn_big_f16",
+            ("nt_gemv", WeightDtype::Bf16) => "nt_gemv_bf16",
+            ("nt_gemv", WeightDtype::F16) => "nt_gemv_f16",
+            ("nt_narrow", WeightDtype::Bf16) => "nt_narrow_bf16",
+            ("nt_narrow", WeightDtype::F16) => "nt_narrow_f16",
+            ("nt_big", WeightDtype::Bf16) => "nt_big_bf16",
+            ("nt_big", WeightDtype::F16) => "nt_big_f16",
+            ("nn_tc", WeightDtype::Bf16) => "nn_tc_bf16",
+            ("nn_tc", WeightDtype::F16) => "nn_tc_f16",
+            ("nn_tc64", WeightDtype::Bf16) => "nn_tc64_bf16",
+            ("nn_tc64", WeightDtype::F16) => "nn_tc64_f16",
+            ("nn_tc16", WeightDtype::Bf16) => "nn_tc16_bf16",
+            ("nn_tc16", WeightDtype::F16) => "nn_tc16_f16",
+            ("tn_tc", WeightDtype::Bf16) => "tn_tc_bf16",
+            ("tn_tc", WeightDtype::F16) => "tn_tc_f16",
+            ("tn_tc64", WeightDtype::Bf16) => "tn_tc64_bf16",
+            ("tn_tc64", WeightDtype::F16) => "tn_tc64_f16",
+            ("tn_tc64_streamk", WeightDtype::Bf16) => "tn_tc64_streamk_bf16",
+            ("tn_tc64_streamk", WeightDtype::F16) => "tn_tc64_streamk_f16",
+            ("tn_tc128x64", WeightDtype::Bf16) => "tn_tc128x64_bf16",
+            ("tn_tc128x64", WeightDtype::F16) => "tn_tc128x64_f16",
+            ("nt_tc", WeightDtype::Bf16) => "nt_tc_bf16",
+            ("nt_tc", WeightDtype::F16) => "nt_tc_f16",
+            ("nt_tc64", WeightDtype::Bf16) => "nt_tc64_bf16",
+            ("nt_tc64", WeightDtype::F16) => "nt_tc64_f16",
+            ("nn_sm89_m128n128_bk64_s3", WeightDtype::Bf16) => "nn_sm89_m128n128_bk64_s3_bf16",
+            ("nn_sm89_m128n128_bk64_s3", WeightDtype::F16) => "nn_sm89_m128n128_bk64_s3_f16",
+            ("tn_sm89_m64n64_bk64_s2_compact_bxor", WeightDtype::Bf16) => {
+                "tn_sm89_m64n64_bk64_s2_compact_bxor_bf16"
             }
-            ("gemm_bi_nn_sm89_m128n128_bk64_s3_v1", WeightDtype::F16) => {
-                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16"
+            ("tn_sm89_m64n64_bk64_s2_compact_bxor", WeightDtype::F16) => {
+                "tn_sm89_m64n64_bk64_s2_compact_bxor_f16"
             }
-            ("gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1", WeightDtype::Bf16) => {
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16"
+            ("tn_sm89_m64n64_bk64_s2_regpipe_vec2", WeightDtype::Bf16) => {
+                "tn_sm89_m64n64_bk64_s2_regpipe_vec2_bf16"
             }
-            ("gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1", WeightDtype::F16) => {
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16"
+            ("tn_sm89_m64n64_bk64_s2_regpipe_vec2", WeightDtype::F16) => {
+                "tn_sm89_m64n64_bk64_s2_regpipe_vec2_f16"
             }
-            ("gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1", WeightDtype::Bf16) => {
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16"
+            ("tn_sm89_m16n16_bk64_s2_ldb72", WeightDtype::Bf16) => {
+                "tn_sm89_m16n16_bk64_s2_ldb72_bf16"
             }
-            ("gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1", WeightDtype::F16) => {
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16"
+            ("tn_sm89_m16n16_bk64_s2_ldb72", WeightDtype::F16) => {
+                "tn_sm89_m16n16_bk64_s2_ldb72_f16"
             }
-            ("gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1", WeightDtype::Bf16) => {
-                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16"
+            ("nt_sm89_m128n128_bk64_s3_bxor", WeightDtype::Bf16) => {
+                "nt_sm89_m128n128_bk64_s3_bxor_bf16"
             }
-            ("gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1", WeightDtype::F16) => {
-                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16"
+            ("nt_sm89_m128n128_bk64_s3_bxor", WeightDtype::F16) => {
+                "nt_sm89_m128n128_bk64_s3_bxor_f16"
             }
-            ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::Bf16) => {
-                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16"
-            }
-            ("gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1", WeightDtype::F16) => {
-                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16"
-            }
-            ("gemm_bi_nt_sm89_m96n128_bk64_s3_v1", WeightDtype::Bf16) => {
-                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16"
-            }
-            ("gemm_bi_nt_sm89_m96n128_bk64_s3_v1", WeightDtype::F16) => {
-                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16"
-            }
+            ("nt_sm89_m96n128_bk64_s3", WeightDtype::Bf16) => "nt_sm89_m96n128_bk64_s3_bf16",
+            ("nt_sm89_m96n128_bk64_s3", WeightDtype::F16) => "nt_sm89_m96n128_bk64_s3_f16",
             (_, WeightDtype::F32) => {
                 return Err("half kernel identity does not accept f32".into());
             }
@@ -11163,18 +11080,18 @@ fn resolved_half_gemm_route_with_compiler(
         match identity.module_kind {
             ModuleKind::TriadScalar => (
                 context.artifacts.triad_scalar,
-                PhysicalGemmBackend::ScalarFmaV1,
-                ResolvedNumericContract::ScalarFmaV1,
+                PhysicalGemmBackend::ScalarFma,
+                ResolvedNumericContract::ScalarFma,
                 ResolvedInstructionFamily::ScalarFma,
                 ResolvedInstructionShape { m: 1, n: 1, k: 1 },
             ),
             ModuleKind::TriadSm80 => (
                 context.artifacts.triad_sm80,
-                PhysicalGemmBackend::Sm80Mma16V1,
+                PhysicalGemmBackend::Sm80Mma16,
                 match identity.schedule {
-                    HalfSchedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
+                    HalfSchedule::Tiled => ResolvedNumericContract::MmaSyncF32,
                     HalfSchedule::StreamKFixedOrder => {
-                        ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
+                        ResolvedNumericContract::MmaSyncF32StreamKFixedOrder
                     }
                 },
                 ResolvedInstructionFamily::MmaSync,
@@ -11188,11 +11105,11 @@ fn resolved_half_gemm_route_with_compiler(
                 if super::sm89_half_source::runtime_kernel_spec(identity.symbol)
                     .is_some_and(|spec| spec.stages == 2)
                 {
-                    PhysicalGemmBackend::Sm89Mma16HalfS2V1
+                    PhysicalGemmBackend::Sm89Mma16HalfS2
                 } else {
-                    PhysicalGemmBackend::Sm89Mma16HalfS3V1
+                    PhysicalGemmBackend::Sm89Mma16HalfS3
                 },
-                ResolvedNumericContract::MmaSyncF32V1,
+                ResolvedNumericContract::MmaSyncF32,
                 ResolvedInstructionFamily::MmaSync,
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             ),
@@ -11222,9 +11139,9 @@ fn resolved_half_gemm_route_with_compiler(
         instruction_shape,
         operand_conversion: ResolvedOperandConversion::None,
         ownership: match identity.schedule {
-            HalfSchedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            HalfSchedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTile,
             HalfSchedule::StreamKFixedOrder => {
-                ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+                ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder
             }
         },
         symbol: identity.symbol,
@@ -11439,61 +11356,57 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
 ) -> Result<PreparedHalfGraphIdentity, String> {
     let base = prepared_half_graph_base(expected, request.dtype)?;
     let choice = match base {
-        "gemm_bi_nn_gemv" => {
+        "nn_gemv" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_gemv_typed.get(request.dtype))
         }
-        "gemm_bi_nn_ultra_thin" => HalfKernelChoice::new(
+        "nn_ultra_thin" => HalfKernelChoice::new(
             base,
             ctx.kernels.gemm_bi_nn_ultra_thin_typed.get(request.dtype),
         ),
-        "gemm_bi_nn_narrow_small" => HalfKernelChoice::new(
+        "nn_narrow_small" => HalfKernelChoice::new(
             base,
             ctx.kernels.gemm_bi_nn_narrow_small_typed.get(request.dtype),
         ),
-        "gemm_bi_nn_narrow" => {
+        "nn_narrow" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_narrow_typed.get(request.dtype))
         }
-        "gemm_bi_nn_big" => {
+        "nn_big" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_big_typed.get(request.dtype))
         }
-        "gemm_bi_tn_gemv" => {
+        "tn_gemv" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_gemv_typed.get(request.dtype))
         }
-        "gemm_bi_tn_narrow" => {
+        "tn_narrow" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_narrow_typed.get(request.dtype))
         }
-        "gemm_bi_tn_big" => {
+        "tn_big" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_big_typed.get(request.dtype))
         }
-        "gemm_bi_nt_gemv" => {
+        "nt_gemv" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_gemv_typed.get(request.dtype))
         }
-        "gemm_bi_nt_narrow" => {
+        "nt_narrow" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_narrow_typed.get(request.dtype))
         }
-        "gemm_bi_nt_big" => {
+        "nt_big" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_big_typed.get(request.dtype))
         }
-        "gemm_bi_nn_tc" => {
-            HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_tc_typed.get(request.dtype))
-        }
-        "gemm_bi_nn_tc64" => {
+        "nn_tc" => HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_tc_typed.get(request.dtype)),
+        "nn_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_tc64_typed.get(request.dtype))
         }
-        "gemm_bi_nn_tc16" => {
+        "nn_tc16" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nn_tc16_typed.get(request.dtype))
         }
-        "gemm_bi_tn_tc" => {
-            HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_tc_typed.get(request.dtype))
-        }
-        "gemm_bi_tn_tc64" => {
+        "tn_tc" => HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_tc_typed.get(request.dtype)),
+        "tn_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_tc64_typed.get(request.dtype))
         }
-        "gemm_bi_tn_tc128x64" => HalfKernelChoice::new(
+        "tn_tc128x64" => HalfKernelChoice::new(
             base,
             ctx.kernels.gemm_bi_tn_tc128x64_typed.get(request.dtype),
         ),
-        "gemm_bi_tn_tc64_streamk" => HalfKernelChoice::new(
+        "tn_tc64_streamk" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .gemm_bi_tn_tc64_streamk_typed
@@ -11503,13 +11416,11 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                 })?
                 .get(request.dtype),
         ),
-        "gemm_bi_nt_tc" => {
-            HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_tc_typed.get(request.dtype))
-        }
-        "gemm_bi_nt_tc64" => {
+        "nt_tc" => HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_tc_typed.get(request.dtype)),
+        "nt_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_tc64_typed.get(request.dtype))
         }
-        "gemm_bi_nn_sm89_m128n128_bk64_s3_v1" => HalfKernelChoice::new(
+        "nn_sm89_m128n128_bk64_s3" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_function(
@@ -11518,7 +11429,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                 )
                 .ok_or_else(|| "prepared SM89 half NN symbol is unavailable".to_string())?,
         ),
-        "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1" => HalfKernelChoice::new(
+        "tn_sm89_m64n64_bk64_s2_compact_bxor" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_function(
@@ -11527,7 +11438,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                 )
                 .ok_or_else(|| "prepared SM89 half TN compact symbol is unavailable".to_string())?,
         ),
-        "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1" => HalfKernelChoice::new(
+        "tn_sm89_m64n64_bk64_s2_regpipe_vec2" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_function(
@@ -11538,13 +11449,13 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                     "prepared SM89 half TN regpipe+vec2 symbol is unavailable".to_string()
                 })?,
         ),
-        "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1" => HalfKernelChoice::new(
+        "tn_sm89_m16n16_bk64_s2_ldb72" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_runtime_function(expected.symbol())
                 .ok_or_else(|| "prepared SM89 half TN small16 symbol is unavailable".to_string())?,
         ),
-        "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1" => HalfKernelChoice::new(
+        "nt_sm89_m128n128_bk64_s3_bxor" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_function(
@@ -11553,7 +11464,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                 )
                 .ok_or_else(|| "prepared SM89 half NT Bxor symbol is unavailable".to_string())?,
         ),
-        "gemm_bi_nt_sm89_m96n128_bk64_s3_v1" => HalfKernelChoice::new(
+        "nt_sm89_m96n128_bk64_s3" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_function(
@@ -11632,22 +11543,22 @@ fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRuntimeRoute) -> &'sta
     match route {
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::NnM128N128Bk64S3,
-        ) => "gemm_bi_nn_sm89_m128n128_bk64_s3_v1",
+        ) => "nn_sm89_m128n128_bk64_s3",
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor,
-        ) => "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1",
+        ) => "tn_sm89_m64n64_bk64_s2_compact_bxor",
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
-        ) => "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1",
+        ) => "tn_sm89_m64n64_bk64_s2_regpipe_vec2",
         super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
-            "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1"
+            "tn_sm89_m16n16_bk64_s2_ldb72"
         }
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
-        ) => "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1",
+        ) => "nt_sm89_m128n128_bk64_s3_bxor",
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::NtM96N128Bk64S3,
-        ) => "gemm_bi_nt_sm89_m96n128_bk64_s3_v1",
+        ) => "nt_sm89_m96n128_bk64_s3",
     }
 }
 
@@ -12190,18 +12101,15 @@ fn gemm_bi_forward_tc_with_tile_in<O: PhysicalLaunchObserver>(
     let k_i = checked_dims.k_i32;
     let cfg = tile.launch_cfg(batch, n_out, 71_680)?;
     let choice = match tile {
-        TcTile::Tile128 => HalfKernelChoice::new(
-            "gemm_bi_nn_tc",
-            environment.kernels.gemm_bi_nn_tc_typed.get(dt),
-        ),
-        TcTile::Tile64 => HalfKernelChoice::new(
-            "gemm_bi_nn_tc64",
-            environment.kernels.gemm_bi_nn_tc64_typed.get(dt),
-        ),
-        TcTile::Thin16 => HalfKernelChoice::new(
-            "gemm_bi_nn_tc16",
-            environment.kernels.gemm_bi_nn_tc16_typed.get(dt),
-        ),
+        TcTile::Tile128 => {
+            HalfKernelChoice::new("nn_tc", environment.kernels.gemm_bi_nn_tc_typed.get(dt))
+        }
+        TcTile::Tile64 => {
+            HalfKernelChoice::new("nn_tc64", environment.kernels.gemm_bi_nn_tc64_typed.get(dt))
+        }
+        TcTile::Thin16 => {
+            HalfKernelChoice::new("nn_tc16", environment.kernels.gemm_bi_nn_tc16_typed.get(dt))
+        }
         TcTile::Rect128x64 => {
             return Err("Rect128x64 is a forced TN dW tile; NN has no rectangular route".into());
         }
@@ -12246,7 +12154,7 @@ fn gemm_bi_forward_tc_with_tile_in<O: PhysicalLaunchObserver>(
                     bias: ops.bias_ptr,
                 },
             },
-            format_args!("gemm_bi_nn_tc ({tile:?})"),
+            format_args!("nn_tc ({tile:?})"),
         )
     }
 }
@@ -12270,7 +12178,7 @@ pub fn gemm_bi_backward_dw_tc(
         dy,
         x_saved,
         dims,
-        HalfTriadPolicy::TiledParityV1,
+        HalfTriadPolicy::TiledParity,
     )
     .map(|(tile, _)| tile)
 }
@@ -12345,24 +12253,18 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
     let (cfg, choice, workspace) = match tile {
         TcTile::Tile128 => (
             tile.launch_cfg(n_in, n_out, 69_632)?,
-            HalfKernelChoice::new(
-                "gemm_bi_tn_tc",
-                environment.kernels.gemm_bi_tn_tc_typed.get(dt),
-            ),
+            HalfKernelChoice::new("tn_tc", environment.kernels.gemm_bi_tn_tc_typed.get(dt)),
             None,
         ),
         TcTile::Tile64 => (
             tile.launch_cfg(n_in, n_out, 69_632)?,
-            HalfKernelChoice::new(
-                "gemm_bi_tn_tc64",
-                environment.kernels.gemm_bi_tn_tc64_typed.get(dt),
-            ),
+            HalfKernelChoice::new("tn_tc64", environment.kernels.gemm_bi_tn_tc64_typed.get(dt)),
             None,
         ),
         TcTile::Rect128x64 => (
             tile.launch_cfg(n_in, n_out, 69_632)?,
             HalfKernelChoice::new(
-                "gemm_bi_tn_tc128x64",
+                "tn_tc128x64",
                 environment.kernels.gemm_bi_tn_tc128x64_typed.get(dt),
             ),
             None,
@@ -12377,7 +12279,7 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
                     shared_mem_bytes: 0,
                 },
                 HalfKernelChoice::new(
-                    "gemm_bi_tn_tc64_streamk",
+                    "tn_tc64_streamk",
                     environment
                         .kernels
                         .gemm_bi_tn_tc64_streamk_typed
@@ -12428,7 +12330,7 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
                     bias: 0,
                 },
             },
-            format_args!("gemm_bi_tn_tc ({tile:?})"),
+            format_args!("tn_tc ({tile:?})"),
         )
     }
 }
@@ -12469,7 +12371,7 @@ fn gemm_bi_backward_dx_tc_in<O: PhysicalLaunchObserver>(
         dims,
         environment.kernels.multiprocessor_count(),
         compute_capability,
-        HalfTriadPolicy::TiledParityV1,
+        HalfTriadPolicy::TiledParity,
     ).ok_or_else(|| {
         format!(
             "UNCOVERED gemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
@@ -12514,14 +12416,12 @@ fn gemm_bi_backward_dx_tc_with_tile_in<O: PhysicalLaunchObserver>(
     let k_out_i = checked_dims.k_i32;
     let cfg = tile.launch_cfg(batch, n_in, 73_728)?;
     let choice = match tile {
-        TcTile::Tile128 => HalfKernelChoice::new(
-            "gemm_bi_nt_tc",
-            environment.kernels.gemm_bi_nt_tc_typed.get(dt),
-        ),
-        TcTile::Tile64 => HalfKernelChoice::new(
-            "gemm_bi_nt_tc64",
-            environment.kernels.gemm_bi_nt_tc64_typed.get(dt),
-        ),
+        TcTile::Tile128 => {
+            HalfKernelChoice::new("nt_tc", environment.kernels.gemm_bi_nt_tc_typed.get(dt))
+        }
+        TcTile::Tile64 => {
+            HalfKernelChoice::new("nt_tc64", environment.kernels.gemm_bi_nt_tc64_typed.get(dt))
+        }
         TcTile::Thin16 => {
             return Err("Thin16 is an NN-forward rung; the NT dX path has no thin tile".into());
         }
@@ -12561,7 +12461,7 @@ fn gemm_bi_backward_dx_tc_with_tile_in<O: PhysicalLaunchObserver>(
                     bias: 0,
                 },
             },
-            format_args!("gemm_bi_nt_tc ({tile:?})"),
+            format_args!("nt_tc ({tile:?})"),
         )
     }
 }
@@ -12615,10 +12515,8 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_nn_gemv",
-            environment.kernels.gemm_bi_nn_gemv_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("nn_gemv", environment.kernels.gemm_bi_nn_gemv_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&y.ptr);
         b.arg(&x.ptr);
@@ -12651,7 +12549,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                         bias: bias_ptr,
                     },
                 },
-                format_args!("gemm_bi_nn_gemv typed"),
+                format_args!("nn_gemv typed"),
             )
         }?;
         return Ok(seal);
@@ -12669,7 +12567,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             )?,
         };
         let choice = HalfKernelChoice::new(
-            "gemm_bi_nn_ultra_thin",
+            "nn_ultra_thin",
             environment.kernels.gemm_bi_nn_ultra_thin_typed.get(dt),
         );
         let mut b = environment.stream.launch_builder(choice.function);
@@ -12706,7 +12604,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                         bias: bias_ptr,
                     },
                 },
-                format_args!("gemm_bi_nn_ultra_thin typed"),
+                format_args!("nn_ultra_thin typed"),
             )
         }?;
         return Ok(seal);
@@ -12721,7 +12619,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                 checked_tile_grid(checked_dims.m_u32, 16, checked_dims.n_u32, 16)?,
                 64u32,
                 HalfKernelChoice::new(
-                    "gemm_bi_nn_narrow_small",
+                    "nn_narrow_small",
                     environment.kernels.gemm_bi_nn_narrow_small_typed.get(dt),
                 ),
             )
@@ -12730,7 +12628,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                 checked_tile_grid(checked_dims.m_u32, 64, checked_dims.n_u32, 32)?,
                 128u32,
                 HalfKernelChoice::new(
-                    "gemm_bi_nn_narrow",
+                    "nn_narrow",
                     environment.kernels.gemm_bi_nn_narrow_typed.get(dt),
                 ),
             )
@@ -12775,7 +12673,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                         bias: bias_ptr,
                     },
                 },
-                format_args!("gemm_bi_nn_narrow typed"),
+                format_args!("nn_narrow typed"),
             )
         }?;
         return Ok(seal);
@@ -12795,10 +12693,8 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (256, 1, 1),
             shared_mem_bytes: 34 * 1024,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_nn_big",
-            environment.kernels.gemm_bi_nn_big_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("nn_big", environment.kernels.gemm_bi_nn_big_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&y.ptr);
         b.arg(&x.ptr);
@@ -12833,7 +12729,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
                         bias: bias_ptr,
                     },
                 },
-                format_args!("gemm_bi_nn_big typed"),
+                format_args!("nn_big typed"),
             )
         }?;
         return Ok(seal);
@@ -12890,10 +12786,8 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_tn_gemv",
-            environment.kernels.gemm_bi_tn_gemv_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("tn_gemv", environment.kernels.gemm_bi_tn_gemv_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&dw_ptr);
         b.arg(&x_saved.ptr);
@@ -12924,7 +12818,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_tn_gemv typed"),
+                format_args!("tn_gemv typed"),
             )
         }?;
         return Ok(seal);
@@ -12945,7 +12839,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
             shared_mem_bytes: 0,
         };
         let choice = HalfKernelChoice::new(
-            "gemm_bi_tn_narrow",
+            "tn_narrow",
             environment.kernels.gemm_bi_tn_narrow_typed.get(dt),
         );
         let mut b = environment.stream.launch_builder(choice.function);
@@ -12977,7 +12871,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_tn_narrow typed"),
+                format_args!("tn_narrow typed"),
             )
         }?;
         return Ok(seal);
@@ -13000,10 +12894,8 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (256, 1, 1),
             shared_mem_bytes: 34 * 1024,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_tn_big",
-            environment.kernels.gemm_bi_tn_big_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("tn_big", environment.kernels.gemm_bi_tn_big_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&dw_ptr);
         b.arg(&x_saved.ptr);
@@ -13033,7 +12925,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_tn_big typed"),
+                format_args!("tn_big typed"),
             )
         }?;
         return Ok(seal);
@@ -13090,10 +12982,8 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_nt_gemv",
-            environment.kernels.gemm_bi_nt_gemv_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("nt_gemv", environment.kernels.gemm_bi_nt_gemv_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&dx.ptr);
         b.arg(&dy.ptr);
@@ -13124,7 +13014,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_nt_gemv typed"),
+                format_args!("nt_gemv typed"),
             )
         }?;
         return Ok(seal);
@@ -13145,7 +13035,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             shared_mem_bytes: 0,
         };
         let choice = HalfKernelChoice::new(
-            "gemm_bi_nt_narrow",
+            "nt_narrow",
             environment.kernels.gemm_bi_nt_narrow_typed.get(dt),
         );
         let mut b = environment.stream.launch_builder(choice.function);
@@ -13177,7 +13067,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_nt_narrow typed"),
+                format_args!("nt_narrow typed"),
             )
         }?;
         return Ok(seal);
@@ -13200,10 +13090,8 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             block_dim: (256, 1, 1),
             shared_mem_bytes: 34 * 1024,
         };
-        let choice = HalfKernelChoice::new(
-            "gemm_bi_nt_big",
-            environment.kernels.gemm_bi_nt_big_typed.get(dt),
-        );
+        let choice =
+            HalfKernelChoice::new("nt_big", environment.kernels.gemm_bi_nt_big_typed.get(dt));
         let mut b = environment.stream.launch_builder(choice.function);
         b.arg(&dx.ptr);
         b.arg(&dy.ptr);
@@ -13233,7 +13121,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
                         bias: 0,
                     },
                 },
-                format_args!("gemm_bi_nt_big typed"),
+                format_args!("nt_big typed"),
             )
         }?;
         return Ok(seal);
@@ -13466,14 +13354,14 @@ mod prepared_f32_launch_tests {
             splitk4_plan,
         );
         assert_eq!(splitk2.len(), 1);
-        assert_eq!(splitk2[0].backend, PhysicalGemmBackend::MmaTf32RnaSplitK2V1);
+        assert_eq!(splitk2[0].backend, PhysicalGemmBackend::MmaTf32RnaSplitK2);
         assert_eq!(
             splitk2[0].numeric_contract,
-            ResolvedNumericContract::MmaTf32RnaSplitK2V1
+            ResolvedNumericContract::MmaTf32RnaSplitK2
         );
         assert_eq!(
             splitk2[0].ownership,
-            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2ReduceV1
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2Reduce
         );
         assert_ne!(splitk2[0].backend, splitk4[0].backend);
         assert_ne!(splitk2[0].numeric_contract, splitk4[0].numeric_contract);
@@ -13539,14 +13427,14 @@ mod prepared_f32_launch_tests {
             [9; 32],
             p8_plan,
         );
-        assert_eq!(p8[0].backend, PhysicalGemmBackend::MmaTf32RnaSplitK8V1);
+        assert_eq!(p8[0].backend, PhysicalGemmBackend::MmaTf32RnaSplitK8);
         assert_eq!(
             p8[0].numeric_contract,
-            ResolvedNumericContract::MmaTf32RnaSplitK8V1
+            ResolvedNumericContract::MmaTf32RnaSplitK8
         );
         assert_eq!(
             p8[0].ownership,
-            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8ReduceV1
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8Reduce
         );
         assert_eq!(p8[0].tile, (32, 32));
         assert_eq!(p8[0].launch.grid_dim, (12, 2, 8));
@@ -13583,12 +13471,12 @@ mod prepared_f32_launch_tests {
                 bi_tensor_cores: true,
                 fast_gemm: false,
                 cublas_tf32: false,
-                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+                half_triad_policy: HalfTriadPolicy::TiledParity,
                 bi_gemm_family: BiGemmFamily::Triad,
             },
             backend_set: BackendSet::TRIAD,
-            numeric_contracts: NumericContractSet::TRIAD_MMA_SYNC_V1,
+            numeric_contracts: NumericContractSet::TRIAD_MMA_SYNC,
             compiler,
             artifacts: build_artifact_set(&[
                 artifact(ModuleKind::Fixed, 5),
@@ -13631,7 +13519,7 @@ mod prepared_f32_launch_tests {
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
             multiprocessors: 170,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
                 bias_ptr: 0x4_0000,
@@ -13699,11 +13587,11 @@ mod prepared_f32_launch_tests {
                 ..policy
             },
             GemmPolicy {
-                f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32,
                 ..policy
             },
             GemmPolicy {
-                half_triad_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                half_triad_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
                 ..policy
             },
             GemmPolicy {
@@ -13726,7 +13614,7 @@ mod prepared_f32_launch_tests {
             request,
             operands,
         );
-        let forced = Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+        let forced = Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
             kvec: false,
             splits: 1,
@@ -13749,13 +13637,11 @@ mod prepared_f32_launch_tests {
             PreparedF32Key::new(
                 context_token,
                 policy,
-                F32PreparedSelection::Forced(Tf32PhysicalRoute::Sm120TmaFmaExactV1(
-                    Sm120FmaRoute {
-                        tile: Sm120FmaTile::M64N128,
-                        kvec: false,
-                        splits: 1,
-                    },
-                )),
+                F32PreparedSelection::Forced(Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
+                    tile: Sm120FmaTile::M64N128,
+                    kvec: false,
+                    splits: 1,
+                },)),
                 request,
                 operands,
             ),
@@ -14135,7 +14021,7 @@ mod prepared_f32_launch_tests {
         ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         let dims = (8, 8, 8);
         let x = GpuBuffer::from_cpu(&ctx.stream, &vec![0.25; dims.0 * dims.1]).expect("allocate X");
         let w = GpuBuffer::from_cpu(&ctx.stream, &vec![0.5; dims.1 * dims.2]).expect("allocate W");
@@ -14209,7 +14095,7 @@ mod prepared_f32_launch_tests {
             .iter()
             .map(|route| route.symbol)
             .collect::<Vec<_>>();
-        assert_eq!(symbols, ["gemm_bi_nn_slim"]);
+        assert_eq!(symbols, ["nn_slim"]);
         ctx.stream.synchronize().expect("finish shifted-B launch");
         let actual = actual
             .to_cpu(&ctx.stream)
@@ -14229,13 +14115,13 @@ mod prepared_f32_launch_tests {
     #[test]
     #[ignore = "requires an SM89 CUDA device"]
     fn exact_scalar_prepared_nn_accepts_managed_b_plus_one() {
-        assert_managed_nn_b_subview(F32TriadPolicy::ExactScalarFmaV1);
+        assert_managed_nn_b_subview(F32TriadPolicy::ExactScalarFma);
     }
 
     #[test]
     #[ignore = "requires an SM89 CUDA device"]
     fn automatic_scalar_prepared_nn_accepts_managed_b_plus_one() {
-        assert_managed_nn_b_subview(F32TriadPolicy::AllowDeterministicTf32V1);
+        assert_managed_nn_b_subview(F32TriadPolicy::AllowDeterministicTf32);
     }
 
     #[test]
@@ -14247,7 +14133,7 @@ mod prepared_f32_launch_tests {
         ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
         let dims = (49, 65, 129);
         let a = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(dims.0 * dims.1, 5))
             .expect("allocate A");
@@ -14270,7 +14156,7 @@ mod prepared_f32_launch_tests {
         assert!(matches!(
             prepared.kind,
             PreparedF32Kind::Tf32 {
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
@@ -14283,7 +14169,7 @@ mod prepared_f32_launch_tests {
                 .iter()
                 .map(|route| route.symbol)
                 .collect::<Vec<_>>(),
-            ["gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4"]
+            ["nn_sm80_mma_tf32_m16n32_bk32_s4"]
         );
 
         let mut repeat_bits = None;
@@ -14340,7 +14226,7 @@ mod prepared_f32_launch_tests {
         builder.arg(&n);
         unsafe { builder.launch(config) }
             .map(|_| ())
-            .map_err(|error| format!("launch gemm_bi_nn_slim alignment fixture: {error:?}"))
+            .map_err(|error| format!("launch nn_slim alignment fixture: {error:?}"))
     }
 
     #[test]
@@ -14352,7 +14238,7 @@ mod prepared_f32_launch_tests {
         ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         let dims = (1024, 16, 128);
         let a = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(dims.0 * dims.1, 5))
             .expect("allocate A");
@@ -14386,7 +14272,7 @@ mod prepared_f32_launch_tests {
             .iter()
             .map(|route| route.symbol)
             .collect::<Vec<_>>();
-        assert_eq!(symbols, ["gemm_bi_nn_slim"]);
+        assert_eq!(symbols, ["nn_slim"]);
         assert!(matches!(
             prepared.kind,
             PreparedF32Kind::Scalar(ScalarDispatchPlan::NnFinal { slim: true })
@@ -14803,11 +14689,7 @@ mod prepared_f32_launch_tests {
             assert_eq!(nodes.len(), 3);
             assert_eq!(
                 nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-                [
-                    "gemm_bi_transpose_f32_2d",
-                    "gemm_bi_nn_splitk32_partial",
-                    "gemm_bi_splitk_reduce",
-                ]
+                ["transpose_f32_2d", "nn_splitk32_partial", "splitk_reduce",]
             );
             assert_eq!(
                 nodes
@@ -14839,28 +14721,28 @@ mod prepared_f32_launch_tests {
                 ResolvedGemmOp::Nn,
                 (2048, 128, 1024),
                 ScalarDispatchPlan::NnFinal { slim: false },
-                "gemm_bi_nn",
+                "nn_big",
                 34 * 1024,
             ),
             (
                 ResolvedGemmOp::Tn,
                 (128, 1024, 1024),
                 ScalarDispatchPlan::TnFinal { slim: false },
-                "gemm_bi_tn_aligned",
+                "tn_aligned",
                 34 * 1024,
             ),
             (
                 ResolvedGemmOp::Nt,
                 (2048, 1024, 129),
                 ScalarDispatchPlan::NtFinal { slim: false },
-                "gemm_bi_nt",
+                "nt_big",
                 33_376,
             ),
             (
                 ResolvedGemmOp::Nt,
                 (2048, 512, 129),
                 ScalarDispatchPlan::NtFinal { slim: true },
-                "gemm_bi_nt_slim",
+                "nt_slim",
                 0,
             ),
         ] {
@@ -14901,7 +14783,7 @@ mod prepared_f32_launch_tests {
                 scalar_physical_nodes(request, operands, ScalarDispatchPlan::NnM64N64Qualified)
                     .unwrap();
             assert_eq!(nodes.len(), 1);
-            assert_eq!(nodes[0].symbol, "gemm_bi_nn_m64n64_bk16_s2_v1");
+            assert_eq!(nodes[0].symbol, "nn_m64n64_bk16_s2");
             assert_eq!(nodes[0].tile, (64, 64));
             assert_eq!((nodes[0].bk, nodes[0].stages), (16, 2));
             assert_eq!(nodes[0].launch.grid_dim, (expected_grid, 1, 1));
@@ -14942,7 +14824,7 @@ mod prepared_f32_launch_tests {
         assert!(scalar_plan_requires_zero_beta(plan));
         let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].symbol, "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1");
+        assert_eq!(nodes[0].symbol, "nn_sm89_f32_n64_copyplan");
         assert_eq!(nodes[0].tile, (64, 64));
         assert_eq!((nodes[0].bk, nodes[0].stages), (32, 2));
         assert_eq!(nodes[0].launch.grid_dim, (384, 1, 1));
@@ -14951,9 +14833,9 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_route_contract(nodes[0].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
-                ResolvedNumericContract::ScalarFmaV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+                ResolvedNumericContract::ScalarFma,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
         );
         let layout = scalar_argument_layout(request, operands, plan, 0);
@@ -14972,10 +14854,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_nn_splitk32_m32n64_exact_v1",
-                "gemm_bi_splitk_reduce",
-            ]
+            ["nn_splitk32_m32n64_exact", "splitk_reduce",]
         );
         assert_eq!(nodes[0].tile, (32, 64));
         assert_eq!((nodes[0].bk, nodes[0].stages), (32, 1));
@@ -15001,9 +14880,9 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_route_contract(nodes[0].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaSplitKPartialV1,
-                ResolvedNumericContract::ScalarFmaSplitKPartialV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartitionV1,
+                PhysicalGemmBackend::ScalarFmaSplitKPartial,
+                ResolvedNumericContract::ScalarFmaSplitKPartial,
+                ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartition,
             )
         );
     }
@@ -15020,10 +14899,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_32x16_d768_v1",
-                "gemm_bi_nn_m64n64_bk16_s2_v1",
-            ]
+            ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
         );
         assert_eq!(nodes[0].tile, (32, 32));
         assert_eq!((nodes[0].bk, nodes[0].stages), (1, 1));
@@ -15068,10 +14944,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_32x16_d768_v1",
-                "gemm_bi_nn_m64n64_bk16_s2_v1",
-            ]
+            ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
         );
         assert_eq!(nodes[0].launch.grid_dim, (24, 48, 1));
         assert_eq!(nodes[0].launch.block_dim, (32, 16, 1));
@@ -15112,10 +14985,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_32x16_d768_v1",
-                "gemm_bi_nn_m64n64_bk16_s2_v1",
-            ]
+            ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
         );
         assert_eq!(nodes[0].tile, (32, 32));
         assert_eq!((nodes[0].bk, nodes[0].stages), (1, 1));
@@ -15161,10 +15031,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_32x16_d768_v1",
-                "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-            ]
+            ["transpose_f32_32x16_d768", "nn_prism_m64n64_bk16_s2",]
         );
         assert_eq!(nodes[0].tile, (32, 32));
         assert_eq!((nodes[0].bk, nodes[0].stages), (1, 1));
@@ -15218,10 +15085,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(
             nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_32x16_d768_v1",
-                "gemm_bi_nn_m64n64_bk16_s2_v1",
-            ]
+            ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
         );
         assert_eq!(
             (nodes[0].tile, nodes[0].bk, nodes[0].stages),
@@ -15443,7 +15307,7 @@ mod prepared_f32_launch_tests {
             assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
             assert_eq!(raw_nodes.len(), 1);
             let node = raw_nodes[0];
-            assert_eq!(node.symbol, "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1");
+            assert_eq!(node.symbol, "tn_m16n16_bk16_s2_splitm16");
             assert_eq!(node.tile, (16, 16));
             assert_eq!((node.bk, node.stages), (16, 2));
             assert_eq!(node.launch.grid_dim, (768, 1, 1));
@@ -15458,9 +15322,9 @@ mod prepared_f32_launch_tests {
             assert_eq!(
                 scalar_route_contract(node.symbol),
                 (
-                    PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
-                    ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-                    ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                    PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
+                    ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                    ResolvedOutputOwnership::OneCtaPerOutputTile,
                 )
             );
             assert!(!raw_plan.needs_transpose_scratch());
@@ -15488,10 +15352,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(raw_nodes.len(), 2);
         assert_eq!(
             raw_nodes.iter().map(|node| node.symbol).collect::<Vec<_>>(),
-            [
-                "gemm_bi_nn_splitk32_m32n64_exact_v1",
-                "gemm_bi_splitk_reduce",
-            ]
+            ["nn_splitk32_m32n64_exact", "splitk_reduce",]
         );
         assert!(
             raw_nodes
@@ -15523,7 +15384,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
         assert_eq!(raw_nodes.len(), 1);
         let node = raw_nodes[0];
-        assert_eq!(node.symbol, "gemm_bi_nt_m2n16_bk64_splitk32_v1");
+        assert_eq!(node.symbol, "nt_m2n16_bk64_splitk32");
         assert_eq!(node.tile, (2, 16));
         assert_eq!((node.bk, node.stages), (64, 2));
         assert_eq!(node.launch.grid_dim, (256, 1, 1));
@@ -15574,7 +15435,7 @@ mod prepared_f32_launch_tests {
         );
         let nodes = scalar_physical_nodes(request, operands, raw_plan).unwrap();
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[1].symbol, "gemm_bi_nn_m64n64_bk16_s2_v1");
+        assert_eq!(nodes[1].symbol, "nn_m64n64_bk16_s2");
         assert_eq!((nodes[1].bk, nodes[1].stages), (16, 2));
     }
 
@@ -15607,14 +15468,11 @@ mod prepared_f32_launch_tests {
         assert_eq!(prepared_nodes, raw_nodes);
         assert_eq!(raw_nodes.len(), scalar_node_count(raw_plan));
         assert_eq!(raw_nodes.len(), 2);
-        assert_eq!(raw_nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+        assert_eq!(raw_nodes[0].symbol, "transpose_f32_32x16_d768");
         assert_eq!(raw_nodes[0].launch.grid_dim, (48, 96, 1));
         assert_eq!(raw_nodes[0].launch.block_dim, (32, 16, 1));
         assert_eq!(raw_nodes[0].launch.shared_mem_bytes, 0);
-        assert_eq!(
-            raw_nodes[1].symbol,
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
-        );
+        assert_eq!(raw_nodes[1].symbol, "nn_sm89_f32_n64_copyplan");
         assert_eq!(raw_nodes[1].launch.grid_dim, (3_072, 1, 1));
         assert_eq!(raw_nodes[1].launch.block_dim, (128, 1, 1));
         assert_eq!(raw_nodes[1].launch.shared_mem_bytes, 0);
@@ -15625,17 +15483,17 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_route_contract(raw_nodes[0].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaV1,
-                ResolvedNumericContract::ScalarFmaV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                PhysicalGemmBackend::ScalarFma,
+                ResolvedNumericContract::ScalarFma,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
         );
         assert_eq!(
             scalar_route_contract(raw_nodes[1].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
-                ResolvedNumericContract::ScalarFmaV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+                ResolvedNumericContract::ScalarFma,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
         );
         assert!(
@@ -15742,10 +15600,10 @@ mod prepared_f32_launch_tests {
         );
         let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+        assert_eq!(nodes[0].symbol, "transpose_f32_32x16_d768");
         assert_eq!(nodes[0].launch.grid_dim, (24, 48, 1));
         assert_eq!(nodes[0].launch.block_dim, (32, 16, 1));
-        assert_eq!(nodes[1].symbol, "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1");
+        assert_eq!(nodes[1].symbol, "nn_sm89_f32_n64_copyplan");
         assert_eq!(nodes[1].launch.grid_dim, (768, 1, 1));
         assert_eq!(nodes[1].launch.block_dim, (128, 1, 1));
         assert_eq!(nodes[1].launch.shared_mem_bytes, 0);
@@ -15755,11 +15613,11 @@ mod prepared_f32_launch_tests {
         );
         assert_eq!(
             scalar_route_contract(nodes[0].symbol).0,
-            PhysicalGemmBackend::ScalarFmaV1
+            PhysicalGemmBackend::ScalarFma
         );
         assert_eq!(
             scalar_route_contract(nodes[1].symbol).0,
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
         );
         assert_ne!(
             nodes[0].launch.arguments_digest,
@@ -15805,14 +15663,11 @@ mod prepared_f32_launch_tests {
             let prepared_nodes = scalar_physical_nodes(request, operands, plan).unwrap();
             assert_eq!(prepared_nodes, raw_nodes, "raw/prepared plan {plan:?}");
             assert_eq!(raw_nodes.len(), 2);
-            assert_eq!(raw_nodes[0].symbol, "gemm_bi_transpose_f32_32x16_d768_v1");
+            assert_eq!(raw_nodes[0].symbol, "transpose_f32_32x16_d768");
             assert_eq!(raw_nodes[0].launch.grid_dim, transpose_grid);
             assert_eq!(raw_nodes[0].launch.block_dim, (32, 16, 1));
             assert_eq!(raw_nodes[0].launch.shared_mem_bytes, 0);
-            assert_eq!(
-                raw_nodes[1].symbol,
-                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
-            );
+            assert_eq!(raw_nodes[1].symbol, "nn_sm89_f32_n64_copyplan");
             assert_eq!(raw_nodes[1].launch.grid_dim, fixed_grid);
             assert_eq!(raw_nodes[1].launch.block_dim, (128, 1, 1));
             assert_eq!(raw_nodes[1].launch.shared_mem_bytes, 0);
@@ -15822,11 +15677,11 @@ mod prepared_f32_launch_tests {
             );
             assert_eq!(
                 scalar_route_contract(raw_nodes[0].symbol).0,
-                PhysicalGemmBackend::ScalarFmaV1
+                PhysicalGemmBackend::ScalarFma
             );
             assert_eq!(
                 scalar_route_contract(raw_nodes[1].symbol).0,
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
+                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
             );
             assert_ne!(
                 raw_nodes[0].launch.arguments_digest,
@@ -15854,34 +15709,28 @@ mod prepared_f32_launch_tests {
     #[test]
     fn scalar_splitk_symbols_have_stage_specific_route_contracts() {
         let partial = (
-            PhysicalGemmBackend::ScalarFmaSplitKPartialV1,
-            ResolvedNumericContract::ScalarFmaSplitKPartialV1,
-            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartitionV1,
+            PhysicalGemmBackend::ScalarFmaSplitKPartial,
+            ResolvedNumericContract::ScalarFmaSplitKPartial,
+            ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartition,
         );
         assert_eq!(partial.0 as u8, 17);
         assert_eq!(partial.1 as u8, 16);
         assert_eq!(partial.2 as u8, 9);
-        for symbol in [
-            "gemm_bi_nn_splitk32_partial",
-            "gemm_bi_nn_splitk_slim_partial",
-        ] {
+        for symbol in ["nn_splitk32_partial", "nn_splitk_slim_partial"] {
             assert_eq!(scalar_route_contract(symbol), partial, "{symbol}");
         }
 
         let reducer = (
-            PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
-            ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1,
-            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitKReduceV1,
+            PhysicalGemmBackend::ScalarFmaSplitKF32Reduce,
+            ResolvedNumericContract::ScalarFmaSplitKF32Reduce,
+            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitKReduce,
         );
         assert_eq!(reducer.0 as u8, 18);
         assert_eq!(reducer.1 as u8, 17);
         assert_eq!(reducer.2 as u8, 10);
-        assert_eq!(scalar_route_contract("gemm_bi_splitk_reduce"), reducer);
+        assert_eq!(scalar_route_contract("splitk_reduce"), reducer);
         assert_ne!(partial, reducer);
-        assert_ne!(
-            partial,
-            scalar_route_contract("gemm_bi_nn_splitk32_partial_typo")
-        );
+        assert_ne!(partial, scalar_route_contract("nn_splitk32_partial_typo"));
     }
 
     #[test]
@@ -15976,7 +15825,7 @@ mod prepared_f32_launch_tests {
 
     #[test]
     fn triad_retained_tf32_prism_nt_freezes_one_rna_mma_node() {
-        let route = Tf32PhysicalRoute::Sm89MmaTf32Compact8V1;
+        let route = Tf32PhysicalRoute::Sm89MmaTf32Compact8;
         let spec = tf32_kernel_spec(ResolvedGemmOp::Nt, route).unwrap();
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
@@ -16005,15 +15854,12 @@ mod prepared_f32_launch_tests {
             config,
         );
 
-        assert_eq!(
-            resolved.symbol,
-            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2"
-        );
+        assert_eq!(resolved.symbol, "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2");
         assert_eq!(resolved.module_kind, ModuleKind::TriadSm89Finalist);
-        assert_eq!(resolved.backend, PhysicalGemmBackend::Sm89MmaTf32Compact8V1);
+        assert_eq!(resolved.backend, PhysicalGemmBackend::Sm89MmaTf32Compact8);
         assert_eq!(
             resolved.numeric_contract,
-            ResolvedNumericContract::MmaTf32RnaV1
+            ResolvedNumericContract::MmaTf32Rna
         );
         assert_eq!(
             resolved.instruction_family,
@@ -16025,11 +15871,11 @@ mod prepared_f32_launch_tests {
         );
         assert_eq!(
             resolved.operand_conversion,
-            ResolvedOperandConversion::RegisterCvtRnaTf32F32V1
+            ResolvedOperandConversion::RegisterCvtRnaTf32F32
         );
         assert_eq!(
             resolved.ownership,
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1
+            ResolvedOutputOwnership::OneCtaPerOutputTile
         );
         assert_eq!(resolved.shape, (4_621, 384, 1_928));
         assert_eq!(resolved.strides, (1_928, 1_928, 384));
@@ -16084,7 +15930,7 @@ mod prepared_f32_launch_tests {
 
     #[test]
     fn tn_underfill_route_freezes_physical_and_graph_identity() {
-        let route = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+        let route = Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         });
@@ -16111,15 +15957,12 @@ mod prepared_f32_launch_tests {
             config,
         );
 
-        assert_eq!(
-            resolved.symbol,
-            "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4"
-        );
+        assert_eq!(resolved.symbol, "tn_sm80_mma_tf32_m16n32_bk32_s4");
         assert_eq!(resolved.module_kind, ModuleKind::TriadSm80);
-        assert_eq!(resolved.backend, PhysicalGemmBackend::MmaTf32RnaV1);
+        assert_eq!(resolved.backend, PhysicalGemmBackend::MmaTf32Rna);
         assert_eq!(
             resolved.numeric_contract,
-            ResolvedNumericContract::MmaTf32RnaV1
+            ResolvedNumericContract::MmaTf32Rna
         );
         assert_eq!(resolved.shape, (256, 512, 384));
         assert_eq!(resolved.strides, (512, 384, 384));
@@ -16151,7 +15994,7 @@ mod prepared_f32_launch_tests {
 
     #[test]
     fn rect_wide_route_freezes_physical_and_graph_identity() {
-        let route = Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+        let route = Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
             tile: Tf32Sm120Tile::M80N32Bk64,
             stages: Tf32Sm120Stages::S2,
         });
@@ -16178,15 +16021,12 @@ mod prepared_f32_launch_tests {
             config,
         );
 
-        assert_eq!(
-            resolved.symbol,
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2"
-        );
+        assert_eq!(resolved.symbol, "nn_sm120_tma_mma_tf32_m80n32_bk64_s2");
         assert_eq!(resolved.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(resolved.backend, PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1);
+        assert_eq!(resolved.backend, PhysicalGemmBackend::Sm120TmaMmaTf32Rna);
         assert_eq!(
             resolved.numeric_contract,
-            ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+            ResolvedNumericContract::Sm120TmaMmaTf32Rna
         );
         assert_eq!(resolved.shape, (512, 3_072, 768));
         assert_eq!(resolved.strides, (3_072, 768, 768));
@@ -16224,7 +16064,7 @@ mod prepared_f32_launch_tests {
     }
 
     fn portable_route() -> Tf32PhysicalRoute {
-        Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+        Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         })
@@ -16352,10 +16192,7 @@ mod prepared_f32_launch_tests {
                 },
             )
             .unwrap();
-            assert!(matches!(
-                maps,
-                F32PreparedTensorMaps::ZeroReductionV1 { .. }
-            ));
+            assert!(matches!(maps, F32PreparedTensorMaps::ZeroReduction { .. }));
         }
         assert_eq!(a_input_queries.get(), 0);
         assert_eq!(b_input_queries.get(), 0);
@@ -16508,10 +16345,10 @@ mod prepared_f32_launch_tests {
             scalar_physical_nodes(request, scalar_test_operands(ResolvedGemmOp::Tn, 1.0), plan)
                 .unwrap();
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].symbol, "gemm_bi_tn_splitm_partial_aligned");
+        assert_eq!(nodes[0].symbol, "tn_splitm_partial_aligned");
         assert_eq!(nodes[0].launch.grid_dim, (1, 1, 16));
         assert_eq!(nodes[0].launch.block_dim, (256, 1, 1));
-        assert_eq!(nodes[1].symbol, "gemm_bi_splitm_reduce");
+        assert_eq!(nodes[1].symbol, "splitm_reduce");
         assert_eq!(nodes[1].launch.grid_dim, (64, 1, 1));
         assert_eq!(nodes[1].launch.block_dim, (256, 1, 1));
 
@@ -16525,7 +16362,7 @@ mod prepared_f32_launch_tests {
         )
         .unwrap();
         assert_eq!(below.len(), 1);
-        assert_eq!(below[0].symbol, "gemm_bi_tn_slim");
+        assert_eq!(below[0].symbol, "tn_slim");
     }
 
     #[test]
@@ -16552,12 +16389,12 @@ mod prepared_f32_launch_tests {
             let aligned_nodes = scalar_physical_nodes(request, aligned, plan).unwrap();
             assert_eq!(aligned_nodes.len(), 2, "{dims:?}");
             assert_eq!(
-                aligned_nodes[0].symbol, "gemm_bi_tn_narrow_splitm_partial_aligned",
+                aligned_nodes[0].symbol, "tn_narrow_splitm_partial_aligned",
                 "{dims:?}"
             );
             assert_eq!(aligned_nodes[0].launch.grid_dim, partial_grid, "{dims:?}");
             assert_eq!(aligned_nodes[0].launch.block_dim, (128, 1, 1), "{dims:?}");
-            assert_eq!(aligned_nodes[1].symbol, "gemm_bi_splitm_reduce", "{dims:?}");
+            assert_eq!(aligned_nodes[1].symbol, "splitm_reduce", "{dims:?}");
             assert_eq!(aligned_nodes[1].launch.grid_dim, reducer_grid, "{dims:?}");
             assert_eq!(aligned_nodes[1].launch.block_dim, (256, 1, 1), "{dims:?}");
 
@@ -16579,14 +16416,11 @@ mod prepared_f32_launch_tests {
                 let unaligned_nodes = scalar_physical_nodes(request, unaligned, plan).unwrap();
                 assert_eq!(unaligned_nodes.len(), 2, "{dims:?}");
                 assert_eq!(
-                    unaligned_nodes[0].symbol, "gemm_bi_tn_narrow_splitm_partial",
+                    unaligned_nodes[0].symbol, "tn_narrow_splitm_partial",
                     "{dims:?}"
                 );
                 assert_eq!(unaligned_nodes[0].launch.grid_dim, partial_grid, "{dims:?}");
-                assert_eq!(
-                    unaligned_nodes[1].symbol, "gemm_bi_splitm_reduce",
-                    "{dims:?}"
-                );
+                assert_eq!(unaligned_nodes[1].symbol, "splitm_reduce", "{dims:?}");
                 assert_eq!(unaligned_nodes[1].launch.grid_dim, reducer_grid, "{dims:?}");
             }
 
@@ -16596,7 +16430,7 @@ mod prepared_f32_launch_tests {
             };
             let output_offset_nodes = scalar_physical_nodes(request, output_offset, plan).unwrap();
             assert_eq!(
-                output_offset_nodes[0].symbol, "gemm_bi_tn_narrow_splitm_partial_aligned",
+                output_offset_nodes[0].symbol, "tn_narrow_splitm_partial_aligned",
                 "{dims:?}"
             );
         }
@@ -16607,10 +16441,10 @@ mod prepared_f32_launch_tests {
         for (dims, aligned_symbol, fallback_symbol) in [
             (
                 (256, 128, 128),
-                "gemm_bi_tn_splitm_partial_aligned",
-                "gemm_bi_tn_splitm_partial",
+                "tn_splitm_partial_aligned",
+                "tn_splitm_partial",
             ),
-            ((128, 1024, 1024), "gemm_bi_tn_aligned", "gemm_bi_tn"),
+            ((128, 1024, 1024), "tn_aligned", "tn_big"),
         ] {
             let (_, request, plan) =
                 scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims, 142).unwrap();
@@ -16644,15 +16478,15 @@ mod prepared_f32_launch_tests {
         let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
         let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
         assert_eq!(nodes.len(), 34);
-        assert_eq!(nodes[0].symbol, "gemm_bi_transpose_f32_2d");
+        assert_eq!(nodes[0].symbol, "transpose_f32_2d");
         assert_eq!(nodes[0].launch.grid_dim, (4, 2, 1));
         assert_eq!(nodes[0].launch.block_dim, (32, 32, 1));
-        assert_eq!(nodes[1].symbol, "gemm_bi_nn_splitk32_partial");
+        assert_eq!(nodes[1].symbol, "nn_splitk32_partial");
         assert_eq!(nodes[1].launch.grid_dim, (4, 1, 1));
-        assert_eq!(nodes[2].symbol, "gemm_bi_splitk_reduce");
+        assert_eq!(nodes[2].symbol, "splitk_reduce");
         assert_eq!(nodes[2].launch.grid_dim, (8, 1, 1));
         for node in &nodes[3..] {
-            assert_eq!(node.symbol, "gemm_bi_dx_col_gemv");
+            assert_eq!(node.symbol, "dx_col_gemv");
             assert_eq!(node.launch.grid_dim, (1, 1, 1));
             assert_eq!(node.launch.block_dim, (128, 1, 1));
         }
@@ -16700,7 +16534,7 @@ mod prepared_f32_launch_tests {
             let neighbor =
                 scalar_physical_nodes(neighbor_request, operands, neighbor_plan).unwrap();
             assert_eq!(neighbor.len(), 1, "neighbor {dims:?}");
-            assert_eq!(neighbor[0].symbol, "gemm_bi_nt_narrow", "neighbor {dims:?}");
+            assert_eq!(neighbor[0].symbol, "nt_narrow", "neighbor {dims:?}");
         }
 
         let alpha_mutation =
@@ -16753,8 +16587,8 @@ mod half_physical_trace_tests {
             bi_tensor_cores: true,
             fast_gemm: false,
             cublas_tf32: false,
-            f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-            half_triad_policy: HalfTriadPolicy::TiledParityV1,
+            f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+            half_triad_policy: HalfTriadPolicy::TiledParity,
             bi_gemm_family: BiGemmFamily::Triad,
         };
         let (backend_set, numeric_contracts) = route_backend_contract_sets(policy);
@@ -16894,45 +16728,36 @@ mod half_physical_trace_tests {
     #[test]
     fn half_kernel_identity_uses_exact_dtype_suffix_and_module_owner() {
         for (base, module_kind) in [
-            ("gemm_bi_nn_gemv", ModuleKind::TriadScalar),
-            ("gemm_bi_nn_ultra_thin", ModuleKind::TriadScalar),
-            ("gemm_bi_nn_narrow", ModuleKind::TriadScalar),
-            ("gemm_bi_nn_narrow_small", ModuleKind::TriadScalar),
-            ("gemm_bi_nn_big", ModuleKind::TriadScalar),
-            ("gemm_bi_tn_gemv", ModuleKind::TriadScalar),
-            ("gemm_bi_tn_narrow", ModuleKind::TriadScalar),
-            ("gemm_bi_tn_big", ModuleKind::TriadScalar),
-            ("gemm_bi_nt_gemv", ModuleKind::TriadScalar),
-            ("gemm_bi_nt_narrow", ModuleKind::TriadScalar),
-            ("gemm_bi_nt_big", ModuleKind::TriadScalar),
-            ("gemm_bi_nn_tc", ModuleKind::TriadSm80),
-            ("gemm_bi_nn_tc64", ModuleKind::TriadSm80),
-            ("gemm_bi_nn_tc16", ModuleKind::TriadSm80),
-            ("gemm_bi_tn_tc", ModuleKind::TriadSm80),
-            ("gemm_bi_tn_tc64", ModuleKind::TriadSm80),
-            ("gemm_bi_tn_tc128x64", ModuleKind::TriadSm80),
-            ("gemm_bi_nt_tc", ModuleKind::TriadSm80),
-            ("gemm_bi_nt_tc64", ModuleKind::TriadSm80),
+            ("nn_gemv", ModuleKind::TriadScalar),
+            ("nn_ultra_thin", ModuleKind::TriadScalar),
+            ("nn_narrow", ModuleKind::TriadScalar),
+            ("nn_narrow_small", ModuleKind::TriadScalar),
+            ("nn_big", ModuleKind::TriadScalar),
+            ("tn_gemv", ModuleKind::TriadScalar),
+            ("tn_narrow", ModuleKind::TriadScalar),
+            ("tn_big", ModuleKind::TriadScalar),
+            ("nt_gemv", ModuleKind::TriadScalar),
+            ("nt_narrow", ModuleKind::TriadScalar),
+            ("nt_big", ModuleKind::TriadScalar),
+            ("nn_tc", ModuleKind::TriadSm80),
+            ("nn_tc64", ModuleKind::TriadSm80),
+            ("nn_tc16", ModuleKind::TriadSm80),
+            ("tn_tc", ModuleKind::TriadSm80),
+            ("tn_tc64", ModuleKind::TriadSm80),
+            ("tn_tc128x64", ModuleKind::TriadSm80),
+            ("nt_tc", ModuleKind::TriadSm80),
+            ("nt_tc64", ModuleKind::TriadSm80),
+            ("nn_sm89_m128n128_bk64_s3", ModuleKind::TriadSm89Half),
             (
-                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1",
+                "tn_sm89_m64n64_bk64_s2_compact_bxor",
                 ModuleKind::TriadSm89Half,
             ),
             (
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1",
+                "tn_sm89_m64n64_bk64_s2_regpipe_vec2",
                 ModuleKind::TriadSm89Half,
             ),
-            (
-                "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1",
-                ModuleKind::TriadSm89Half,
-            ),
-            (
-                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1",
-                ModuleKind::TriadSm89Half,
-            ),
-            (
-                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1",
-                ModuleKind::TriadSm89Half,
-            ),
+            ("nt_sm89_m128n128_bk64_s3_bxor", ModuleKind::TriadSm89Half),
+            ("nt_sm89_m96n128_bk64_s3", ModuleKind::TriadSm89Half),
         ] {
             for (dtype, suffix) in [(WeightDtype::Bf16, "_bf16"), (WeightDtype::F16, "_f16")] {
                 let identity = HalfKernelIdentity::resolve(base, dtype).unwrap();
@@ -16941,7 +16766,7 @@ mod half_physical_trace_tests {
             }
         }
 
-        let tensor_core = HalfKernelIdentity::resolve("gemm_bi_nn_tc64", WeightDtype::F16).unwrap();
+        let tensor_core = HalfKernelIdentity::resolve("nn_tc64", WeightDtype::F16).unwrap();
         assert!(
             tensor_core
                 .validate(ModuleKind::TriadScalar, tensor_core.symbol)
@@ -16949,31 +16774,31 @@ mod half_physical_trace_tests {
         );
         assert!(
             tensor_core
-                .validate(tensor_core.module_kind, "gemm_bi_nn_tc64")
+                .validate(tensor_core.module_kind, "nn_tc64")
                 .is_err()
         );
-        assert!(HalfKernelIdentity::resolve("gemm_bi_nn_tc64", WeightDtype::F32).is_err());
+        assert!(HalfKernelIdentity::resolve("nn_tc64", WeightDtype::F32).is_err());
         assert!(HalfKernelIdentity::resolve("gemm_bi_unknown", WeightDtype::Bf16).is_err());
     }
 
     #[test]
     fn triad_retained_half_small16_identity_uses_exact_suffix_and_owner() {
-        let base = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1";
+        let base = "tn_sm89_m16n16_bk64_s2_ldb72";
         for (dtype, symbol, resources_digest) in [
             (
                 WeightDtype::Bf16,
-                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16",
+                "tn_sm89_m16n16_bk64_s2_ldb72_bf16",
                 [
-                    158, 160, 174, 127, 8, 46, 75, 224, 212, 149, 133, 12, 207, 231, 197, 26, 6,
-                    89, 14, 95, 93, 70, 251, 217, 236, 156, 176, 15, 60, 89, 80, 35,
+                    49, 212, 166, 201, 100, 151, 56, 95, 31, 152, 208, 83, 18, 42, 33, 208, 193,
+                    176, 220, 120, 125, 136, 61, 14, 36, 190, 210, 121, 95, 190, 204, 183,
                 ],
             ),
             (
                 WeightDtype::F16,
-                "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16",
+                "tn_sm89_m16n16_bk64_s2_ldb72_f16",
                 [
-                    177, 199, 237, 244, 19, 91, 188, 127, 113, 229, 96, 221, 96, 195, 28, 71, 118,
-                    105, 21, 105, 244, 186, 144, 3, 62, 146, 62, 125, 71, 50, 168, 9,
+                    100, 197, 96, 141, 108, 35, 8, 242, 247, 195, 64, 103, 194, 218, 40, 248, 79,
+                    167, 23, 191, 35, 167, 248, 211, 107, 30, 98, 187, 145, 242, 0, 215,
                 ],
             ),
         ] {
@@ -16999,7 +16824,7 @@ mod half_physical_trace_tests {
     fn triad_retained_half_small16_tn_argument_spans_match_the_physical_abi() {
         let dims = (1024, 256, 128);
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            let base = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1";
+            let base = "tn_sm89_m16n16_bk64_s2_ldb72";
             let identity = HalfKernelIdentity::resolve(base, dtype).unwrap();
             let spec =
                 super::super::sm89_half_source::runtime_kernel_spec(identity.symbol).unwrap();
@@ -17063,8 +16888,8 @@ mod half_physical_trace_tests {
                 PolicyDtype::Bf16,
                 super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
                 [
-                    158, 160, 174, 127, 8, 46, 75, 224, 212, 149, 133, 12, 207, 231, 197, 26, 6,
-                    89, 14, 95, 93, 70, 251, 217, 236, 156, 176, 15, 60, 89, 80, 35,
+                    49, 212, 166, 201, 100, 151, 56, 95, 31, 152, 208, 83, 18, 42, 33, 208, 193,
+                    176, 220, 120, 125, 136, 61, 14, 36, 190, 210, 121, 95, 190, 204, 183,
                 ],
             ),
             (
@@ -17072,8 +16897,8 @@ mod half_physical_trace_tests {
                 PolicyDtype::F16,
                 super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
                 [
-                    177, 199, 237, 244, 19, 91, 188, 127, 113, 229, 96, 221, 96, 195, 28, 71, 118,
-                    105, 21, 105, 244, 186, 144, 3, 62, 146, 62, 125, 71, 50, 168, 9,
+                    100, 197, 96, 141, 108, 35, 8, 242, 247, 195, 64, 103, 194, 218, 40, 248, 79,
+                    167, 23, 191, 35, 167, 248, 211, 107, 30, 98, 187, 145, 242, 0, 215,
                 ],
             ),
         ] {
@@ -17112,11 +16937,8 @@ mod half_physical_trace_tests {
             assert_eq!(node.tile(), Some((16, 16)));
             assert_eq!(route.op, ResolvedGemmOp::Tn);
             assert_eq!(route.dtype, policy_dtype);
-            assert_eq!(route.backend, PhysicalGemmBackend::Sm89Mma16HalfS2V1);
-            assert_eq!(
-                route.numeric_contract,
-                ResolvedNumericContract::MmaSyncF32V1
-            );
+            assert_eq!(route.backend, PhysicalGemmBackend::Sm89Mma16HalfS2);
+            assert_eq!(route.numeric_contract, ResolvedNumericContract::MmaSyncF32);
             assert_eq!(route.instruction_family, ResolvedInstructionFamily::MmaSync);
             assert_eq!(
                 route.instruction_shape,
@@ -17125,7 +16947,7 @@ mod half_physical_trace_tests {
             assert_eq!(route.operand_conversion, ResolvedOperandConversion::None);
             assert_eq!(
                 route.ownership,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1
+                ResolvedOutputOwnership::OneCtaPerOutputTile
             );
             assert_eq!(route.symbol, symbol);
             assert_eq!(route.module_kind, ModuleKind::TriadSm89Half);
@@ -17225,10 +17047,10 @@ mod half_physical_trace_tests {
         assert_eq!(config.shared_mem_bytes, 0);
 
         for (dtype, symbol) in [
-            (WeightDtype::Bf16, "gemm_bi_tn_tc128x64_bf16"),
-            (WeightDtype::F16, "gemm_bi_tn_tc128x64_f16"),
+            (WeightDtype::Bf16, "tn_tc128x64_bf16"),
+            (WeightDtype::F16, "tn_tc128x64_f16"),
         ] {
-            let identity = HalfKernelIdentity::resolve("gemm_bi_tn_tc128x64", dtype).unwrap();
+            let identity = HalfKernelIdentity::resolve("tn_tc128x64", dtype).unwrap();
             assert_eq!(identity.symbol, symbol);
             assert_eq!(identity.module_kind, ModuleKind::TriadSm80);
         }
@@ -17254,7 +17076,7 @@ mod sm89_exact_f32_tn_route_tests {
                 (2_048, 768, 3_072),
                 ScalarDispatchPlan::TnD768InSm89DualChunkQualified,
                 [
-                    "gemm_bi_transpose_f32_32x16_d768_v1",
+                    "transpose_f32_32x16_d768",
                     super::super::D768_IN_FUSED_SYMBOL,
                 ],
                 [(24, 64, 1), (576, 1, 1)],
@@ -17263,14 +17085,14 @@ mod sm89_exact_f32_tn_route_tests {
             (
                 (2_048, 1_536, 768),
                 ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified,
-                [super::super::D768_OUT_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+                [super::super::D768_OUT_RAW_SYMBOL, "splitm_reduce"],
                 [(288, 1, 4), (4_608, 1, 1)],
                 None,
             ),
             (
                 (4_621, 384, 1_928),
                 ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified,
-                [super::super::PRISM_RAW_SYMBOL, "gemm_bi_splitm_reduce"],
+                [super::super::PRISM_RAW_SYMBOL, "splitm_reduce"],
                 [(186, 1, 6), (2_892, 1, 1)],
                 None,
             ),
@@ -17305,9 +17127,9 @@ mod sm89_exact_f32_tn_route_tests {
         assert_eq!(
             scalar_route_contract(super::super::D768_IN_FUSED_SYMBOL),
             (
-                PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-                ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
+                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
         );
         for symbol in [
@@ -17317,9 +17139,9 @@ mod sm89_exact_f32_tn_route_tests {
             assert_eq!(
                 scalar_route_contract(symbol),
                 (
-                    PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
-                    ResolvedNumericContract::ScalarFmaTnSplitMPartialV1,
-                    ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1,
+                    PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
+                    ResolvedNumericContract::ScalarFmaTnSplitMPartial,
+                    ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
                 )
             );
         }
@@ -17374,9 +17196,9 @@ mod sm89_exact_f32_tn_route_tests {
             assert_eq!(
                 scalar_route_contract(symbol),
                 (
-                    PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1,
-                    ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
-                    ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                    PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
+                    ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                    ResolvedOutputOwnership::OneCtaPerOutputTile,
                 )
             );
         }
@@ -17410,7 +17232,7 @@ mod sm89_tf32_joint_route_tests {
         for (dims, route, stride, elements, physical, grid) in [
             (
                 (2_048, 768, 3_072),
-                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaN96,
                 2_048,
                 1_572_864,
                 (768, 2_048, 3_072),
@@ -17418,7 +17240,7 @@ mod sm89_tf32_joint_route_tests {
             ),
             (
                 (2_048, 1_536, 768),
-                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaN96,
                 2_048,
                 3_145_728,
                 (1_536, 2_048, 768),
@@ -17426,7 +17248,7 @@ mod sm89_tf32_joint_route_tests {
             ),
             (
                 (4_621, 384, 1_928),
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
                 4_624,
                 1_775_616,
                 (384, 4_621, 1_928),
@@ -17462,27 +17284,27 @@ mod sm89_tf32_joint_route_tests {
             (
                 ResolvedGemmOp::Tn,
                 (2_048, 768, 3_072),
-                Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaN96,
             ),
             (
                 ResolvedGemmOp::Tn,
                 (4_621, 384, 1_928),
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
             ),
             (
                 ResolvedGemmOp::Nn,
                 (4_621, 384, 1_928),
-                Tf32PhysicalRoute::Sm89NnDirectN96V1,
+                Tf32PhysicalRoute::Sm89NnDirectN96,
             ),
             (
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
-                Tf32PhysicalRoute::Sm89NnN96V1,
+                Tf32PhysicalRoute::Sm89NnN96,
             ),
             (
                 ResolvedGemmOp::Nt,
                 (2_048, 768, 3_072),
-                Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+                Tf32PhysicalRoute::Sm89NtALdmatrixN96,
             ),
         ] {
             let request = request(op, dims);

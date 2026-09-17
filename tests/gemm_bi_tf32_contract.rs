@@ -10,11 +10,11 @@ use toolkit::*;
 
 const SCALAR_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/scalar.cu");
 const COMMON_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/common.cuh");
-const SM80_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
-const SM80_TN_SPLITK_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80_tn_splitk.cu");
-const SM90A_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm90a.cu");
-const SM100_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100.cu");
-const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
+const SM80_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
+const SM80_TN_SPLITK_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80/tn_splitk.cu");
+const SM90A_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm90a/wgmma.cu");
+const SM100_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100/tcgen05.cu");
+const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
 const CONTEXT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/context.rs");
 const DEVICE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/device.rs");
 const IDENTITY_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/kernel_identity.rs");
@@ -48,14 +48,13 @@ fn assert_code_excludes_all(source: &str, forbidden: &[&str], contract: &str) {
 
 #[test]
 fn tc128_nn_pair_store_is_decided_per_row_for_odd_ldc() {
-    let body = braced_scope_after(SM80_SOURCE, "void gemm_bi_nn_tc_##SUFFIX");
+    let body = braced_scope_after(SM80_SOURCE, "void nn_tc_##SUFFIX");
     assert!(
-        body.contains("bool packed_epilogue = gemm_bi_is_aligned_4(C);"),
+        body.contains("bool packed_epilogue = is_aligned_4(C);"),
         "TC128 NN must keep pair stores available for aligned rows of odd-ldc outputs"
     );
     assert!(
-        body.contains("packed_epilogue && c0 + 1 < N &&")
-            && body.contains("gemm_bi_is_aligned_4(dst)"),
+        body.contains("packed_epilogue && c0 + 1 < N &&") && body.contains("is_aligned_4(dst)"),
         "TC128 NN must validate each destination row before a pair store"
     );
 }
@@ -203,10 +202,12 @@ fn closure_expression_end(source: &str, start: usize, call_close: usize) -> usiz
     call_close
 }
 
-fn identifiers_with_prefix(source: &str, prefix: &str) -> BTreeSet<String> {
+/// Kernel symbols start with the operand layout they compute (`nn_`, `tn_`
+/// or `nt_`); everything else in a CUDA source is a helper, a macro or a type.
+fn op_kernel_identifiers(source: &str) -> BTreeSet<String> {
     source
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-        .filter(|token| token.starts_with(prefix))
+        .filter(|token| ["nn_", "tn_", "nt_"].iter().any(|op| token.starts_with(op)))
         .map(str::to_owned)
         .collect()
 }
@@ -629,7 +630,7 @@ fn expected_ptx_parameters(
         alignment,
     };
     if bundle_bytes == 32
-        && ["_splitk2_v1_", "_splitk4_v1_", "_splitk8_v1_"]
+        && ["_splitk2_", "_splitk4_", "_splitk8_"]
             .iter()
             .any(|family| symbol.contains(family))
     {
@@ -650,15 +651,11 @@ fn expected_ptx_parameters(
             parameter(3, "u64", 8, None),
             parameter(4, "b8", 32, Some(4)),
         ]
-    } else if symbol.contains("_streamk") || symbol.contains("_tma_fma_v1_") {
+    } else if symbol.contains("_streamk") || symbol.contains("_tma_fma_") {
         // The exact-F32 routes share the stream-K parameter order with a
         // 32-byte bundle: output rows, columns, reduction, output stride,
         // split count, k tiles per split behind alpha and beta.
-        let bundle = if symbol.contains("_tma_fma_v1_") {
-            32
-        } else {
-            40
-        };
+        let bundle = if symbol.contains("_tma_fma_") { 32 } else { 40 };
         vec![
             parameter(0, "u64", 8, None),
             parameter(1, "u64", 8, None),
@@ -682,8 +679,8 @@ fn expected_ptx_parameters(
 fn normalized_reduction_bundle_offset(symbol: &str, bundle_bytes: usize) -> usize {
     match (
         bundle_bytes,
-        symbol.contains("_nn_"),
-        symbol.contains("_tn_"),
+        symbol.starts_with("nn_"),
+        symbol.starts_with("tn_"),
     ) {
         (32, true, _) => 12,
         (32, false, true) => 8,
@@ -1320,9 +1317,9 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
         zero_body.contains("st.global"),
         "{symbol} K=0 CFG must execute the output epilogue"
     );
-    let allowed_fp = if symbol.contains("_nn_") {
+    let allowed_fp = if symbol.starts_with("nn_") {
         BTreeSet::from(["mul.rn.f32", "fma.rn.f32"])
-    } else if symbol.contains("_tn_") {
+    } else if symbol.starts_with("tn_") {
         BTreeSet::from(["fma.rn.f32"])
     } else {
         BTreeSet::from(["mul.rn.f32"])
@@ -1410,7 +1407,7 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
         // One resident CTA per multiprocessor owns the whole register file.
         return (255, 73_856);
     }
-    if symbol.contains("_tma_fma_v1_") {
+    if symbol.contains("_tma_fma_") {
         // Two dense 16-deep stages plus one mbarrier per stage; the NT
         // k-vector arms keep a float4 B fragment per column and run two
         // blocks per multiprocessor.
@@ -1437,7 +1434,7 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
         };
         if symbol.contains("_m128n64_") {
             assert!(matches!(stage, 2 | 3), "invalid SM80 M128N64 stage");
-            let stage_bytes = if symbol.contains("_tn_") {
+            let stage_bytes = if symbol.starts_with("tn_") {
                 26_624
             } else {
                 27_648
@@ -1448,13 +1445,13 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
             (128, 18_432 * stage)
         } else if symbol.contains("_m16n32_") {
             assert!(matches!(stage, 3 | 4), "invalid SM80 M16N32 stage");
-            let shared = if symbol.contains("_nn_") {
+            let shared = if symbol.starts_with("nn_") {
                 assert_eq!(stage, 4, "invalid SM80 NN M16N32 stage");
                 29_696
-            } else if symbol.contains("_tn_") {
+            } else if symbol.starts_with("tn_") {
                 assert_eq!(stage, 4, "invalid SM80 TN M16N32 stage");
                 32_768
-            } else if symbol.contains("_nt_") {
+            } else if symbol.starts_with("nt_") {
                 6_912 * stage
             } else {
                 panic!("unknown SM80 TF32 operation for {symbol}")
@@ -1462,17 +1459,17 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
             (96, shared)
         } else if symbol.contains("_m32n32_") {
             assert!(
-                symbol.contains("_nt_") && matches!(stage, 3 | 4),
+                symbol.starts_with("nt_") && matches!(stage, 3 | 4),
                 "invalid SM80 NT M32N32 stage"
             );
             (96, 9_216 * stage)
         } else if symbol.contains("_m16n16_") {
             assert_eq!(stage, 4, "invalid SM80 M16N16 stage");
-            let shared = if symbol.contains("_nn_") {
+            let shared = if symbol.starts_with("nn_") {
                 21_504
-            } else if symbol.contains("_tn_") {
+            } else if symbol.starts_with("tn_") {
                 24_576
-            } else if symbol.contains("_nt_") {
+            } else if symbol.starts_with("nt_") {
                 18_432
             } else {
                 panic!("unknown SM80 TF32 operation for {symbol}")
@@ -2414,7 +2411,7 @@ fn assert_sass_cfg_corroboration(
         "{label}/{symbol} anchored zero SASS region is unsafe or unterminated"
     );
     if label == "SM100"
-        && symbol.contains("_sm100_tcgen_tf32_v1_")
+        && symbol.contains("_sm100_tcgen_tf32_")
         && loaded_nvrtc_version() >= (12, 9)
     {
         assert_tcgen_management_cfg(
@@ -2849,7 +2846,7 @@ fn assert_sass_entry_contract(sass: &str, symbol: &str, label: &str) {
         );
     }
     let instructions = sass_line_instructions(entry, symbol);
-    if label == "SM100" && symbol.contains("_sm100_tcgen_tf32_v1_") {
+    if label == "SM100" && symbol.contains("_sm100_tcgen_tf32_") {
         // CUDA 12.8 assembles the tcgen allocation with a different pairing;
         // the family is not offered on that toolkit, so its SASS shape is
         // not part of the contract there.
@@ -2871,9 +2868,9 @@ fn assert_sass_entry_contract(sass: &str, symbol: &str, label: &str) {
             );
         }
     }
-    if symbol.contains("_nn_") {
+    if symbol.starts_with("nn_") {
         assert!(entry.contains("FFMA") && entry.contains("FMUL"));
-    } else if symbol.contains("_tn_") {
+    } else if symbol.starts_with("tn_") {
         assert!(
             entry.contains("FFMA"),
             "{label}/{symbol} TN is missing FFMA"
@@ -2988,7 +2985,7 @@ where
 
 #[test]
 fn hardware_artifact_expected_exports_cover_wide_without_changing_frozen_base() {
-    const WIDE: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+    const WIDE: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
     assert_eq!(expected_sm80_symbols().len(), 18);
     assert!(!expected_sm80_symbols().contains(WIDE));
     for (cc, count, wide) in [
@@ -3088,8 +3085,8 @@ fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
         declaration,
         &[
             "#[default]",
-            "ExactScalarFmaV1 = 0",
-            "AllowDeterministicTf32V1 = 1",
+            "ExactScalarFma = 0",
+            "AllowDeterministicTf32 = 1",
         ],
         "F32 triad policy",
     );
@@ -3110,8 +3107,8 @@ fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
         &parser,
         &[
             "pub fn parse_env_value(value: &str) -> Result<Self, String>",
-            "ExactScalarFmaV1",
-            "AllowDeterministicTf32V1",
+            "ExactScalarFma",
+            "AllowDeterministicTf32",
         ],
         "MAMBA_RS_BI_F32_POLICY parser",
     );
@@ -3134,7 +3131,7 @@ fn exact_f32_policy_is_the_public_default_and_env_is_strict() {
         &[
             "Ok(value) => F32TriadPolicy::parse_env_value(&value)",
             "VarError::NotPresent",
-            "ExactScalarFmaV1",
+            "ExactScalarFma",
             "VarError::NotUnicode",
         ],
         "strict F32 triad environment result parser",
@@ -3224,10 +3221,10 @@ fn context_and_resolved_route_identity_keep_tf32_domains_distinct() {
     assert_contains_all(
         IDENTITY_SOURCE,
         &[
-            "MmaTf32RnaV1",
-            "Sm90aWgmmaTf32TmaV1",
-            "Sm100Tcgen05Tf32TmaV1",
-            "Sm120TmaMmaTf32RnaV1",
+            "MmaTf32Rna",
+            "Sm90aWgmmaTf32Tma",
+            "Sm100Tcgen05Tf32Tma",
+            "Sm120TmaMmaTf32Rna",
             "NUMERIC_CONTRACT_DOMAIN",
             "ARTIFACT_DIGEST_DOMAIN",
             "COMPILER_TARGET_DOMAIN",
@@ -3237,17 +3234,17 @@ fn context_and_resolved_route_identity_keep_tf32_domains_distinct() {
             "ResolvedInstructionFamily",
             "ResolvedInstructionShape",
             "ResolvedOperandConversion",
-            "RegisterCvtRnaTf32F32V1",
-            "TensorMapTfloat32V1",
-            "TensorMapUint32ThenCvtRnaTf32F32V1",
+            "RegisterCvtRnaTf32F32",
+            "TensorMapTfloat32",
+            "TensorMapUint32ThenCvtRnaTf32F32",
         ],
         "resolved TF32 route identity",
     );
     for variant in [
-        "MmaTf32RnaV1",
-        "Sm90aWgmmaTf32TmaV1",
-        "Sm100Tcgen05Tf32TmaV1",
-        "Sm120TmaMmaTf32RnaV1",
+        "MmaTf32Rna",
+        "Sm90aWgmmaTf32Tma",
+        "Sm100Tcgen05Tf32Tma",
+        "Sm120TmaMmaTf32Rna",
     ] {
         assert!(
             IDENTITY_SOURCE.matches(variant).count() >= 2,
@@ -3300,12 +3297,12 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
             "alpha: f32",
             "beta: f32",
             "pub enum Tf32PhysicalRoute",
-            "MmaTf32RnaV1(Tf32PortableRoute)",
-            "Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute)",
-            "Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route)",
-            "Sm120TmaMmaTf32RnaV1(Tf32Sm120Route)",
+            "MmaTf32Rna(Tf32PortableRoute)",
+            "Sm90aWgmmaTf32Tma(Tf32Sm90aRoute)",
+            "Sm100Tcgen05Tf32Tma(Tf32Sm100Route)",
+            "Sm120TmaMmaTf32Rna(Tf32Sm120Route)",
             "pub enum F32TriadSelection",
-            "ScalarFmaV1",
+            "ScalarFma",
             "Tf32(Tf32PhysicalRoute)",
             "pub struct Tf32QualifiedModule",
             "module_kind: ModuleKind",
@@ -3364,9 +3361,9 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
             "request: F32TriadRequest",
             "availability: F32TriadAvailability",
             "Result<F32TriadSelection, String>",
-            "F32TriadPolicy::ExactScalarFmaV1",
-            "F32TriadPolicy::AllowDeterministicTf32V1",
-            "F32TriadSelection::ScalarFmaV1",
+            "F32TriadPolicy::ExactScalarFma",
+            "F32TriadPolicy::AllowDeterministicTf32",
+            "F32TriadSelection::ScalarFma",
             "request",
             "availability",
             "validate",
@@ -3374,10 +3371,10 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
         "automatic TF32 resolver",
     );
     let exact = resolver
-        .find("F32TriadPolicy::ExactScalarFmaV1")
+        .find("F32TriadPolicy::ExactScalarFma")
         .expect("exact policy branch");
     let allow = resolver
-        .find("F32TriadPolicy::AllowDeterministicTf32V1")
+        .find("F32TriadPolicy::AllowDeterministicTf32")
         .expect("allow policy branch");
     let exact_branch = if exact < allow {
         &resolver[exact..allow]
@@ -3399,7 +3396,7 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
         &floor,
         &[
             "sm120_fma_exact_route",
-            "F32TriadSelection::ScalarFmaV1",
+            "F32TriadSelection::ScalarFma",
             "F32TriadSelection::ExactSm120Fma",
         ],
         "exact-or-scalar selection floor",
@@ -3421,7 +3418,7 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_the_exact_fami
     let forced = source_mask(forced_scope);
     assert_contains_all(
         &forced,
-        &["Sm120TmaFmaExactV1", "sm120_fma_exclusions"],
+        &["Sm120TmaFmaExact", "sm120_fma_exclusions"],
         "forced exact-F32 per-symbol rejection",
     );
     assert!(
@@ -3528,10 +3525,10 @@ fn staged_behavioral_resolver_scaffold_is_explicit_and_nontrivial() {
     assert_contains_all(
         &forced,
         &[
-            "Tf32PhysicalRoute::MmaTf32RnaV1",
-            "Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1",
-            "Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1",
-            "Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1",
+            "Tf32PhysicalRoute::MmaTf32Rna",
+            "Tf32PhysicalRoute::Sm90aWgmmaTf32Tma",
+            "Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma",
+            "Tf32PhysicalRoute::Sm120TmaMmaTf32Rna",
         ],
         "forced resolver physical-family admission",
     );
@@ -4357,7 +4354,7 @@ fn typed_fallback_records_scalar_routes_without_reading_f32_policy() {
         );
         assert!(
             !shared_scope.contains("f32_triad_policy")
-                && !shared_scope.contains("AllowDeterministicTf32V1"),
+                && !shared_scope.contains("AllowDeterministicTf32"),
             "{shared} typed numeric contract must ignore f32 TF32 policy"
         );
         let fallback_scope = source_mask(braced_scope_after(LAUNCH_SOURCE, split));
@@ -8280,41 +8277,34 @@ fn production_f32_wrappers_preserve_the_complete_auto_operand_contract() {
 #[test]
 fn tf32_sources_export_the_exact_planned_symbol_inventories() {
     let inventories = [
-        (
-            SM80_SOURCE,
-            "gemm_bi_",
-            "_sm80_mma_tf32_v1_",
-            expected_sm80_symbols(),
-            18,
-        ),
+        (SM80_SOURCE, "_sm80_mma_tf32_", expected_sm80_symbols(), 18),
         (
             SM90A_SOURCE,
-            "gemm_bi_",
-            "_sm90a_wgmma_tf32_v1_",
+            "_sm90a_wgmma_tf32_",
             expected_sm90a_symbols(),
             6,
         ),
         (
             SM100_SOURCE,
-            "gemm_bi_",
-            "_sm100_tcgen_tf32_v1_",
+            "_sm100_tcgen_tf32_",
             expected_sm100_symbols(),
             36,
         ),
         (
             SM120_SOURCE,
-            "gemm_bi_",
-            "_sm120_tma_mma_tf32_v1_",
+            "_sm120_tma_mma_tf32_",
             expected_sm120_symbols(),
             18,
         ),
     ];
 
-    for (source, prefix, family, expected, count) in inventories {
+    for (source, family, expected, count) in inventories {
         let source = source_mask(source);
-        let actual: BTreeSet<_> = identifiers_with_prefix(&source, prefix)
+        // The split-K kernels share the source but belong to the extension
+        // contract, which has its own inventory.
+        let actual: BTreeSet<_> = op_kernel_identifiers(&source)
             .into_iter()
-            .filter(|symbol| symbol.contains(family))
+            .filter(|symbol| symbol.contains(family) && !symbol.contains("_splitk"))
             .collect();
         assert_eq!(expected.len(), count);
         assert_eq!(actual, expected, "wrong public inventory for {family}");
@@ -8460,19 +8450,19 @@ fn cuda_and_rust_kernel_parameter_layouts_match() {
     }
 
     for (source, family) in [
-        (SM80_SOURCE, "_sm80_mma_tf32_v1_"),
-        (SM90A_SOURCE, "_sm90a_wgmma_tf32_v1_"),
-        (SM100_SOURCE, "_sm100_tcgen_tf32_v1_"),
-        (SM120_SOURCE, "_sm120_tma_mma_tf32_v1_"),
+        (SM80_SOURCE, "_sm80_mma_tf32_"),
+        (SM90A_SOURCE, "_sm90a_wgmma_tf32_"),
+        (SM100_SOURCE, "_sm100_tcgen_tf32_"),
+        (SM120_SOURCE, "_sm120_tma_mma_tf32_"),
     ] {
         let code = source_mask(source);
         assert!(
             code.contains("TF32_ASSERT_KERNEL_SIGNATURE"),
             "{family} must compile decltype(&symbol) signature assertions"
         );
-        let symbols = identifiers_with_prefix(&code, "gemm_bi_")
+        let symbols = op_kernel_identifiers(&code)
             .into_iter()
-            .filter(|symbol| symbol.contains(family));
+            .filter(|symbol| symbol.contains(family) && !symbol.contains("_splitk"));
         for symbol in symbols {
             assert!(
                 code.contains(&format!("TF32_ASSERT_KERNEL_SIGNATURE({symbol}")),
@@ -8530,7 +8520,10 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
         64
     };
     for (label, ptx, expected, bundle_bytes, sass_target, source) in families {
-        let actual = ptx_entry_symbols(&ptx, "_tf32_v1_");
+        let actual = ptx_entry_symbols(&ptx, "_tf32_")
+            .into_iter()
+            .filter(|symbol| !symbol.contains("_splitk"))
+            .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "{label} compiled PTX export inventory");
         for symbol in &expected {
             assert_eq!(
@@ -8554,7 +8547,7 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                 !entry.contains(".local"),
                 "{label} {symbol} PTX must not declare local memory"
             );
-            if symbol == "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2" {
+            if symbol == "tn_sm80_mma_tf32_m128n64_bk32_s2" {
                 assert!(
                     entry.contains(".maxntid 256, 1, 1"),
                     "{label} {symbol} must retain its 256-thread CTA"
@@ -8590,17 +8583,17 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                 !contains_float_mad_opcode(entry),
                 "{label} {symbol} compiled forbidden floating-point mad"
             );
-            if symbol.contains("_nn_") {
+            if symbol.starts_with("nn_") {
                 assert!(
                     entry.contains("mul.rn.f32") && entry.contains("fma.rn.f32"),
                     "{label} {symbol} NN epilogue must keep alpha multiply and beta FMA"
                 );
-            } else if symbol.contains("_tn_") {
+            } else if symbol.starts_with("tn_") {
                 assert!(
                     entry.contains("fma.rn.f32") && !entry.contains("mul.rn.f32"),
                     "{label} {symbol} TN epilogue must use only its RN alpha FMA"
                 );
-            } else if symbol.contains("_nt_") {
+            } else if symbol.starts_with("nt_") {
                 assert!(
                     entry.contains("mul.rn.f32") && !entry.contains("fma.rn.f32"),
                     "{label} {symbol} NT epilogue must use only its RN alpha multiply"
@@ -8661,12 +8654,12 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
 fn compiled_sm80_tf32_splitk_candidates_freeze_abi_and_ordered_reduction() {
     let ptx = compile_tf32_ptx(tf32_cuda_blob(SM80_SOURCE, true), "sm_89");
     let fused_symbols = [
-        "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
-        "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
-        "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
-        "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
-        "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-        "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+        "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
+        "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
+        "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
+        "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
+        "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+        "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
     ];
     let expected = fused_symbols
         .into_iter()
@@ -8726,7 +8719,7 @@ fn compiled_sm80_tf32_splitk_candidates_freeze_abi_and_ordered_reduction() {
             ],
             "SM80 split-K fused compiled PTX",
         );
-        if symbol.contains("_nn_") {
+        if symbol.starts_with("nn_") {
             assert!(
                 fused.contains("fma.rn.f32"),
                 "SM80 split-K NN epilogue must retain beta FMA"
@@ -8748,9 +8741,9 @@ fn compiled_sm80_tf32_splitk_candidates_freeze_abi_and_ordered_reduction() {
             .map(|(_, operands)| ptx_operands(operands))
             .map(|operands| operands[2].to_owned())
             .collect::<Vec<_>>();
-        let expected_limit = if symbol.contains("_splitk2_v1_") {
+        let expected_limit = if symbol.contains("_splitk2_") {
             "1"
-        } else if symbol.contains("_splitk4_v1_") {
+        } else if symbol.contains("_splitk4_") {
             "3"
         } else {
             "7"
@@ -8767,11 +8760,11 @@ fn compiled_sm80_tf32_splitk_candidates_freeze_abi_and_ordered_reduction() {
                 opcode_context(fused, forbidden)
             );
         }
-        let partition_add_group = if symbol.contains("_splitk2_v1_") {
+        let partition_add_group = if symbol.contains("_splitk2_") {
             4
-        } else if symbol.contains("_nn_") {
+        } else if symbol.starts_with("nn_") {
             8
-        } else if symbol.contains("_splitk4_v1_") {
+        } else if symbol.contains("_splitk4_") {
             6
         } else {
             14
@@ -8788,23 +8781,23 @@ fn compiled_sm80_tf32_splitk_candidates_freeze_abi_and_ordered_reduction() {
 fn portable_sm80_tf32_nt_splitk_candidates_freeze_cuda_contract() {
     let candidates = [
         (
-            "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
-            "gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nt, 16, 32, 3, 4>",
+            "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
+            "tf32_splitk_fused_kernel<SgbTf32Nt, 16, 32, 3, 4>",
             "__launch_bounds__(128, 3)",
         ),
         (
-            "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
-            "gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nt, 16, 32, 4, 4>",
+            "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
+            "tf32_splitk_fused_kernel<SgbTf32Nt, 16, 32, 4, 4>",
             "__launch_bounds__(128, 3)",
         ),
         (
-            "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-            "gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nt, 32, 32, 3, 8>",
+            "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+            "tf32_splitk_fused_kernel<SgbTf32Nt, 32, 32, 3, 8>",
             "__launch_bounds__(128, 3)",
         ),
         (
-            "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
-            "gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nt, 32, 32, 4, 8>",
+            "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
+            "tf32_splitk_fused_kernel<SgbTf32Nt, 32, 32, 4, 8>",
             "__launch_bounds__(128, 2)",
         ),
     ];
@@ -8835,15 +8828,15 @@ fn portable_sm80_tf32_nt_splitk_candidates_freeze_cuda_contract() {
 
     let fused = compact_code(&source_mask(braced_scope_after(
         SM80_SOURCE,
-        "gemm_bi_tf32_splitk_fused_kernel",
+        "tf32_splitk_fused_kernel",
     )));
     assert_contains_all(
         &fused,
         &[
             "SgbTf32Storage<Op,BM,BN,Stages>",
-            "gemm_bi_tf32_rows<Op>(params)",
-            "gemm_bi_tf32_columns<Op>(params)",
-            "gemm_bi_tf32_reduction<Op>(params)",
+            "tf32_rows<Op>(params)",
+            "tf32_columns<Op>(params)",
+            "tf32_reduction<Op>(params)",
             "partial_stride=(longlong)rows*columns",
             "atomicInc(counters+tile,Partitions-1U)",
             "ifconstexpr(Partitions==8)",
@@ -8869,23 +8862,23 @@ fn portable_sm80_tf32_nt_splitk_candidates_freeze_cuda_contract() {
 fn portable_sm80_tf32_tn_splitk_candidates_freeze_cuda_contract() {
     let candidates = [
         (
-            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
-            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 2, 8>",
+            "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s2",
+            "tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 2, 8>",
             "__launch_bounds__(128, 2)",
         ),
         (
-            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
-            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 3, 8>",
+            "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3",
+            "tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 3, 8>",
             "__launch_bounds__(128, 1)",
         ),
         (
-            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 3, 8>",
+            "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+            "tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 3, 8>",
             "__launch_bounds__(128, 3)",
         ),
         (
-            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
-            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 4, 8>",
+            "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
+            "tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 4, 8>",
             "__launch_bounds__(128, 2)",
         ),
     ];
@@ -8930,7 +8923,7 @@ fn portable_sm80_tf32_tn_splitk_candidates_freeze_cuda_contract() {
     // folds beta into the fused output like NN does, without a bias term.
     let stage = compact_code(&source_mask(braced_scope_after(
         SM80_TN_SPLITK_SOURCE,
-        "gemm_bi_tf32_tn_splitk_stage_async",
+        "tf32_tn_splitk_stage_async",
     )));
     assert_contains_all(
         &stage,
@@ -8943,14 +8936,14 @@ fn portable_sm80_tf32_tn_splitk_candidates_freeze_cuda_contract() {
     );
     let fused = compact_code(&source_mask(braced_scope_after(
         SM80_TN_SPLITK_SOURCE,
-        "gemm_bi_tf32_tn_splitk_fused_kernel",
+        "tf32_tn_splitk_fused_kernel",
     )));
     assert_contains_all(
         &fused,
         &[
             "static_assert(Op==SgbTf32Tn,",
             "assert(bias==nullptr);",
-            "gemm_bi_tf32_tn_splitk_async_mainloop<",
+            "tf32_tn_splitk_async_mainloop<",
             "if(params.beta!=0.0f){value0=__fmaf_rn(params.beta,destination[0],value0);}",
             "if(params.beta!=0.0f){value1=__fmaf_rn(params.beta,destination[1],value1);}",
             "atomicInc(counters+tile,Partitions-1U)",
@@ -8969,7 +8962,7 @@ fn portable_sm80_tf32_tn_splitk_candidates_freeze_cuda_contract() {
 fn portable_sm80_tf32_uses_rna_m16n8k8_and_frozen_shared_bank_maps() {
     assert_contains_all(
         SM80_SOURCE,
-        &["gemm_bi_tf32_rna", "gemm_bi_tf32_mma_m16n8k8", "bk32"],
+        &["tf32_rna", "tf32_mma_m16n8k8", "bk32"],
         "portable SM80 TF32 mainloop",
     );
     let code = source_mask(SM80_SOURCE);
@@ -9010,8 +9003,8 @@ fn portable_sm80_tf32_uses_rna_m16n8k8_and_frozen_shared_bank_maps() {
 #[test]
 fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownership() {
     for symbol in [
-        "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
-        "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+        "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
+        "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
     ] {
         assert!(
             SM80_SOURCE.contains(&format!("TF32_ASSERT_SPLITK_KERNEL_SIGNATURE({symbol})")),
@@ -9021,20 +9014,20 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
 
     let fused = compact_code(&source_mask(braced_scope_after(
         SM80_SOURCE,
-        "gemm_bi_tf32_splitk_fused_kernel",
+        "tf32_splitk_fused_kernel",
     )));
-    assert!(SM80_SOURCE.contains("gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nn, 16, 32, 4, 2>"));
-    assert!(SM80_SOURCE.contains("gemm_bi_tf32_splitk_fused_kernel<SgbTf32Nn, 16, 32, 4, 4>"));
+    assert!(SM80_SOURCE.contains("tf32_splitk_fused_kernel<SgbTf32Nn, 16, 32, 4, 2>"));
+    assert!(SM80_SOURCE.contains("tf32_splitk_fused_kernel<SgbTf32Nn, 16, 32, 4, 4>"));
     assert!(SM80_SOURCE.contains("atomicInc(counters + tile, Partitions - 1U)"));
     assert!(SM80_SOURCE.contains("if constexpr (Partitions == 4)"));
-    assert!(SM80_SOURCE.contains("gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4"));
+    assert!(SM80_SOURCE.contains("nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4"));
     assert_contains_all(
         SM80_SOURCE,
         &[
-            "gemm_bi_tf32_partial_store_cg",
-            "gemm_bi_tf32_partial_store_cg_v2",
-            "gemm_bi_tf32_partial_load_cg",
-            "gemm_bi_tf32_partial_load_cg_v2",
+            "tf32_partial_store_cg",
+            "tf32_partial_store_cg_float2",
+            "tf32_partial_load_cg",
+            "tf32_partial_load_cg_float2",
         ],
         "portable TF32 split-K global visibility path",
     );
@@ -9050,7 +9043,7 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
         );
     }
     let visibility_helpers = SM80_SOURCE
-        .split_once("gemm_bi_tf32_partial_store_cg")
+        .split_once("tf32_partial_store_cg")
         .and_then(|(_, tail)| {
             tail.split_once("template <SgbTf32Op Op, int BM, int BN, int Stages, int Partitions>")
         })
@@ -9069,7 +9062,7 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
         prepared_gate.contains("prepared.stream_token!=ctx.stream_token()"),
         "portable TF32 split-K shared workspace must remain bound to one ordered CUDA stream"
     );
-    assert!(SM80_SOURCE.contains("gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"));
+    assert!(SM80_SOURCE.contains("nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4"));
     assert_contains_all(
         &fused,
         &[
@@ -9079,8 +9072,8 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
             "tiles_per_partition",
             "tile_begin",
             "tile_end",
-            "gemm_bi_tf32_compute_stage",
-            "gemm_bi_tf32_splitk_async_mainloop",
+            "tf32_compute_stage",
+            "tf32_splitk_async_mainloop",
             "full_output_tile",
             "partial_stride",
             "packed_output",
@@ -9096,11 +9089,11 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
     );
     let mainloop = compact_code(&source_mask(braced_scope_after(
         SM80_SOURCE,
-        "gemm_bi_tf32_splitk_async_mainloop",
+        "tf32_splitk_async_mainloop",
     )));
     assert_contains_all(
         &mainloop,
-        &["gemm_bi_tf32_splitk_stage_async"],
+        &["tf32_splitk_stage_async"],
         "portable TF32 split-K async mainloop",
     );
     let mut cursor = 0;
@@ -9124,12 +9117,12 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
     assert_contains_all(
         IDENTITY_SOURCE,
         &[
-            "MmaTf32RnaSplitK4V1",
-            "MmaTf32RnaSplitK2V1",
-            "MmaTf32RnaSplitK8V1",
-            "LastCtaPerOutputTileFixedSplitK2ReduceV1",
-            "LastCtaPerOutputTileFixedSplitK4ReduceV1",
-            "LastCtaPerOutputTileFixedSplitK8ReduceV1",
+            "MmaTf32RnaSplitK4",
+            "MmaTf32RnaSplitK2",
+            "MmaTf32RnaSplitK8",
+            "LastCtaPerOutputTileFixedSplitK2Reduce",
+            "LastCtaPerOutputTileFixedSplitK4Reduce",
+            "LastCtaPerOutputTileFixedSplitK8Reduce",
         ],
         "portable TF32 split-K4 numeric identity",
     );
@@ -9149,7 +9142,7 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
 }
 
 #[test]
-fn qualification_v5_binds_every_boundary_output_corpus() {
+fn qualification_binds_every_boundary_output_corpus() {
     let boundary = braced_scope_after(QUALIFICATION_SOURCE, "fn qualify_shape_boundaries");
     for required in [
         "tf32-qualification-boundary-corpus.v1",
@@ -9402,10 +9395,10 @@ fn bk32_always_issues_four_ordered_k8_atoms_and_zero_fills_the_tail() {
     }
 
     for (name, source, family) in [
-        ("SM80", SM80_SOURCE, "_sm80_mma_tf32_v1_"),
-        ("SM90a", SM90A_SOURCE, "_sm90a_wgmma_tf32_v1_"),
-        ("SM100", SM100_SOURCE, "_sm100_tcgen_tf32_v1_"),
-        ("SM120", SM120_SOURCE, "_sm120_tma_mma_tf32_v1_"),
+        ("SM80", SM80_SOURCE, "_sm80_mma_tf32_"),
+        ("SM90a", SM90A_SOURCE, "_sm90a_wgmma_tf32_"),
+        ("SM100", SM100_SOURCE, "_sm100_tcgen_tf32_"),
+        ("SM120", SM120_SOURCE, "_sm120_tma_mma_tf32_"),
     ] {
         assert!(
             source.contains(family),
@@ -9504,8 +9497,8 @@ fn zero_reduction_preparation_uses_a_revisioned_mapless_sentinel() {
             "fn output_rows",
             "fn output_columns",
             "fn reduction",
-            "ZeroReductionV1",
-            "EncodedV1",
+            "ZeroReduction",
+            "Encoded",
             "zeroed_tensor_map_sentinel",
             "ZERO_REDUCTION_MAP_REVISION",
             "ZERO_REDUCTION_DIGEST_DOMAIN",
@@ -9543,7 +9536,7 @@ fn zero_reduction_preparation_uses_a_revisioned_mapless_sentinel() {
     assert_code_contains_all(
         &zero_constructor,
         &[
-            "Self::ZeroReductionV1",
+            "Self::ZeroReduction",
             "a: zeroed_tensor_map_sentinel()",
             "b: zeroed_tensor_map_sentinel()",
             "revision: ZERO_REDUCTION_MAP_REVISION",
@@ -9555,15 +9548,15 @@ fn zero_reduction_preparation_uses_a_revisioned_mapless_sentinel() {
         CONTRACT_SOURCE,
         "pub fn identity_digest(&self) -> Sha256Digest",
     ));
-    let zero_identity_marker = "Self::ZeroReductionV1 { data } =>";
+    let zero_identity_marker = "Self::ZeroReduction { data } =>";
     let zero_identity_start = maps_identity
         .find(zero_identity_marker)
-        .expect("ZeroReductionV1 identity branch")
+        .expect("ZeroReduction identity branch")
         + zero_identity_marker.len();
     let zero_identity = braced_scope_at(
         &maps_identity,
         zero_identity_start,
-        "ZeroReductionV1 identity branch",
+        "ZeroReduction identity branch",
     );
     assert_code_contains_all(
         zero_identity,
@@ -9721,8 +9714,8 @@ fn zero_reduction_preparation_uses_a_revisioned_mapless_sentinel() {
     assert_code_contains_all(
         &domain,
         &[
-            "ZeroReductionV1",
-            "EncodedV1",
+            "ZeroReduction",
+            "Encoded",
             "ZERO_REDUCTION_MAP_REVISION",
             "ZERO_REDUCTION_DIGEST_DOMAIN",
             "assert_ne!",
@@ -10092,13 +10085,13 @@ fn tf32_epilogues_keep_f32_rounding_placement_and_single_owner_reduction() {
         (
             "SM80",
             SM80_SOURCE,
-            "gemm_bi_tf32_epilogue",
-            "gemm_bi_tf32_store",
+            "tf32_epilogue",
+            "tf32_store",
             "Sm80Tf32KernelParams",
             "SgbTf32Nn",
             "SgbTf32Tn",
-            "gemm_bi_tf32_rows",
-            "gemm_bi_tf32_columns",
+            "tf32_rows",
+            "tf32_columns",
             true,
         ),
         (
@@ -10202,7 +10195,7 @@ fn tf32_epilogues_keep_f32_rounding_placement_and_single_owner_reduction() {
     );
     assert_contains_all(
         IDENTITY_SOURCE,
-        &["OneCtaPerOutputTileV1", "ownership"],
+        &["OneCtaPerOutputTile", "ownership"],
         "single-CTA resolved route identity",
     );
     let operands = braced_scope_after(LAUNCH_SOURCE, "fn validate_f32_triad_operands");
@@ -10225,7 +10218,7 @@ fn tf32_epilogues_keep_f32_rounding_placement_and_single_owner_reduction() {
         !operands.contains("is_null"),
         "CUDA device-pointer validation must not create host pointers"
     );
-    let portable_stage = braced_scope_after(SM80_SOURCE, "gemm_bi_tf32_stage_async");
+    let portable_stage = braced_scope_after(SM80_SOURCE, "tf32_stage_async");
     assert!(
         portable_stage.contains("_bytes == 0 ? 0"),
         "portable TF32 staging itself must suppress zero-byte pointer formation"
@@ -10300,7 +10293,7 @@ fn sm110_feature_targets_nvrtc_ptxas_pipeline() {
             "{nvrtc_target} must emit exact PTX target {ptx_target}"
         );
         assert_eq!(
-            ptx_entry_symbols(&ptx, "_sm100_tcgen_tf32_v1_"),
+            ptx_entry_symbols(&ptx, "_sm100_tcgen_tf32_"),
             expected,
             "{nvrtc_target} must export the complete SM100 TF32 inventory"
         );
@@ -10348,9 +10341,9 @@ fn release_target_entry_matrix_nvrtc_ptxas_pipeline() {
             "{nvrtc_target} must emit exact PTX target {ptx_target}"
         );
         let family_marker = match family {
-            SpecializedTf32Family::Sm90a => "_sm90a_wgmma_tf32_v1_",
-            SpecializedTf32Family::Sm100 => "_sm100_tcgen_tf32_v1_",
-            SpecializedTf32Family::Sm120 => "_sm120_tma_mma_tf32_v1_",
+            SpecializedTf32Family::Sm90a => "_sm90a_wgmma_tf32_",
+            SpecializedTf32Family::Sm100 => "_sm100_tcgen_tf32_",
+            SpecializedTf32Family::Sm120 => "_sm120_tma_mma_tf32_",
         };
         assert_eq!(ptx_entry_symbols(&ptx, family_marker), expected);
         for symbol in &expected {
@@ -10411,11 +10404,7 @@ fn tf32_target_and_toolchain_admission_is_fail_closed() {
     );
     assert_contains_all(
         DISPATCH_SOURCE,
-        &[
-            "ExactScalarFmaV1",
-            "AllowDeterministicTf32V1",
-            "ScalarFmaV1",
-        ],
+        &["ExactScalarFma", "AllowDeterministicTf32", "ScalarFma"],
         "exact/allow TF32 dispatch",
     );
 
@@ -10456,10 +10445,10 @@ fn tf32_forced_routes_fail_instead_of_falling_back() {
     assert_contains_all(
         CONTRACT_SOURCE,
         &[
-            "MmaTf32RnaV1",
-            "Sm90aWgmmaTf32TmaV1",
-            "Sm100Tcgen05Tf32TmaV1",
-            "Sm120TmaMmaTf32RnaV1",
+            "MmaTf32Rna",
+            "Sm90aWgmmaTf32Tma",
+            "Sm100Tcgen05Tf32Tma",
+            "Sm120TmaMmaTf32Rna",
         ],
         "forced TF32 route contracts",
     );
@@ -10479,7 +10468,7 @@ fn tf32_forced_routes_fail_instead_of_falling_back() {
     );
     assert!(
         !forced.contains("Option<")
-            && !forced.contains("ScalarFmaV1")
+            && !forced.contains("ScalarFma")
             && !forced.contains("resolve_f32_triad_auto"),
         "forced TF32 admission must return Err rather than fallback"
     );
@@ -11017,7 +11006,7 @@ fn k0_cfg_checker_propagates_values_and_rejects_bad_zero_subgraphs() {
     ));
     assert!(!contains_float_mad_opcode("mad.lo.s32 %r1, %r2, %r3, %r4;"));
     assert!(contains_float_mad_opcode("mad.rn.f32 %f1, %f2, %f3, %f4;"));
-    let symbol = "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
+    let symbol = "nn_sm100_tcgen_tf32_m128n64_bk32_s2_c4";
     let valid = format!(
         r#"
 .visible .entry {symbol}(
@@ -11182,7 +11171,7 @@ fn dot_instruction_offsets_ignore_hexadecimal_basic_block_labels() {
 
 #[test]
 fn k0_provenance_kills_overwritten_registers() {
-    let symbol = "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
+    let symbol = "nn_sm100_tcgen_tf32_m128n64_bk32_s2_c4";
     let overwritten = format!(
         r#"
 .visible .entry {symbol}(
@@ -11268,7 +11257,7 @@ fn sass_cfg_checker_requires_the_guarded_zero_partition() {
         eprintln!("sass_cfg_checker_requires_the_guarded_zero_partition: skipped below CUDA 12.9");
         return;
     }
-    let symbol = "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
+    let symbol = "nn_sm100_tcgen_tf32_m128n64_bk32_s2_c4";
     let source = "#line 1001 \"mamba_tf32_k0_guard\"\n#line 1002 \"mamba_tf32_k0_branch\"\n#line 2001 \"mamba_tf32_k0_zero_store\"\n";
     let valid = format!(
         r#"digraph "{symbol}" {{
@@ -11457,7 +11446,7 @@ fn sass_atomic_parser_rejects_management_lookalikes() {
         eprintln!("sass_atomic_parser_rejects_management_lookalikes: skipped below CUDA 12.9");
         return;
     }
-    let symbol = "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
+    let symbol = "nn_sm100_tcgen_tf32_m128n64_bk32_s2_c4";
     let valid = format!(
         "Function : {symbol}\n\
          //## File \"/root/tf32.cu\", line 1\n\
@@ -11502,7 +11491,7 @@ fn sass_atomic_parser_rejects_management_lookalikes() {
 
 #[test]
 fn resource_parser_rejects_duplicate_records_and_cap_overruns() {
-    let symbol = "gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4";
+    let symbol = "nn_sm80_mma_tf32_m16n32_bk32_s4";
     let symbols = BTreeSet::from([symbol.to_owned()]);
     let ptxas = format!(
         "ptxas info : Compiling entry function '{symbol}' for 'sm_80'\n\
@@ -11538,58 +11527,34 @@ fn resource_parser_rejects_duplicate_records_and_cap_overruns() {
 #[test]
 fn resource_caps_match_the_frozen_cuda_map() {
     for (symbol, expected) in [
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s2", (192, 55_296)),
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s3", (192, 82_944)),
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2", (128, 36_864)),
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3", (128, 55_296)),
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4", (96, 29_696)),
-        ("gemm_bi_nn_sm80_mma_tf32_v1_m16n16_bk32_s4", (96, 21_504)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2", (192, 53_248)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3", (192, 79_872)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2", (128, 36_864)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s3", (128, 55_296)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4", (96, 32_768)),
-        ("gemm_bi_tn_sm80_mma_tf32_v1_m16n16_bk32_s4", (96, 24_576)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2", (192, 55_296)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3", (192, 82_944)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2", (128, 36_864)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s3", (128, 55_296)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4", (96, 27_648)),
-        ("gemm_bi_nt_sm80_mma_tf32_v1_m16n16_bk32_s4", (96, 18_432)),
+        ("nn_sm80_mma_tf32_m128n64_bk32_s2", (192, 55_296)),
+        ("nn_sm80_mma_tf32_m128n64_bk32_s3", (192, 82_944)),
+        ("nn_sm80_mma_tf32_m64n64_bk32_s2", (128, 36_864)),
+        ("nn_sm80_mma_tf32_m64n64_bk32_s3", (128, 55_296)),
+        ("nn_sm80_mma_tf32_m16n32_bk32_s4", (96, 29_696)),
+        ("nn_sm80_mma_tf32_m16n16_bk32_s4", (96, 21_504)),
+        ("tn_sm80_mma_tf32_m128n64_bk32_s2", (192, 53_248)),
+        ("tn_sm80_mma_tf32_m128n64_bk32_s3", (192, 79_872)),
+        ("tn_sm80_mma_tf32_m64n64_bk32_s2", (128, 36_864)),
+        ("tn_sm80_mma_tf32_m64n64_bk32_s3", (128, 55_296)),
+        ("tn_sm80_mma_tf32_m16n32_bk32_s4", (96, 32_768)),
+        ("tn_sm80_mma_tf32_m16n16_bk32_s4", (96, 24_576)),
+        ("nt_sm80_mma_tf32_m128n64_bk32_s2", (192, 55_296)),
+        ("nt_sm80_mma_tf32_m128n64_bk32_s3", (192, 82_944)),
+        ("nt_sm80_mma_tf32_m64n64_bk32_s2", (128, 36_864)),
+        ("nt_sm80_mma_tf32_m64n64_bk32_s3", (128, 55_296)),
+        ("nt_sm80_mma_tf32_m16n32_bk32_s4", (96, 27_648)),
+        ("nt_sm80_mma_tf32_m16n16_bk32_s4", (96, 18_432)),
+        ("nn_sm90a_wgmma_tf32_m64n128_bk32_s3_wg1", (168, 73_984)),
+        ("nn_sm90a_wgmma_tf32_m64n128_bk32_s3_wg2", (128, 73_984)),
+        ("nn_sm100_tcgen_tf32_m128n64_bk32_s2_c4", (128, 49_408)),
+        ("nn_sm100_tcgen_tf32_m128n64_bk32_s4_p8", (128, 98_560)),
+        ("nn_sm100_tcgen_tf32_m128n128_bk32_s3_c4", (128, 98_560)),
+        ("nn_sm120_tma_mma_tf32_m128n64_bk32_s2", (128, 49_280)),
+        ("nn_sm120_tma_mma_tf32_m64n128_bk32_s3", (128, 73_856)),
+        ("tn_sm120_tma_mma_tf32_m64n128_bk32_s4_pair", (128, 98_432)),
         (
-            "gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1",
-            (168, 73_984),
-        ),
-        (
-            "gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2",
-            (128, 73_984),
-        ),
-        (
-            "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4",
-            (128, 49_408),
-        ),
-        (
-            "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8",
-            (128, 98_560),
-        ),
-        (
-            "gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4",
-            (128, 98_560),
-        ),
-        (
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2",
-            (128, 49_280),
-        ),
-        (
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3",
-            (128, 73_856),
-        ),
-        (
-            "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair",
-            (128, 98_432),
-        ),
-        (
-            "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+            "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
             (255, 73_856),
         ),
     ] {
@@ -11715,7 +11680,7 @@ fn replace_first_qualification_route_field(artifact: &[u8], field: usize, value:
     artifact.into_bytes()
 }
 
-fn qualification_v5_fixture() -> (String, Vec<u8>, Vec<u8>) {
+fn qualification_fixture() -> (String, Vec<u8>, Vec<u8>) {
     let driver_abi_proof = b"MambaBiTf32DriverAbiV2\nfixture\n".to_vec();
     let driver_abi_digest = sha256_hex(&driver_abi_proof);
     let mut route_lines = Vec::new();
@@ -11821,8 +11786,8 @@ fn qualification_v5_fixture() -> (String, Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn qualification_v5_fixture_rejects_every_boundary_and_schema_mutation() {
-    let (report, artifact, driver_abi_proof) = qualification_v5_fixture();
+fn qualification_fixture_rejects_every_boundary_and_schema_mutation() {
+    let (report, artifact, driver_abi_proof) = qualification_fixture();
     assert!(verify_qualification_digests(&report, &artifact, &driver_abi_proof).is_ok());
 
     let wrong_schema = replace_json_string_value(&report, "schema", "MambaBiTf32QualificationV3");

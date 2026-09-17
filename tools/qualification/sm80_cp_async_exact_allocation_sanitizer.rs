@@ -84,7 +84,7 @@ const TYPED_CASES: [TypedCase; 7] = [
 ];
 
 fn regular_tf32_route() -> Tf32PhysicalRoute {
-    Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+    Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
         tile: Tf32PortableTile::M64N64,
         stages: Tf32PortableStages::S2,
     })
@@ -205,7 +205,7 @@ fn sm80_exact_allocation_cp_async_memcheck() -> Result<(), String> {
         "tf32_nn_splitk_exact_tail",
         ResolvedGemmOp::Nn,
         (16, 3, 31),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         }),
@@ -215,7 +215,7 @@ fn sm80_exact_allocation_cp_async_memcheck() -> Result<(), String> {
         "tf32_nt_splitk_exact_tail",
         ResolvedGemmOp::Nt,
         (16, 32, 3),
-        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S3,
         }),

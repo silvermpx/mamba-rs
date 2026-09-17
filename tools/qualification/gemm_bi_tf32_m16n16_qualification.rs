@@ -113,7 +113,7 @@ impl Path {
 }
 
 fn route(tile: Tf32PortableTile) -> Tf32PhysicalRoute {
-    Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+    Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
         tile,
         stages: Tf32PortableStages::S4,
     })
@@ -131,7 +131,7 @@ fn context(device: &GpuDevice) -> Result<GpuCtx, String> {
     let ctx = GpuCtx::new(device)?;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     Ok(ctx)
 }
 
@@ -229,18 +229,18 @@ fn run_cell(device: &GpuDevice, cell: Cell) -> Result<(), String> {
     assert_route(
         &candidate,
         match cell.op {
-            ResolvedGemmOp::Nn => "gemm_bi_nn_sm80_mma_tf32_v1_m16n16_bk32_s4",
-            ResolvedGemmOp::Tn => "gemm_bi_tn_sm80_mma_tf32_v1_m16n16_bk32_s4",
-            ResolvedGemmOp::Nt => "gemm_bi_nt_sm80_mma_tf32_v1_m16n16_bk32_s4",
+            ResolvedGemmOp::Nn => "nn_sm80_mma_tf32_m16n16_bk32_s4",
+            ResolvedGemmOp::Tn => "tn_sm80_mma_tf32_m16n16_bk32_s4",
+            ResolvedGemmOp::Nt => "nt_sm80_mma_tf32_m16n16_bk32_s4",
         },
         (16, 16),
     )?;
     assert_route(
         &incumbent,
         match cell.op {
-            ResolvedGemmOp::Nn => "gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4",
-            ResolvedGemmOp::Tn => "gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4",
-            ResolvedGemmOp::Nt => "gemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4",
+            ResolvedGemmOp::Nn => "nn_sm80_mma_tf32_m16n32_bk32_s4",
+            ResolvedGemmOp::Tn => "tn_sm80_mma_tf32_m16n32_bk32_s4",
+            ResolvedGemmOp::Nt => "nt_sm80_mma_tf32_m16n32_bk32_s4",
         },
         (16, 32),
     )?;

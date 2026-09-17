@@ -1161,12 +1161,12 @@ fn assert_auto_route(
     };
     assert_eq!(route.op, expected_op);
     assert_eq!(route.module_kind, ModuleKind::TriadSm120);
-    assert_eq!(route.backend, PhysicalGemmBackend::Sm120TmaMma16V1);
+    assert_eq!(route.backend, PhysicalGemmBackend::Sm120TmaMma16);
     assert_eq!(
         route.numeric_contract,
         match expected.physical.schedule {
-            Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
-            Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+            Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32,
+            Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrder,
         }
     );
     assert_eq!(
@@ -1321,42 +1321,42 @@ fn sm120_auto_graph_and_physical_inventory_is_dtype_symmetric() {
                 Sm120Op::Nn,
                 shape,
                 nn,
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
+                "nn_sm120_tma_64x64_bk64_s2_bf16",
             ),
             (
                 WeightDtype::Bf16,
                 Sm120Op::Tn,
                 shape,
                 tn,
-                "gemm_bi_tn_sm120_tma_64x128_bk32_s3_bf16",
+                "tn_sm120_tma_64x128_bk32_s3_bf16",
             ),
             (
                 WeightDtype::Bf16,
                 Sm120Op::Nt,
                 nt_shape,
                 nt,
-                "gemm_bi_nt_sm120_tma_64x64_bk64_s2_bf16",
+                "nt_sm120_tma_64x64_bk64_s2_bf16",
             ),
             (
                 WeightDtype::F16,
                 Sm120Op::Nn,
                 shape,
                 nn,
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
+                "nn_sm120_tma_64x64_bk64_s2_f16",
             ),
             (
                 WeightDtype::F16,
                 Sm120Op::Tn,
                 shape,
                 tn,
-                "gemm_bi_tn_sm120_tma_64x128_bk32_s3_f16",
+                "tn_sm120_tma_64x128_bk32_s3_f16",
             ),
             (
                 WeightDtype::F16,
                 Sm120Op::Nt,
                 nt_shape,
                 nt,
-                "gemm_bi_nt_sm120_tma_64x64_bk64_s2_f16",
+                "nt_sm120_tma_64x64_bk64_s2_f16",
             ),
         ]
     );
@@ -1376,11 +1376,11 @@ fn sm120_auto_typed_qualified_cells() {
     // The stream-K cells open under the half policy that permits their
     // fixed-order fold; each qualifies against its forced stream-K route and
     // repeats bit for bit, while the tiled table stays the default answer.
-    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrderV1);
+    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
     for route in SM120_STREAMK_CELLS_CC120.iter().copied() {
         assert_auto_cell_repeats_bit_for_bit(&ctx, route);
     }
-    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
     for streamk in SM120_STREAMK_CELLS_CC120.iter().copied() {
         let tiled = SM120_AUTO_CELLS_CC120
             .iter()
@@ -1517,7 +1517,7 @@ fn sm120_auto_physical_qualification_matches_eager_and_graph() {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: route.dtype,
                 tensor_cores: true,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
         )
     });

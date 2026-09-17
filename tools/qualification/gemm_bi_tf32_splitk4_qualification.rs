@@ -25,8 +25,8 @@ const WINDOWS: usize = 101;
 const WARMUPS: usize = 128;
 const DETERMINISM_REPEATS: usize = 10;
 const TARGET_WINDOW_MS: f64 = 5.0;
-const S4_FUSED_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4";
-const DIRECT_SYMBOL: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4";
+const S4_FUSED_SYMBOL: &str = "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4";
+const DIRECT_SYMBOL: &str = "nn_sm80_mma_tf32_m16n32_bk32_s4";
 
 #[derive(Clone, Copy)]
 struct Cell {
@@ -80,8 +80,8 @@ impl Arm {
             stages: Tf32PortableStages::S4,
         };
         match self {
-            Self::SplitS4 => Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(portable),
-            Self::DirectS4 => Tf32PhysicalRoute::MmaTf32RnaV1(portable),
+            Self::SplitS4 => Tf32PhysicalRoute::MmaTf32RnaSplitK4(portable),
+            Self::DirectS4 => Tf32PhysicalRoute::MmaTf32Rna(portable),
         }
     }
 
@@ -301,7 +301,7 @@ fn context(device: &GpuDevice) -> Result<GpuCtx, String> {
     let ctx = GpuCtx::new(device)?;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
     Ok(ctx)
 }
 

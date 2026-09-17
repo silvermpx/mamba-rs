@@ -1,6 +1,6 @@
-const PRODUCTION_SYMBOL: &str = "gemm_bi_nn_m64n64_bk16_s2_v1";
-const FIXED_COPYPLAN_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
-const GENERIC_SYMBOL: &str = "gemm_bi_nn";
+const PRODUCTION_SYMBOL: &str = "nn_m64n64_bk16_s2";
+const FIXED_COPYPLAN_SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
+const GENERIC_SYMBOL: &str = "nn_big";
 const PRODUCTION_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu");
 const TEST_SOURCE: &str = include_str!("gemm_bi_scalar_nn_m64n64_qualification.rs");
 #[cfg(feature = "cuda")]
@@ -267,7 +267,7 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
     // else may join it without being named here.
     assert_eq!(source.matches("threadResults[idx] = __fmaf_rn(").count(), 2);
     assert_eq!(source.matches("extern \"C\" __global__").count(), 2);
-    assert!(source.contains("void gemm_bi_nn_prism_m64n64_bk16_s2_v1("));
+    assert!(source.contains("void nn_prism_m64n64_bk16_s2("));
     let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut ascending = normalized.as_str();
     for token in [
@@ -283,7 +283,7 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
         ascending = tail;
     }
     let registry = include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
-    assert!(!registry.contains("gemm_bi_nn_m64n64_bk16_s2_exp_v1"));
+    assert!(!registry.contains("nn_m64n64_bk16_s2_exp"));
     assert!(!PRODUCTION_SOURCE.contains("Experiment"));
     assert!(!PRODUCTION_SOURCE.contains("EXPERIMENT"));
     assert!(!PRODUCTION_SOURCE.contains("_exp_"));
@@ -319,10 +319,10 @@ fn production_scalar_module_owns_the_m64n64_source_and_required_handle() {
     for required in [
         "kernels/gemm_bi_triad/scalar_nn_m64n64.cu",
         "include_str!(\"../../../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu\")",
-        "\"gemm_bi_nn_m64n64_bk16_s2_v1\"",
-        "pub gemm_bi_nn_m64n64_bk16_s2_v1: CudaFunction",
-        "let gemm_bi_nn_m64n64_bk16_s2_v1 = load(\"gemm_bi_nn_m64n64_bk16_s2_v1\")?",
-        "gemm_bi_nn_m64n64_bk16_s2_v1,",
+        "\"nn_m64n64_bk16_s2\"",
+        "pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction",
+        "let gemm_bi_nn_m64n64_bk16_s2 = load(\"nn_m64n64_bk16_s2\")?",
+        "&gemm_bi_nn_m64n64_bk16_s2,",
     ] {
         assert!(
             modules.contains(required),
@@ -703,9 +703,9 @@ mod cuda_qualification {
             // Reuse the production inference kernel without changing its arithmetic.
             // Its sole external helper is the identical 16-byte alignment predicate.
             let source = format!(
-                "{}\n#define gbf_aligned16 gemm_bi_is_aligned_16\n{}\n#undef gbf_aligned16\n",
+                "{}\n#define gbf_aligned16 is_aligned_16\n{}\n#undef gbf_aligned16\n",
                 compose_cuda_source(),
-                include_str!("../../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu"),
+                include_str!("../../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"),
             );
             compile_ptx_source(device.nvrtc_target(), source)?
         } else {
@@ -2042,7 +2042,7 @@ mod cuda_qualification {
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         runtime.stream = ctx.stream.clone();
         runtime.live_copyplan = Some(
             ctx.kernels
@@ -2147,7 +2147,7 @@ mod cuda_qualification {
             let request = PhysicalQualificationRequest::contiguous(
                 ResolvedGemmOp::Nn,
                 cell.dims,
-                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
             );
             let mut auto = qualify_physical_launch(&ctx, request)?;
             let evidence = auto.evidence();
@@ -2169,7 +2169,7 @@ mod cuda_qualification {
                 let expected_grid = (cell.dims.0.div_ceil(64) * cell.dims.2.div_ceil(64)) as u32;
                 if node.shape != cell.dims
                     || node.tile != Some((64, 64))
-                    || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaV1)
+                    || node.numeric_contract != Some(ResolvedNumericContract::ScalarFma)
                     || node.launch.block_dim != (128, 1, 1)
                     || node.launch.grid_dim != (expected_grid, 1, 1)
                     || node.launch.shared_mem_bytes != 0

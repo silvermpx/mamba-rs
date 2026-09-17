@@ -1,4 +1,4 @@
-pub const SYMBOL: &str = "gemm_bi_tn_test_direct_prism_sm89_f32_m64n64_bk16_s2_raw_v1";
+pub const SYMBOL: &str = "tn_test_direct_prism_sm89_f32_m64n64_bk16_s2_raw";
 
 pub fn compose_source() -> String {
     SOURCE.to_owned()
@@ -19,7 +19,7 @@ static_assert(
     "direct Prism TN shared memory changed");
 
 extern "C" __global__ __launch_bounds__(PRISM_DIRECT_TN_THREADS, 4)
-void gemm_bi_tn_test_direct_prism_sm89_f32_m64n64_bk16_s2_raw_v1(
+void tn_test_direct_prism_sm89_f32_m64n64_bk16_s2_raw(
     float* __restrict__ partial,
     const float* __restrict__ x,
     const float* __restrict__ dy,

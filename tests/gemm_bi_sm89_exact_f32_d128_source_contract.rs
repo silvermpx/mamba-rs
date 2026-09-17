@@ -11,11 +11,11 @@ fn forced_routes_select_their_independent_production_symbols() {
 
     assert_eq!(
         Sm89ExactF32D128Route::D128InDirectFold.symbol(),
-        "gemm_bi_tn_sm89_f32_d128_in_m16n16_f64fold_v1"
+        "tn_sm89_f32_d128_in_m16n16_f64fold"
     );
     assert_eq!(
         Sm89ExactF32D128Route::D128OutDirectFold.symbol(),
-        "gemm_bi_tn_sm89_f32_d128_out_m8n16_f64fold_v1"
+        "tn_sm89_f32_d128_out_m8n16_f64fold"
     );
     assert_ne!(
         Sm89ExactF32D128Route::D128InDirectFold.symbol(),
@@ -164,9 +164,9 @@ fn validator_rejects_foreign_duplicate_and_placeholder_exports() {
     assert!(production::validate_source_text(&duplicate).is_err());
 
     for foreign in [
-        "gemm_bi_tn_sm89_f32_d128_m8n32_v1",
-        "gemm_bi_tn_test_d128_leak",
-        "gemm_bi_tn_sm89_f32_d128_foldpipe_v1",
+        "tn_sm89_f32_d128_m8n32",
+        "tn_test_d128_leak",
+        "tn_sm89_f32_d128_foldpipe",
     ] {
         let mutated = format!(
             "{source}\nextern \"C\" __global__ void {foreign}(float* output) {{ output[0] = 0.0f; }}\n"
@@ -216,7 +216,7 @@ fn retained_specs_pin_direct_fold_geometry_and_resource_limits() {
         assert_eq!(spec.abi_parameter_bytes, 40);
     }
     assert!(production::kernel_spec(frozen::M8N16_SYMBOL).is_none());
-    assert!(production::kernel_spec("gemm_bi_tn_sm89_f32_d128_foldpipe_v1").is_none());
+    assert!(production::kernel_spec("tn_sm89_f32_d128_foldpipe").is_none());
     assert!(production::kernel_spec("").is_none());
 }
 

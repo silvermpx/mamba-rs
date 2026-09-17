@@ -1,6 +1,6 @@
 // Exact qualified specialization of the deterministic M32N64/BK32 Split-K
 // partial. Its output layout and ascending 32-FFMA chain match the generic
-// production partial consumed by gemm_bi_splitk_reduce.
+// production partial consumed by splitk_reduce.
 #define NN_SPLITK_EXACT_M 128
 #define NN_SPLITK_EXACT_K 8192
 #define NN_SPLITK_EXACT_N 128
@@ -18,7 +18,7 @@
 #define NN_SPLITK_EXACT_THREADS 128
 
 extern "C" __global__ __launch_bounds__(NN_SPLITK_EXACT_THREADS, 4)
-void gemm_bi_nn_splitk32_m32n64_exact_v1(
+void nn_splitk32_m32n64_exact(
     float* __restrict__ partial,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -47,8 +47,8 @@ void gemm_bi_nn_splitk32_m32n64_exact_v1(
         || K_CHUNKS != EXACT_CHUNKS || lda != EXACT_K
         || blockDim.x != NN_SPLITK_EXACT_THREADS || blockDim.y != 1
         || blockDim.z != 1 || gridDim.x != TOTAL_BLOCKS || gridDim.y != 1
-        || gridDim.z != 1 || !gemm_bi_is_aligned_16(partial)
-        || !gemm_bi_is_aligned_16(A) || !gemm_bi_is_aligned_16(B)) {
+        || gridDim.z != 1 || !is_aligned_16(partial)
+        || !is_aligned_16(A) || !is_aligned_16(B)) {
         return;
     }
 

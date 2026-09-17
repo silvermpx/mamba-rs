@@ -550,234 +550,208 @@ impl MambaKernels {
         symbol: &str,
     ) -> Option<&CudaFunction> {
         match symbol {
-            "gemm_bi_f32_f32_s2" => Some(&self.gemm_bi_f32_f32_s2),
-            "gemm_bi_f32_f32_n128_s2" => Some(&self.gemm_bi_f32_f32_n128_s2),
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" => {
-                self.fixed_sm89_f32_n64_copyplan.as_ref()
-            }
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16" => {
+            "f32_f32_s2" => Some(&self.gemm_bi_f32_f32_s2),
+            "f32_f32_n128_s2" => Some(&self.gemm_bi_f32_f32_n128_s2),
+            "nn_sm89_f32_n64_copyplan" => self.fixed_sm89_f32_n64_copyplan.as_ref(),
+            "nn_sm89_tc128_f32out_s3_bf16" => {
                 self.inference_sm89_bundle.half_f32out_s3_bf16.as_ref().ok()
             }
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16" => {
+            "nn_sm89_tc128_f32out_s3_f16" => {
                 self.inference_sm89_bundle.half_f32out_s3_f16.as_ref().ok()
             }
-            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1" => {
+            "nn_sm89_f32_m128n64_tail_copyplan" => {
                 self.inference_sm89_bundle.exact_m128n64_tail.as_ref().ok()
             }
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1" => {
-                self.fixed_sm120_f32_n64_copyplan.as_ref()
-            }
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1" => {
-                self.fixed_sm120_f32_n64_copyplan_t256.as_ref()
-            }
-            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1" => {
+            "nn_sm120_f32_n64_copyplan" => self.fixed_sm120_f32_n64_copyplan.as_ref(),
+            "nn_sm120_f32_n64_copyplan_t256" => self.fixed_sm120_f32_n64_copyplan_t256.as_ref(),
+            "nn_sm120_f32_n64_copyplan_m128n64_t256" => {
                 self.fixed_sm120_f32_m128n64_copyplan_t256.as_ref()
             }
-            "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1" => self.fixed_sm120_f32_n64_sliced.as_ref(),
-            "gemm_bi_bf16_bf16" => Some(&self.gemm_bi_bf16_bf16),
+            "nn_sm120_f32_n64_sliced" => self.fixed_sm120_f32_n64_sliced.as_ref(),
+            "bf16_bf16" => Some(&self.gemm_bi_bf16_bf16),
             "matvec_bi_bf16_bf16" => Some(&self.matvec_bi_bf16_bf16),
-            "gemm_bi_bf16_f32" => Some(&self.gemm_bi_bf16_f32),
+            "bf16_f32" => Some(&self.gemm_bi_bf16_f32),
             "matvec_bi_bf16_f32" => Some(&self.matvec_bi_bf16_f32),
-            "gemm_bi_nn_tc128_bf16" => Some(&self.gemm_bi_nn_tc128_typed.bf16),
-            "gemm_bi_nn_tc128_f32out_bf16" => Some(&self.gemm_bi_nn_tc128_f32out.bf16),
-            "gemm_bi_nn_tcw64_bf16" => Some(&self.gemm_bi_nn_tcw64_typed.bf16),
-            "gemm_bi_nn_tcwn64_bf16" => Some(&self.gemm_bi_nn_tcwn64_typed.bf16),
-            "gemm_bi_nn_tc64_bf16" => Some(&self.gemm_bi_nn_tc64_typed.bf16),
-            "gemm_bi_nn_tc64_f32out_bf16" => Some(&self.gemm_bi_nn_tc64_f32out.bf16),
-            "gemm_bi_nn_tc16_bf16" => Some(&self.gemm_bi_nn_tc16_typed.bf16),
-            "gemm_bi_nn_tc16_f32out_bf16" => Some(&self.gemm_bi_nn_tc16_f32out.bf16),
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16" => {
-                Some(&self.fixed_sm89_half_pipeline.as_ref()?.bf16)
-            }
-            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16" => {
-                Some(&self.fixed_sm89_half_swizzle.as_ref()?.bf16)
-            }
-            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16" => {
-                Some(&self.fixed_sm89_half_s3.as_ref()?.bf16)
-            }
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16" => {
+            "nn_tc128_bf16" => Some(&self.gemm_bi_nn_tc128_typed.bf16),
+            "nn_tc128_f32out_bf16" => Some(&self.gemm_bi_nn_tc128_f32out.bf16),
+            "nn_tcw64_bf16" => Some(&self.gemm_bi_nn_tcw64_typed.bf16),
+            "nn_tcwn64_bf16" => Some(&self.gemm_bi_nn_tcwn64_typed.bf16),
+            "nn_tc64_bf16" => Some(&self.gemm_bi_nn_tc64_typed.bf16),
+            "nn_tc64_f32out_bf16" => Some(&self.gemm_bi_nn_tc64_f32out.bf16),
+            "nn_tc16_bf16" => Some(&self.gemm_bi_nn_tc16_typed.bf16),
+            "nn_tc16_f32out_bf16" => Some(&self.gemm_bi_nn_tc16_f32out.bf16),
+            "nn_sm89_tc128_pipeline_bf16" => Some(&self.fixed_sm89_half_pipeline.as_ref()?.bf16),
+            "nn_sm89_tc128_swizzle_bf16" => Some(&self.fixed_sm89_half_swizzle.as_ref()?.bf16),
+            "nn_sm89_tc128_s3_bf16" => Some(&self.fixed_sm89_half_s3.as_ref()?.bf16),
+            "nn_sm120_tma_64x64_bk64_s2_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.bf16)
             }
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_bf16" => Some(
+            "nn_sm120_tma_64x64_bk64_s2_f32out_bf16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m64n64_bk64_s2
                     .bf16,
             ),
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16" => {
+            "nn_sm120_tma_64x128_bk64_s2_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n128_bk64_s2.bf16)
             }
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_bf16" => Some(
+            "nn_sm120_tma_64x128_bk64_s2_f32out_bf16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m64n128_bk64_s2
                     .bf16,
             ),
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16" => {
+            "nn_sm120_tma_128x64_bk32_s3_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n64_bk32_s3.bf16)
             }
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_bf16" => Some(
+            "nn_sm120_tma_128x64_bk32_s3_f32out_bf16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n64_bk32_s3
                     .bf16,
             ),
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16" => {
+            "nn_sm120_tma_128x128_bk32_s2_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s2.bf16)
             }
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_bf16" => Some(
+            "nn_sm120_tma_128x128_bk32_s2_f32out_bf16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n128_bk32_s2
                     .bf16,
             ),
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16" => {
+            "nn_sm120_tma_128x128_bk32_s3_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s3.bf16)
             }
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_bf16" => Some(
+            "nn_sm120_tma_128x128_bk32_s3_f32out_bf16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n128_bk32_s3
                     .bf16,
             ),
-            "gemm_bi_nn_sm90a_wgmma_wg1_bf16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.bf16),
-            "gemm_bi_nn_sm100_tcgen_c4_bf16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.bf16),
-            "gemm_bi_f16_f16" => Some(&self.gemm_bi_f16_f16),
+            "nn_sm90a_wgmma_wg1_bf16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.bf16),
+            "nn_sm100_tcgen_c4_bf16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.bf16),
+            "f16_f16" => Some(&self.gemm_bi_f16_f16),
             "matvec_bi_f16_f16" => Some(&self.matvec_bi_f16_f16),
-            "gemm_bi_f16_f32" => Some(&self.gemm_bi_f16_f32),
+            "f16_f32" => Some(&self.gemm_bi_f16_f32),
             "matvec_bi_f16_f32" => Some(&self.matvec_bi_f16_f32),
-            "gemm_bi_nn_tc128_f16" => Some(&self.gemm_bi_nn_tc128_typed.f16),
-            "gemm_bi_nn_tc128_f32out_f16" => Some(&self.gemm_bi_nn_tc128_f32out.f16),
-            "gemm_bi_nn_tcw64_f16" => Some(&self.gemm_bi_nn_tcw64_typed.f16),
-            "gemm_bi_nn_tcwn64_f16" => Some(&self.gemm_bi_nn_tcwn64_typed.f16),
-            "gemm_bi_nn_tc64_f16" => Some(&self.gemm_bi_nn_tc64_typed.f16),
-            "gemm_bi_nn_tc64_f32out_f16" => Some(&self.gemm_bi_nn_tc64_f32out.f16),
-            "gemm_bi_nn_tc16_f16" => Some(&self.gemm_bi_nn_tc16_typed.f16),
-            "gemm_bi_nn_tc16_f32out_f16" => Some(&self.gemm_bi_nn_tc16_f32out.f16),
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16" => {
-                Some(&self.fixed_sm89_half_pipeline.as_ref()?.f16)
-            }
-            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16" => {
-                Some(&self.fixed_sm89_half_swizzle.as_ref()?.f16)
-            }
-            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16" => Some(&self.fixed_sm89_half_s3.as_ref()?.f16),
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16" => {
+            "nn_tc128_f16" => Some(&self.gemm_bi_nn_tc128_typed.f16),
+            "nn_tc128_f32out_f16" => Some(&self.gemm_bi_nn_tc128_f32out.f16),
+            "nn_tcw64_f16" => Some(&self.gemm_bi_nn_tcw64_typed.f16),
+            "nn_tcwn64_f16" => Some(&self.gemm_bi_nn_tcwn64_typed.f16),
+            "nn_tc64_f16" => Some(&self.gemm_bi_nn_tc64_typed.f16),
+            "nn_tc64_f32out_f16" => Some(&self.gemm_bi_nn_tc64_f32out.f16),
+            "nn_tc16_f16" => Some(&self.gemm_bi_nn_tc16_typed.f16),
+            "nn_tc16_f32out_f16" => Some(&self.gemm_bi_nn_tc16_f32out.f16),
+            "nn_sm89_tc128_pipeline_f16" => Some(&self.fixed_sm89_half_pipeline.as_ref()?.f16),
+            "nn_sm89_tc128_swizzle_f16" => Some(&self.fixed_sm89_half_swizzle.as_ref()?.f16),
+            "nn_sm89_tc128_s3_f16" => Some(&self.fixed_sm89_half_s3.as_ref()?.f16),
+            "nn_sm120_tma_64x64_bk64_s2_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.f16)
             }
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_f16" => Some(
+            "nn_sm120_tma_64x64_bk64_s2_f32out_f16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m64n64_bk64_s2
                     .f16,
             ),
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16" => {
+            "nn_sm120_tma_64x128_bk64_s2_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n128_bk64_s2.f16)
             }
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_f16" => Some(
+            "nn_sm120_tma_64x128_bk64_s2_f32out_f16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m64n128_bk64_s2
                     .f16,
             ),
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16" => {
+            "nn_sm120_tma_128x64_bk32_s3_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n64_bk32_s3.f16)
             }
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_f16" => Some(
+            "nn_sm120_tma_128x64_bk32_s3_f32out_f16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n64_bk32_s3
                     .f16,
             ),
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16" => {
+            "nn_sm120_tma_128x128_bk32_s2_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s2.f16)
             }
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_f16" => Some(
+            "nn_sm120_tma_128x128_bk32_s2_f32out_f16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n128_bk32_s2
                     .f16,
             ),
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16" => {
+            "nn_sm120_tma_128x128_bk32_s3_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m128n128_bk32_s3.f16)
             }
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_f16" => Some(
+            "nn_sm120_tma_128x128_bk32_s3_f32out_f16" => Some(
                 &self
                     .gemm_bi_nn_half_sm120_f32out
                     .as_ref()?
                     .m128n128_bk32_s3
                     .f16,
             ),
-            "gemm_bi_nn_sm90a_wgmma_wg1_f16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.f16),
-            "gemm_bi_nn_sm100_tcgen_c4_f16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.f16),
+            "nn_sm90a_wgmma_wg1_f16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.f16),
+            "nn_sm100_tcgen_c4_f16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.f16),
             "matvec_bi_f32_f32" => Some(&self.matvec_bi_f32_f32),
-            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16" => {
-                self.fixed_sm89_half_m64n64_s3_f16.as_ref()
-            }
-            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16" => {
-                self.fixed_sm89_half_m128n64_s2_f16.as_ref()
-            }
-            "gemm_bi_nn_tf32_v1_m128n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m128n64_s2),
-            "gemm_bi_nn_tf32_v1_m128n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m128n64_s3),
-            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m64n64_s2),
-            "gemm_bi_nn_tf32_v1_m64n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m64n64_s3),
-            "gemm_bi_nn_tf32_v1_m16n32_bk32_s4" => Some(&self.gemm_bi_nn_tf32.m16n32_s4),
-            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3" => {
-                self.fixed_sm89_tf32_rna_wide.as_ref()
-            }
-            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3" => {
-                self.fixed_sm89_tf32_rna_n96.as_ref()
-            }
-            "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3" => {
-                self.triad_kernels().tf32_function(symbol)
-            }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2" => {
+            "nn_sm89_m64n64_bk64_s3_f16" => self.fixed_sm89_half_m64n64_s3_f16.as_ref(),
+            "nn_sm89_m128n64_bk64_s2_f16" => self.fixed_sm89_half_m128n64_s2_f16.as_ref(),
+            "nn_tf32_m128n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m128n64_s2),
+            "nn_tf32_m128n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m128n64_s3),
+            "nn_tf32_m64n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m64n64_s2),
+            "nn_tf32_m64n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m64n64_s3),
+            "nn_tf32_m16n32_bk32_s4" => Some(&self.gemm_bi_nn_tf32.m16n32_s4),
+            "nn_rna_wide_tf32_m128n128_bk32_s3" => self.fixed_sm89_tf32_rna_wide.as_ref(),
+            "nn_sm89_rna_tf32_m128n96_bk32_s3" => self.fixed_sm89_tf32_rna_n96.as_ref(),
+            "nn_sm80_mma_tf32_m128n128_bk32_s3" => self.triad_kernels().tf32_function(symbol),
+            "nn_sm120_tma_tf32_m128n64_bk32_s2" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m128n64_s2)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3" => {
+            "nn_sm120_tma_tf32_m128n64_bk32_s3" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m128n64_s3)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2" => {
+            "nn_sm120_tma_tf32_m64n128_bk32_s2" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n128_s2)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3" => {
+            "nn_sm120_tma_tf32_m64n128_bk32_s3" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n128_s3)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp" => {
+            "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2_producer_warp)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2" => {
+            "nn_sm120_tma_tf32_m64n64_bk32_s2" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2)
             }
-            "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store" => {
+            "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2_pair_store)
             }
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2" => {
+            "nn_sm120_tma_fma_postbias_m128n64_bk16_s2" => {
                 Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n64)
             }
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => {
+            "nn_sm120_tma_fma_postbias_m64n128_bk16_s2" => {
                 Some(&self.fixed_sm120_fma_postbias.as_ref()?.m64n128)
             }
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => {
+            "nn_sm120_tma_fma_postbias_m128n96_bk16_s2" => {
                 Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n96)
             }
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4" => {
+            "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4" => {
                 self.fixed_sm120_fma_postbias.as_ref()?.m128n64_k4.as_ref()
             }
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2" => self
+            "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2" => self
                 .fixed_sm120_fma_postbias
                 .as_ref()?
                 .m128n64_t256
                 .as_ref(),
-            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => self
+            "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => self
                 .fixed_sm120_fma_postbias
                 .as_ref()?
                 .nobias_m128n64_t256
@@ -1210,19 +1184,11 @@ impl MambaKernels {
         };
         let load_sm120_half = |suffix: &str| -> Result<FixedSm120HalfKernels, String> {
             let kernels = FixedSm120HalfKernels {
-                m64n64_bk64_s2: load_half(&format!("gemm_bi_nn_sm120_tma_64x64_bk64_s2{suffix}"))?,
-                m64n128_bk64_s2: load_half(&format!(
-                    "gemm_bi_nn_sm120_tma_64x128_bk64_s2{suffix}"
-                ))?,
-                m128n64_bk32_s3: load_half(&format!(
-                    "gemm_bi_nn_sm120_tma_128x64_bk32_s3{suffix}"
-                ))?,
-                m128n128_bk32_s2: load_half(&format!(
-                    "gemm_bi_nn_sm120_tma_128x128_bk32_s2{suffix}"
-                ))?,
-                m128n128_bk32_s3: load_half(&format!(
-                    "gemm_bi_nn_sm120_tma_128x128_bk32_s3{suffix}"
-                ))?,
+                m64n64_bk64_s2: load_half(&format!("nn_sm120_tma_64x64_bk64_s2{suffix}"))?,
+                m64n128_bk64_s2: load_half(&format!("nn_sm120_tma_64x128_bk64_s2{suffix}"))?,
+                m128n64_bk32_s3: load_half(&format!("nn_sm120_tma_128x64_bk32_s3{suffix}"))?,
+                m128n128_bk32_s2: load_half(&format!("nn_sm120_tma_128x128_bk32_s2{suffix}"))?,
+                m128n128_bk32_s3: load_half(&format!("nn_sm120_tma_128x128_bk32_s3{suffix}"))?,
             };
             for (tile, bytes) in [
                 (&kernels.m64n64_bk64_s2, 32_896),
@@ -1372,13 +1338,13 @@ impl MambaKernels {
             adamw_step_multi: load_typed("adamw_step_multi")?,
 
             // Batch-invariant GEMM
-            gemm_bi_bf16_bf16: get("gemm_bi_bf16_bf16")?,
-            gemm_bi_f16_f16: get("gemm_bi_f16_f16")?,
-            gemm_bi_bf16_f32: get("gemm_bi_bf16_f32")?,
-            gemm_bi_f16_f32: get("gemm_bi_f16_f32")?,
-            gemm_bi_f32_f32: get("gemm_bi_f32_f32")?,
-            gemm_bi_f32_f32_s2: get("gemm_bi_f32_f32_s2")?,
-            gemm_bi_f32_f32_n128_s2: get("gemm_bi_f32_f32_n128_s2")?,
+            gemm_bi_bf16_bf16: get("bf16_bf16")?,
+            gemm_bi_f16_f16: get("f16_f16")?,
+            gemm_bi_bf16_f32: get("bf16_f32")?,
+            gemm_bi_f16_f32: get("f16_f32")?,
+            gemm_bi_f32_f32: get("f32_f32")?,
+            gemm_bi_f32_f32_s2: get("f32_f32_s2")?,
+            gemm_bi_f32_f32_n128_s2: get("f32_f32_n128_s2")?,
             fixed_sm89_half_pipeline,
             fixed_sm89_half_pipeline_rejection,
             fixed_sm89_half_swizzle,
@@ -1408,11 +1374,11 @@ impl MambaKernels {
             fixed_sm120_fma_postbias_rejection,
             gemm_bi_nn_tf32: {
                 let kernels = FixedTf32Kernels {
-                    m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,
-                    m128n64_s3: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s3")?,
-                    m64n64_s2: get("gemm_bi_nn_tf32_v1_m64n64_bk32_s2")?,
-                    m64n64_s3: get("gemm_bi_nn_tf32_v1_m64n64_bk32_s3")?,
-                    m16n32_s4: get("gemm_bi_nn_tf32_v1_m16n32_bk32_s4")?,
+                    m128n64_s2: get("nn_tf32_m128n64_bk32_s2")?,
+                    m128n64_s3: get("nn_tf32_m128n64_bk32_s3")?,
+                    m64n64_s2: get("nn_tf32_m64n64_bk32_s2")?,
+                    m64n64_s3: get("nn_tf32_m64n64_bk32_s3")?,
+                    m16n32_s4: get("nn_tf32_m16n32_bk32_s4")?,
                 };
                 for (function, bytes) in [
                     (&kernels.m128n64_s2, 55_296),
@@ -1436,17 +1402,13 @@ impl MambaKernels {
                 && matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121")
             {
                 let kernels = FixedSm120Tf32Kernels {
-                    m128n64_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2")?,
-                    m128n64_s3: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3")?,
-                    m64n128_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2")?,
-                    m64n128_s3: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3")?,
-                    m64n64_s2_producer_warp: get(
-                        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
-                    )?,
-                    m64n64_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2")?,
-                    m64n64_s2_pair_store: get(
-                        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
-                    )?,
+                    m128n64_s2: get("nn_sm120_tma_tf32_m128n64_bk32_s2")?,
+                    m128n64_s3: get("nn_sm120_tma_tf32_m128n64_bk32_s3")?,
+                    m64n128_s2: get("nn_sm120_tma_tf32_m64n128_bk32_s2")?,
+                    m64n128_s3: get("nn_sm120_tma_tf32_m64n128_bk32_s3")?,
+                    m64n64_s2_producer_warp: get("nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp")?,
+                    m64n64_s2: get("nn_sm120_tma_tf32_m64n64_bk32_s2")?,
+                    m64n64_s2_pair_store: get("nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store")?,
                 };
                 for (function, bytes) in [
                     (&kernels.m128n64_s2, 49_280),
@@ -1535,21 +1497,21 @@ impl MambaKernels {
             rmsnorm_bwd_f32in_typed: load_half("rmsnorm_backward_f32in")?,
             residual_add_f32_typed: load_half("residual_add_f32")?,
 
-            gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
-            gemm_bi_nn_tc128_f32out: load_half_dynsmem("gemm_bi_nn_tc128_f32out", 71_680)?,
-            gemm_bi_nn_tc64_f32out: load_half("gemm_bi_nn_tc64_f32out")?,
-            gemm_bi_nn_tc16_f32out: load_half("gemm_bi_nn_tc16_f32out")?,
-            gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
-            gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
-            gemm_bi_nn_tcw64_typed: load_half_dynsmem("gemm_bi_nn_tcw64", 65_536)?,
-            gemm_bi_nn_tcwn64_typed: load_half_dynsmem("gemm_bi_nn_tcwn64", 98_304)?,
+            gemm_bi_nn_tc128_typed: load_half_dynsmem("nn_tc128", 71_680)?,
+            gemm_bi_nn_tc128_f32out: load_half_dynsmem("nn_tc128_f32out", 71_680)?,
+            gemm_bi_nn_tc64_f32out: load_half("nn_tc64_f32out")?,
+            gemm_bi_nn_tc16_f32out: load_half("nn_tc16_f32out")?,
+            gemm_bi_nn_tc64_typed: load_half("nn_tc64")?,
+            gemm_bi_nn_tc16_typed: load_half("nn_tc16")?,
+            gemm_bi_nn_tcw64_typed: load_half_dynsmem("nn_tcw64", 65_536)?,
+            gemm_bi_nn_tcwn64_typed: load_half_dynsmem("nn_tcwn64", 98_304)?,
             gemm_bi_nn_sm90_typed: if arch == "sm_90a" {
-                Some(load_half_dynsmem("gemm_bi_nn_sm90a_wgmma_wg1", 49_152)?)
+                Some(load_half_dynsmem("nn_sm90a_wgmma_wg1", 49_152)?)
             } else {
                 None
             },
             gemm_bi_nn_sm100_typed: if matches!(arch, "sm_100a" | "sm_103a" | "sm_110a") {
-                Some(load_half_dynsmem("gemm_bi_nn_sm100_tcgen_c4", 65_536)?)
+                Some(load_half_dynsmem("nn_sm100_tcgen_c4", 65_536)?)
             } else {
                 None
             },

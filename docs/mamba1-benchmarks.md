@@ -108,7 +108,7 @@ kernel caches on an RTX 6000 Ada in the same CUDA 13.2 environment.
 
 `MAMBA_RS_GEMM_MODE=deterministic` resolves the Triad family and
 `MAMBA_RS_BI_F32_POLICY=tf32` resolves
-`AllowDeterministicTf32V1`. That policy permits deterministic TF32 where a
+`AllowDeterministicTf32`. That policy permits deterministic TF32 where a
 qualified route applies; it does not force every GEMM to use TF32, and an
 exact deterministic fallback remains valid.
 

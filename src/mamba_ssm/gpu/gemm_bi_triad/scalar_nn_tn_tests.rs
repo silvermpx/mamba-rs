@@ -789,14 +789,14 @@ fn assert_big_route(host: &HostCase, trace: &RecordedGemmTrace) {
     assert_eq!(routes.len(), 1, "{} route count", host.spec.label);
     let route = routes[0];
     let expected_symbol = match host.spec.op {
-        ResolvedGemmOp::Nn => "gemm_bi_nn",
-        ResolvedGemmOp::Tn => "gemm_bi_tn_aligned",
+        ResolvedGemmOp::Nn => "nn_big",
+        ResolvedGemmOp::Tn => "tn_aligned",
         ResolvedGemmOp::Nt => unreachable!("NN/TN qualification received NT"),
     };
     assert_eq!(route.op, host.spec.op);
     assert_eq!(route.dtype, PolicyDtype::F32);
-    assert_eq!(route.backend, PhysicalGemmBackend::ScalarFmaV1);
-    assert_eq!(route.numeric_contract, ResolvedNumericContract::ScalarFmaV1);
+    assert_eq!(route.backend, PhysicalGemmBackend::ScalarFma);
+    assert_eq!(route.numeric_contract, ResolvedNumericContract::ScalarFma);
     assert_eq!(
         route.instruction_family,
         ResolvedInstructionFamily::ScalarFma
@@ -804,7 +804,7 @@ fn assert_big_route(host: &HostCase, trace: &RecordedGemmTrace) {
     assert_eq!(route.operand_conversion, ResolvedOperandConversion::None);
     assert_eq!(
         route.ownership,
-        ResolvedOutputOwnership::OneCtaPerOutputTileV1
+        ResolvedOutputOwnership::OneCtaPerOutputTile
     );
     assert_eq!(route.symbol, expected_symbol);
     assert_eq!(route.module_kind, ModuleKind::TriadScalar);
@@ -1009,9 +1009,9 @@ fn runtime_production_shapes_resolve_to_single_big_routes() {
             assert_eq!(
                 nodes[0].symbol,
                 if op == ResolvedGemmOp::Nn {
-                    "gemm_bi_nn"
+                    "nn_big"
                 } else {
-                    "gemm_bi_tn_aligned"
+                    "tn_aligned"
                 }
             );
             assert_eq!(
@@ -1243,7 +1243,7 @@ fn scalar_big_nn_tn_runtime_matrix_is_exact_and_graph_stable() {
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     let mut forced_outputs = HashMap::new();
     for spec in runtime_cases() {

@@ -283,13 +283,9 @@ fn expected_nodes(
         let shape = InferenceShape { m, k, n };
         match case.row {
             "bf16" | "f16" => {
-                let tile = expected_ada_half_auto_v45(
-                    nvrtc,
-                    words::dtype(case.storage[0])?,
-                    shape,
-                    case.bias,
-                )
-                .ok_or("missing literal homogeneous-half AUTO expectation")?;
+                let tile =
+                    expected_ada_half_auto(nvrtc, words::dtype(case.storage[0])?, shape, case.bias)
+                        .ok_or("missing literal homogeneous-half AUTO expectation")?;
                 let symbol = fixed_force_spec(case.row, (8, 9), tile)?
                     .expected_symbol
                     .to_owned();
@@ -323,10 +319,7 @@ fn expected_nodes(
             "bf16_f32" | "f16_f32" => {
                 if matches!((m, k, n), (4621, 768, 2304) | (4621, 1928, 384)) {
                     let mut node = tiled_node(
-                        format!(
-                            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_{}",
-                            case.storage[0]
-                        ),
+                        format!("nn_sm89_tc128_f32out_s3_{}", case.storage[0]),
                         ModuleKind::Fixed,
                         (m, n),
                         (128, 128),
@@ -340,7 +333,7 @@ fn expected_nodes(
                     let large = (m, k, n) == (2048, 2304, 768);
                     tiled_node(
                         format!(
-                            "gemm_bi_nn_tc{}_f32out_{}",
+                            "nn_tc{}_f32out_{}",
                             if large { 128 } else { 64 },
                             case.storage[0]
                         ),
@@ -360,9 +353,9 @@ fn expected_nodes(
                 let narrow = (m, k, n) == (2048, 2304, 768) && !case.bias;
                 let mut node = tiled_node(
                     if narrow {
-                        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3"
+                        "nn_sm89_rna_tf32_m128n96_bk32_s3"
                     } else {
-                        "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
+                        "nn_rna_wide_tf32_m128n128_bk32_s3"
                     }
                     .into(),
                     ModuleKind::Fixed,
@@ -378,7 +371,7 @@ fn expected_nodes(
                 if (m, k, n) == (4621, 1928, 384) {
                     if case.bias {
                         tiled_node(
-                            "gemm_bi_f32_f32_s2".into(),
+                            "f32_f32_s2".into(),
                             ModuleKind::Fixed,
                             (m, n),
                             (64, 64),
@@ -387,7 +380,7 @@ fn expected_nodes(
                         )
                     } else {
                         tiled_node(
-                            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1".into(),
+                            "nn_sm89_f32_m128n64_tail_copyplan".into(),
                             ModuleKind::Fixed,
                             (m, n),
                             (128, 64),
@@ -397,7 +390,7 @@ fn expected_nodes(
                     }
                 } else {
                     tiled_node(
-                        "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1".into(),
+                        "nn_sm89_f32_n64_copyplan".into(),
                         ModuleKind::Fixed,
                         (m, n),
                         (64, 64),
@@ -413,10 +406,7 @@ fn expected_nodes(
         let columns = if case.op == "nt" { k } else { n };
         if case.op == "tn" && (m, k, n) == (1024, 256, 128) {
             let mut node = tiled_node(
-                format!(
-                    "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_{}",
-                    case.storage[0]
-                ),
+                format!("tn_sm89_m16n16_bk64_s2_ldb72_{}", case.storage[0]),
                 ModuleKind::TriadSm89Half,
                 (rows, columns),
                 (16, 16),
@@ -458,9 +448,9 @@ fn expected_nodes(
         let finalist = (m, k, n) == (4621, 384, 1928);
         let mut node = tiled_node(
             if finalist {
-                "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2"
+                "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2"
             } else {
-                "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1"
+                "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3"
             }
             .into(),
             if finalist {
@@ -477,7 +467,7 @@ fn expected_nodes(
         node
     } else if case.op == "tn" {
         let mut node = tiled_node(
-            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1".into(),
+            "tn_m16n16_bk16_s2_splitm16".into(),
             ModuleKind::TriadScalar,
             (k, n),
             (16, 16),
@@ -489,7 +479,7 @@ fn expected_nodes(
         node
     } else {
         tiled_node(
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1".into(),
+            "nn_sm89_f32_n64_copyplan".into(),
             ModuleKind::Fixed,
             (m, if case.op == "nt" { k } else { n }),
             (64, 64),
@@ -502,7 +492,7 @@ fn expected_nodes(
     }
     if case.family == "triad" && case.row == "f32_exact" && case.op == "nt" {
         let transpose = ExpectedNode {
-            symbol: "gemm_bi_transpose_f32_32x16_d768_v1".into(),
+            symbol: "transpose_f32_32x16_d768".into(),
             module: ModuleKind::TriadScalar,
             abi: "transpose",
             grid: ((n as u32).div_ceil(32), (k as u32).div_ceil(32), 1),
@@ -885,7 +875,7 @@ impl Census {
         case.bias = false;
         words::configure(ctx, &case)?;
         let spec = tiled_node(
-            "gemm_bi_f32_f32_s2".into(),
+            "f32_f32_s2".into(),
             ModuleKind::Fixed,
             (64, 64),
             (64, 64),
@@ -905,7 +895,7 @@ impl Census {
         case.dims = (128, 64, 128);
         words::configure(ctx, &case)?;
         let spec = tiled_node(
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16".into(),
+            "nn_sm89_m128n128_bk64_s3_f16".into(),
             ModuleKind::TriadSm89Half,
             (128, 128),
             (128, 128),
@@ -934,7 +924,7 @@ impl Census {
         fixture.reset(ctx, 0)?;
         let trace = ctx.record_eager_gemm_trace(|| fixture.launch(ctx))?;
         if trace.routes().len() != 1
-            || trace.routes()[0].symbol != "gemm_bi_tn_gemv"
+            || trace.routes()[0].symbol != "tn_gemv"
             || trace.routes()[0].module_kind != ModuleKind::TriadScalar
         {
             return Err("public scalar legacy anchor selected a different route".into());
@@ -942,7 +932,7 @@ impl Census {
         fixture.reset(ctx, 0)?;
         let graph = unsafe { capture_into_graph(&ctx.stream, || fixture.launch(ctx)) }?;
         let spec = tiled_node(
-            "gemm_bi_tn_gemv".into(),
+            "tn_gemv".into(),
             ModuleKind::TriadScalar,
             (4, 1),
             (4, 1),
@@ -955,7 +945,7 @@ impl Census {
         case.dims = (128, 96, 32);
         words::configure(ctx, &case)?;
         let spec = tiled_node(
-            "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1".into(),
+            "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3".into(),
             ModuleKind::TriadSm89Tf32Joint,
             (128, 96),
             (128, 96),
@@ -1186,15 +1176,15 @@ fn qualification_request(
 ) -> Result<PhysicalQualificationRequest, String> {
     let route = if case.storage[0] == "f32" {
         PhysicalQualificationRoute::F32Policy(if case.row == "tf32" {
-            F32TriadPolicy::AllowDeterministicTf32V1
+            F32TriadPolicy::AllowDeterministicTf32
         } else {
-            F32TriadPolicy::ExactScalarFmaV1
+            F32TriadPolicy::ExactScalarFma
         })
     } else {
         PhysicalQualificationRoute::HalfPolicy {
             dtype: words::dtype(case.storage[0])?,
             tensor_cores: true,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
         }
     };
     Ok(if case.storage[0] == "f32" {
@@ -1223,7 +1213,7 @@ fn offset_negative_request(
         PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores: true,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
         },
         offset,
     )
@@ -1233,7 +1223,7 @@ fn epilogue_negative_request() -> PhysicalQualificationRequest {
     PhysicalQualificationRequest::contiguous_f32(
         ResolvedGemmOp::Nn,
         (4096, 3072, 1536),
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
         PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
     )
 }
@@ -1623,10 +1613,12 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
         ] {
             let request = offset_negative_request(dtype, offset);
             let launch = qualify_physical_launch(ctx, request)?;
-            if launch.evidence().nodes().iter().any(|node| {
-                node.symbol
-                    .starts_with("gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_")
-            }) {
+            if launch
+                .evidence()
+                .nodes()
+                .iter()
+                .any(|node| node.symbol.starts_with("tn_sm89_m16n16_bk64_s2_ldb72_"))
+            {
                 return Err("misaligned half view entered small16 AUTO".into());
             }
             eprintln!(
@@ -1641,7 +1633,7 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
         .evidence()
         .nodes()
         .iter()
-        .any(|node| node.symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1")
+        .any(|node| node.symbol == "nn_sm89_f32_n64_copyplan")
     {
         return Err("biased NN request entered no-bias Fixed copyplan AUTO".into());
     }
@@ -1932,7 +1924,7 @@ mod combined_gemm_host {
         for toolkit in [(12, 8), (13, 0), (13, 2)] {
             for case in &cases {
                 for node in expected_nodes(case, toolkit).unwrap() {
-                    if node.symbol == "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1" {
+                    if node.symbol == "nn_sm89_f32_n64_copyplan" {
                         occurrences += 1;
                         assert_eq!(
                             node.static_bytes,
@@ -1973,7 +1965,7 @@ mod combined_gemm_host {
                 .unwrap();
             assert_eq!(
                 expected_nodes(exact, toolkit).unwrap()[0].symbol,
-                "gemm_bi_f32_f32_s2"
+                "f32_f32_s2"
             );
             let finalist = cases
                 .iter()
@@ -2002,7 +1994,7 @@ mod combined_gemm_host {
                 assert!(
                     expected_nodes(case, toolkit).unwrap()[0]
                         .symbol
-                        .starts_with("gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_")
+                        .starts_with("nn_sm89_tc128_f32out_s3_")
                 );
             }
         }
@@ -2059,41 +2051,41 @@ mod combined_gemm_host {
 
     fn six_current_receipt_fixture() -> Vec<Value> {
         let literal_symbols = [
-            "gemm_bi_f32_f32_s2",
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
-            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
-            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
-            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
-            "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
-            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
-            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
-            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
-            "gemm_bi_nn_tc64_f32out_bf16",
-            "gemm_bi_nn_tc64_f32out_f16",
-            "gemm_bi_nn_tc128_f32out_bf16",
-            "gemm_bi_nn_tc128_f32out_f16",
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
-            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
-            "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16",
-            "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16",
-            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16",
-            "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16",
-            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16",
-            "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
-            "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16",
-            "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16",
-            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
-            "gemm_bi_transpose_f32_32x16_d768_v1",
-            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
-            "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1",
+            "f32_f32_s2",
+            "nn_sm89_tc128_pipeline_bf16",
+            "nn_sm89_tc128_pipeline_f16",
+            "nn_sm89_tc128_swizzle_bf16",
+            "nn_sm89_tc128_swizzle_f16",
+            "nn_sm89_tc128_s3_bf16",
+            "nn_sm89_tc128_s3_f16",
+            "nn_sm89_m64n64_bk64_s3_f16",
+            "nn_sm89_m128n64_bk64_s2_f16",
+            "nn_sm89_f32_n64_copyplan",
+            "nn_rna_wide_tf32_m128n128_bk32_s3",
+            "nn_sm89_rna_tf32_m128n96_bk32_s3",
+            "nn_tc64_f32out_bf16",
+            "nn_tc64_f32out_f16",
+            "nn_tc128_f32out_bf16",
+            "nn_tc128_f32out_f16",
+            "nn_sm89_tc128_f32out_s3_bf16",
+            "nn_sm89_tc128_f32out_s3_f16",
+            "nn_sm89_f32_m128n64_tail_copyplan",
+            "nn_sm89_m128n128_bk64_s3_bf16",
+            "nn_sm89_m128n128_bk64_s3_f16",
+            "tn_sm89_m64n64_bk64_s2_compact_bxor_bf16",
+            "tn_sm89_m64n64_bk64_s2_compact_bxor_f16",
+            "tn_sm89_m64n64_bk64_s2_regpipe_vec2_bf16",
+            "tn_sm89_m64n64_bk64_s2_regpipe_vec2_f16",
+            "nt_sm89_m128n128_bk64_s3_bxor_bf16",
+            "nt_sm89_m128n128_bk64_s3_bxor_f16",
+            "nt_sm89_m96n128_bk64_s3_bf16",
+            "nt_sm89_m96n128_bk64_s3_f16",
+            "tn_sm89_m16n16_bk64_s2_ldb72_bf16",
+            "tn_sm89_m16n16_bk64_s2_ldb72_f16",
+            "tn_m16n16_bk16_s2_splitm16",
+            "transpose_f32_32x16_d768",
+            "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
+            "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3",
         ];
         let mut receipts = Vec::new();
         for (toolkit, cap) in [

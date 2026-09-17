@@ -354,15 +354,15 @@ extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS) void NAME(   \
     gbf_tf32_entry<BM, BN, STAGES>(output, a, b, bias, params);             \
 }
 
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m128n64_bk32_s2, 128, 64, 2, 256, 1)
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m128n64_bk32_s3, 128, 64, 3, 256, 1)
+GBF_TF32_KERNEL(nn_tf32_m128n64_bk32_s2, 128, 64, 2, 256, 1)
+GBF_TF32_KERNEL(nn_tf32_m128n64_bk32_s3, 128, 64, 3, 256, 1)
 extern "C" __global__ __launch_bounds__(128, 1)
-void gemm_bi_nn_tf32_v1_m64n64_bk32_s2(
+void nn_tf32_m64n64_bk32_s2(
     float* output, const float* a, const float* b, const float* bias,
     GbfTf32Params params) {
     gbf_tf32_entry<64, 64, 2, true>(output, a, b, bias, params);
 }
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m64n64_bk32_s3, 64, 64, 3, 128, 1)
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m16n32_bk32_s4, 16, 32, 4, 128, 3)
+GBF_TF32_KERNEL(nn_tf32_m64n64_bk32_s3, 64, 64, 3, 128, 1)
+GBF_TF32_KERNEL(nn_tf32_m16n32_bk32_s4, 16, 32, 4, 128, 3)
 
 #undef GBF_TF32_KERNEL

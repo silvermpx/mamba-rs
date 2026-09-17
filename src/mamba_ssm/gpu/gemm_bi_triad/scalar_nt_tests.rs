@@ -468,7 +468,7 @@ fn assert_thin_physical_evidence(ctx: &GpuCtx, case: NtCase) -> [u8; 32] {
     let request = PhysicalQualificationRequest::contiguous(
         ResolvedGemmOp::Nt,
         case.dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified = qualify_physical_launch(ctx, request)
         .unwrap_or_else(|error| panic!("{} physical qualification: {error}", case.label));
@@ -482,7 +482,7 @@ fn assert_thin_physical_evidence(ctx: &GpuCtx, case: NtCase) -> [u8; 32] {
     if exact_m2n16 {
         assert_eq!(evidence.launch_count(), 1, "{} launch count", case.label);
         let node = evidence.nodes()[0];
-        assert_eq!(node.symbol, "gemm_bi_nt_m2n16_bk64_splitk32_v1");
+        assert_eq!(node.symbol, "nt_m2n16_bk64_splitk32");
         assert_eq!(node.module_kind, ModuleKind::TriadScalar);
         assert_eq!(node.logical_op, ResolvedGemmOp::Nt);
         assert_eq!(node.shape, case.dims);
@@ -500,11 +500,7 @@ fn assert_thin_physical_evidence(ctx: &GpuCtx, case: NtCase) -> [u8; 32] {
                 .iter()
                 .map(|node| node.symbol)
                 .collect::<Vec<_>>(),
-            [
-                "gemm_bi_transpose_f32_2d",
-                "gemm_bi_nn_splitk32_partial",
-                "gemm_bi_splitk_reduce",
-            ],
+            ["transpose_f32_2d", "nn_splitk32_partial", "splitk_reduce",],
             "{} physical nodes",
             case.label
         );
@@ -618,7 +614,7 @@ fn sm120_scalar_nt_d768_out_production_route_is_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
     let compiler = ctx.kernels.triad_scalar_compiler_identity();
     assert_eq!(compiler.target.as_str(), "compute_120");
@@ -641,7 +637,7 @@ fn sm120_scalar_nt_d768_out_production_route_is_exact_and_graph_stable() {
     let request = PhysicalQualificationRequest::contiguous(
         ResolvedGemmOp::Nt,
         case.dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified = qualify_physical_launch(&ctx, request)
         .expect("qualify production d768-out scalar NT route");
@@ -657,10 +653,7 @@ fn sm120_scalar_nt_d768_out_production_route_is_exact_and_graph_stable() {
             .iter()
             .map(|node| node.symbol)
             .collect::<Vec<_>>(),
-        [
-            "gemm_bi_transpose_f32_32x16_d768_v1",
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
-        ]
+        ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
     );
     assert!(
         evidence
@@ -818,7 +811,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
     let compiler = ctx.kernels.triad_scalar_compiler_identity();
     assert_eq!(compiler.target.as_str(), "compute_120");
@@ -842,7 +835,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
     let request = PhysicalQualificationRequest::contiguous(
         ResolvedGemmOp::Nt,
         case.dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified = qualify_physical_launch(&ctx, request)
         .expect("qualify production large-deep scalar NT route");
@@ -858,10 +851,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
             .iter()
             .map(|node| node.symbol)
             .collect::<Vec<_>>(),
-        [
-            "gemm_bi_transpose_f32_32x16_d768_v1",
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
-        ]
+        ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
     );
     assert!(
         evidence
@@ -902,7 +892,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
         .expect("validate production large-deep qualification red zones");
 
     let kernels = ctx.kernels.triad_kernels();
-    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768_v1;
+    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768;
     assert!(transpose.num_regs().expect("transpose registers") <= 28);
     assert_eq!(transpose.local_size_bytes().expect("transpose local"), 0);
     assert_eq!(
@@ -917,7 +907,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
             .expect("transpose occupancy")
             >= 2
     );
-    let m64 = &kernels.gemm_bi_nn_m64n64_bk16_s2_v1;
+    let m64 = &kernels.gemm_bi_nn_m64n64_bk16_s2;
     assert!(m64.num_regs().expect("M64 registers") <= 103);
     assert_eq!(m64.local_size_bytes().expect("M64 local"), 0);
     assert_eq!(m64.shared_size_bytes().expect("M64 static shared"), 0);
@@ -952,7 +942,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
     let compiler = ctx.kernels.triad_scalar_compiler_identity();
     assert_eq!(compiler.target.as_str(), "compute_120");
@@ -977,7 +967,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
     let request = PhysicalQualificationRequest::contiguous(
         ResolvedGemmOp::Nt,
         case.dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified =
         qualify_physical_launch(&ctx, request).expect("qualify production prism scalar NT route");
@@ -993,10 +983,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
             .iter()
             .map(|node| node.symbol)
             .collect::<Vec<_>>(),
-        [
-            "gemm_bi_transpose_f32_32x16_d768_v1",
-            "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-        ]
+        ["transpose_f32_32x16_d768", "nn_prism_m64n64_bk16_s2",]
     );
     assert!(
         evidence
@@ -1035,7 +1022,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
         evidence.nodes()[1].launch.arguments_digest
     );
     let kernels = ctx.kernels.triad_kernels();
-    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768_v1;
+    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768;
     assert!(transpose.num_regs().expect("transpose registers") <= 28);
     assert_eq!(transpose.local_size_bytes().expect("transpose local"), 0);
     assert_eq!(
@@ -1050,7 +1037,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
             .expect("transpose occupancy")
             >= 2
     );
-    let m64 = &kernels.gemm_bi_nn_prism_m64n64_bk16_s2_v1;
+    let m64 = &kernels.gemm_bi_nn_prism_m64n64_bk16_s2;
     assert!(m64.num_regs().expect("M64 registers") <= 103);
     assert_eq!(m64.local_size_bytes().expect("M64 local"), 0);
     assert_eq!(m64.shared_size_bytes().expect("M64 static shared"), 0);
@@ -1085,7 +1072,7 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     assert_eq!(ctx.kernels.multiprocessor_count(), 170);
     let compiler = ctx.kernels.triad_scalar_compiler_identity();
     assert_eq!(compiler.target.as_str(), "compute_120");
@@ -1109,7 +1096,7 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
     let request = PhysicalQualificationRequest::contiguous(
         ResolvedGemmOp::Nt,
         case.dims,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified = qualify_physical_launch(&ctx, request)
         .expect("qualify production d128-out scalar NT route");
@@ -1123,10 +1110,7 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
             .iter()
             .map(|node| node.symbol)
             .collect::<Vec<_>>(),
-        [
-            "gemm_bi_transpose_f32_32x16_d768_v1",
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
-        ]
+        ["transpose_f32_32x16_d768", "nn_m64n64_bk16_s2",]
     );
     assert!(
         evidence
@@ -1166,7 +1150,7 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
         .expect("validate production d128-out qualification red zones");
 
     let kernels = ctx.kernels.triad_kernels();
-    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768_v1;
+    let transpose = &kernels.gemm_bi_transpose_f32_32x16_d768;
     assert!(transpose.num_regs().expect("transpose registers") <= 28);
     assert_eq!(transpose.local_size_bytes().expect("transpose local"), 0);
     assert_eq!(
@@ -1181,7 +1165,7 @@ fn sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable() {
             .expect("transpose occupancy")
             >= 2
     );
-    let m64 = &kernels.gemm_bi_nn_m64n64_bk16_s2_v1;
+    let m64 = &kernels.gemm_bi_nn_m64n64_bk16_s2;
     assert!(m64.num_regs().expect("M64 registers") <= 103);
     assert_eq!(m64.local_size_bytes().expect("M64 local"), 0);
     assert_eq!(m64.shared_size_bytes().expect("M64 static shared"), 0);
@@ -1216,7 +1200,7 @@ fn ada_scalar_big_nt_runtime_matrix_is_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     for case in [
         NtCase {
@@ -1297,7 +1281,7 @@ fn sm80plus_scalar_nt_thin_outputs_are_exact_and_graph_stable() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     let mut prior_launch_digest = None;
     for case in [
@@ -1334,7 +1318,7 @@ fn sm80plus_scalar_nt_splitk_matches_its_frozen_f32_tree() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
 
     let case = NtCase {
         label: "splitk32-fixed-f32-tree",
@@ -1357,7 +1341,7 @@ fn sm80plus_f32_preparation_rejects_output_resource_aliases() {
     ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
         .unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     let dims = (128, 128, 128);
     let matrix_elements = dims.0 * dims.1;
     let shared = GpuBuffer::zeros(&ctx.stream, matrix_elements * 2)

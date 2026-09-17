@@ -1,6 +1,6 @@
 // c++ -std=c++17 -O2 tests/cuda/gemm_bi_fixed_sm89_swizzle_layout.cpp -o /tmp/gemm_bi_fixed_sm89_swizzle_layout
 // Pure-host exhaustive proof over the production constexpr mapping helpers.
-#include "../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"
+#include "../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
 #include <array>
 #include <cstdio>
 #include <stdexcept>

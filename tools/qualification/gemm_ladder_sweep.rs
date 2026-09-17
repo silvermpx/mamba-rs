@@ -64,9 +64,9 @@ enum Op {
 impl Op {
     fn name(self) -> &'static str {
         match self {
-            Op::NnFwd => "nn_fwd",
-            Op::TnDw => "tn_dw",
-            Op::NtDx => "nt_dx",
+            Op::NnFwd => "gemm_bi_nn_fwd",
+            Op::TnDw => "gemm_bi_tn_dw",
+            Op::NtDx => "gemm_bi_nt_dx",
         }
     }
 }

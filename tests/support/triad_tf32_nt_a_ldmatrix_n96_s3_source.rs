@@ -1,6 +1,6 @@
-pub const SYMBOL: &str = "gemm_bi_nt_test_a_ldmatrix_n96_s3_sm89_v1";
+pub const SYMBOL: &str = "nt_test_a_ldmatrix_n96_s3_sm89";
 
-const SM80_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+const SM80_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
 
 pub fn candidate_source() -> String {
     compose(SYMBOL, A_LDMATRIX_LOAD)
@@ -23,10 +23,10 @@ const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                 : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
                 : "r"(address));
-            a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
-            a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
-            a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
-            a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+            a_fragments[m_atom][0] = tf32_rna(__uint_as_float(raw0));
+            a_fragments[m_atom][1] = tf32_rna(__uint_as_float(raw1));
+            a_fragments[m_atom][2] = tf32_rna(__uint_as_float(raw2));
+            a_fragments[m_atom][3] = tf32_rna(__uint_as_float(raw3));
         }"#;
 
 const N96_BODY: &str = r#"
@@ -214,7 +214,7 @@ __device__ __forceinline__ void nt_n96_mma(
     for (int m_atom = 0; m_atom < 4; ++m_atom) {
 #pragma unroll
         for (int n_atom = 0; n_atom < 3; ++n_atom) {
-            gemm_bi_tf32_mma_m16n8k8(
+            tf32_mma_m16n8k8(
                 acc[m_atom][n_atom], fragments.a[m_atom], fragments.b[n_atom]);
         }
     }

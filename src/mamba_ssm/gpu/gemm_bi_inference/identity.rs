@@ -72,89 +72,89 @@ macro_rules! terminal {
 // native half-to-F32. No suffix acceptance or dynamic symbol construction.
 const TERMINALS: &[TerminalSpec] = &[
     terminal!(
-        "gemm_bi_f32_f32_s2",
+        "f32_f32_s2",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (64, 64, 32, 2, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_f32_f32_n128_s2",
+        "f32_f32_n128_s2",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (64, 128, 32, 2, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+        "nn_sm89_f32_n64_copyplan",
         (F32, F32),
-        ScalarFmaSm89FixedCopyPlanV1,
+        ScalarFmaSm89FixedCopyPlan,
         (64, 64, 32, 2, 128, 0),
         ExactF32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+        "nn_sm89_tc128_f32out_s3_bf16",
         (Bf16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 3, 256, 98304),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+        "nn_sm89_tc128_f32out_s3_f16",
         (F16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 3, 256, 98304),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+        "nn_sm89_f32_m128n64_tail_copyplan",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (128, 64, 32, 2, 256, 0),
         ExactF32,
         Forbidden
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+        "nn_sm120_f32_n64_copyplan",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (64, 64, 32, 2, 128, 0),
         ExactF32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
+        "nn_sm120_f32_n64_copyplan_t256",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (64, 64, 32, 2, 256, 0),
         ExactF32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+        "nn_sm120_f32_n64_copyplan_m128n64_t256",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (128, 64, 32, 2, 256, 0),
         ExactF32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1",
+        "nn_sm120_f32_n64_sliced",
         (F32, F32),
-        InferenceScalarFmaV1,
+        InferenceScalarFma,
         (64, 64, 32, 2, 128, 0),
         ExactF32,
         Optional
     ),
     terminal!(
-        "gemm_bi_bf16_bf16",
+        "bf16_bf16",
         (Bf16, Bf16),
-        InferenceWmmaV1,
+        InferenceWmma,
         (64, 64, 32, 1, 256, 0),
         Legacy,
         Optional
@@ -162,15 +162,15 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_bf16_bf16",
         (Bf16, Bf16),
-        FixedMatvecEightWarpV1,
+        FixedMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_bf16_f32",
+        "bf16_f32",
         (Bf16, F32),
-        InferenceWmmaV1,
+        InferenceWmma,
         (64, 64, 32, 1, 256, 0),
         Legacy,
         Optional
@@ -178,199 +178,199 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_bf16_f32",
         (Bf16, F32),
-        FixedMatvecEightWarpV1,
+        FixedMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc128_bf16",
+        "nn_tc128_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc128_f32out_bf16",
+        "nn_tc128_f32out_bf16",
         (Bf16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tcw64_bf16",
+        "nn_tcw64_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 128, 65536),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tcwn64_bf16",
+        "nn_tcwn64_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 256, 64, 2, 256, 98304),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc64_bf16",
+        "nn_tc64_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (64, 64, 64, 2, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc64_f32out_bf16",
+        "nn_tc64_f32out_bf16",
         (Bf16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (64, 64, 64, 2, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc16_bf16",
+        "nn_tc16_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (16, 32, 64, 4, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc16_f32out_bf16",
+        "nn_tc16_f32out_bf16",
         (Bf16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (16, 32, 64, 4, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+        "nn_sm89_tc128_pipeline_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+        "nn_sm89_tc128_swizzle_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 69632),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+        "nn_sm89_tc128_s3_bf16",
         (Bf16, Bf16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 3, 256, 98304),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
+        "nn_sm120_tma_64x64_bk64_s2_bf16",
         (Bf16, Bf16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 64, 64, 2, 128, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_bf16",
+        "nn_sm120_tma_64x64_bk64_s2_f32out_bf16",
         (Bf16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 64, 64, 2, 128, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16",
+        "nn_sm120_tma_64x128_bk64_s2_bf16",
         (Bf16, Bf16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 128, 64, 2, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_bf16",
+        "nn_sm120_tma_64x128_bk64_s2_f32out_bf16",
         (Bf16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 128, 64, 2, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16",
+        "nn_sm120_tma_128x64_bk32_s3_bf16",
         (Bf16, Bf16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 64, 32, 3, 256, 36992),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_bf16",
+        "nn_sm120_tma_128x64_bk32_s3_f32out_bf16",
         (Bf16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 64, 32, 3, 256, 36992),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16",
+        "nn_sm120_tma_128x128_bk32_s2_bf16",
         (Bf16, Bf16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 2, 256, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_bf16",
+        "nn_sm120_tma_128x128_bk32_s2_f32out_bf16",
         (Bf16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 2, 256, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16",
+        "nn_sm120_tma_128x128_bk32_s3_bf16",
         (Bf16, Bf16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 3, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_bf16",
+        "nn_sm120_tma_128x128_bk32_s3_f32out_bf16",
         (Bf16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 3, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
+        "nn_sm90a_wgmma_wg1_bf16",
         (Bf16, Bf16),
-        InferenceSm90aWgmmaV1,
+        InferenceSm90aWgmma,
         (64, 128, 64, 2, 128, 49152),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm100_tcgen_c4_bf16",
+        "nn_sm100_tcgen_c4_bf16",
         (Bf16, Bf16),
-        InferenceSm100Tcgen05V1,
+        InferenceSm100Tcgen05,
         (128, 128, 64, 2, 128, 65536),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_f16_f16",
+        "f16_f16",
         (F16, F16),
-        InferenceWmmaV1,
+        InferenceWmma,
         (64, 64, 32, 1, 256, 0),
         Legacy,
         Optional
@@ -378,15 +378,15 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f16_f16",
         (F16, F16),
-        FixedMatvecEightWarpV1,
+        FixedMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_f16_f32",
+        "f16_f32",
         (F16, F32),
-        InferenceWmmaV1,
+        InferenceWmma,
         (64, 64, 32, 1, 256, 0),
         Legacy,
         Optional
@@ -394,191 +394,191 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f16_f32",
         (F16, F32),
-        FixedMatvecEightWarpV1,
+        FixedMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc128_f16",
+        "nn_tc128_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc128_f32out_f16",
+        "nn_tc128_f32out_f16",
         (F16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tcw64_f16",
+        "nn_tcw64_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 128, 65536),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tcwn64_f16",
+        "nn_tcwn64_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 256, 64, 2, 256, 98304),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc64_f16",
+        "nn_tc64_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (64, 64, 64, 2, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc64_f32out_f16",
+        "nn_tc64_f32out_f16",
         (F16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (64, 64, 64, 2, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc16_f16",
+        "nn_tc16_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (16, 32, 64, 4, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tc16_f32out_f16",
+        "nn_tc16_f32out_f16",
         (F16, F32),
-        InferenceMma16V1,
+        InferenceMma16,
         (16, 32, 64, 4, 128, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+        "nn_sm89_tc128_pipeline_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 71680),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+        "nn_sm89_tc128_swizzle_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 2, 256, 69632),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+        "nn_sm89_tc128_s3_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 128, 64, 3, 256, 98304),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
+        "nn_sm120_tma_64x64_bk64_s2_f16",
         (F16, F16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 64, 64, 2, 128, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_f16",
+        "nn_sm120_tma_64x64_bk64_s2_f32out_f16",
         (F16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 64, 64, 2, 128, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16",
+        "nn_sm120_tma_64x128_bk64_s2_f16",
         (F16, F16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 128, 64, 2, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_f16",
+        "nn_sm120_tma_64x128_bk64_s2_f32out_f16",
         (F16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (64, 128, 64, 2, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16",
+        "nn_sm120_tma_128x64_bk32_s3_f16",
         (F16, F16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 64, 32, 3, 256, 36992),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_f16",
+        "nn_sm120_tma_128x64_bk32_s3_f32out_f16",
         (F16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 64, 32, 3, 256, 36992),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16",
+        "nn_sm120_tma_128x128_bk32_s2_f16",
         (F16, F16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 2, 256, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_f16",
+        "nn_sm120_tma_128x128_bk32_s2_f32out_f16",
         (F16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 2, 256, 32896),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16",
+        "nn_sm120_tma_128x128_bk32_s3_f16",
         (F16, F16),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 3, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_f16",
+        "nn_sm120_tma_128x128_bk32_s3_f32out_f16",
         (F16, F32),
-        InferenceSm120TmaMma16V1,
+        InferenceSm120TmaMma16,
         (128, 128, 32, 3, 256, 49280),
         Sm120Half,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm90a_wgmma_wg1_f16",
+        "nn_sm90a_wgmma_wg1_f16",
         (F16, F16),
-        InferenceSm90aWgmmaV1,
+        InferenceSm90aWgmma,
         (64, 128, 64, 2, 128, 49152),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm100_tcgen_c4_f16",
+        "nn_sm100_tcgen_c4_f16",
         (F16, F16),
-        InferenceSm100Tcgen05V1,
+        InferenceSm100Tcgen05,
         (128, 128, 64, 2, 128, 65536),
         Legacy,
         Optional
@@ -586,191 +586,191 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f32_f32",
         (F32, F32),
-        FixedMatvecEightWarpV1,
+        FixedMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+        "nn_sm89_m64n64_bk64_s3_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (64, 64, 64, 3, 128, 49152),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+        "nn_sm89_m128n64_bk64_s2_f16",
         (F16, F16),
-        InferenceMma16V1,
+        InferenceMma16,
         (128, 64, 64, 2, 128, 49152),
         HalfSm89,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+        "nn_tf32_m128n64_bk32_s2",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (128, 64, 32, 2, 256, 55296),
         Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+        "nn_tf32_m128n64_bk32_s3",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (128, 64, 32, 3, 256, 82944),
         Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+        "nn_tf32_m64n64_bk32_s2",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (64, 64, 32, 2, 128, 32768),
         Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+        "nn_tf32_m64n64_bk32_s3",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (64, 64, 32, 3, 128, 55296),
         Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+        "nn_tf32_m16n32_bk32_s4",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (16, 32, 32, 4, 128, 29696),
         Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+        "nn_rna_wide_tf32_m128n128_bk32_s3",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (128, 128, 32, 3, 256, 98304),
         Tf32Wide,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        "nn_sm89_rna_tf32_m128n96_bk32_s3",
         (F32, F32),
-        InferenceMmaTf32RnaV1,
+        InferenceMmaTf32Rna,
         (128, 96, 32, 3, 256, 86016),
         Tf32Wide,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+        "nn_sm80_mma_tf32_m128n128_bk32_s3",
         (F32, F32),
-        MmaTf32RnaV1,
+        MmaTf32Rna,
         (128, 128, 32, 3, 256, 98304),
         Tf32Wide,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
+        "nn_sm120_tma_tf32_m128n64_bk32_s2",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (128, 64, 32, 2, 128, 49280),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
+        "nn_sm120_tma_tf32_m128n64_bk32_s3",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (128, 64, 32, 3, 256, 73856),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
+        "nn_sm120_tma_tf32_m64n128_bk32_s2",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (64, 128, 32, 2, 128, 49280),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3",
+        "nn_sm120_tma_tf32_m64n128_bk32_s3",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (64, 128, 32, 3, 256, 73856),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
+        "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (64, 64, 32, 2, 160, 32896),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
+        "nn_sm120_tma_tf32_m64n64_bk32_s2",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (64, 64, 32, 2, 128, 32896),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+        "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store",
         (F32, F32),
-        InferenceSm120TmaMmaTf32RnaV1,
+        InferenceSm120TmaMmaTf32Rna,
         (64, 64, 32, 2, 128, 32896),
         Sm120Tf32,
         Optional
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (128, 64, 16, 2, 128, 24592),
         Sm120PostBias,
         Required
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m64n128_bk16_s2",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (64, 128, 16, 2, 128, 24592),
         Sm120PostBias,
         Required
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n96_bk16_s2",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (128, 96, 16, 2, 256, 28688),
         Sm120PostBias,
         Required
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (128, 64, 16, 2, 128, 24592),
         Sm120PostBias,
         Required
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (128, 64, 16, 2, 256, 24592),
         Sm120PostBias,
         Required
     ),
     terminal!(
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+        "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2",
         (F32, F32),
-        InferenceSm120TmaFmaV1,
+        InferenceSm120TmaFma,
         (128, 64, 16, 2, 256, 24592),
         Sm120PostBias,
         Forbidden
@@ -788,8 +788,7 @@ pub(in crate::mamba_ssm::gpu) fn validate_cached_bridge(
 ) -> Result<(), String> {
     if !matches!(
         route.symbol,
-        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2"
-            | "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2"
+        "nn_sm120_tma_fma_m128n64_bk16_s2" | "nn_sm120_tma_fma_m64n128_bk16_s2"
     ) {
         return Err(
             "Inference exact-TMA bridge symbol is not one of its two prepared entries".into(),
@@ -798,11 +797,11 @@ pub(in crate::mamba_ssm::gpu) fn validate_cached_bridge(
     let spec = super::super::gemm_bi_triad::tf32_route_specs_all(ModuleKind::TriadSm120)
         .find(|spec| spec.symbol == route.symbol)
         .ok_or("missing prepared exact-TMA bridge spec")?;
-    if route.backend != PhysicalGemmBackend::Sm120TmaFmaExactV1
-        || route.numeric_contract != ResolvedNumericContract::ScalarFmaV1
+    if route.backend != PhysicalGemmBackend::Sm120TmaFmaExact
+        || route.numeric_contract != ResolvedNumericContract::ScalarFma
         || route.op != ResolvedGemmOp::Nn
         || route.dtype != PolicyDtype::F32
-        || route.ownership != ResolvedOutputOwnership::OneCtaPerOutputTileV1
+        || route.ownership != ResolvedOutputOwnership::OneCtaPerOutputTile
         || route.module_kind != spec.module_kind
         || route.instruction_family != spec.instruction_family
         || route.instruction_shape != spec.instruction_shape
@@ -848,40 +847,38 @@ impl TerminalSpec {
         use ResolvedNumericContract as N;
         use ResolvedOperandConversion as C;
         let (numeric, instruction, (m, n, k), conversion) = match self.backend {
-            B::InferenceScalarFmaV1
-            | B::ScalarFmaSm89FixedCopyPlanV1
-            | B::InferenceSm120TmaFmaV1 => {
-                (N::ScalarFmaPostDotBiasV1, I::ScalarFma, (1, 1, 1), C::None)
+            B::InferenceScalarFma | B::ScalarFmaSm89FixedCopyPlan | B::InferenceSm120TmaFma => {
+                (N::ScalarFmaPostDotBias, I::ScalarFma, (1, 1, 1), C::None)
             }
-            B::InferenceWmmaV1 => (N::WmmaF32PostDotBiasV1, I::WmmaApi, (16, 16, 16), C::None),
-            B::InferenceMma16V1 | B::InferenceSm120TmaMma16V1 => {
-                (N::MmaSyncF32V1, I::MmaSync, (16, 8, 16), C::None)
+            B::InferenceWmma => (N::WmmaF32PostDotBias, I::WmmaApi, (16, 16, 16), C::None),
+            B::InferenceMma16 | B::InferenceSm120TmaMma16 => {
+                (N::MmaSyncF32, I::MmaSync, (16, 8, 16), C::None)
             }
-            B::InferenceSm90aWgmmaV1 => (N::WgmmaF32V1, I::Wgmma, (64, 128, 16), C::None),
-            B::InferenceSm100Tcgen05V1 => (N::Tcgen05F32V1, I::Tcgen05, (128, 128, 16), C::None),
-            B::InferenceMmaTf32RnaV1 => (
-                N::MmaTf32RnaV1,
+            B::InferenceSm90aWgmma => (N::WgmmaF32, I::Wgmma, (64, 128, 16), C::None),
+            B::InferenceSm100Tcgen05 => (N::Tcgen05F32, I::Tcgen05, (128, 128, 16), C::None),
+            B::InferenceMmaTf32Rna => (
+                N::MmaTf32Rna,
                 I::MmaSync,
                 (16, 8, 8),
-                C::RegisterCvtRnaTf32F32V1,
+                C::RegisterCvtRnaTf32F32,
             ),
-            B::InferenceSm120TmaMmaTf32RnaV1 => (
-                N::Sm120TmaMmaTf32RnaV1,
+            B::InferenceSm120TmaMmaTf32Rna => (
+                N::Sm120TmaMmaTf32Rna,
                 I::MmaSync,
                 (16, 8, 8),
-                C::TensorMapUint32ThenCvtRnaTf32F32V1,
+                C::TensorMapUint32ThenCvtRnaTf32F32,
             ),
-            B::FixedMatvecEightWarpV1 => (
-                N::ScalarFmaEightWarpTreePostDotBiasV1,
+            B::FixedMatvecEightWarp => (
+                N::ScalarFmaEightWarpTreePostDotBias,
                 I::ScalarFma,
                 (1, 1, 1),
                 C::None,
             ),
-            B::MmaTf32RnaV1 => (
-                N::MmaTf32AddHalfUlpV1,
+            B::MmaTf32Rna => (
+                N::MmaTf32AddHalfUlp,
                 I::MmaSync,
                 (16, 8, 8),
-                C::RegisterAddHalfUlpTf32V1,
+                C::RegisterAddHalfUlpTf32,
             ),
             _ => unreachable!("closed Inference terminal table"),
         };
@@ -894,7 +891,7 @@ impl TerminalSpec {
     }
 
     fn module(&self) -> ModuleKind {
-        if self.backend == PhysicalGemmBackend::MmaTf32RnaV1 {
+        if self.backend == PhysicalGemmBackend::MmaTf32Rna {
             ModuleKind::TriadSm80
         } else {
             ModuleKind::Fixed
@@ -902,7 +899,7 @@ impl TerminalSpec {
     }
 
     fn tuning_revision(&self) -> u16 {
-        if self.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 {
+        if self.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan {
             SM89_FIXED_COPYPLAN_ROUTE_REVISION
         } else {
             TUNING_TABLE_REVISION
@@ -929,7 +926,7 @@ impl TerminalSpec {
             || route.instruction_family != arithmetic.instruction
             || route.instruction_shape != arithmetic.shape
             || route.operand_conversion != arithmetic.conversion
-            || route.ownership != ResolvedOutputOwnership::OneCtaPerOutputTileV1
+            || route.ownership != ResolvedOutputOwnership::OneCtaPerOutputTile
             || route.module_kind != self.module()
             || route.artifact.module_kind != self.module()
             || route.tile != self.tile
@@ -948,7 +945,7 @@ impl TerminalSpec {
         }
         let m = u32::try_from(m).map_err(|_| "Inference M exceeds u32")?;
         let n = u32::try_from(n).map_err(|_| "Inference N exceeds u32")?;
-        let (grid, shared) = if self.backend == PhysicalGemmBackend::FixedMatvecEightWarpV1 {
+        let (grid, shared) = if self.backend == PhysicalGemmBackend::FixedMatvecEightWarp {
             let shared = u32::try_from(k)
                 .ok()
                 .and_then(|k| k.checked_mul(width(self.storage[0]) as u32))
@@ -984,7 +981,7 @@ impl TerminalSpec {
         family: BiGemmFamily,
     ) -> Result<NumericContractSet, String> {
         use PhysicalGemmBackend as B;
-        let expected_family = if self.backend == B::FixedMatvecEightWarpV1 {
+        let expected_family = if self.backend == B::FixedMatvecEightWarp {
             BiGemmFamily::Triad
         } else {
             BiGemmFamily::Inference
@@ -993,18 +990,18 @@ impl TerminalSpec {
             return Err("Inference terminal has the wrong live GEMM family".into());
         }
         Ok(match self.backend {
-            B::InferenceScalarFmaV1
-            | B::ScalarFmaSm89FixedCopyPlanV1
-            | B::InferenceSm120TmaFmaV1 => NumericContractSet::FIXED_SCALAR_FMA_V1,
-            B::InferenceWmmaV1
-            | B::InferenceMma16V1
-            | B::InferenceSm90aWgmmaV1
-            | B::InferenceSm100Tcgen05V1
-            | B::InferenceSm120TmaMma16V1 => NumericContractSet::FIXED_MMA_SYNC_V1,
-            B::InferenceMmaTf32RnaV1 | B::InferenceSm120TmaMmaTf32RnaV1 | B::MmaTf32RnaV1 => {
-                NumericContractSet::FIXED_DETERMINISTIC_TF32_V1
+            B::InferenceScalarFma | B::ScalarFmaSm89FixedCopyPlan | B::InferenceSm120TmaFma => {
+                NumericContractSet::FIXED_SCALAR_FMA
             }
-            B::FixedMatvecEightWarpV1 => NumericContractSet::FIXED_MATVEC_TREE_V1,
+            B::InferenceWmma
+            | B::InferenceMma16
+            | B::InferenceSm90aWgmma
+            | B::InferenceSm100Tcgen05
+            | B::InferenceSm120TmaMma16 => NumericContractSet::FIXED_MMA_SYNC,
+            B::InferenceMmaTf32Rna | B::InferenceSm120TmaMmaTf32Rna | B::MmaTf32Rna => {
+                NumericContractSet::FIXED_DETERMINISTIC_TF32
+            }
+            B::FixedMatvecEightWarp => NumericContractSet::FIXED_MATVEC_TREE,
             _ => unreachable!("closed Inference terminal table"),
         })
     }
@@ -1307,7 +1304,7 @@ pub(in crate::mamba_ssm::gpu) fn observation<O: PhysicalLaunchObserver>(
             instruction_family: arithmetic.instruction,
             instruction_shape: arithmetic.shape,
             operand_conversion: arithmetic.conversion,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
             symbol: spec.symbol,
             module_kind: spec.module(),
             target: compiler.target,
@@ -1398,7 +1395,7 @@ mod tests {
             maps: spec.uses_maps().then_some([[7; 16], [9; 16]]),
             auxiliary: [0; 2],
         };
-        let matvec = spec.backend == PhysicalGemmBackend::FixedMatvecEightWarpV1;
+        let matvec = spec.backend == PhysicalGemmBackend::FixedMatvecEightWarp;
         let config = LaunchConfig {
             grid_dim: if matvec {
                 (3, 3, 1)
@@ -1455,480 +1452,435 @@ mod tests {
         // does not call a production selector or terminal constructor.
         type TerminalRow = (&'static str, u8, (u32, u32, u32, u8, u32, u32), [u8; 3]);
         let expected: &[TerminalRow] = &[
-            ("gemm_bi_f32_f32_s2", 31, (64, 64, 32, 2, 128, 0), [1, 1, 1]),
+            ("f32_f32_s2", 31, (64, 64, 32, 2, 128, 0), [1, 1, 1]),
+            ("f32_f32_n128_s2", 31, (64, 128, 32, 2, 256, 0), [1, 1, 1]),
             (
-                "gemm_bi_f32_f32_n128_s2",
-                31,
-                (64, 128, 32, 2, 256, 0),
-                [1, 1, 1],
-            ),
-            (
-                "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+                "nn_sm89_f32_n64_copyplan",
                 22,
                 (64, 64, 32, 2, 128, 0),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+                "nn_sm89_tc128_f32out_s3_bf16",
                 33,
                 (128, 128, 64, 3, 256, 98_304),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                "nn_sm89_tc128_f32out_s3_f16",
                 33,
                 (128, 128, 64, 3, 256, 98_304),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+                "nn_sm89_f32_m128n64_tail_copyplan",
                 31,
                 (128, 64, 32, 2, 256, 0),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+                "nn_sm120_f32_n64_copyplan",
                 31,
                 (64, 64, 32, 2, 128, 0),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
+                "nn_sm120_f32_n64_copyplan_t256",
                 31,
                 (64, 64, 32, 2, 256, 0),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+                "nn_sm120_f32_n64_copyplan_m128n64_t256",
                 31,
                 (128, 64, 32, 2, 256, 0),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1",
+                "nn_sm120_f32_n64_sliced",
                 31,
                 (64, 64, 32, 2, 128, 0),
                 [1, 1, 1],
             ),
-            ("gemm_bi_bf16_bf16", 32, (64, 64, 32, 1, 256, 0), [3, 3, 3]),
+            ("bf16_bf16", 32, (64, 64, 32, 1, 256, 0), [3, 3, 3]),
             ("matvec_bi_bf16_bf16", 40, (1, 32, 0, 1, 256, 0), [3, 3, 3]),
-            ("gemm_bi_bf16_f32", 32, (64, 64, 32, 1, 256, 0), [3, 3, 1]),
+            ("bf16_f32", 32, (64, 64, 32, 1, 256, 0), [3, 3, 1]),
             ("matvec_bi_bf16_f32", 40, (1, 32, 0, 1, 256, 0), [3, 3, 1]),
             (
-                "gemm_bi_nn_tc128_bf16",
+                "nn_tc128_bf16",
                 33,
                 (128, 128, 64, 2, 256, 71680),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_tc128_f32out_bf16",
+                "nn_tc128_f32out_bf16",
                 33,
                 (128, 128, 64, 2, 256, 71680),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_tcw64_bf16",
+                "nn_tcw64_bf16",
                 33,
                 (128, 128, 64, 2, 128, 65536),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_tcwn64_bf16",
+                "nn_tcwn64_bf16",
                 33,
                 (128, 256, 64, 2, 256, 98304),
                 [3, 3, 3],
             ),
+            ("nn_tc64_bf16", 33, (64, 64, 64, 2, 128, 0), [3, 3, 3]),
             (
-                "gemm_bi_nn_tc64_bf16",
-                33,
-                (64, 64, 64, 2, 128, 0),
-                [3, 3, 3],
-            ),
-            (
-                "gemm_bi_nn_tc64_f32out_bf16",
+                "nn_tc64_f32out_bf16",
                 33,
                 (64, 64, 64, 2, 128, 0),
                 [3, 3, 1],
             ),
+            ("nn_tc16_bf16", 33, (16, 32, 64, 4, 128, 0), [3, 3, 3]),
             (
-                "gemm_bi_nn_tc16_bf16",
-                33,
-                (16, 32, 64, 4, 128, 0),
-                [3, 3, 3],
-            ),
-            (
-                "gemm_bi_nn_tc16_f32out_bf16",
+                "nn_tc16_f32out_bf16",
                 33,
                 (16, 32, 64, 4, 128, 0),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+                "nn_sm89_tc128_pipeline_bf16",
                 33,
                 (128, 128, 64, 2, 256, 71680),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+                "nn_sm89_tc128_swizzle_bf16",
                 33,
                 (128, 128, 64, 2, 256, 69632),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
+                "nn_sm89_tc128_s3_bf16",
                 33,
                 (128, 128, 64, 3, 256, 98304),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
+                "nn_sm120_tma_64x64_bk64_s2_bf16",
                 38,
                 (64, 64, 64, 2, 128, 32896),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_bf16",
+                "nn_sm120_tma_64x64_bk64_s2_f32out_bf16",
                 38,
                 (64, 64, 64, 2, 128, 32896),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16",
+                "nn_sm120_tma_64x128_bk64_s2_bf16",
                 38,
                 (64, 128, 64, 2, 256, 49280),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_bf16",
+                "nn_sm120_tma_64x128_bk64_s2_f32out_bf16",
                 38,
                 (64, 128, 64, 2, 256, 49280),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16",
+                "nn_sm120_tma_128x64_bk32_s3_bf16",
                 38,
                 (128, 64, 32, 3, 256, 36992),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_bf16",
+                "nn_sm120_tma_128x64_bk32_s3_f32out_bf16",
                 38,
                 (128, 64, 32, 3, 256, 36992),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16",
+                "nn_sm120_tma_128x128_bk32_s2_bf16",
                 38,
                 (128, 128, 32, 2, 256, 32896),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_bf16",
+                "nn_sm120_tma_128x128_bk32_s2_f32out_bf16",
                 38,
                 (128, 128, 32, 2, 256, 32896),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16",
+                "nn_sm120_tma_128x128_bk32_s3_bf16",
                 38,
                 (128, 128, 32, 3, 256, 49280),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_bf16",
+                "nn_sm120_tma_128x128_bk32_s3_f32out_bf16",
                 38,
                 (128, 128, 32, 3, 256, 49280),
                 [3, 3, 1],
             ),
             (
-                "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
+                "nn_sm90a_wgmma_wg1_bf16",
                 34,
                 (64, 128, 64, 2, 128, 49152),
                 [3, 3, 3],
             ),
             (
-                "gemm_bi_nn_sm100_tcgen_c4_bf16",
+                "nn_sm100_tcgen_c4_bf16",
                 35,
                 (128, 128, 64, 2, 128, 65536),
                 [3, 3, 3],
             ),
-            ("gemm_bi_f16_f16", 32, (64, 64, 32, 1, 256, 0), [2, 2, 2]),
+            ("f16_f16", 32, (64, 64, 32, 1, 256, 0), [2, 2, 2]),
             ("matvec_bi_f16_f16", 40, (1, 32, 0, 1, 256, 0), [2, 2, 2]),
-            ("gemm_bi_f16_f32", 32, (64, 64, 32, 1, 256, 0), [2, 2, 1]),
+            ("f16_f32", 32, (64, 64, 32, 1, 256, 0), [2, 2, 1]),
             ("matvec_bi_f16_f32", 40, (1, 32, 0, 1, 256, 0), [2, 2, 1]),
+            ("nn_tc128_f16", 33, (128, 128, 64, 2, 256, 71680), [2, 2, 2]),
             (
-                "gemm_bi_nn_tc128_f16",
-                33,
-                (128, 128, 64, 2, 256, 71680),
-                [2, 2, 2],
-            ),
-            (
-                "gemm_bi_nn_tc128_f32out_f16",
+                "nn_tc128_f32out_f16",
                 33,
                 (128, 128, 64, 2, 256, 71680),
                 [2, 2, 1],
             ),
+            ("nn_tcw64_f16", 33, (128, 128, 64, 2, 128, 65536), [2, 2, 2]),
             (
-                "gemm_bi_nn_tcw64_f16",
-                33,
-                (128, 128, 64, 2, 128, 65536),
-                [2, 2, 2],
-            ),
-            (
-                "gemm_bi_nn_tcwn64_f16",
+                "nn_tcwn64_f16",
                 33,
                 (128, 256, 64, 2, 256, 98304),
                 [2, 2, 2],
             ),
+            ("nn_tc64_f16", 33, (64, 64, 64, 2, 128, 0), [2, 2, 2]),
+            ("nn_tc64_f32out_f16", 33, (64, 64, 64, 2, 128, 0), [2, 2, 1]),
+            ("nn_tc16_f16", 33, (16, 32, 64, 4, 128, 0), [2, 2, 2]),
+            ("nn_tc16_f32out_f16", 33, (16, 32, 64, 4, 128, 0), [2, 2, 1]),
             (
-                "gemm_bi_nn_tc64_f16",
-                33,
-                (64, 64, 64, 2, 128, 0),
-                [2, 2, 2],
-            ),
-            (
-                "gemm_bi_nn_tc64_f32out_f16",
-                33,
-                (64, 64, 64, 2, 128, 0),
-                [2, 2, 1],
-            ),
-            (
-                "gemm_bi_nn_tc16_f16",
-                33,
-                (16, 32, 64, 4, 128, 0),
-                [2, 2, 2],
-            ),
-            (
-                "gemm_bi_nn_tc16_f32out_f16",
-                33,
-                (16, 32, 64, 4, 128, 0),
-                [2, 2, 1],
-            ),
-            (
-                "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+                "nn_sm89_tc128_pipeline_f16",
                 33,
                 (128, 128, 64, 2, 256, 71680),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+                "nn_sm89_tc128_swizzle_f16",
                 33,
                 (128, 128, 64, 2, 256, 69632),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
+                "nn_sm89_tc128_s3_f16",
                 33,
                 (128, 128, 64, 3, 256, 98304),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
+                "nn_sm120_tma_64x64_bk64_s2_f16",
                 38,
                 (64, 64, 64, 2, 128, 32896),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f32out_f16",
+                "nn_sm120_tma_64x64_bk64_s2_f32out_f16",
                 38,
                 (64, 64, 64, 2, 128, 32896),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16",
+                "nn_sm120_tma_64x128_bk64_s2_f16",
                 38,
                 (64, 128, 64, 2, 256, 49280),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f32out_f16",
+                "nn_sm120_tma_64x128_bk64_s2_f32out_f16",
                 38,
                 (64, 128, 64, 2, 256, 49280),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16",
+                "nn_sm120_tma_128x64_bk32_s3_f16",
                 38,
                 (128, 64, 32, 3, 256, 36992),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f32out_f16",
+                "nn_sm120_tma_128x64_bk32_s3_f32out_f16",
                 38,
                 (128, 64, 32, 3, 256, 36992),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16",
+                "nn_sm120_tma_128x128_bk32_s2_f16",
                 38,
                 (128, 128, 32, 2, 256, 32896),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f32out_f16",
+                "nn_sm120_tma_128x128_bk32_s2_f32out_f16",
                 38,
                 (128, 128, 32, 2, 256, 32896),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16",
+                "nn_sm120_tma_128x128_bk32_s3_f16",
                 38,
                 (128, 128, 32, 3, 256, 49280),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f32out_f16",
+                "nn_sm120_tma_128x128_bk32_s3_f32out_f16",
                 38,
                 (128, 128, 32, 3, 256, 49280),
                 [2, 2, 1],
             ),
             (
-                "gemm_bi_nn_sm90a_wgmma_wg1_f16",
+                "nn_sm90a_wgmma_wg1_f16",
                 34,
                 (64, 128, 64, 2, 128, 49152),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_sm100_tcgen_c4_f16",
+                "nn_sm100_tcgen_c4_f16",
                 35,
                 (128, 128, 64, 2, 128, 65536),
                 [2, 2, 2],
             ),
             ("matvec_bi_f32_f32", 40, (1, 32, 0, 1, 256, 0), [1, 1, 1]),
             (
-                "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+                "nn_sm89_m64n64_bk64_s3_f16",
                 33,
                 (64, 64, 64, 3, 128, 49152),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+                "nn_sm89_m128n64_bk64_s2_f16",
                 33,
                 (128, 64, 64, 2, 128, 49152),
                 [2, 2, 2],
             ),
             (
-                "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+                "nn_tf32_m128n64_bk32_s2",
                 36,
                 (128, 64, 32, 2, 256, 55296),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+                "nn_tf32_m128n64_bk32_s3",
                 36,
                 (128, 64, 32, 3, 256, 82944),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+                "nn_tf32_m64n64_bk32_s2",
                 36,
                 (64, 64, 32, 2, 128, 32768),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+                "nn_tf32_m64n64_bk32_s3",
                 36,
                 (64, 64, 32, 3, 128, 55296),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+                "nn_tf32_m16n32_bk32_s4",
                 36,
                 (16, 32, 32, 4, 128, 29696),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                "nn_rna_wide_tf32_m128n128_bk32_s3",
                 36,
                 (128, 128, 32, 3, 256, 98304),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+                "nn_sm89_rna_tf32_m128n96_bk32_s3",
                 36,
                 (128, 96, 32, 3, 256, 86016),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+                "nn_sm80_mma_tf32_m128n128_bk32_s3",
                 5,
                 (128, 128, 32, 3, 256, 98304),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
+                "nn_sm120_tma_tf32_m128n64_bk32_s2",
                 39,
                 (128, 64, 32, 2, 128, 49280),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
+                "nn_sm120_tma_tf32_m128n64_bk32_s3",
                 39,
                 (128, 64, 32, 3, 256, 73856),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
+                "nn_sm120_tma_tf32_m64n128_bk32_s2",
                 39,
                 (64, 128, 32, 2, 128, 49280),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3",
+                "nn_sm120_tma_tf32_m64n128_bk32_s3",
                 39,
                 (64, 128, 32, 3, 256, 73856),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
+                "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp",
                 39,
                 (64, 64, 32, 2, 160, 32896),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
+                "nn_sm120_tma_tf32_m64n64_bk32_s2",
                 39,
                 (64, 64, 32, 2, 128, 32896),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+                "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store",
                 39,
                 (64, 64, 32, 2, 128, 32896),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+                "nn_sm120_tma_fma_postbias_m128n64_bk16_s2",
                 37,
                 (128, 64, 16, 2, 128, 24592),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+                "nn_sm120_tma_fma_postbias_m64n128_bk16_s2",
                 37,
                 (64, 128, 16, 2, 128, 24592),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+                "nn_sm120_tma_fma_postbias_m128n96_bk16_s2",
                 37,
                 (128, 96, 16, 2, 256, 28688),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+                "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4",
                 37,
                 (128, 64, 16, 2, 128, 24592),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+                "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2",
                 37,
                 (128, 64, 16, 2, 256, 24592),
                 [1, 1, 1],
             ),
             (
-                "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+                "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2",
                 37,
                 (128, 64, 16, 2, 256, 24592),
                 [1, 1, 1],
@@ -2006,8 +1958,8 @@ mod tests {
             );
             ResolvedPhysicalLaunchSet::from_nodes(&[node]).unwrap();
         }
-        assert!(terminal("gemm_bi_f32_f32").is_none());
-        assert!(terminal("gemm_bi_nn_sm90a_wgmma_wg1_f32out_bf16").is_none());
+        assert!(terminal("f32_f32").is_none());
+        assert!(terminal("nn_sm90a_wgmma_wg1_f32out_bf16").is_none());
         assert!(terminal("unrelated_f32out_bf16").is_none());
     }
 
@@ -2015,25 +1967,25 @@ mod tests {
     fn inference_bundle_admission_has_three_independent_closed_terminal_identities() {
         let cases = [
             (
-                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
+                "nn_sm89_tc128_f32out_s3_bf16",
                 PolicyDtype::Bf16,
-                PhysicalGemmBackend::InferenceMma16V1,
+                PhysicalGemmBackend::InferenceMma16,
                 AbiKind::HalfSm89,
                 (128, 128, 64, 3, 256, 98_304),
                 BiasDomain::Optional,
             ),
             (
-                "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
+                "nn_sm89_tc128_f32out_s3_f16",
                 PolicyDtype::F16,
-                PhysicalGemmBackend::InferenceMma16V1,
+                PhysicalGemmBackend::InferenceMma16,
                 AbiKind::HalfSm89,
                 (128, 128, 64, 3, 256, 98_304),
                 BiasDomain::Optional,
             ),
             (
-                "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+                "nn_sm89_f32_m128n64_tail_copyplan",
                 PolicyDtype::F32,
-                PhysicalGemmBackend::InferenceScalarFmaV1,
+                PhysicalGemmBackend::InferenceScalarFma,
                 AbiKind::ExactF32,
                 (128, 64, 32, 2, 256, 0),
                 BiasDomain::Forbidden,
@@ -2074,10 +2026,10 @@ mod tests {
             };
             route_mutations.push(value);
             let mut value = route;
-            value.backend = PhysicalGemmBackend::ScalarFmaV1;
+            value.backend = PhysicalGemmBackend::ScalarFma;
             route_mutations.push(value);
             let mut value = route;
-            value.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+            value.numeric_contract = ResolvedNumericContract::ScalarFma;
             route_mutations.push(value);
             let mut value = route;
             value.module_kind = ModuleKind::TriadScalar;
@@ -2086,7 +2038,7 @@ mod tests {
             value.instruction_shape.k += 1;
             route_mutations.push(value);
             let mut value = route;
-            value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32V1;
+            value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32;
             route_mutations.push(value);
             let mut value = route;
             value.tile.1 += 1;
@@ -2116,10 +2068,10 @@ mod tests {
             value.schedule_revision += 1;
             route_mutations.push(value);
             let mut value = route;
-            value.symbol = if route.symbol == "gemm_bi_f32_f32_s2" {
-                "gemm_bi_f32_f32_n128_s2"
+            value.symbol = if route.symbol == "f32_f32_s2" {
+                "f32_f32_n128_s2"
             } else {
-                "gemm_bi_f32_f32_s2"
+                "f32_f32_s2"
             };
             route_mutations.push(value);
             for changed in route_mutations {
@@ -2216,8 +2168,8 @@ mod tests {
 
     #[test]
     fn pair_store_symbol_is_bound_even_when_geometry_is_identical() {
-        let regular = terminal("gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2").unwrap();
-        let pair = terminal("gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store").unwrap();
+        let regular = terminal("nn_sm120_tma_tf32_m64n64_bk32_s2").unwrap();
+        let pair = terminal("nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store").unwrap();
         let (args, route, config) = fixture(regular, 64);
         let (pair_args, pair_route, _) = fixture(pair, 64);
         assert_eq!(route.launch.grid_dim, pair_route.launch.grid_dim);
@@ -2241,8 +2193,8 @@ mod tests {
     #[test]
     fn cached_bridge_preserves_only_its_two_existing_triad_specs() {
         for (symbol, tile) in [
-            ("gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2", (128, 64)),
-            ("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", (64, 128)),
+            ("nn_sm120_tma_fma_m128n64_bk16_s2", (128, 64)),
+            ("nn_sm120_tma_fma_m64n128_bk16_s2", (64, 128)),
         ] {
             let spec =
                 crate::mamba_ssm::gpu::gemm_bi_triad::tf32_route_specs_all(ModuleKind::TriadSm120)
@@ -2250,7 +2202,7 @@ mod tests {
                     .unwrap();
             let mut route = inference_test_support::route();
             route.symbol = symbol;
-            route.backend = PhysicalGemmBackend::Sm120TmaFmaExactV1;
+            route.backend = PhysicalGemmBackend::Sm120TmaFmaExact;
             route.module_kind = ModuleKind::TriadSm120;
             route.artifact.module_kind = ModuleKind::TriadSm120;
             route.shape = (2048, 768, 2304);
@@ -2267,13 +2219,13 @@ mod tests {
             route.schedule_revision = spec.schedule_revision;
             validate_cached_bridge(&route).unwrap();
             let mut bad = route;
-            bad.symbol = "gemm_bi_nn_sm120_tma_fma_v1_m64n64_bk16_s2";
+            bad.symbol = "nn_sm120_tma_fma_m64n64_bk16_s2";
             assert!(validate_cached_bridge(&bad).is_err());
             let mut bad = route;
-            bad.numeric_contract = ResolvedNumericContract::ScalarFmaPostDotBiasV1;
+            bad.numeric_contract = ResolvedNumericContract::ScalarFmaPostDotBias;
             assert!(validate_cached_bridge(&bad).is_err());
             let mut bad = route;
-            bad.ownership = ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFoldV1;
+            bad.ownership = ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFold;
             assert!(validate_cached_bridge(&bad).is_err());
             let mut bad = route;
             bad.module_kind = ModuleKind::Fixed;
@@ -2290,7 +2242,7 @@ mod tests {
 
     #[test]
     fn allocation_spans_and_zero_reduction_use_actual_required_operands() {
-        let spec = terminal("gemm_bi_f32_f32_s2").unwrap();
+        let spec = terminal("f32_f32_s2").unwrap();
         let (args, route, config) = fixture(spec, 64);
         for failing in [0x1000, 0x10000, 0x20000] {
             let observer = inference_test_support::observer(move |pointer, _| {
@@ -2351,7 +2303,7 @@ mod tests {
 
     #[test]
     fn allocation_bound_digest_updates_the_contained_route_and_rejects_stale_copy() {
-        let (args, route, config) = fixture(terminal("gemm_bi_bf16_f32").unwrap(), 64);
+        let (args, route, config) = fixture(terminal("bf16_f32").unwrap(), 64);
         let observer = bounded_observer(args, route.shape);
         let node = resolve_physical_launch_observation(
             &observer,
@@ -2401,8 +2353,8 @@ mod tests {
             bi_tensor_cores: true,
             fast_gemm: false,
             cublas_tf32: false,
-            f32_triad_policy: super::super::super::context::F32TriadPolicy::ExactScalarFmaV1,
-            half_triad_policy: super::super::super::context::HalfTriadPolicy::TiledParityV1,
+            f32_triad_policy: super::super::super::context::F32TriadPolicy::ExactScalarFma,
+            half_triad_policy: super::super::super::context::HalfTriadPolicy::TiledParity,
             bi_gemm_family: BiGemmFamily::Inference,
         };
         for family in [BiGemmFamily::Inference, BiGemmFamily::Triad] {
@@ -2411,14 +2363,14 @@ mod tests {
                     policy.bi_gemm_family = family;
                     policy.bi_tensor_cores = tc;
                     policy.f32_triad_policy = if allow_tf32 {
-                        super::super::super::context::F32TriadPolicy::AllowDeterministicTf32V1
+                        super::super::super::context::F32TriadPolicy::AllowDeterministicTf32
                     } else {
-                        super::super::super::context::F32TriadPolicy::ExactScalarFmaV1
+                        super::super::super::context::F32TriadPolicy::ExactScalarFma
                     };
                     let (_, contracts) = route_backend_contract_sets(policy);
                     for spec in TERMINALS {
                         let expected_family =
-                            if spec.backend == PhysicalGemmBackend::FixedMatvecEightWarpV1 {
+                            if spec.backend == PhysicalGemmBackend::FixedMatvecEightWarp {
                                 BiGemmFamily::Triad
                             } else {
                                 BiGemmFamily::Inference
@@ -2431,9 +2383,9 @@ mod tests {
                         let required = required.unwrap();
                         let tf32 = matches!(
                             spec.backend,
-                            PhysicalGemmBackend::InferenceMmaTf32RnaV1
-                                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
-                                | PhysicalGemmBackend::MmaTf32RnaV1
+                            PhysicalGemmBackend::InferenceMmaTf32Rna
+                                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
+                                | PhysicalGemmBackend::MmaTf32Rna
                         );
                         assert_eq!(
                             contracts.contains(required),
@@ -2444,17 +2396,12 @@ mod tests {
                     }
                     if family == BiGemmFamily::Inference {
                         assert_eq!(
-                            contracts.contains(NumericContractSet::FIXED_DETERMINISTIC_TF32_V1),
+                            contracts.contains(NumericContractSet::FIXED_DETERMINISTIC_TF32),
                             allow_tf32
                         );
-                        assert!(
-                            !contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
-                        );
+                        assert!(!contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
                     } else {
-                        assert_eq!(
-                            contracts.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
-                            tc
-                        );
+                        assert_eq!(contracts.contains(NumericContractSet::TRIAD_MMA_SYNC), tc);
                     }
                 }
             }

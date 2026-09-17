@@ -5404,7 +5404,7 @@ extern "C" __global__ void adamw_step_multi_##SUFFIX(                          \
 DEFINE_ADAMW_MULTI(f32,  float,         from_f_f32)
 DEFINE_ADAMW_MULTI(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_ADAMW_MULTI(f16,  __half,        from_f_f16)
-#line 1 "kernels/gemm_bi_fixed/common.cuh"
+#line 1 "kernels/gemm_bi_inference/common.cuh"
 // Batch-invariant bf16/f16/f32 GEMM — the single FIXED-TILE family
 // (BiGemmFamily::Fixed). Forward-only NN; the triad in gemm_bi_triad.cu
 // carries the backward layouts.
@@ -5535,7 +5535,7 @@ static __device__ __forceinline__ void gbf_store_pair_rne(
         dst[1] = v1;
     }
 }
-#line 1 "kernels/gemm_bi_fixed/ffma.cu"
+#line 1 "kernels/gemm_bi_inference/ffma.cu"
 #define DEFINE_GEMM_BI_FFMA(NAME, T_IO, T_OUT, FROM_F_OUT, ZERO_IO)             \
 extern "C" __global__ __launch_bounds__(THREADS, 2) void                        \
 NAME(                                                                           \
@@ -5698,7 +5698,7 @@ NAME(                                                                           
     } while (0)
 
 extern "C" __global__ __launch_bounds__(GBF_F32_THREADS, 2) void
-gemm_bi_f32_f32_s2(
+f32_f32_s2(
     float* __restrict__ c,
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -5899,7 +5899,7 @@ gemm_bi_f32_f32_s2(
     } while (0)
 
 extern "C" __global__ __launch_bounds__(GBF_F32_N128_THREADS, 2) void
-gemm_bi_f32_f32_n128_s2(
+f32_f32_n128_s2(
     float* __restrict__ c,
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -6045,7 +6045,7 @@ gemm_bi_f32_f32_n128_s2(
 // Smem A is [BLOCK_M, BLOCK_K] row-major; smem B is [BLOCK_K, BLOCK_N] row-major.
 // `wmma::load_matrix_sync` reads with the given leading dimension; B is
 // row-major from K's perspective so we use `wmma::row_major` and ldB=BLOCK_N.
-#line 1 "kernels/gemm_bi_fixed/tf32.cu"
+#line 1 "kernels/gemm_bi_inference/tf32.cu"
 // Deterministic TF32 inference GEMM. This is an NN-only numeric mode owned
 // by the inference module; its fixed K traversal never changes with M.
 
@@ -6402,19 +6402,19 @@ extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS) void NAME(   \
     gbf_tf32_entry<BM, BN, STAGES>(output, a, b, bias, params);             \
 }
 
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m128n64_bk32_s2, 128, 64, 2, 256, 1)
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m128n64_bk32_s3, 128, 64, 3, 256, 1)
+GBF_TF32_KERNEL(nn_tf32_m128n64_bk32_s2, 128, 64, 2, 256, 1)
+GBF_TF32_KERNEL(nn_tf32_m128n64_bk32_s3, 128, 64, 3, 256, 1)
 extern "C" __global__ __launch_bounds__(128, 1)
-void gemm_bi_nn_tf32_v1_m64n64_bk32_s2(
+void nn_tf32_m64n64_bk32_s2(
     float* output, const float* a, const float* b, const float* bias,
     GbfTf32Params params) {
     gbf_tf32_entry<64, 64, 2, true>(output, a, b, bias, params);
 }
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m64n64_bk32_s3, 64, 64, 3, 128, 1)
-GBF_TF32_KERNEL(gemm_bi_nn_tf32_v1_m16n32_bk32_s4, 16, 32, 4, 128, 3)
+GBF_TF32_KERNEL(nn_tf32_m64n64_bk32_s3, 64, 64, 3, 128, 1)
+GBF_TF32_KERNEL(nn_tf32_m16n32_bk32_s4, 16, 32, 4, 128, 3)
 
 #undef GBF_TF32_KERNEL
-#line 1 "kernels/gemm_bi_fixed/tf32_sm120.cu"
+#line 1 "kernels/gemm_bi_inference/sm120/tf32.cu"
 #if defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210)
 
@@ -6839,25 +6839,25 @@ extern "C" __global__ __launch_bounds__((M * N) / WARP_N                    \
 }
 
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2, 128, 64, 2, 64, true, false)
+    nn_sm120_tma_tf32_m128n64_bk32_s2, 128, 64, 2, 64, true, false)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3, 128, 64, 3, 32, false, false)
+    nn_sm120_tma_tf32_m128n64_bk32_s3, 128, 64, 3, 32, false, false)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2, 64, 128, 2, 64, true, false)
+    nn_sm120_tma_tf32_m64n128_bk32_s2, 64, 128, 2, 64, true, false)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3, 64, 128, 3, 32, false, false)
+    nn_sm120_tma_tf32_m64n128_bk32_s3, 64, 128, 3, 32, false, false)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp,
+    nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp,
     64, 64, 2, 32, true, true)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2, 64, 64, 2, 32, false, false)
+    nn_sm120_tma_tf32_m64n64_bk32_s2, 64, 64, 2, 32, false, false)
 GBF_SM120_TF32_KERNEL(
-    gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store,
+    nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store,
     64, 64, 2, 32, true, false)
 
 #undef GBF_SM120_TF32_KERNEL
 #endif
-#line 1 "kernels/gemm_bi_fixed/sm120_tma.cu"
+#line 1 "kernels/gemm_bi_inference/sm120/tma.cu"
 // Deterministic SM120 inference GEMM for homogeneous bf16/f16 operands.
 // One CTA owns each output tile and walks K in ascending order. There is no
 // split-K, inter-CTA reduction, or atomic update anywhere in this file.
@@ -7669,16 +7669,16 @@ static __device__ __forceinline__ void gbf_sm120_half_kernel(
 
 #define GBF_SM120_HALF_DEFINE_PAIR(M, N, BK, STAGES)                         \
     GBF_SM120_HALF_DEFINE_KERNEL(                                            \
-        gemm_bi_nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_bf16,          \
+        nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_bf16,          \
         __nv_bfloat16, __nv_bfloat16, M, N, BK, STAGES)                      \
     GBF_SM120_HALF_DEFINE_KERNEL(                                            \
-        gemm_bi_nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f16,           \
+        nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f16,           \
         __half, __half, M, N, BK, STAGES)                                    \
     GBF_SM120_HALF_DEFINE_KERNEL(                                            \
-        gemm_bi_nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f32out_bf16,   \
+        nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f32out_bf16,   \
         __nv_bfloat16, float, M, N, BK, STAGES)                              \
     GBF_SM120_HALF_DEFINE_KERNEL(                                            \
-        gemm_bi_nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f32out_f16,    \
+        nn_sm120_tma_##M##x##N##_bk##BK##_s##STAGES##_f32out_f16,    \
         __half, float, M, N, BK, STAGES)
 
 GBF_SM120_HALF_DEFINE_PAIR(64, 64, 64, 2)
@@ -7694,7 +7694,7 @@ GBF_SM120_HALF_DEFINE_PAIR(128, 128, 32, 3)
 #undef GBF_SM120_HALF_SWIZZLE_64B
 
 #endif
-#line 1 "kernels/gemm_bi_fixed/wmma_legacy.cu"
+#line 1 "kernels/gemm_bi_inference/wmma_legacy.cu"
 #define DEFINE_GEMM_BI_TC(NAME, T_IO, T_OUT, FROM_F_OUT, ZERO_IO)               \
 extern "C" __global__ __launch_bounds__(THREADS, 2) void                        \
 NAME(                                                                           \
@@ -7822,17 +7822,17 @@ NAME(                                                                           
 }
 
 // Tensor-Core instantiations for half-precision paths (the regression source).
-DEFINE_GEMM_BI_TC(gemm_bi_bf16_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, zero_bf16)
-DEFINE_GEMM_BI_TC(gemm_bi_f16_f16,   __half,        __half,        from_f_f16,  zero_f16)
-DEFINE_GEMM_BI_TC(gemm_bi_bf16_f32,  __nv_bfloat16, float,         from_f_f32,  zero_bf16)
-DEFINE_GEMM_BI_TC(gemm_bi_f16_f32,   __half,        float,         from_f_f32,  zero_f16)
+DEFINE_GEMM_BI_TC(bf16_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, zero_bf16)
+DEFINE_GEMM_BI_TC(f16_f16,   __half,        __half,        from_f_f16,  zero_f16)
+DEFINE_GEMM_BI_TC(bf16_f32,  __nv_bfloat16, float,         from_f_f32,  zero_bf16)
+DEFINE_GEMM_BI_TC(f16_f32,   __half,        float,         from_f_f32,  zero_f16)
 
 // f32 path stays on CUDA cores (Tensor Cores require fp16/bf16/tf32 inputs;
 // converting f32→tf32 would lose 13 mantissa bits — not acceptable for the
 // f32 training path that exists specifically because the user wants exact
 // f32 math). cuBLAS f32 was never the regression source.
-DEFINE_GEMM_BI_FFMA(gemm_bi_f32_f32, float, float, from_f_f32, zero_f32)
-#line 1 "kernels/gemm_bi_fixed/matvec.cu"
+DEFINE_GEMM_BI_FFMA(f32_f32, float, float, from_f_f32, zero_f32)
+#line 1 "kernels/gemm_bi_inference/matvec.cu"
 // ═════════════════════════════════════════════════════════════════════════
 // M=1 specialized batch-invariant matvec — the decode hot path.
 //
@@ -8029,7 +8029,7 @@ DEFINE_MATVEC_BI(matvec_bi_f16_f16,   __half,        __half,        from_f_f16)
 DEFINE_MATVEC_BI(matvec_bi_bf16_f32,  __nv_bfloat16, float,         from_f_f32)
 DEFINE_MATVEC_BI(matvec_bi_f16_f32,   __half,        float,         from_f_f32)
 DEFINE_MATVEC_BI(matvec_bi_f32_f32,   float,         float,         from_f_f32)
-#line 1 "kernels/gemm_bi_fixed/mma16.cu"
+#line 1 "kernels/gemm_bi_inference/mma16.cu"
 // ============================================================================
 // The inference tile ladder - the fixed family's fast NN forward.
 // ============================================================================
@@ -8159,7 +8159,7 @@ DEFINE_MATVEC_BI(matvec_bi_f32_f32,   float,         float,         from_f_f32)
 
 #define DEFINE_GEMM_BI_NN_TC128(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(256, 1)                                \
-void gemm_bi_nn_tc128_##SUFFIX(                                                  \
+void nn_tc128_##SUFFIX(                                                  \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -8429,7 +8429,7 @@ DEFINE_GEMM_BI_NN_TC128(f32out_f16,  __half,        float, from_f_f16,  from_f_f
 
 #define DEFINE_GEMM_BI_NN_TC64(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF64_THREADS, 1)                   \
-void gemm_bi_nn_tc64_##SUFFIX(                                                \
+void nn_tc64_##SUFFIX(                                                \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -8687,7 +8687,7 @@ DEFINE_GEMM_BI_NN_TC64(f32out_f16,  __half,        float, from_f_f16,  from_f_f3
 
 #define DEFINE_GEMM_BI_NN_TC16(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF16_THREADS, 3)                   \
-void gemm_bi_nn_tc16_##SUFFIX(                                                \
+void nn_tc16_##SUFFIX(                                                \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -8892,7 +8892,7 @@ DEFINE_GEMM_BI_NN_TC16(f32out_f16,  __half,        float, from_f_f16,  from_f_f3
 #undef BLOCK_N_MV
 #undef WARPS_PER_BLOCK
 #undef THREADS_PER_BLOCK
-#line 1 "kernels/gemm_bi_fixed/tcw64.cu"
+#line 1 "kernels/gemm_bi_inference/tcw64.cu"
 // ============================================================================
 // GBFW64: the fragment-reuse 128x128 tile (warp tile 64x64).
 // ============================================================================
@@ -9047,7 +9047,7 @@ DEFINE_GEMM_BI_NN_TC16(f32out_f16,  __half,        float, from_f_f16,  from_f_f3
 
 #define DEFINE_GEMM_BI_NN_TCW64(SUFFIX, T_ACT, FROM_F, MMA_T)                 \
 extern "C" __global__ __launch_bounds__(GBFW64_THREADS, 1)                    \
-void gemm_bi_nn_tcw64_##SUFFIX(                                               \
+void nn_tcw64_##SUFFIX(                                               \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -9337,7 +9337,7 @@ DEFINE_GEMM_BI_NN_TCW64(f16,  __half,        from_f_f16,  "f16")
 
 #define DEFINE_GEMM_BI_NN_TCWN64(SUFFIX, T_ACT, FROM_F, MMA_T)                 \
 extern "C" __global__ __launch_bounds__(GBFWN64_THREADS, 1)                    \
-void gemm_bi_nn_tcwn64_##SUFFIX(                                               \
+void nn_tcwn64_##SUFFIX(                                               \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -9487,7 +9487,7 @@ DEFINE_GEMM_BI_NN_TCWN64(f16,  __half,        from_f_f16,  "f16")
 #undef GBFWN64_STAGE_SCALAR
 #undef GBFWN64_LOAD_FRAGS
 #undef DEFINE_GEMM_BI_NN_TCWN64
-#line 1 "kernels/gemm_bi_fixed/sm90_wgmma.cu"
+#line 1 "kernels/gemm_bi_inference/sm90a/wgmma.cu"
 // ============================================================================
 // Hopper (sm_90a) inference rung: NN forward through wgmma.mma_async.
 // ============================================================================
@@ -9598,7 +9598,7 @@ sm90_desc(const void* smem_ptr, unsigned lbo16, unsigned sbo16) {
 
 #define DEFINE_GEMM_BI_NN_SM90(SUFFIX, T_ACT, FROM_F, WG_T)                   \
 extern "C" __global__ __launch_bounds__(128, 1)                               \
-void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
+void nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -9741,7 +9741,7 @@ DEFINE_GEMM_BI_NN_SM90(f16,  __half,        from_f_f16,  "f16")
 #undef DEFINE_GEMM_BI_NN_SM90
 
 #endif
-#line 1 "kernels/gemm_bi_fixed/sm100_tcgen05.cu"
+#line 1 "kernels/gemm_bi_inference/sm100/tcgen05.cu"
 // ============================================================================
 // Datacenter Blackwell (sm_100 family) inference rung: NN forward through
 // tcgen05.mma with f32 accumulation in Tensor Memory.
@@ -9880,7 +9880,7 @@ sm100_desc(const void* smem_ptr, unsigned lbo16, unsigned sbo16) {
 
 #define DEFINE_GEMM_BI_NN_SM100(SUFFIX, T_ACT, FROM_F, IDESC)                 \
 extern "C" __global__ __launch_bounds__(128, 1)                               \
-void gemm_bi_nn_sm100_tcgen_c4_##SUFFIX(                                      \
+void nn_sm100_tcgen_c4_##SUFFIX(                                      \
     T_ACT* __restrict__ C,                                                    \
     const T_ACT* __restrict__ A,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -10071,7 +10071,7 @@ DEFINE_GEMM_BI_NN_SM100(f16,  __half,        from_f_f16,  SM100_IDESC_F16)
 #undef DEFINE_GEMM_BI_NN_SM100
 
 #endif
-#line 1 "kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/half_pipeline.cu"
 // OWN Ada-only Fixed homogeneous-half inference pipeline.
 // Derived from the repository's measured pipe_vec experiment: same
 // 128x128/BK64/S2 geometry, ascending k16 MMA chain and bias-seeded F32
@@ -10445,7 +10445,7 @@ static __device__ __forceinline__ void kernel(
 } // namespace fixed_sm89_half_pipeline
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16(
+void nn_sm89_tc128_pipeline_bf16(
     __nv_bfloat16* __restrict__ C, const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B, const float* __restrict__ bias,
     FixedSm89HalfParams params) {
@@ -10455,7 +10455,7 @@ void gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16(
 }
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16(
+void nn_sm89_tc128_pipeline_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, const float* __restrict__ bias,
     FixedSm89HalfParams params) {
@@ -10463,7 +10463,7 @@ void gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16(
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);
 }
-#line 1 "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"
 // Ada-only exact F32 N64 copy-plan extension. The immutable standalone
 // 713a575 candidate supplies the body; only names and compact ABI unpacking differ.
 struct FixedSm89ExactF32Params {
@@ -10580,7 +10580,7 @@ static_assert(SM89_EXACT_N64_CP_BM == 64 && SM89_EXACT_N64_CP_BN == 64 && SM89_E
     } while (0)
 
 extern "C" __global__ __launch_bounds__(SM89_EXACT_N64_CP_THREADS, 2) void
-gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1(
+nn_sm89_f32_n64_copyplan(
     float* __restrict__ c,
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -10778,7 +10778,7 @@ gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1(
 #undef SM89_EXACT_N64_CP_BN
 #undef SM89_EXACT_N64_CP_BK
 #undef SM89_EXACT_N64_CP_GROUP_M
-#line 1 "kernels/gemm_bi_fixed/tf32_rna_wide.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"
 // Fixed-owned NN wide TF32 candidate. This is the production adaptation of
 // internal/experiments/sm89-nn-wide-rna-compatible.cu at SHA256
 // c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4.
@@ -10788,7 +10788,7 @@ gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1(
 // the production export, and the self-contained parameter/store helpers differ.
 // Compose this fragment after Fixed common.cuh and tf32.cu, on sm_89 only.
 //
-// Export: gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3
+// Export: nn_rna_wide_tf32_m128n128_bk32_s3
 // ABI: (float* output, const float* a, const float* b, const float* bias,
 //       GbfTf32WideParams params).
 // Params: {float alpha,beta; int m,k,n,lda,ldb,ldc;} (32 bytes, alignment 4).
@@ -10963,7 +10963,7 @@ __device__ __forceinline__ void tf32wrc_fragment_offsets(
 }
 
 // Keep the operand conversion instruction identical to gbf_tf32_rna in
-// kernels/gemm_bi_fixed/tf32.cu. __uint_as_float is a bit reinterpretation;
+// kernels/gemm_bi_inference/tf32.cu. __uint_as_float is a bit reinterpretation;
 // it performs no FP arithmetic that could quiet or canonicalize an sNaN
 // before the PTX instruction sees the original 32-bit payload.
 __device__ __forceinline__ unsigned tf32wrc_round(unsigned bits) {
@@ -11182,7 +11182,7 @@ __device__ __forceinline__ void tf32wrc_nn_kernel(
 
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3(
+void nn_rna_wide_tf32_m128n128_bk32_s3(
     float* output, const float* a, const float* b, const float* bias,
     GbfTf32WideParams params) {
     if (params.k == 0) {
@@ -11197,9 +11197,9 @@ template <typename A> struct GbfRnaSameType<A, A> { static constexpr bool value 
 using GbfRnaWideSignature = void (*)(
     float*, const float*, const float*, const float*, GbfTf32WideParams);
 static_assert(GbfRnaSameType<
-    decltype(&gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3),
+    decltype(&nn_rna_wide_tf32_m128n128_bk32_s3),
     GbfRnaWideSignature>::value, "Fixed NN RNA-wide ABI");
-#line 1 "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
+#line 1 "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
 // Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once
@@ -11242,7 +11242,7 @@ SM89_FHS_HD constexpr unsigned b_fragment_issue(unsigned base, int issue) {
 }
 } // namespace sm89_fixed_half_swizzle_layout
 #undef SM89_FHS_HD
-#line 1 "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/half_swizzle.cu"
 // Production Fixed SM89 homogeneous-half packed/XOR staging twin.
 // Only staging addresses change; exact ascending k16 chain, copy issue
 // schedule, bias seed, alpha/beta, conversion and 136-float output stride stay.
@@ -11251,8 +11251,8 @@ SM89_FHS_HD constexpr unsigned b_fragment_issue(unsigned base, int issue) {
 // Every scalar and cp.async staging path uses the SAME tested layout helper.
 // Actual GPU output, sanitizer and speed qualification remain required.
 // Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.
-// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and
-// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.
+// Exports: nn_sm89_tc128_swizzle_bf16 and
+// nn_sm89_tc128_swizzle_f16.
 
 struct FixedSm89HalfSwizzleParams {
     float alpha;
@@ -11604,7 +11604,7 @@ static __device__ __forceinline__ void kernel(
 
 #define SM89_FHS_EXPORT(TYPE, SUFFIX)                                      \
 extern "C" __global__ __launch_bounds__(256, 1)                            \
-void gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_##SUFFIX(                      \
+void nn_sm89_tc128_swizzle_##SUFFIX(                      \
     TYPE* __restrict__ C, const TYPE* __restrict__ A,                       \
     const TYPE* __restrict__ B, const float* __restrict__ bias,             \
     FixedSm89HalfSwizzleParams params) {                                    \
@@ -11615,7 +11615,7 @@ void gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_##SUFFIX(                      \
 SM89_FHS_EXPORT(__nv_bfloat16, bf16)
 SM89_FHS_EXPORT(__half, f16)
 #undef SM89_FHS_EXPORT
-#line 1 "kernels/gemm_bi_fixed/sm89_half_s3.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/half_s3.cu"
 // Ada homogeneous-half CTA128x128/BK64/S3. The two-stage provider above
 // supplies unchanged layout, fragment, arithmetic and epilogue helpers.
 namespace sm89_fixed_half_s3 {
@@ -11757,7 +11757,7 @@ static __device__ __forceinline__ void kernel(
 } // namespace sm89_fixed_half_s3
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16(
+void nn_sm89_tc128_s3_bf16(
     __nv_bfloat16* __restrict__ C, const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B, const float* __restrict__ bias,
     FixedSm89HalfSwizzleParams params) {
@@ -11765,14 +11765,14 @@ void gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16(
         params.m, params.n, params.k, params.lda, params.ldb, params.ldc);
 }
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16(
+void nn_sm89_tc128_s3_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, const float* __restrict__ bias,
     FixedSm89HalfSwizzleParams params) {
     sm89_fixed_half_s3::kernel(C, A, B, bias, params.alpha, params.beta,
         params.m, params.n, params.k, params.lda, params.ldb, params.ldc);
 }
-#line 1 "kernels/gemm_bi_fixed/tf32_rna_n96.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
 // Ada Fixed TF32 M128xN96/BK32/S3 finalist. Optional forced route until qualified.
 
 struct GbfTf32N96Params {
@@ -12138,7 +12138,7 @@ __device__ __forceinline__ void tf32n96_kernel(
 }
 
 extern "C" __global__ __launch_bounds__(256, 1)
-void gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3(
+void nn_sm89_rna_tf32_m128n96_bk32_s3(
     float* output, const float* a, const float* b, const float* bias,
     GbfTf32N96Params params) {
     if (params.k == 0) {
@@ -12148,7 +12148,7 @@ void gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3(
     tf32n96_kernel(output, a, b, bias, params);
 }
 
-#line 1 "kernels/gemm_bi_fixed/sm89_half_n64.cu"
+#line 1 "kernels/gemm_bi_inference/sm89/half_n64.cu"
 // Ada Fixed F16 N64 finalists. Optional forced routes until qualified.
 
 namespace sm89_fixed_half_n64 {
@@ -12389,7 +12389,7 @@ static __device__ __forceinline__ void rect_kernel(
 } // namespace sm89_fixed_half_n64
 
 extern "C" __global__ __launch_bounds__(128, 2)
-void gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16(
+void nn_sm89_m64n64_bk64_s3_f16(
     __half* C, const __half* A, const __half* B, const float* bias,
     FixedSm89HalfSwizzleParams params) {
     if (bias != nullptr || params.alpha != 1.0f || params.beta != 0.0f
@@ -12407,7 +12407,7 @@ void gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16(
 }
 
 extern "C" __global__ __launch_bounds__(128, 2)
-void gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16(
+void nn_sm89_m128n64_bk64_s2_f16(
     __half* C, const __half* A, const __half* B, const float* bias,
     FixedSm89HalfSwizzleParams params) {
     if (bias != nullptr || params.alpha != 1.0f || params.beta != 0.0f

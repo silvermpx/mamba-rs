@@ -1,10 +1,10 @@
-const PRODUCTION_SYMBOL: &str = "gemm_bi_nt_slim";
+const PRODUCTION_SYMBOL: &str = "nt_slim";
 const SCALAR_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/scalar.cu");
 const TEST_SOURCE: &str = include_str!("gemm_bi_scalar_nt_slim_qualification.rs");
 
 fn production_body() -> &'static str {
     let (_, kernel_and_tail) = SCALAR_SOURCE
-        .split_once("void gemm_bi_nt_slim(")
+        .split_once("void nt_slim(")
         .expect("production NT Slim kernel must exist");
     kernel_and_tail
         .split_once("// Slim geometry ends here")
@@ -22,7 +22,7 @@ fn production_symbol_is_unique_registered_and_the_experiment_is_removed() {
         "production NT Slim must have exactly one implementation"
     );
     assert!(!SCALAR_SOURCE.contains("GEMM_BI_SCALAR_NT_SLIM_BRAW_EXPERIMENT"));
-    assert!(!SCALAR_SOURCE.contains("gemm_bi_nt_slim_braw_exp_v1"));
+    assert!(!SCALAR_SOURCE.contains("nt_slim_braw_exp"));
     assert!(
         include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs")
             .contains(PRODUCTION_SYMBOL)

@@ -33,7 +33,7 @@ static_assert(__is_standard_layout(SgbNnM64N64Params),
               "M64N64 parameters must remain standard layout");
 
 extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
-void gemm_bi_nn_m64n64_bk16_s2_v1(
+void nn_m64n64_bk16_s2(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -166,7 +166,7 @@ void gemm_bi_nn_m64n64_bk16_s2_v1(
                    + inner_column_b * 4) * (unsigned)sizeof(float);                    \
             bool full = global_row < params.k                                          \
                 && global_column + 3 < params.n                                        \
-                && (params.ldb & 3) == 0 && gemm_bi_is_aligned_16(B);                  \
+                && (params.ldb & 3) == 0 && is_aligned_16(B);                  \
             if (full) {                                                                 \
                 const float* source =                                                   \
                     B + (long long)global_row * params.ldb + global_column;             \
@@ -297,7 +297,7 @@ void gemm_bi_nn_m64n64_bk16_s2_v1(
                 (thread_row * EXACT_NN_M64N64_TM + result_row) * params.ldc
                 + thread_column * EXACT_NN_M64N64_TN + result_column];
             if (global_column + 3 >= params.n || (params.ldc & 3) != 0
-                || !gemm_bi_is_aligned_16(C)) {
+                || !is_aligned_16(C)) {
                 #pragma unroll
                 for (int element = 0;
                      element < 4 && global_column + element < params.n;
@@ -381,7 +381,7 @@ static_assert(__is_standard_layout(SgbNnPrismM64N64Params),
               "M64N64 parameters must remain standard layout");
 
 extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
-void gemm_bi_nn_prism_m64n64_bk16_s2_v1(
+void nn_prism_m64n64_bk16_s2(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -493,7 +493,7 @@ void gemm_bi_nn_prism_m64n64_bk16_s2_v1(
                    + inner_column_b * 4) * (unsigned)sizeof(float);                    \
             bool full = global_row < params.k                                          \
                 && global_column + 3 < params.n                                        \
-                && (params.ldb & 3) == 0 && gemm_bi_is_aligned_16(B);                  \
+                && (params.ldb & 3) == 0 && is_aligned_16(B);                  \
             if (full) {                                                                 \
                 const float* source =                                                   \
                     B + (long long)global_row * params.ldb + global_column;             \

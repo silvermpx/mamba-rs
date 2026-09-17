@@ -81,8 +81,8 @@ fn explicit_gemm_config(mode: GemmMode, family: BiGemmFamily) -> ResolvedGemmEnv
         mode,
         family,
         tensor_cores: true,
-        f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-        half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+        f32_policy: F32TriadPolicy::ExactScalarFma,
+        half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
     }
 }
 
@@ -160,8 +160,8 @@ fn resolve_gemm_env(
             mode,
             tensor_cores: true,
             family: default_family,
-            f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            f32_policy: F32TriadPolicy::ExactScalarFma,
+            half_policy: HalfTriadPolicy::TiledParity,
         });
     }
 
@@ -173,9 +173,9 @@ fn resolve_gemm_env(
     // default; the scalar tier has no stream-K route and stays tiled.
     let half_policy =
         half_triad_policy_from_result(values.half_policy)?.unwrap_or(if tensor_cores {
-            HalfTriadPolicy::AllowStreamKFixedOrderV1
+            HalfTriadPolicy::AllowStreamKFixedOrder
         } else {
-            HalfTriadPolicy::TiledParityV1
+            HalfTriadPolicy::TiledParity
         });
     let family = bi_gemm_family_from_result(values.family, default_family)?;
     validate_custom_policy(tensor_cores, half_policy)?;
@@ -292,20 +292,20 @@ fn optional_tier_flag_from_result(
 pub enum F32TriadPolicy {
     /// Preserve the scalar `__fmaf_rn` reduction contract.
     #[default]
-    ExactScalarFmaV1 = 0,
+    ExactScalarFma = 0,
     /// Permit frozen and qualified deterministic TF32 routes.
     ///
     /// This is permission, not a forced backend. Unsupported or unmeasured
     /// cells keep the exact scalar FMA contract.
-    AllowDeterministicTf32V1 = 1,
+    AllowDeterministicTf32 = 1,
 }
 
 impl F32TriadPolicy {
     /// Parse the strict public environment spelling for this policy.
     pub fn parse_env_value(value: &str) -> Result<Self, String> {
         match value.trim_ascii() {
-            "exact" => Ok(Self::ExactScalarFmaV1),
-            "tf32" => Ok(Self::AllowDeterministicTf32V1),
+            "exact" => Ok(Self::ExactScalarFma),
+            "tf32" => Ok(Self::AllowDeterministicTf32),
             _ => Err(format!(
                 "MAMBA_RS_BI_F32_POLICY={value:?} is not a recognized f32 triad policy \
                  (use exact or tf32)"
@@ -319,7 +319,7 @@ fn f32_triad_policy_from_result(
 ) -> Result<F32TriadPolicy, String> {
     match value {
         Ok(value) => F32TriadPolicy::parse_env_value(&value),
-        Err(std::env::VarError::NotPresent) => Ok(F32TriadPolicy::ExactScalarFmaV1),
+        Err(std::env::VarError::NotPresent) => Ok(F32TriadPolicy::ExactScalarFma),
         Err(std::env::VarError::NotUnicode(value)) => Err(format!(
             "MAMBA_RS_BI_F32_POLICY={value:?} is not valid Unicode (use exact or tf32)"
         )),
@@ -333,7 +333,7 @@ pub enum HalfTriadPolicy {
     /// Every automatic half route reproduces the forced portable tensor-core
     /// kernel bit for bit: one owner CTA per output tile, one reduction order.
     #[default]
-    TiledParityV1 = 0,
+    TiledParity = 0,
     /// Permit the measured stream-K half routes: a persistent grid folds
     /// per-CTA partials in a fixed order that differs from the tiled
     /// reduction, while repeated eager and graph launches of the same route
@@ -342,15 +342,15 @@ pub enum HalfTriadPolicy {
     /// This is permission, not a forced schedule. Unmeasured shapes, and
     /// shapes whose tile grid already fills the device, keep the tiled
     /// contract.
-    AllowStreamKFixedOrderV1 = 1,
+    AllowStreamKFixedOrder = 1,
 }
 
 impl HalfTriadPolicy {
     /// Parse the strict public environment spelling for this policy.
     pub fn parse_env_value(value: &str) -> Result<Self, String> {
         match value.trim_ascii() {
-            "tiled" => Ok(Self::TiledParityV1),
-            "streamk" => Ok(Self::AllowStreamKFixedOrderV1),
+            "tiled" => Ok(Self::TiledParity),
+            "streamk" => Ok(Self::AllowStreamKFixedOrder),
             _ => Err(format!(
                 "MAMBA_RS_BI_HALF_POLICY={value:?} is not a recognized half triad policy \
                  (use tiled or streamk)"
@@ -379,7 +379,7 @@ fn validate_custom_policy(
     bi_tensor_cores: bool,
     half_policy: HalfTriadPolicy,
 ) -> Result<(), String> {
-    if half_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1 && !bi_tensor_cores {
+    if half_policy == HalfTriadPolicy::AllowStreamKFixedOrder && !bi_tensor_cores {
         return Err(
             "MAMBA_RS_BI_HALF_POLICY=streamk requires MAMBA_RS_BI_TENSOR_CORES=1; \
              stream-K routes are in the deterministic tensor-core tier"
@@ -1507,27 +1507,27 @@ impl GpuCtx {
         let context = *context;
         let inference_terminal = matches!(
             route.backend,
-            PhysicalGemmBackend::InferenceScalarFmaV1
-                | PhysicalGemmBackend::InferenceWmmaV1
-                | PhysicalGemmBackend::InferenceMma16V1
-                | PhysicalGemmBackend::InferenceSm90aWgmmaV1
-                | PhysicalGemmBackend::InferenceSm100Tcgen05V1
-                | PhysicalGemmBackend::InferenceMmaTf32RnaV1
-                | PhysicalGemmBackend::InferenceSm120TmaFmaV1
-                | PhysicalGemmBackend::InferenceSm120TmaMma16V1
-                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
-                | PhysicalGemmBackend::FixedMatvecEightWarpV1
+            PhysicalGemmBackend::InferenceScalarFma
+                | PhysicalGemmBackend::InferenceWmma
+                | PhysicalGemmBackend::InferenceMma16
+                | PhysicalGemmBackend::InferenceSm90aWgmma
+                | PhysicalGemmBackend::InferenceSm100Tcgen05
+                | PhysicalGemmBackend::InferenceMmaTf32Rna
+                | PhysicalGemmBackend::InferenceSm120TmaFma
+                | PhysicalGemmBackend::InferenceSm120TmaMma16
+                | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
+                | PhysicalGemmBackend::FixedMatvecEightWarp
         ) || (route.backend
-            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
-            && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBiasV1)
+            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBias)
             || (context.policy.bi_gemm_family == BiGemmFamily::Inference
-                && route.backend == PhysicalGemmBackend::MmaTf32RnaV1
-                && route.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3");
+                && route.backend == PhysicalGemmBackend::MmaTf32Rna
+                && route.symbol == "nn_sm80_mma_tf32_m128n128_bk32_s3");
         if inference_terminal {
             return self.validate_inference_terminal_route(&context, route, label);
         }
         if context.policy.bi_gemm_family == BiGemmFamily::Inference
-            && route.backend == PhysicalGemmBackend::Sm120TmaFmaExactV1
+            && route.backend == PhysicalGemmBackend::Sm120TmaFmaExact
         {
             super::gemm_bi_inference::identity::validate_cached_bridge(route)?;
             if self.kernels.tf32_function(route.symbol).is_none() {
@@ -1536,10 +1536,10 @@ impl GpuCtx {
                 ));
             }
         }
-        if route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
-            && (route.numeric_contract != ResolvedNumericContract::ScalarFmaV1
+        if route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            && (route.numeric_contract != ResolvedNumericContract::ScalarFma
                 || context.policy.bi_gemm_family != BiGemmFamily::Triad
-                || route.symbol != "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
+                || route.symbol != "nn_sm89_f32_n64_copyplan"
                 || self
                     .kernels
                     .inference_terminal_function(route.symbol)
@@ -1555,44 +1555,44 @@ impl GpuCtx {
             ));
         }
         let required_contract = match route.numeric_contract {
-            ResolvedNumericContract::ScalarFmaPostDotBiasV1
-            | ResolvedNumericContract::WmmaF32PostDotBiasV1
-            | ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBiasV1 => {
+            ResolvedNumericContract::ScalarFmaPostDotBias
+            | ResolvedNumericContract::WmmaF32PostDotBias
+            | ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBias => {
                 return Err(format!(
                     "{label}: Inference numeric contract has an incompatible backend"
                 ));
             }
-            ResolvedNumericContract::ScalarFmaV1
-            | ResolvedNumericContract::ScalarFmaSplitKPartialV1
-            | ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1
-            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1
-            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1
-            | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
-            | ResolvedNumericContract::ScalarFmaTnSplitMPartialV1
-            | ResolvedNumericContract::ScalarFmaFixedSplitFoldV1
-            | ResolvedNumericContract::ZeroReductionEpilogueF32V1 => {
-                NumericContractSet::TRIAD_SCALAR_FMA_V1
+            ResolvedNumericContract::ScalarFma
+            | ResolvedNumericContract::ScalarFmaSplitKPartial
+            | ResolvedNumericContract::ScalarFmaSplitKF32Reduce
+            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial
+            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce
+            | ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce
+            | ResolvedNumericContract::ScalarFmaTnSplitMPartial
+            | ResolvedNumericContract::ScalarFmaFixedSplitFold
+            | ResolvedNumericContract::ZeroReductionEpilogueF32 => {
+                NumericContractSet::TRIAD_SCALAR_FMA
             }
-            ResolvedNumericContract::MmaSyncF32V1
-            | ResolvedNumericContract::WgmmaF32V1
-            | ResolvedNumericContract::Tcgen05F32V1 => NumericContractSet::TRIAD_MMA_SYNC_V1,
-            ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1 => {
-                NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1
+            ResolvedNumericContract::MmaSyncF32
+            | ResolvedNumericContract::WgmmaF32
+            | ResolvedNumericContract::Tcgen05F32 => NumericContractSet::TRIAD_MMA_SYNC,
+            ResolvedNumericContract::MmaSyncF32StreamKFixedOrder => {
+                NumericContractSet::TRIAD_MMA_SYNC_STREAM_K
             }
-            ResolvedNumericContract::MmaTf32RnaV1
+            ResolvedNumericContract::MmaTf32Rna
             | ResolvedNumericContract::MmaTf32PreRnaAV1
-            | ResolvedNumericContract::MmaTf32AddHalfUlpV1
-            | ResolvedNumericContract::Tf32RnaPreprocessV1
-            | ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
-            | ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
-            | ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 => {
-                NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1
+            | ResolvedNumericContract::MmaTf32AddHalfUlp
+            | ResolvedNumericContract::Tf32RnaPreprocess
+            | ResolvedNumericContract::Sm90aWgmmaTf32Tma
+            | ResolvedNumericContract::Sm100Tcgen05Tf32Tma
+            | ResolvedNumericContract::Sm120TmaMmaTf32Rna => {
+                NumericContractSet::TRIAD_DETERMINISTIC_TF32
             }
-            ResolvedNumericContract::MmaTf32RnaSplitK2V1
-            | ResolvedNumericContract::MmaTf32RnaSplitK4V1
-            | ResolvedNumericContract::MmaTf32RnaSplitK8V1
+            ResolvedNumericContract::MmaTf32RnaSplitK2
+            | ResolvedNumericContract::MmaTf32RnaSplitK4
+            | ResolvedNumericContract::MmaTf32RnaSplitK8
             | ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1 => {
-                NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1
+                NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K
             }
         };
         if !context.numeric_contracts.contains(required_contract) {
@@ -1608,19 +1608,19 @@ impl GpuCtx {
         }
         let uses_qualified_tf32_module = matches!(
             route.numeric_contract,
-            super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+            super::kernel_identity::ResolvedNumericContract::MmaTf32Rna
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32PreRnaAV1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlpV1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
-                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
-                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
-                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlp
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8
+                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32Tma
+                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32Tma
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32Rna
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
-                | super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+                | super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32
         ) && route.module_kind != ModuleKind::TriadScalar
-            || route.backend == super::kernel_identity::PhysicalGemmBackend::Sm120TmaFmaExactV1;
+            || route.backend == super::kernel_identity::PhysicalGemmBackend::Sm120TmaFmaExact;
         if uses_qualified_tf32_module {
             let binding = self
                 .live_qualified_tf32_binding(route.module_kind)
@@ -1659,20 +1659,20 @@ impl GpuCtx {
         }
         let tf32_numeric = matches!(
             route.numeric_contract,
-            super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+            super::kernel_identity::ResolvedNumericContract::MmaTf32Rna
                 | super::kernel_identity::ResolvedNumericContract::MmaTf32PreRnaAV1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlpV1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
-                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
-                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
-                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
-                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32AddHalfUlp
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8
+                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32Tma
+                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32Tma
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32Rna
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
         );
         if tf32_numeric
             && (route.dtype != PolicyDtype::F32
-                || self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1)
+                || self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32)
         {
             return Err(format!(
                 "{label}: captured deterministic TF32 route is disabled by the live policy"
@@ -1681,7 +1681,7 @@ impl GpuCtx {
         if route.dtype == PolicyDtype::F32
             && !tf32_numeric
             && route.numeric_contract
-                != super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+                != super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32
             && !scalar_backend_supports_logical_f32(route.backend)
         {
             return Err(format!(
@@ -1689,7 +1689,7 @@ impl GpuCtx {
             ));
         }
         if route.numeric_contract
-            == super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+            == super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32
             && (route.dtype != PolicyDtype::F32
                 || route.instruction_family
                     != super::kernel_identity::ResolvedInstructionFamily::ScalarFma
@@ -1708,7 +1708,7 @@ impl GpuCtx {
             ));
         }
         if route.dtype != PolicyDtype::F32
-            && route.backend != PhysicalGemmBackend::ScalarFmaV1
+            && route.backend != PhysicalGemmBackend::ScalarFma
             && !self.bi_tensor_cores()
         {
             return Err(format!(
@@ -1736,8 +1736,8 @@ impl GpuCtx {
         if !context.policy.batch_invariant
             || !context.backend_set.contains(backend)
             || !context.numeric_contracts.contains(required)
-            || (required == NumericContractSet::FIXED_DETERMINISTIC_TF32_V1
-                && self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1)
+            || (required == NumericContractSet::FIXED_DETERMINISTIC_TF32
+                && self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32)
         {
             return Err(format!(
                 "{label}: Inference terminal is disabled by the live policy"
@@ -1770,11 +1770,11 @@ impl GpuCtx {
         label: &str,
     ) -> Result<(), String> {
         use super::kernel_identity::{ResolvedOperandConversion, ResolvedTransformOutputOwnership};
-        if self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1
-            || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocessV1
-            || transform.operand_conversion != ResolvedOperandConversion::RegisterCvtRnaTf32F32V1
+        if self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32
+            || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocess
+            || transform.operand_conversion != ResolvedOperandConversion::RegisterCvtRnaTf32F32
             || transform.output_ownership
-                != ResolvedTransformOutputOwnership::PreparedScratchAllocationV1
+                != ResolvedTransformOutputOwnership::PreparedScratchAllocation
             || symbol != super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL
         {
             return Err(format!(
@@ -1856,7 +1856,7 @@ impl GpuCtx {
 
     /// Select the numeric policy used by deterministic f32 Triad GEMMs.
     ///
-    /// [`F32TriadPolicy::ExactScalarFmaV1`] is the default. The deterministic
+    /// [`F32TriadPolicy::ExactScalarFma`] is the default. The deterministic
     /// TF32 permission is independent of vendor TF32 and is dormant in cuBLAS
     /// modes.
     pub fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
@@ -1875,7 +1875,7 @@ impl GpuCtx {
 
     /// Select the numeric policy used by deterministic half-precision Triad GEMMs.
     ///
-    /// [`HalfTriadPolicy::AllowStreamKFixedOrderV1`] is the default. The
+    /// [`HalfTriadPolicy::AllowStreamKFixedOrder`] is the default. The
     /// stream-K routes live in the tensor-core tier, so the permission is
     /// dormant while tensor cores are off; requesting the pair from the
     /// environment or the explicit configuration is refused.
@@ -1898,7 +1898,7 @@ impl GpuCtx {
     /// New code should call [`Self::set_gemm_mode`]. In
     /// [`GemmMode::CublasFast`] this selects [`GemmMode::CublasPedantic`]. It
     /// leaves Deterministic and CublasPedantic unchanged. In particular it does
-    /// not change [`F32TriadPolicy::AllowDeterministicTf32V1`], which controls
+    /// not change [`F32TriadPolicy::AllowDeterministicTf32`], which controls
     /// custom deterministic TF32 rather than vendor TF32. A failed transition
     /// panics because this legacy signature cannot return the error.
     #[deprecated(since = "0.7.0", note = "use GpuCtx::set_gemm_mode")]
@@ -2056,7 +2056,7 @@ impl GpuCtx {
 }
 
 fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
-    if backend == PhysicalGemmBackend::Sm120TmaMma16V1 {
+    if backend == PhysicalGemmBackend::Sm120TmaMma16 {
         super::gemm_bi_triad::SM120_SCHEDULE_REVISION
     } else {
         generic
@@ -2065,73 +2065,73 @@ fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) 
 
 const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
     match backend {
-        PhysicalGemmBackend::ScalarFmaV1
-        | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
-        | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
-        | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
-        | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
-        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
-        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 => {
+        PhysicalGemmBackend::ScalarFma
+        | PhysicalGemmBackend::ScalarFmaSplitKPartial
+        | PhysicalGemmBackend::ScalarFmaSplitKF32Reduce
+        | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial
+        | PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce => ModuleKind::TriadScalar,
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
+        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial => {
             ModuleKind::TriadSm89ExactF32
         }
-        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 => ModuleKind::TriadSm89ExactF32D128,
-        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
-        | PhysicalGemmBackend::InferenceScalarFmaV1
-        | PhysicalGemmBackend::InferenceWmmaV1
-        | PhysicalGemmBackend::InferenceMma16V1
-        | PhysicalGemmBackend::InferenceSm90aWgmmaV1
-        | PhysicalGemmBackend::InferenceSm100Tcgen05V1
-        | PhysicalGemmBackend::InferenceMmaTf32RnaV1
-        | PhysicalGemmBackend::InferenceSm120TmaFmaV1
-        | PhysicalGemmBackend::InferenceSm120TmaMma16V1
-        | PhysicalGemmBackend::InferenceSm120TmaMmaTf32RnaV1
-        | PhysicalGemmBackend::FixedMatvecEightWarpV1 => ModuleKind::Fixed,
-        PhysicalGemmBackend::Sm80Mma16V1
-        | PhysicalGemmBackend::MmaTf32RnaV1
-        | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
-        | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
-        | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
-        PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
-        PhysicalGemmBackend::Sm89MmaTf32PreRnaV1
-        | PhysicalGemmBackend::Sm89MmaTf32AddHalfV1
-        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 => ModuleKind::TriadSm89Tf32Joint,
-        PhysicalGemmBackend::Sm89Mma16HalfS3V1 | PhysicalGemmBackend::Sm89Mma16HalfS2V1 => {
+        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 => ModuleKind::TriadSm89ExactF32D128,
+        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+        | PhysicalGemmBackend::InferenceScalarFma
+        | PhysicalGemmBackend::InferenceWmma
+        | PhysicalGemmBackend::InferenceMma16
+        | PhysicalGemmBackend::InferenceSm90aWgmma
+        | PhysicalGemmBackend::InferenceSm100Tcgen05
+        | PhysicalGemmBackend::InferenceMmaTf32Rna
+        | PhysicalGemmBackend::InferenceSm120TmaFma
+        | PhysicalGemmBackend::InferenceSm120TmaMma16
+        | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
+        | PhysicalGemmBackend::FixedMatvecEightWarp => ModuleKind::Fixed,
+        PhysicalGemmBackend::Sm80Mma16
+        | PhysicalGemmBackend::MmaTf32Rna
+        | PhysicalGemmBackend::MmaTf32RnaSplitK2
+        | PhysicalGemmBackend::MmaTf32RnaSplitK4
+        | PhysicalGemmBackend::MmaTf32RnaSplitK8 => ModuleKind::TriadSm80,
+        PhysicalGemmBackend::Sm89MmaTf32Compact8 => ModuleKind::TriadSm89Finalist,
+        PhysicalGemmBackend::Sm89MmaTf32PreRna
+        | PhysicalGemmBackend::Sm89MmaTf32AddHalf
+        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix => ModuleKind::TriadSm89Tf32Joint,
+        PhysicalGemmBackend::Sm89Mma16HalfS3 | PhysicalGemmBackend::Sm89Mma16HalfS2 => {
             ModuleKind::TriadSm89Half
         }
-        PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
+        PhysicalGemmBackend::Sm90aWgmma | PhysicalGemmBackend::Sm90aWgmmaTf32Tma => {
             ModuleKind::TriadSm90a
         }
-        PhysicalGemmBackend::Sm100Tcgen05V1 | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => {
+        PhysicalGemmBackend::Sm100Tcgen05 | PhysicalGemmBackend::Sm100Tcgen05Tf32Tma => {
             ModuleKind::TriadSm100
         }
-        PhysicalGemmBackend::Sm120TmaMma16V1
-        | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1
+        PhysicalGemmBackend::Sm120TmaMma16
+        | PhysicalGemmBackend::Sm120TmaMmaTf32Rna
         | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1
-        | PhysicalGemmBackend::Sm120TmaFmaExactV1 => ModuleKind::TriadSm120,
+        | PhysicalGemmBackend::Sm120TmaFmaExact => ModuleKind::TriadSm120,
     }
 }
 
 fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
     match backend {
-        PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => {
+        PhysicalGemmBackend::Sm89MmaTf32Compact8 => {
             super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
         }
-        PhysicalGemmBackend::Sm89MmaTf32PreRnaV1
-        | PhysicalGemmBackend::Sm89MmaTf32AddHalfV1
-        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1 => {
+        PhysicalGemmBackend::Sm89MmaTf32PreRna
+        | PhysicalGemmBackend::Sm89MmaTf32AddHalf
+        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
-        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1 => {
+        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan => {
             super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
         }
-        PhysicalGemmBackend::Sm89Mma16HalfS3V1 | PhysicalGemmBackend::Sm89Mma16HalfS2V1 => {
+        PhysicalGemmBackend::Sm89Mma16HalfS3 | PhysicalGemmBackend::Sm89Mma16HalfS2 => {
             super::kernel_identity::SM89_HALF_ROUTE_REVISION
         }
-        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
-        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 => {
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
+        | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial => {
             super::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
         }
-        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 => {
+        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 => {
             super::kernel_identity::SM89_EXACT_F32_D128_ROUTE_REVISION
         }
         _ => generic,
@@ -2141,16 +2141,16 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
 const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bool {
     matches!(
         backend,
-        PhysicalGemmBackend::ScalarFmaV1
-            | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
-            | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
-            | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
-            | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1
-            | PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1
-            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1
-            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1
-            | PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1
-            | PhysicalGemmBackend::Sm120TmaFmaExactV1
+        PhysicalGemmBackend::ScalarFma
+            | PhysicalGemmBackend::ScalarFmaSplitKPartial
+            | PhysicalGemmBackend::ScalarFmaSplitKF32Reduce
+            | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial
+            | PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce
+            | PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
+            | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial
+            | PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89
+            | PhysicalGemmBackend::Sm120TmaFmaExact
     )
 }
 
@@ -2220,15 +2220,12 @@ mod tests {
     #[test]
     fn sm120_mma16_graph_routes_use_their_sealed_schedule_revision() {
         assert_eq!(
-            expected_route_schedule_revision(
-                PhysicalGemmBackend::Sm120TmaMma16V1,
-                SCHEDULE_REVISION,
-            ),
+            expected_route_schedule_revision(PhysicalGemmBackend::Sm120TmaMma16, SCHEDULE_REVISION,),
             super::super::gemm_bi_triad::SM120_SCHEDULE_REVISION
         );
         assert_eq!(
             expected_route_schedule_revision(
-                PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1,
+                PhysicalGemmBackend::Sm120TmaMmaTf32Rna,
                 SCHEDULE_REVISION,
             ),
             SCHEDULE_REVISION
@@ -2239,7 +2236,7 @@ mod tests {
     fn sm89_finalist_routes_use_their_private_tuning_revision() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         let finalist =
-            expected_route_tuning_revision(PhysicalGemmBackend::Sm89MmaTf32Compact8V1, generic);
+            expected_route_tuning_revision(PhysicalGemmBackend::Sm89MmaTf32Compact8, generic);
         assert_eq!(
             finalist,
             super::super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
@@ -2247,7 +2244,7 @@ mod tests {
         assert_ne!(finalist, 0);
         assert_ne!(finalist, 1);
 
-        let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32RnaV1, generic);
+        let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32Rna, generic);
         assert_eq!(portable, 45);
         assert_ne!(portable, finalist);
     }
@@ -2256,9 +2253,9 @@ mod tests {
     fn sm89_tf32_joint_backends_use_the_joint_module_and_private_revision() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         for backend in [
-            PhysicalGemmBackend::Sm89MmaTf32PreRnaV1,
-            PhysicalGemmBackend::Sm89MmaTf32AddHalfV1,
-            PhysicalGemmBackend::Sm89MmaTf32NtALdmatrixV1,
+            PhysicalGemmBackend::Sm89MmaTf32PreRna,
+            PhysicalGemmBackend::Sm89MmaTf32AddHalf,
+            PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix,
         ] {
             assert_eq!(
                 expected_route_module(backend),
@@ -2276,7 +2273,7 @@ mod tests {
     fn sm89_fixed_copyplan_routes_use_a_private_revision_without_moving_global_45() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         let copyplan = expected_route_tuning_revision(
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
             generic,
         );
         assert_eq!(
@@ -2286,15 +2283,15 @@ mod tests {
         assert_ne!(copyplan, 0);
         assert_ne!(copyplan, 2);
         assert_eq!(
-            expected_route_tuning_revision(PhysicalGemmBackend::ScalarFmaV1, generic),
+            expected_route_tuning_revision(PhysicalGemmBackend::ScalarFma, generic),
             45
         );
         assert_eq!(
-            expected_route_module(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1),
+            expected_route_module(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan),
             ModuleKind::Fixed
         );
         assert_eq!(
-            expected_route_module(PhysicalGemmBackend::ScalarFmaV1),
+            expected_route_module(PhysicalGemmBackend::ScalarFma),
             ModuleKind::TriadScalar
         );
     }
@@ -2303,8 +2300,8 @@ mod tests {
     fn sm89_half_routes_use_the_isolated_module_and_private_revision() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         for backend in [
-            PhysicalGemmBackend::Sm89Mma16HalfS3V1,
-            PhysicalGemmBackend::Sm89Mma16HalfS2V1,
+            PhysicalGemmBackend::Sm89Mma16HalfS3,
+            PhysicalGemmBackend::Sm89Mma16HalfS2,
         ] {
             assert_eq!(
                 expected_route_tuning_revision(backend, generic),
@@ -2318,8 +2315,8 @@ mod tests {
     #[test]
     fn sm89_exact_f32_tn_routes_use_the_isolated_module_and_private_revision() {
         for backend in [
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
         ] {
             assert_eq!(
                 expected_route_module(backend),
@@ -2335,7 +2332,7 @@ mod tests {
 
     #[test]
     fn sm89_exact_f32_d128_routes_use_their_isolated_module_and_private_revision() {
-        let backend = PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1;
+        let backend = PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89;
         assert_eq!(
             expected_route_module(backend),
             ModuleKind::TriadSm89ExactF32D128
@@ -2350,23 +2347,23 @@ mod tests {
     #[test]
     fn logical_f32_accepts_only_scalar_triad_backends() {
         for backend in [
-            PhysicalGemmBackend::ScalarFmaV1,
-            PhysicalGemmBackend::ScalarFmaSplitKPartialV1,
-            PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
-            PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlanV1,
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1,
-            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1,
-            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1,
-            PhysicalGemmBackend::Sm120TmaFmaExactV1,
+            PhysicalGemmBackend::ScalarFma,
+            PhysicalGemmBackend::ScalarFmaSplitKPartial,
+            PhysicalGemmBackend::ScalarFmaSplitKF32Reduce,
+            PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial,
+            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
+            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
+            PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
+            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
+            PhysicalGemmBackend::Sm120TmaFmaExact,
         ] {
             assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");
         }
         for backend in [
-            PhysicalGemmBackend::Sm80Mma16V1,
-            PhysicalGemmBackend::MmaTf32RnaV1,
-            PhysicalGemmBackend::Sm120TmaMma16V1,
+            PhysicalGemmBackend::Sm80Mma16,
+            PhysicalGemmBackend::MmaTf32Rna,
+            PhysicalGemmBackend::Sm120TmaMma16,
         ] {
             assert!(!scalar_backend_supports_logical_f32(backend), "{backend:?}");
         }
@@ -2379,11 +2376,11 @@ mod tests {
 
         assert_eq!(
             f32_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
-            F32TriadPolicy::ExactScalarFmaV1
+            F32TriadPolicy::ExactScalarFma
         );
         assert_eq!(
             f32_triad_policy_from_result(Ok("tf32".into())).unwrap(),
-            F32TriadPolicy::AllowDeterministicTf32V1
+            F32TriadPolicy::AllowDeterministicTf32
         );
         let error = f32_triad_policy_from_result(Err(std::env::VarError::NotUnicode(
             OsString::from_vec(vec![b't', b'f', 0xff, b'3', b'2']),
@@ -2490,8 +2487,8 @@ mod tests {
                         mode,
                         family,
                         tensor_cores: true,
-                        f32_policy: F32TriadPolicy::ExactScalarFmaV1,
-                        half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                        f32_policy: F32TriadPolicy::ExactScalarFma,
+                        half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
                     }
                 );
             }
@@ -2611,10 +2608,10 @@ mod tests {
         assert_eq!(resolved.mode, GemmMode::Deterministic);
         assert!(resolved.tensor_cores);
         assert_eq!(resolved.family, BiGemmFamily::Inference);
-        assert_eq!(resolved.f32_policy, F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(resolved.f32_policy, F32TriadPolicy::ExactScalarFma);
         assert_eq!(
             resolved.half_policy,
-            HalfTriadPolicy::AllowStreamKFixedOrderV1
+            HalfTriadPolicy::AllowStreamKFixedOrder
         );
 
         let mut values = empty_gemm_env();
@@ -2636,11 +2633,11 @@ mod tests {
         );
         assert_eq!(
             super::half_triad_policy_from_result(Ok(" tiled ".into())).unwrap(),
-            Some(super::HalfTriadPolicy::TiledParityV1)
+            Some(super::HalfTriadPolicy::TiledParity)
         );
         assert_eq!(
             super::half_triad_policy_from_result(Ok("streamk".into())).unwrap(),
-            Some(super::HalfTriadPolicy::AllowStreamKFixedOrderV1)
+            Some(super::HalfTriadPolicy::AllowStreamKFixedOrder)
         );
         for wrong in ["", "stream-k", "StreamK", "1", "on"] {
             let error = super::half_triad_policy_from_result(Ok(wrong.into()))

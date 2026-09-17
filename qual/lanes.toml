@@ -35,6 +35,7 @@
 "ddp_reduction_tree" = "host"
 "conv_tiled_hash" = "contract"
 "decode_digest" = "contract"
+"identity_mint" = "qualification"
 "m3_decode_digest" = "contract"
 "determinism_source_gates" = "host"
 "device_facts" = "qualification"

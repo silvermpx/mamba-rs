@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 pub const OWNER_TEMPLATE: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89_exact_f32_d128.cu");
+    include_str!("../../../../kernels/gemm_bi_triad/sm89/exact_f32_d128.cu");
 
 pub const OWNER_SHA256: &str = "c684cfcc1165af0ad5cdc2e9e0e1c5c4d7d2986d48fb37b6c192a2dd40718310";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [
@@ -9,8 +9,8 @@ pub const OWNER_SHA256_BYTES: [u8; 32] = [
     0xd7, 0xd2, 0x98, 0x6d, 0x48, 0xfb, 0x37, 0xb6, 0xc1, 0x92, 0xa2, 0xdd, 0x40, 0x71, 0x83, 0x10,
 ];
 
-pub const D128_IN_SYMBOL: &str = "gemm_bi_tn_sm89_f32_d128_in_m16n16_f64fold_v1";
-pub const D128_OUT_SYMBOL: &str = "gemm_bi_tn_sm89_f32_d128_out_m8n16_f64fold_v1";
+pub const D128_IN_SYMBOL: &str = "tn_sm89_f32_d128_in_m16n16_f64fold";
+pub const D128_OUT_SYMBOL: &str = "tn_sm89_f32_d128_out_m8n16_f64fold";
 
 /// Separate CUDA Driver arguments: output, A, B, alpha, M, K, N.
 /// Each pair is the byte offset and size in the kernel parameter buffer.

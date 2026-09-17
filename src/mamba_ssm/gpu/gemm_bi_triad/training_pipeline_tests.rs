@@ -112,33 +112,21 @@ fn expected_topology(arm: PipelineArm) -> ExpectedTopology {
             ExpectedNode::MemcpyD2d {
                 elements: ACTIVE_ELEMENTS,
             },
-            ExpectedNode::kernel(
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
-                [1, 1, 32],
-                [128, 1, 1],
-            ),
-            ExpectedNode::kernel("gemm_bi_splitm_reduce", [4, 1, 1], [256, 1, 1]),
-            ExpectedNode::kernel(
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
-                [2, 1, 32],
-                [128, 1, 1],
-            ),
-            ExpectedNode::kernel("gemm_bi_splitm_reduce", [13, 1, 1], [256, 1, 1]),
-            ExpectedNode::kernel(
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
-                [1, 2, 86],
-                [128, 1, 1],
-            ),
-            ExpectedNode::kernel("gemm_bi_splitm_reduce", [16, 1, 1], [256, 1, 1]),
+            ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [1, 1, 32], [128, 1, 1]),
+            ExpectedNode::kernel("splitm_reduce", [4, 1, 1], [256, 1, 1]),
+            ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [2, 1, 32], [128, 1, 1]),
+            ExpectedNode::kernel("splitm_reduce", [13, 1, 1], [256, 1, 1]),
+            ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [1, 2, 86], [128, 1, 1]),
+            ExpectedNode::kernel("splitm_reduce", [16, 1, 1], [256, 1, 1]),
             ExpectedNode::adamw(ACTIVE_ELEMENTS),
         ],
         PipelineArm::DirectControl => vec![
             ExpectedNode::MemcpyD2d {
                 elements: ACTIVE_ELEMENTS,
             },
-            ExpectedNode::kernel("gemm_bi_tn_narrow", [1, 1, 1], [128, 1, 1]),
-            ExpectedNode::kernel("gemm_bi_tn_narrow", [2, 1, 1], [128, 1, 1]),
-            ExpectedNode::kernel("gemm_bi_tn_narrow", [2, 1, 1], [128, 1, 1]),
+            ExpectedNode::kernel("tn_narrow", [1, 1, 1], [128, 1, 1]),
+            ExpectedNode::kernel("tn_narrow", [2, 1, 1], [128, 1, 1]),
+            ExpectedNode::kernel("tn_narrow", [2, 1, 1], [128, 1, 1]),
             ExpectedNode::adamw(ACTIVE_ELEMENTS),
         ],
     };
@@ -265,7 +253,7 @@ impl PairedAbsoluteSamples {
 
 fn stable_schedule_canonical() -> String {
     [
-        "task8_schedule_v1",
+        "task8_schedule",
         "modes=eager,graph",
         "orders=production_first,direct_first",
         "calls=1024:47:17:7296,1024:128:25:0,4096:64:64:3200",
@@ -337,39 +325,27 @@ fn production_and_direct_topologies_are_exact_linear_contracts() {
     );
     assert_eq!(
         production.nodes[1],
-        ExpectedNode::kernel(
-            "gemm_bi_tn_narrow_splitm_partial_aligned",
-            [1, 1, 32],
-            [128, 1, 1]
-        )
+        ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [1, 1, 32], [128, 1, 1])
     );
     assert_eq!(
         production.nodes[2],
-        ExpectedNode::kernel("gemm_bi_splitm_reduce", [4, 1, 1], [256, 1, 1])
+        ExpectedNode::kernel("splitm_reduce", [4, 1, 1], [256, 1, 1])
     );
     assert_eq!(
         production.nodes[3],
-        ExpectedNode::kernel(
-            "gemm_bi_tn_narrow_splitm_partial_aligned",
-            [2, 1, 32],
-            [128, 1, 1]
-        )
+        ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [2, 1, 32], [128, 1, 1])
     );
     assert_eq!(
         production.nodes[4],
-        ExpectedNode::kernel("gemm_bi_splitm_reduce", [13, 1, 1], [256, 1, 1])
+        ExpectedNode::kernel("splitm_reduce", [13, 1, 1], [256, 1, 1])
     );
     assert_eq!(
         production.nodes[5],
-        ExpectedNode::kernel(
-            "gemm_bi_tn_narrow_splitm_partial_aligned",
-            [1, 2, 86],
-            [128, 1, 1]
-        )
+        ExpectedNode::kernel("tn_narrow_splitm_partial_aligned", [1, 2, 86], [128, 1, 1])
     );
     assert_eq!(
         production.nodes[6],
-        ExpectedNode::kernel("gemm_bi_splitm_reduce", [16, 1, 1], [256, 1, 1])
+        ExpectedNode::kernel("splitm_reduce", [16, 1, 1], [256, 1, 1])
     );
     assert_eq!(production.nodes[7], ExpectedNode::adamw(8095));
 
@@ -381,7 +357,7 @@ fn production_and_direct_topologies_are_exact_linear_contracts() {
     assert!(
         direct.nodes[1..4]
             .iter()
-            .all(|node| node.symbol() == Some("gemm_bi_tn_narrow"))
+            .all(|node| node.symbol() == Some("tn_narrow"))
     );
 }
 
@@ -713,7 +689,7 @@ mod cuda_qualification {
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         Ok(ctx)
     }
 
@@ -1016,7 +992,7 @@ mod cuda_qualification {
             PipelineArm::DirectControl => "direct_control",
         };
         let mut canonical = format!(
-            "task8_topology_v1\narm={arm_name}\nnode_count={count}\nedge_count={edge_count}\nedge_semantics=linear_default_zero_ports_reserved_zero\n"
+            "task8_topology\narm={arm_name}\nnode_count={count}\nedge_count={edge_count}\nedge_semantics=linear_default_zero_ports_reserved_zero\n"
         );
         for (index, (node, contract)) in ordered.into_iter().zip(expected.nodes).enumerate() {
             let observed = observe_node(node)?;

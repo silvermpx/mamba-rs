@@ -12,7 +12,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{CudaTarget, DeviceCaps};
 
-const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
+const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
 const CONTRACT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs");
 const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
 const MODULE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
@@ -74,9 +74,7 @@ fn expected_symbols() -> BTreeSet<String> {
             for bk in [32, 64] {
                 for stages in [2, 3] {
                     for dtype in ["bf16", "f16"] {
-                        symbols.insert(format!(
-                            "gemm_bi_{op}_sm120_tma_{tile}_bk{bk}_s{stages}_{dtype}"
-                        ));
+                        symbols.insert(format!("{op}_sm120_tma_{tile}_bk{bk}_s{stages}_{dtype}"));
                     }
                 }
             }

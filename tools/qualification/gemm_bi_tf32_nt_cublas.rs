@@ -12,7 +12,7 @@ const TIMING_CLOCK: &str = "cuda_event_device_elapsed";
 const CANDIDATE_MEMORY_SAFETY_SCOPE: &str =
     "test_owned_guarded_direct_launch_exact_candidate_symbol";
 const COMPARATOR_MEMORY_SAFETY_SCOPE: &str = "test_owned_guarded_cublas_gemm_ex_launch";
-const CANDIDATE_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3";
+const CANDIDATE_SYMBOL: &str = "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3";
 const CUBLAS_GEMM_SYMBOL: &str =
     "_ZN7cutlass7Kernel2I50cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4EEvNT_6ParamsE";
 const CUBLAS_SPLIT_K_REDUCER_PREFIX: &str = "_ZN8cublasLt19splitKreduce_kernel";
@@ -390,7 +390,7 @@ fn comparator_contract_freezes_shapes_route_and_explicit_nt_semantics() {
     assert_eq!(qualified_cells(), [(64, 384, 1_536), (384, 64, 1_536)]);
     assert_eq!(
         candidate_symbol(),
-        "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3"
+        "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3"
     );
     assert_eq!(nt_semantics(), "C[M,K]=A[M,N]*transpose(B[K,N])");
     assert_eq!(candidate_manifest(CELLS[0]).grid, (12, 4, 4));
@@ -665,10 +665,10 @@ mod cuda_suite {
     const MAX_WINDOW_ITERATIONS: usize = 4_096;
     const RECORDS_BEFORE_COMPLETION: usize = CELLS.len() * 2;
     const TEST_SOURCE: &str = include_str!("gemm_bi_tf32_nt_cublas.rs");
-    const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+    const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
 
     const CANDIDATE_ROUTE: Tf32PhysicalRoute =
-        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S3,
         });
@@ -921,7 +921,7 @@ mod cuda_suite {
             include_str!("../../kernels/gemm_bi_triad/common.cuh"),
             include_str!("../../kernels/gemm_bi_triad/epilogue.cuh"),
             include_str!("../../kernels/gemm_bi_triad/mma16.cuh"),
-            include_str!("../../kernels/gemm_bi_triad/sm80.cu"),
+            include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu"),
         ]
         .iter()
         .map(|source| {

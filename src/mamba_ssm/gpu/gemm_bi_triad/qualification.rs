@@ -115,7 +115,7 @@ impl Drop for ActiveQualificationToken {
 pub enum PhysicalQualificationRoute {
     /// Production F32 policy dispatcher with the requested permission policy.
     ///
-    /// `AllowDeterministicTf32V1` permits a deterministic TF32 route but may
+    /// `AllowDeterministicTf32` permits a deterministic TF32 route but may
     /// resolve to the exact scalar FMA path for an unsupported shape or device.
     F32Policy(F32TriadPolicy),
     /// Production BF16/F16 policy dispatcher.
@@ -423,7 +423,7 @@ impl PhysicalQualificationRoute {
             Self::F32Policy(policy) => PhysicalQualificationPolicy {
                 bi_tensor_cores: false,
                 f32_triad_policy: policy,
-                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                half_triad_policy: HalfTriadPolicy::TiledParity,
             },
             Self::HalfPolicy {
                 tensor_cores,
@@ -431,7 +431,7 @@ impl PhysicalQualificationRoute {
                 ..
             } => PhysicalQualificationPolicy {
                 bi_tensor_cores: tensor_cores,
-                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFma,
                 half_triad_policy: half_policy,
             },
             // The forced stream-K tile records a route that only the
@@ -439,23 +439,23 @@ impl PhysicalQualificationRoute {
             // on the tiled parity contract.
             Self::HalfForced { tile, .. } => PhysicalQualificationPolicy {
                 bi_tensor_cores: true,
-                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFma,
                 half_triad_policy: if tile == TcTile::Tile64StreamK {
-                    HalfTriadPolicy::AllowStreamKFixedOrderV1
+                    HalfTriadPolicy::AllowStreamKFixedOrder
                 } else {
-                    HalfTriadPolicy::TiledParityV1
+                    HalfTriadPolicy::TiledParity
                 },
             },
             Self::Tf32Forced(_) => PhysicalQualificationPolicy {
                 bi_tensor_cores: false,
-                f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32V1,
-                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32,
+                half_triad_policy: HalfTriadPolicy::TiledParity,
             },
             Self::Sm89ExactF32TnForced(_) | Self::Sm89ExactF32D128TnForced(_) => {
                 PhysicalQualificationPolicy {
                     bi_tensor_cores: false,
-                    f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-                    half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                    f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+                    half_triad_policy: HalfTriadPolicy::TiledParity,
                 }
             }
         }
@@ -655,9 +655,9 @@ impl PhysicalQualificationRequest {
             PhysicalQualificationRoute::Tf32Forced(route) => {
                 if matches!(
                     route,
-                    Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-                        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-                        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+                    Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
                 ) {
                     tf32_splitk_spec(self.op, route)?;
                 } else {
@@ -713,9 +713,9 @@ impl PhysicalQualificationRequest {
             PhysicalQualificationRoute::Tf32Forced(route) => {
                 if matches!(
                     route,
-                    Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-                        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-                        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+                    Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
                 ) {
                     let spec = tf32_splitk_spec(self.op, route)?;
                     (Some(spec.symbol), Some(spec.tile))
@@ -781,10 +781,10 @@ fn timed_request_digest(identity: PhysicalTimedRequestIdentity) -> [u8; 32] {
         .required(b"beta-bits", &identity.beta_bits.to_le_bytes())
         .required(b"bias", &[u8::from(identity.bias)]);
     digest = match identity.route {
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1) => {
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma) => {
             digest.required(b"route", b"f32-policy-exact-scalar-fma-v1")
         }
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1) => {
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32) => {
             digest.required(b"route", b"f32-policy-allow-deterministic-tf32-v1")
         }
         PhysicalQualificationRoute::HalfPolicy {
@@ -796,8 +796,8 @@ fn timed_request_digest(identity: PhysicalTimedRequestIdentity) -> [u8; 32] {
                 b"route",
                 match half_policy {
                     // Retain the byte-for-byte legacy tiled request encoding.
-                    HalfTriadPolicy::TiledParityV1 => b"half-policy",
-                    HalfTriadPolicy::AllowStreamKFixedOrderV1 => {
+                    HalfTriadPolicy::TiledParity => b"half-policy",
+                    HalfTriadPolicy::AllowStreamKFixedOrder => {
                         b"half-policy-allow-streamk-fixed-order-v1"
                     }
                 },
@@ -1195,7 +1195,7 @@ mod f32_trailing_guard_tests {
             let request = PhysicalQualificationRequest::contiguous_f32(
                 op,
                 dims,
-                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                 PhysicalQualificationF32Epilogue::new(
                     1.0,
                     if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
@@ -2493,8 +2493,8 @@ fn validate_sm120_half_branch(
         return Err("SM120 half production branch must match exactly one eager node".into());
     };
     let expected_contract = match seal.route.physical.schedule {
-        super::Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
-        super::Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+        super::Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32,
+        super::Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrder,
     };
     let [graph] = graph_nodes else {
         return Err("SM120 half production branch must match exactly one graph node".into());
@@ -2518,7 +2518,7 @@ fn validate_sm120_half_branch(
     );
     if expected.op != expected_op
         || expected.dtype != expected_dtype
-        || expected.backend != PhysicalGemmBackend::Sm120TmaMma16V1
+        || expected.backend != PhysicalGemmBackend::Sm120TmaMma16
         || expected.numeric_contract != expected_contract
         || expected.instruction_family != ResolvedInstructionFamily::MmaSync
         || expected.symbol != spec.symbol
@@ -2543,7 +2543,7 @@ fn validate_sm120_half_branch(
             || node.module_kind() != ModuleKind::TriadSm120
             || node.logical_dtype() != expected_dtype
             || node.execution_dtype() != expected_dtype
-            || actual.backend != PhysicalGemmBackend::Sm120TmaMma16V1
+            || actual.backend != PhysicalGemmBackend::Sm120TmaMma16
             || actual.numeric_contract != expected_contract
             || actual.instruction_family != ResolvedInstructionFamily::MmaSync
             || actual != *expected
@@ -2593,8 +2593,8 @@ fn validate_sm100_half_branch(
     );
     if expected.op != expected_op
         || expected.dtype != expected_dtype
-        || expected.backend != PhysicalGemmBackend::Sm100Tcgen05V1
-        || expected.numeric_contract != ResolvedNumericContract::Tcgen05F32V1
+        || expected.backend != PhysicalGemmBackend::Sm100Tcgen05
+        || expected.numeric_contract != ResolvedNumericContract::Tcgen05F32
         || expected.instruction_family != ResolvedInstructionFamily::Tcgen05
         || expected.symbol != spec.symbol
         || expected.module_kind != ModuleKind::TriadSm100
@@ -2618,8 +2618,8 @@ fn validate_sm100_half_branch(
             || node.module_kind() != ModuleKind::TriadSm100
             || node.logical_dtype() != expected_dtype
             || node.execution_dtype() != expected_dtype
-            || actual.backend != PhysicalGemmBackend::Sm100Tcgen05V1
-            || actual.numeric_contract != ResolvedNumericContract::Tcgen05F32V1
+            || actual.backend != PhysicalGemmBackend::Sm100Tcgen05
+            || actual.numeric_contract != ResolvedNumericContract::Tcgen05F32
             || actual.instruction_family != ResolvedInstructionFamily::Tcgen05
             || actual != *expected
         {
@@ -2657,8 +2657,8 @@ fn validate_sm90a_half_branch(
     };
     if expected.op != expected_op
         || expected.dtype != expected_dtype
-        || expected.backend != PhysicalGemmBackend::Sm90aWgmmaV1
-        || expected.numeric_contract != ResolvedNumericContract::WgmmaF32V1
+        || expected.backend != PhysicalGemmBackend::Sm90aWgmma
+        || expected.numeric_contract != ResolvedNumericContract::WgmmaF32
         || expected.instruction_family != ResolvedInstructionFamily::Wgmma
         || expected.symbol != seal.route.symbol()
         || expected.module_kind != ModuleKind::TriadSm90a
@@ -2687,8 +2687,8 @@ fn validate_sm90a_half_branch(
             || node.module_kind() != ModuleKind::TriadSm90a
             || node.logical_dtype() != expected_dtype
             || node.execution_dtype() != expected_dtype
-            || actual.backend != PhysicalGemmBackend::Sm90aWgmmaV1
-            || actual.numeric_contract != ResolvedNumericContract::WgmmaF32V1
+            || actual.backend != PhysicalGemmBackend::Sm90aWgmma
+            || actual.numeric_contract != ResolvedNumericContract::WgmmaF32
             || actual.instruction_family != ResolvedInstructionFamily::Wgmma
             || actual != *expected
         {
@@ -3377,7 +3377,7 @@ fn qualify_f32_launch<'ctx>(
 /// and prepared resource referenced by its graph. Use a dedicated context:
 /// only one holder may be live for a context, and the holder retains a policy
 /// lease until drop. The normalized policy is restored when the holder drops.
-/// F32 `AllowDeterministicTf32V1` is permission rather than a forced route and
+/// F32 `AllowDeterministicTf32` is permission rather than a forced route and
 /// may resolve to exact scalar FMA. Forced TF32 and half routes must satisfy
 /// their architecture, dtype, tile, operation, and layout contracts.
 ///
@@ -3487,7 +3487,7 @@ fn shape_for_spec(
 ) -> Result<F32TriadShape, String> {
     if matches!(
         spec.route,
-        Tf32PhysicalRoute::MmaTf32RnaV1(route) if route.tile != Tf32PortableTile::M128N128
+        Tf32PhysicalRoute::MmaTf32Rna(route) if route.tile != Tf32PortableTile::M128N128
     ) {
         Ok(F32TriadShape::contiguous(spec.op, dims))
     } else {
@@ -3545,7 +3545,7 @@ fn exceptional_class(value: f32) -> ExceptionalClass {
 }
 
 fn exceptional_class_for_spec(spec: &Tf32KernelSpec, value: f32) -> ExceptionalClass {
-    if spec.operand_conversion != ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 {
+    if spec.operand_conversion != ResolvedOperandConversion::RegisterAddHalfUlpTf32 {
         return exceptional_class(value);
     }
 
@@ -3568,7 +3568,7 @@ fn exceptional_class_for_spec(spec: &Tf32KernelSpec, value: f32) -> ExceptionalC
 }
 
 fn exceptional_values_for_spec(spec: &Tf32KernelSpec) -> &'static [u32] {
-    if spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 {
+    if spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32 {
         return &[
             0x8000_0000,
             0x0000_0001,
@@ -5231,8 +5231,8 @@ impl<'a, C: QualificationPolicyContext> QualificationPolicyGuard<'a, C> {
         let half_policy = context.half_triad_policy();
         context.set_bi_gemm_family(BiGemmFamily::Triad);
         context.set_bi_tensor_cores(false);
-        context.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-        context.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        context.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+        context.set_half_triad_policy(HalfTriadPolicy::TiledParity);
         if let Err(error) = context.set_gemm_mode(GemmMode::Deterministic) {
             context.set_half_triad_policy(half_policy);
             context.set_f32_triad_policy(f32_policy);
@@ -5575,12 +5575,12 @@ mod tests {
         assert_eq!(evidence.launch_count(), 1);
         assert_eq!(
             evidence.single_launch_symbol(),
-            Some("gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4")
+            Some("nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4")
         );
         assert_eq!(evidence.single_launch_tile(), Some((16, 32)));
         assert_eq!(
             evidence.nodes()[0].symbol,
-            "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+            "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4"
         );
         assert_eq!(evidence.nodes()[0].tile, Some((16, 32)));
         assert_eq!(evidence.nodes()[0].launch.grid_dim, (12, 4, 4));
@@ -5699,7 +5699,7 @@ mod tests {
         ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
         for (index, dims) in [(64, 1_536, 384), (64, 833, 384)].into_iter().enumerate() {
             qualify_splitk_numeric_case(
                 &ctx,
@@ -5746,7 +5746,7 @@ mod tests {
         ctx.set_gemm_mode(crate::mamba_ssm::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
         for (index, dims) in [(64, 833, 384), (64, 1_536, 384), (9, 65, 33), (9, 17, 33)]
             .into_iter()
             .enumerate()
@@ -5881,9 +5881,9 @@ mod tests {
         assert!(!context.bi_tensor_cores());
         assert_eq!(
             context.f32_triad_policy(),
-            F32TriadPolicy::AllowDeterministicTf32V1
+            F32TriadPolicy::AllowDeterministicTf32
         );
-        assert_eq!(context.half_triad_policy(), HalfTriadPolicy::TiledParityV1);
+        assert_eq!(context.half_triad_policy(), HalfTriadPolicy::TiledParity);
         Err("injected qualification failure".into())
     }
 
@@ -5895,18 +5895,18 @@ mod tests {
             mode_change_calls: Cell::new(0),
             family: Cell::new(BiGemmFamily::Inference),
             tensor_cores: Cell::new(true),
-            f32_policy: Cell::new(F32TriadPolicy::ExactScalarFmaV1),
-            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrderV1),
+            f32_policy: Cell::new(F32TriadPolicy::ExactScalarFma),
+            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrder),
         };
 
         assert!(fail_with_qualification_policy(&context).is_err());
         assert_eq!(context.gemm_mode(), GemmMode::CublasFast);
         assert_eq!(context.bi_gemm_family(), BiGemmFamily::Inference);
         assert!(context.bi_tensor_cores());
-        assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
         assert_eq!(
             context.half_triad_policy(),
-            HalfTriadPolicy::AllowStreamKFixedOrderV1
+            HalfTriadPolicy::AllowStreamKFixedOrder
         );
     }
 
@@ -5918,8 +5918,8 @@ mod tests {
             mode_change_calls: Cell::new(0),
             family: Cell::new(BiGemmFamily::Inference),
             tensor_cores: Cell::new(true),
-            f32_policy: Cell::new(F32TriadPolicy::ExactScalarFmaV1),
-            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrderV1),
+            f32_policy: Cell::new(F32TriadPolicy::ExactScalarFma),
+            half_policy: Cell::new(HalfTriadPolicy::AllowStreamKFixedOrder),
         };
 
         let error = match QualificationPolicyGuard::enter(&context) {
@@ -5931,10 +5931,10 @@ mod tests {
         assert_eq!(context.gemm_mode(), GemmMode::CublasFast);
         assert_eq!(context.bi_gemm_family(), BiGemmFamily::Inference);
         assert!(context.bi_tensor_cores());
-        assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(context.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
         assert_eq!(
             context.half_triad_policy(),
-            HalfTriadPolicy::AllowStreamKFixedOrderV1
+            HalfTriadPolicy::AllowStreamKFixedOrder
         );
     }
 
@@ -5979,7 +5979,7 @@ mod tests {
 
     #[test]
     fn wide_qualification_inventory_matches_target_composition() {
-        const WIDE: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+        const WIDE: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
         for (cc, expected_wide) in [
             ((8, 0), 1),
             ((8, 6), 1),
@@ -6030,7 +6030,7 @@ mod tests {
 
     #[test]
     fn sm120_pair_route_is_qualified_exactly_once() {
-        const SYMBOL: &str = "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair";
+        const SYMBOL: &str = "tn_sm120_tma_mma_tf32_m64n128_bk32_s4_pair";
         for cc in [(12, 0), (12, 1)] {
             assert_eq!(
                 tf32_qualification_route_specs(cc)
@@ -6251,7 +6251,7 @@ mod tests {
     }
 
     #[test]
-    fn qualification_artifact_v5_freezes_driver_jit_resources_per_route() {
+    fn qualification_artifact_freezes_driver_jit_resources_per_route() {
         let config = Tf32QualificationConfig {
             exact_cc: (8, 9),
             expected_routes: 1,
@@ -6509,7 +6509,7 @@ mod tests {
         let wide = &super::super::SM80_TF32_WIDE_ROUTE_SPECS[0];
         assert_eq!(
             wide.operand_conversion,
-            ResolvedOperandConversion::RegisterAddHalfUlpTf32V1
+            ResolvedOperandConversion::RegisterAddHalfUlpTf32
         );
         // Literal expectations describe the bits consumed by MMA after the
         // register add and discarded low 13 bits, not the original f32 class.
@@ -6643,7 +6643,7 @@ mod tests {
         let spec = tf32_qualification_route_specs(device.compute_capability)
             .expect("Ada qualification inventory")
             .into_iter()
-            .find(|spec| spec.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3")
+            .find(|spec| spec.symbol == "nn_sm80_mma_tf32_m128n128_bk32_s3")
             .expect("wide must be in the admitted qualification inventory");
 
         // These are the full corpus's production-bound helpers, not a
@@ -6846,7 +6846,7 @@ mod tests {
 
         let portable_spec = super::super::contract::tf32_kernel_spec(
             ResolvedGemmOp::Nt,
-            Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M128N64,
                 stages: Tf32PortableStages::S2,
             }),
@@ -6960,7 +6960,7 @@ mod tests {
             tensor_map_access: true,
         };
         let identity = Sm120RouteIdentity {
-            numeric_contract: Sm120NumericContract::TmaMma16F32V1,
+            numeric_contract: Sm120NumericContract::TmaMma16F32,
             op: forced.op,
             dtype: forced.dtype,
             physical: forced.physical,
@@ -7068,7 +7068,7 @@ mod tests {
                 planned_symbol: None,
                 planned_tile: None,
                 layout: PhysicalQualificationLayout::Contiguous,
-                route: PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                route: PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                 alpha_bits: 1.0_f32.to_bits(),
                 beta_bits: 0.0_f32.to_bits(),
                 bias: false,
@@ -7113,7 +7113,7 @@ mod tests {
     #[test]
     fn half_branch_seal_rejects_production_and_physical_route_drift() {
         let seal = HalfNativeBranchSeal {
-            base: "gemm_bi_nn_narrow_small",
+            base: "nn_narrow_small",
             op: ResolvedGemmOp::Nn,
             dtype: WeightDtype::Bf16,
             dims: (64, 64, 64),
@@ -7125,7 +7125,7 @@ mod tests {
             shared_mem_bytes: 0,
         };
         let mut physical = native_half_seal_projection(seal).expect("valid half seal");
-        physical.base = "gemm_bi_nn_tc64";
+        physical.base = "nn_tc64";
         physical.tile = Some((64, 64));
 
         assert_ne!(native_half_seal_projection(seal).unwrap(), physical);
@@ -7149,17 +7149,17 @@ mod tests {
     fn timed_request_digest_separates_policy_mode_and_forced_tile() {
         let dims = (256, 512, 384);
         let routes = [
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32),
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: true,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
             PhysicalQualificationRoute::HalfForced {
                 dtype: WeightDtype::Bf16,
@@ -7190,8 +7190,8 @@ mod tests {
             for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
                 for tensor_cores in [false, true] {
                     for half_policy in [
-                        HalfTriadPolicy::TiledParityV1,
-                        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                        HalfTriadPolicy::TiledParity,
+                        HalfTriadPolicy::AllowStreamKFixedOrder,
                     ] {
                         let route = PhysicalQualificationRoute::HalfPolicy {
                             dtype,
@@ -7201,7 +7201,7 @@ mod tests {
                         let policy = route.policy();
                         assert_eq!(policy.bi_tensor_cores, tensor_cores);
                         assert_eq!(policy.half_triad_policy, half_policy);
-                        assert_eq!(policy.f32_triad_policy, F32TriadPolicy::ExactScalarFmaV1);
+                        assert_eq!(policy.f32_triad_policy, F32TriadPolicy::ExactScalarFma);
                         let request =
                             PhysicalQualificationRequest::contiguous(op, (256, 512, 384), route);
                         // Permission is valid for every op and also when TC is
@@ -7260,7 +7260,7 @@ mod tests {
                 PhysicalQualificationRoute::HalfPolicy {
                     dtype,
                     tensor_cores,
-                    half_policy: HalfTriadPolicy::TiledParityV1,
+                    half_policy: HalfTriadPolicy::TiledParity,
                 },
             );
             assert_eq!(
@@ -7273,7 +7273,7 @@ mod tests {
 
     #[test]
     fn request_validation_rejects_invalid_extent_dtype_and_thin_tile() {
-        let scalar = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1);
+        let scalar = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma);
         assert!(
             PhysicalQualificationRequest::contiguous(ResolvedGemmOp::Nn, (0, 1, 1), scalar)
                 .validate()
@@ -7287,7 +7287,7 @@ mod tests {
         let half_f32 = PhysicalQualificationRoute::HalfPolicy {
             dtype: WeightDtype::F32,
             tensor_cores: false,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
         };
         assert!(
             PhysicalQualificationRequest::contiguous(ResolvedGemmOp::Nn, (1, 0, 1), half_f32)
@@ -7388,7 +7388,7 @@ mod tests {
 
     #[test]
     fn f32_epilogue_request_preserves_contract_and_identity() {
-        let route = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        let route = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32);
         let plain =
             PhysicalQualificationRequest::contiguous(ResolvedGemmOp::Nn, (64, 384, 1536), route);
         let biased = PhysicalQualificationRequest::contiguous_f32(
@@ -7416,7 +7416,7 @@ mod tests {
 
     #[test]
     fn f32_policy_epilogue_rejects_values_the_production_wrappers_cannot_express() {
-        let policy = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1);
+        let policy = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma);
         for (op, epilogue) in [
             (
                 ResolvedGemmOp::Nn,
@@ -7459,8 +7459,8 @@ mod tests {
     #[test]
     fn f32_policy_epilogue_accepts_exact_wrapper_values_and_forced_routes_stay_general() {
         for policy in [
-            F32TriadPolicy::ExactScalarFmaV1,
-            F32TriadPolicy::AllowDeterministicTf32V1,
+            F32TriadPolicy::ExactScalarFma,
+            F32TriadPolicy::AllowDeterministicTf32,
         ] {
             for (op, bias) in [
                 (ResolvedGemmOp::Nn, false),
@@ -7502,8 +7502,8 @@ mod tests {
         let salt = 0xb1a5_5eed;
 
         for policy in [
-            F32TriadPolicy::ExactScalarFmaV1,
-            F32TriadPolicy::AllowDeterministicTf32V1,
+            F32TriadPolicy::ExactScalarFma,
+            F32TriadPolicy::AllowDeterministicTf32,
         ] {
             let biased_request = PhysicalQualificationRequest::contiguous_f32(
                 ResolvedGemmOp::Nn,
@@ -7701,14 +7701,14 @@ mod tests {
             .gemm_route()
             .ok_or_else(|| "G2 captured node lacks GEMM contract".to_string())?;
         let contract = if stream_k {
-            ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
+            ResolvedNumericContract::MmaSyncF32StreamKFixedOrder
         } else {
-            ResolvedNumericContract::MmaSyncF32V1
+            ResolvedNumericContract::MmaSyncF32
         };
         let ownership = if stream_k {
-            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder
         } else {
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1
+            ResolvedOutputOwnership::OneCtaPerOutputTile
         };
         let (m, k, n) = qualified.request.dims;
         if eager.symbol != symbol
@@ -7751,7 +7751,7 @@ mod tests {
     #[ignore = "requires CC8.9/142SM; explicit half AUTO permission and actual eager/graph route"]
     fn g2_half_auto_streamk_permission_is_not_lost() {
         let ctx = g2_exact_ada_142_context();
-        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
         // The explicit request must install permission independently of the
         // ambient context, then restore the original tiled policy on drop.
         let requests = [WeightDtype::Bf16, WeightDtype::F16].map(|dtype| {
@@ -7761,16 +7761,16 @@ mod tests {
                 PhysicalQualificationRoute::HalfPolicy {
                     dtype,
                     tensor_cores: true,
-                    half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                    half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
                 },
             )
         });
         presize_physical_qualification_suite(&ctx, &requests).expect("G2 suite scratch");
         let mut failures = Vec::new();
-        for (request, symbol) in requests.into_iter().zip([
-            "gemm_bi_tn_tc64_streamk_bf16",
-            "gemm_bi_tn_tc64_streamk_f16",
-        ]) {
+        for (request, symbol) in requests
+            .into_iter()
+            .zip(["tn_tc64_streamk_bf16", "tn_tc64_streamk_f16"])
+        {
             let planned = request.timed_identity().expect("G2 AUTO identity");
             assert_eq!(planned.planned_symbol, None, "AUTO must not force a symbol");
             assert_eq!(planned.planned_tile, None, "AUTO must not force a tile");
@@ -7794,7 +7794,7 @@ mod tests {
             }
             assert_eq!(
                 ctx.half_triad_policy(),
-                HalfTriadPolicy::TiledParityV1,
+                HalfTriadPolicy::TiledParity,
                 "G2 lease must restore the original tiled policy even on error"
             );
         }
@@ -7809,7 +7809,7 @@ mod tests {
     #[ignore = "requires CC8.9/142SM; forced TN Rect128x64 actual eager/graph route"]
     fn g2_half_forced_rectangular_prepares_the_exact_graph() {
         let ctx = g2_exact_ada_142_context();
-        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParity);
         let requests = [WeightDtype::Bf16, WeightDtype::F16].map(|dtype| {
             PhysicalQualificationRequest::one_element_offset(
                 ResolvedGemmOp::Tn,
@@ -7825,7 +7825,7 @@ mod tests {
         let mut failures = Vec::new();
         for (request, symbol) in requests
             .into_iter()
-            .zip(["gemm_bi_tn_tc128x64_bf16", "gemm_bi_tn_tc128x64_f16"])
+            .zip(["tn_tc128x64_bf16", "tn_tc128x64_f16"])
         {
             let result = (|| -> Result<(), String> {
                 let mut qualified = qualify_physical_launch(&ctx, request)?;
@@ -7847,7 +7847,7 @@ mod tests {
             }
             assert_eq!(
                 ctx.half_triad_policy(),
-                HalfTriadPolicy::TiledParityV1,
+                HalfTriadPolicy::TiledParity,
                 "G2 rectangular error must restore the original tiled policy"
             );
         }
@@ -7864,8 +7864,8 @@ mod tests {
     // nonzero reduction rows. No cross-schedule floating-point parity is claimed.
     fn g2_other_half_policy(policy: HalfTriadPolicy) -> HalfTriadPolicy {
         match policy {
-            HalfTriadPolicy::TiledParityV1 => HalfTriadPolicy::AllowStreamKFixedOrderV1,
-            HalfTriadPolicy::AllowStreamKFixedOrderV1 => HalfTriadPolicy::TiledParityV1,
+            HalfTriadPolicy::TiledParity => HalfTriadPolicy::AllowStreamKFixedOrder,
+            HalfTriadPolicy::AllowStreamKFixedOrder => HalfTriadPolicy::TiledParity,
         }
     }
 
@@ -7974,10 +7974,10 @@ mod tests {
             let mut qualified = qualify_physical_launch(ctx, request)?;
             qualified.validate_timed_request(ctx, request)?;
             let symbol = match (request.route.logical_dtype(), stream_k) {
-                (PolicyDtype::Bf16, false) => "gemm_bi_tn_tc64_bf16",
-                (PolicyDtype::F16, false) => "gemm_bi_tn_tc64_f16",
-                (PolicyDtype::Bf16, true) => "gemm_bi_tn_tc64_streamk_bf16",
-                (PolicyDtype::F16, true) => "gemm_bi_tn_tc64_streamk_f16",
+                (PolicyDtype::Bf16, false) => "tn_tc64_bf16",
+                (PolicyDtype::F16, false) => "tn_tc64_f16",
+                (PolicyDtype::Bf16, true) => "tn_tc64_streamk_bf16",
+                (PolicyDtype::F16, true) => "tn_tc64_streamk_f16",
                 _ => return Err("G2 half fixture has an unexpected dtype".into()),
             };
             g2_check_half_tn_physical_evidence(
@@ -8054,8 +8054,8 @@ mod tests {
             ),
         ];
         let policies = [
-            HalfTriadPolicy::TiledParityV1,
-            HalfTriadPolicy::AllowStreamKFixedOrderV1,
+            HalfTriadPolicy::TiledParity,
+            HalfTriadPolicy::AllowStreamKFixedOrder,
         ];
         let mut requests = Vec::new();
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -8088,8 +8088,7 @@ mod tests {
             for (label, dims, offset, tiled_grid, admits) in fixtures {
                 let mut tiled_words = None;
                 for half_policy in policies {
-                    let stream_k =
-                        admits && half_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1;
+                    let stream_k = admits && half_policy == HalfTriadPolicy::AllowStreamKFixedOrder;
                     let request = g2_tn_request(
                         dims,
                         PhysicalQualificationRoute::HalfPolicy {
@@ -8107,7 +8106,7 @@ mod tests {
                         if stream_k { 142 } else { tiled_grid },
                     )
                     .unwrap_or_else(|error| panic!("{label}/{dtype:?}/{half_policy:?}: {error}"));
-                    if half_policy == HalfTriadPolicy::TiledParityV1 {
+                    if half_policy == HalfTriadPolicy::TiledParity {
                         tiled_words = Some(words);
                     } else if stream_k {
                         let forced = g2_tn_request(
@@ -8153,7 +8152,7 @@ mod tests {
                 PhysicalQualificationRoute::HalfPolicy {
                     dtype,
                     tensor_cores: true,
-                    half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                    half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
                 },
                 None,
             );
@@ -8230,8 +8229,8 @@ mod tests {
         let ctx = g2_exact_ada_142_context();
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             for original_half in [
-                HalfTriadPolicy::TiledParityV1,
-                HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                HalfTriadPolicy::TiledParity,
+                HalfTriadPolicy::AllowStreamKFixedOrder,
             ] {
                 for error_exit in [false, true] {
                     // Set every normalized field opposite to the requested
@@ -8240,7 +8239,7 @@ mod tests {
                     ctx.set_gemm_mode(GemmMode::CublasFast).unwrap();
                     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
                     ctx.set_bi_tensor_cores(false);
-                    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+                    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
                     ctx.set_half_triad_policy(original_half);
                     let original = ctx.gemm_route();
                     let frozen_tf32 = ctx.tf32();
@@ -8261,15 +8260,15 @@ mod tests {
                         assert_eq!(ctx.bi_gemm_family(), BiGemmFamily::Triad);
                         assert!(ctx.bi_tensor_cores());
                         assert!(!ctx.fast_gemm());
-                        assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+                        assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
                         assert_eq!(ctx.half_triad_policy(), requested_half);
                         assert_eq!(ctx.gemm_mode(), GemmMode::Deterministic);
                         assert!(!ctx.tf32());
                         g2_check_seeded_tn_eager_graph(&ctx, &mut qualified)?;
                         let symbol = if dtype == WeightDtype::Bf16 {
-                            "gemm_bi_tn_tc64_bf16"
+                            "tn_tc64_bf16"
                         } else {
-                            "gemm_bi_tn_tc64_f16"
+                            "tn_tc64_f16"
                         };
                         g2_check_half_tn_physical_evidence(
                             &qualified,
@@ -8460,7 +8459,7 @@ mod tests {
                     PhysicalQualificationRoute::HalfPolicy {
                         dtype: WeightDtype::Bf16,
                         tensor_cores: true,
-                        half_policy: HalfTriadPolicy::TiledParityV1,
+                        half_policy: HalfTriadPolicy::TiledParity,
                     },
                     PhysicalQualificationOffset::A,
                 ),
@@ -8580,10 +8579,7 @@ mod tests {
             resources.output.ptr() + WeightDtype::Bf16.size_bytes() as u64
         );
         assert_eq!(qualified.evidence().nodes().len(), 1);
-        assert_eq!(
-            qualified.evidence().nodes()[0].symbol,
-            "gemm_bi_nt_tc64_bf16"
-        );
+        assert_eq!(qualified.evidence().nodes()[0].symbol, "nt_tc64_bf16");
         assert_eq!(qualified.evidence().nodes()[0].shape, (129, 129, 72));
         assert_eq!(qualified.evidence().nodes()[0].strides, (72, 72, 129));
 

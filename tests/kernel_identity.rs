@@ -14,8 +14,8 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     NumericContractSet, POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype,
     ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
     ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedNumericContract,
-    ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1,
-    Sm80TcPolicyV4, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
+    ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicy,
+    Sm80TcPolicy, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
     canonical_ptx_image, gemm_dispatch_policy_digest, route_backend_contract_sets,
 };
 
@@ -63,15 +63,15 @@ fn module_kind_discriminants_are_stable() {
 fn f32_triad_policy_parser_accepts_only_the_versioned_public_spellings() {
     assert_eq!(
         F32TriadPolicy::parse_env_value("exact").unwrap(),
-        F32TriadPolicy::ExactScalarFmaV1
+        F32TriadPolicy::ExactScalarFma
     );
     assert_eq!(
         F32TriadPolicy::parse_env_value(" \t\ntf32\r ").unwrap(),
-        F32TriadPolicy::AllowDeterministicTf32V1
+        F32TriadPolicy::AllowDeterministicTf32
     );
-    assert_eq!(F32TriadPolicy::default(), F32TriadPolicy::ExactScalarFmaV1);
-    assert_eq!(F32TriadPolicy::ExactScalarFmaV1 as u8, 0);
-    assert_eq!(F32TriadPolicy::AllowDeterministicTf32V1 as u8, 1);
+    assert_eq!(F32TriadPolicy::default(), F32TriadPolicy::ExactScalarFma);
+    assert_eq!(F32TriadPolicy::ExactScalarFma as u8, 0);
+    assert_eq!(F32TriadPolicy::AllowDeterministicTf32 as u8, 1);
 
     for rejected in [
         "",
@@ -195,16 +195,16 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
         bi_tensor_cores,
         fast_gemm: false,
         cublas_tf32: false,
-        f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-        half_triad_policy: HalfTriadPolicy::TiledParityV1,
+        f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+        half_triad_policy: HalfTriadPolicy::TiledParity,
         bi_gemm_family,
     };
 
     let (backends, contracts) =
         route_backend_contract_sets(policy(false, false, BiGemmFamily::Triad));
     assert_eq!(backends, BackendSet::CUBLAS);
-    assert_eq!(contracts, NumericContractSet::CUBLAS_POLICY_V2);
-    assert_ne!(contracts, NumericContractSet::CUBLAS_POLICY_V1);
+    assert_eq!(contracts, NumericContractSet::CUBLAS_FAST_AND_PEDANTIC);
+    assert_ne!(contracts, NumericContractSet::CUBLAS_ONE_CONTRACT);
     assert_eq!(CUBLAS_POLICY_REVISION, 2);
     assert_eq!(POLICY_REVISION, 6);
 
@@ -213,12 +213,9 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
             route_backend_contract_sets(policy(true, tc, BiGemmFamily::Triad));
         assert!(backends.contains(BackendSet::TRIAD));
         assert!(backends.contains(BackendSet::FIXED));
-        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA_V1));
-        assert!(contracts.contains(NumericContractSet::FIXED_MATVEC_TREE_V1));
-        assert_eq!(
-            contracts.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
-            tc
-        );
+        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA));
+        assert!(contracts.contains(NumericContractSet::FIXED_MATVEC_TREE));
+        assert_eq!(contracts.contains(NumericContractSet::TRIAD_MMA_SYNC), tc);
     }
 
     for tc in [false, true] {
@@ -226,14 +223,11 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
             route_backend_contract_sets(policy(true, tc, BiGemmFamily::Inference));
         assert!(backends.contains(BackendSet::TRIAD));
         assert!(backends.contains(BackendSet::FIXED));
-        assert!(!contracts.contains(NumericContractSet::FIXED_MATVEC_TREE_V1));
-        assert!(contracts.contains(NumericContractSet::FIXED_SCALAR_FMA_V1));
-        assert!(contracts.contains(NumericContractSet::FIXED_MMA_SYNC_V1));
-        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA_V1));
-        assert_eq!(
-            contracts.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
-            tc
-        );
+        assert!(!contracts.contains(NumericContractSet::FIXED_MATVEC_TREE));
+        assert!(contracts.contains(NumericContractSet::FIXED_SCALAR_FMA));
+        assert!(contracts.contains(NumericContractSet::FIXED_MMA_SYNC));
+        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA));
+        assert_eq!(contracts.contains(NumericContractSet::TRIAD_MMA_SYNC), tc);
     }
 }
 
@@ -245,29 +239,29 @@ fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
         fast_gemm: false,
         cublas_tf32,
         f32_triad_policy,
-        half_triad_policy: HalfTriadPolicy::TiledParityV1,
+        half_triad_policy: HalfTriadPolicy::TiledParity,
         bi_gemm_family: BiGemmFamily::Triad,
     };
 
-    let exact = policy(true, F32TriadPolicy::ExactScalarFmaV1);
-    let allow = policy(false, F32TriadPolicy::AllowDeterministicTf32V1);
+    let exact = policy(true, F32TriadPolicy::ExactScalarFma);
+    let allow = policy(false, F32TriadPolicy::AllowDeterministicTf32);
     assert!(exact.cublas_tf32);
-    assert_eq!(exact.f32_triad_policy, F32TriadPolicy::ExactScalarFmaV1);
+    assert_eq!(exact.f32_triad_policy, F32TriadPolicy::ExactScalarFma);
     assert!(!allow.cublas_tf32);
     assert_eq!(
         allow.f32_triad_policy,
-        F32TriadPolicy::AllowDeterministicTf32V1
+        F32TriadPolicy::AllowDeterministicTf32
     );
 
     let (_, exact_contracts) = route_backend_contract_sets(exact);
     let (_, allow_contracts) = route_backend_contract_sets(allow);
-    assert!(!exact_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
-    assert!(allow_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
+    assert!(!exact_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
+    assert!(allow_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
 
     let mut fixed_allow = allow;
     fixed_allow.bi_gemm_family = BiGemmFamily::Inference;
     let (_, fixed_contracts) = route_backend_contract_sets(fixed_allow);
-    assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
+    assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
 }
 
 #[test]
@@ -277,17 +271,17 @@ fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
         bi_tensor_cores,
         fast_gemm: false,
         cublas_tf32: false,
-        f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+        f32_triad_policy: F32TriadPolicy::ExactScalarFma,
         half_triad_policy,
         bi_gemm_family,
     };
-    let stream_k = NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1;
+    let stream_k = NumericContractSet::TRIAD_MMA_SYNC_STREAM_K;
 
     // The default policy never carries the fixed-order fold, tensor cores or not.
     for tc in [false, true] {
         for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
             let (_, contracts) =
-                route_backend_contract_sets(policy(tc, HalfTriadPolicy::TiledParityV1, family));
+                route_backend_contract_sets(policy(tc, HalfTriadPolicy::TiledParity, family));
             assert!(!contracts.contains(stream_k), "{tc} {family:?}");
         }
     }
@@ -296,31 +290,31 @@ fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
     for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
         let (_, without_tc) = route_backend_contract_sets(policy(
             false,
-            HalfTriadPolicy::AllowStreamKFixedOrderV1,
+            HalfTriadPolicy::AllowStreamKFixedOrder,
             family,
         ));
         assert!(!without_tc.contains(stream_k), "{family:?}");
         let (_, with_tc) = route_backend_contract_sets(policy(
             true,
-            HalfTriadPolicy::AllowStreamKFixedOrderV1,
+            HalfTriadPolicy::AllowStreamKFixedOrder,
             family,
         ));
         assert!(with_tc.contains(stream_k), "{family:?}");
         assert!(
-            with_tc.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
+            with_tc.contains(NumericContractSet::TRIAD_MMA_SYNC),
             "{family:?}"
         );
     }
     // Outside the batch-invariant dispatch cuBLAS owns the route.
     let mut cublas = policy(
         true,
-        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+        HalfTriadPolicy::AllowStreamKFixedOrder,
         BiGemmFamily::Triad,
     );
     cublas.batch_invariant = false;
     assert_eq!(
         route_backend_contract_sets(cublas).1,
-        NumericContractSet::CUBLAS_POLICY_V2
+        NumericContractSet::CUBLAS_FAST_AND_PEDANTIC
     );
 }
 
@@ -484,8 +478,8 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
 }
 
 #[test]
-fn sm80_tc_policy_v3_digest_covers_geometry_waves_device_and_deep_split_k() {
-    let policy = Sm80TcPolicyV4::current();
+fn sm80_tc_policy_digest_covers_geometry_waves_device_and_deep_split_k() {
+    let policy = Sm80TcPolicy::current();
     let hash = policy.digest(142);
     assert_ne!(policy.digest(141), hash);
 
@@ -584,8 +578,8 @@ fn sm80_tc_policy_v3_digest_covers_geometry_waves_device_and_deep_split_k() {
 }
 
 #[test]
-fn scalar_wave_policy_v1_digest_covers_every_wave_and_device_field() {
-    let policy = ScalarWavePolicyV1::current();
+fn scalar_wave_policy_digest_covers_every_wave_and_device_field() {
+    let policy = ScalarWavePolicy::current();
     let hash = policy.digest(142);
     assert_ne!(policy.digest(141), hash);
 
@@ -611,15 +605,15 @@ fn scalar_wave_policy_v1_digest_covers_every_wave_and_device_field() {
     assert_ne!(gemm_dispatch_policy_digest(142), hash);
     assert_ne!(
         gemm_dispatch_policy_digest(142),
-        Sm80TcPolicyV4::current().digest(142)
+        Sm80TcPolicy::current().digest(142)
     );
 }
 
 #[test]
-fn vendor_policy_v2_changes_the_dispatch_identity() {
+fn vendor_policy_decoy_changes_the_dispatch_identity() {
     let multiprocessor_count = 142;
-    let tensor_core = Sm80TcPolicyV4::current().digest(multiprocessor_count);
-    let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
+    let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
+    let scalar = ScalarWavePolicy::current().digest(multiprocessor_count);
     let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
         .required(b"sm80-tensor-core-policy", &tensor_core)
         .required(b"scalar-wave-policy", &scalar)
@@ -656,13 +650,13 @@ fn route() -> GemmRouteIdentity {
             bi_tensor_cores: true,
             fast_gemm: false,
             cublas_tf32: false,
-            f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-            half_triad_policy: HalfTriadPolicy::TiledParityV1,
+            f32_triad_policy: F32TriadPolicy::ExactScalarFma,
+            half_triad_policy: HalfTriadPolicy::TiledParity,
             bi_gemm_family: BiGemmFamily::Triad,
         },
         backend_set: BackendSet::TRIAD,
-        numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA_V1
-            .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
+        numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA
+            .union(NumericContractSet::TRIAD_MMA_SYNC),
         compiler,
         artifacts,
         policy_revision: POLICY_REVISION,
@@ -708,7 +702,7 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.policy.cublas_tf32 = true;
     changed.push(value);
     let mut value = captured;
-    value.policy.f32_triad_policy = F32TriadPolicy::AllowDeterministicTf32V1;
+    value.policy.f32_triad_policy = F32TriadPolicy::AllowDeterministicTf32;
     changed.push(value);
     let mut value = captured;
     value.policy.bi_gemm_family = BiGemmFamily::Inference;
@@ -717,7 +711,7 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.backend_set = BackendSet::CUBLAS;
     changed.push(value);
     let mut value = captured;
-    value.numeric_contracts = NumericContractSet::CUBLAS_POLICY_V1;
+    value.numeric_contracts = NumericContractSet::CUBLAS_ONE_CONTRACT;
     changed.push(value);
     let mut value = captured;
     value.compiler.source_digest[0] ^= 1;
@@ -878,7 +872,7 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
         build_digest: digest(35),
     };
     Sm120RouteIdentity {
-        numeric_contract: Sm120NumericContract::TmaMma16F32V1,
+        numeric_contract: Sm120NumericContract::TmaMma16F32,
         op: Sm120Op::Nn,
         dtype: WeightDtype::Bf16,
         physical: Sm120PhysicalRoute {
@@ -895,7 +889,7 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
             ldb: 144,
             ldc: 144,
         },
-        symbol: "gemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16",
+        symbol: "nn_sm120_tma_128x64_bk64_s3_bf16",
         module_kind: ModuleKind::TriadSm120,
         target: Sm120TargetCandidate {
             device_cc: (12, 1),
@@ -934,10 +928,10 @@ fn sm120_route_identity_resolves_the_exact_production_route() {
     let resolved = sm120_route_identity().resolved_route().unwrap();
     assert_eq!(resolved.op, ResolvedGemmOp::Nn);
     assert_eq!(resolved.dtype, PolicyDtype::Bf16);
-    assert_eq!(resolved.backend, PhysicalGemmBackend::Sm120TmaMma16V1);
+    assert_eq!(resolved.backend, PhysicalGemmBackend::Sm120TmaMma16);
     assert_eq!(
         resolved.numeric_contract,
-        ResolvedNumericContract::MmaSyncF32V1
+        ResolvedNumericContract::MmaSyncF32
     );
     assert_eq!(
         resolved.instruction_family,
@@ -964,30 +958,30 @@ fn sm120_route_identity_resolves_the_exact_production_route() {
 
 #[test]
 fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
-    assert_eq!(PhysicalGemmBackend::MmaTf32RnaV1 as u8, 5);
-    assert_eq!(PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 as u8, 6);
-    assert_eq!(PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 as u8, 7);
-    assert_eq!(PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1 as u8, 8);
-    assert_eq!(ResolvedNumericContract::MmaTf32RnaV1 as u8, 5);
-    assert_eq!(ResolvedNumericContract::Sm90aWgmmaTf32TmaV1 as u8, 6);
-    assert_eq!(ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1 as u8, 7);
-    assert_eq!(ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 as u8, 8);
-    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK4V1 as u8, 10);
-    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK2V1 as u8, 11);
-    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK8V1 as u8, 16);
-    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK4V1 as u8, 10);
-    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK2V1 as u8, 11);
-    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK8V1 as u8, 15);
+    assert_eq!(PhysicalGemmBackend::MmaTf32Rna as u8, 5);
+    assert_eq!(PhysicalGemmBackend::Sm90aWgmmaTf32Tma as u8, 6);
+    assert_eq!(PhysicalGemmBackend::Sm100Tcgen05Tf32Tma as u8, 7);
+    assert_eq!(PhysicalGemmBackend::Sm120TmaMmaTf32Rna as u8, 8);
+    assert_eq!(ResolvedNumericContract::MmaTf32Rna as u8, 5);
+    assert_eq!(ResolvedNumericContract::Sm90aWgmmaTf32Tma as u8, 6);
+    assert_eq!(ResolvedNumericContract::Sm100Tcgen05Tf32Tma as u8, 7);
+    assert_eq!(ResolvedNumericContract::Sm120TmaMmaTf32Rna as u8, 8);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK4 as u8, 10);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK2 as u8, 11);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK8 as u8, 16);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK4 as u8, 10);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK2 as u8, 11);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK8 as u8, 15);
     assert_eq!(
-        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK4ReduceV1 as u8,
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK4Reduce as u8,
         4
     );
     assert_eq!(
-        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2ReduceV1 as u8,
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2Reduce as u8,
         5
     );
     assert_eq!(
-        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8ReduceV1 as u8,
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8Reduce as u8,
         8
     );
     assert_eq!(ResolvedInstructionFamily::ScalarFma as u8, 1);
@@ -995,54 +989,48 @@ fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
     assert_eq!(ResolvedInstructionFamily::Wgmma as u8, 3);
     assert_eq!(ResolvedInstructionFamily::Tcgen05 as u8, 4);
     assert_eq!(ResolvedOperandConversion::None as u8, 0);
-    assert_eq!(ResolvedOperandConversion::RegisterCvtRnaTf32F32V1 as u8, 1);
-    assert_eq!(ResolvedOperandConversion::TensorMapTfloat32V1 as u8, 2);
+    assert_eq!(ResolvedOperandConversion::RegisterCvtRnaTf32F32 as u8, 1);
+    assert_eq!(ResolvedOperandConversion::TensorMapTfloat32 as u8, 2);
     assert_eq!(
-        ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1 as u8,
+        ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32 as u8,
         3
     );
-    assert_eq!(ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 as u8, 4);
+    assert_eq!(ResolvedOperandConversion::RegisterAddHalfUlpTf32 as u8, 4);
 }
 
 #[test]
 fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
     assert_eq!(
-        PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1 as u8,
+        PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial as u8,
         13
     );
-    assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 as u8, 15);
-    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3V1 as u8, 23);
-    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2V1 as u8, 28);
+    assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce as u8, 15);
+    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3 as u8, 23);
+    assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2 as u8, 28);
     assert_eq!(
-        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFusedV1 as u8,
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused as u8,
         24
     );
     assert_eq!(
-        PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartialV1 as u8,
+        PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial as u8,
         25
     );
+    assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8, 30);
     assert_eq!(
-        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89V1 as u8,
-        30
-    );
-    assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1 as u8,
+        ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce as u8,
         12
     );
     assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1 as u8,
+        ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial as u8,
         13
     );
     assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1 as u8,
+        ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce as u8,
         14
     );
+    assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8, 21);
     assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnSplitMPartialV1 as u8,
-        21
-    );
-    assert_eq!(
-        ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartitionV1 as u8,
+        ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition as u8,
         13
     );
 }
@@ -1051,7 +1039,7 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
 fn sm120_route_identity_conversion_rejects_incoherent_inputs() {
     let baseline = sm120_route_identity();
     let mut wrong_symbol = baseline;
-    wrong_symbol.symbol = "gemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16";
+    wrong_symbol.symbol = "nn_sm120_tma_64x64_bk32_s2_bf16";
     let mut wrong_target = baseline;
     wrong_target.device_caps.accepted_target = Some(CudaTarget::new("compute_120").unwrap());
     let mut unsupported_dtype = baseline;
@@ -1074,7 +1062,7 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     let first = resolved_sm120_route();
     let mut second = first;
     second.op = ResolvedGemmOp::Tn;
-    second.symbol = "gemm_bi_tn_sm120_tma_64x128_bk32_s2_f16";
+    second.symbol = "tn_sm120_tma_64x128_bk32_s2_f16";
     second.dtype = PolicyDtype::F16;
     second.shape = (509, 65, 257);
     second.strides = (80, 272, 272);
@@ -1101,10 +1089,10 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     value.dtype = PolicyDtype::F16;
     mutations.push(value);
     let mut value = first;
-    value.backend = PhysicalGemmBackend::Sm80Mma16V1;
+    value.backend = PhysicalGemmBackend::Sm80Mma16;
     mutations.push(value);
     let mut value = first;
-    value.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+    value.numeric_contract = ResolvedNumericContract::ScalarFma;
     mutations.push(value);
     let mut value = first;
     value.instruction_family = ResolvedInstructionFamily::Wgmma;
@@ -1113,10 +1101,10 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     value.instruction_shape.k = 8;
     mutations.push(value);
     let mut value = first;
-    value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32V1;
+    value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32;
     mutations.push(value);
     let mut value = first;
-    value.symbol = "gemm_bi_nn_tc_bf16";
+    value.symbol = "nn_tc_bf16";
     mutations.push(value);
     let mut value = first;
     value.module_kind = ModuleKind::TriadSm80;
@@ -1212,7 +1200,7 @@ fn streaming_launch_set_builder_matches_slice_builder_and_fails_closed() {
     let first = resolved_sm120_route();
     let mut second = first;
     second.op = ResolvedGemmOp::Tn;
-    second.symbol = "gemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16";
+    second.symbol = "tn_sm120_tma_128x64_bk64_s3_bf16";
 
     let expected = build_resolved_gemm_launch_set(&[first, second]).unwrap();
     let mut builder = ResolvedGemmLaunchSetBuilder::new(2).unwrap();

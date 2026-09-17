@@ -117,7 +117,7 @@ fn select_inference_bundle_route(
         && operands.w.dtype == WeightDtype::F32;
     if exact_f32
         && stack.exact_available
-        && policy == F32TriadPolicy::ExactScalarFmaV1
+        && policy == F32TriadPolicy::ExactScalarFma
         && operands.bias_ptr.is_none()
         && (shape.m, shape.k, shape.n) == (4621, 1928, 384)
     {
@@ -485,7 +485,7 @@ mod inference_bundle_runtime_tests {
                                 mixed(dtype, bias),
                                 shape,
                                 compiler,
-                                F32TriadPolicy::ExactScalarFmaV1,
+                                F32TriadPolicy::ExactScalarFma,
                             ),
                             Some(InferenceBundleRoute::HalfF32S3),
                             "mixed winner missing for {nvrtc:?}/cap{state_cap} {dtype:?} {shape:?} bias={bias:?}"
@@ -494,7 +494,7 @@ mod inference_bundle_runtime_tests {
                 }
             }
             assert_eq!(
-                select(exact(), HOT_C, compiler, F32TriadPolicy::ExactScalarFmaV1,),
+                select(exact(), HOT_C, compiler, F32TriadPolicy::ExactScalarFma,),
                 Some(InferenceBundleRoute::ExactF32M128N64Tail),
                 "exact winner missing for {nvrtc:?}/cap{state_cap}"
             );
@@ -534,11 +534,11 @@ mod inference_bundle_runtime_tests {
         ];
         for bad in bad_stacks {
             assert_eq!(
-                select(mixed_ops, HOT_B, bad, F32TriadPolicy::ExactScalarFmaV1,),
+                select(mixed_ops, HOT_B, bad, F32TriadPolicy::ExactScalarFma,),
                 None
             );
             assert_eq!(
-                select(exact_ops, HOT_C, bad, F32TriadPolicy::ExactScalarFmaV1,),
+                select(exact_ops, HOT_C, bad, F32TriadPolicy::ExactScalarFma,),
                 None
             );
         }
@@ -550,12 +550,12 @@ mod inference_bundle_runtime_tests {
             InferenceShape { m: 0, ..HOT_B },
         ] {
             assert_eq!(
-                select(mixed_ops, shape, good, F32TriadPolicy::ExactScalarFmaV1,),
+                select(mixed_ops, shape, good, F32TriadPolicy::ExactScalarFma,),
                 None
             );
         }
         assert_eq!(
-            select(exact_ops, HOT_B, good, F32TriadPolicy::ExactScalarFmaV1,),
+            select(exact_ops, HOT_B, good, F32TriadPolicy::ExactScalarFma,),
             None
         );
         assert_eq!(
@@ -566,7 +566,7 @@ mod inference_bundle_runtime_tests {
                 },
                 HOT_C,
                 good,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             None
         );
@@ -575,7 +575,7 @@ mod inference_bundle_runtime_tests {
                 exact_ops,
                 HOT_C,
                 good,
-                F32TriadPolicy::AllowDeterministicTf32V1,
+                F32TriadPolicy::AllowDeterministicTf32,
             ),
             None
         );
@@ -589,7 +589,7 @@ mod inference_bundle_runtime_tests {
                     _ => bad.w.ptr = ptr,
                 }
                 assert_eq!(
-                    select(bad, HOT_B, good, F32TriadPolicy::ExactScalarFmaV1),
+                    select(bad, HOT_B, good, F32TriadPolicy::ExactScalarFma),
                     None
                 );
             }
@@ -600,7 +600,7 @@ mod inference_bundle_runtime_tests {
                     mixed(WeightDtype::Bf16, Some(bad_bias)),
                     HOT_B,
                     good,
-                    F32TriadPolicy::ExactScalarFmaV1,
+                    F32TriadPolicy::ExactScalarFma,
                 ),
                 None
             );
@@ -623,7 +623,7 @@ mod inference_bundle_runtime_tests {
             },
         ] {
             assert_eq!(
-                select(bad, HOT_B, good, F32TriadPolicy::ExactScalarFmaV1),
+                select(bad, HOT_B, good, F32TriadPolicy::ExactScalarFma),
                 None
             );
         }
@@ -641,7 +641,7 @@ mod inference_bundle_runtime_tests {
                 mixed(WeightDtype::Bf16, None),
                 HOT_B,
                 without_bf16,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             None
         );
@@ -650,17 +650,12 @@ mod inference_bundle_runtime_tests {
                 mixed(WeightDtype::F16, None),
                 HOT_B,
                 without_bf16,
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             Some(InferenceBundleRoute::HalfF32S3)
         );
         assert_eq!(
-            select(
-                exact(),
-                HOT_C,
-                without_bf16,
-                F32TriadPolicy::ExactScalarFmaV1,
-            ),
+            select(exact(), HOT_C, without_bf16, F32TriadPolicy::ExactScalarFma,),
             Some(InferenceBundleRoute::ExactF32M128N64Tail)
         );
         assert_eq!(
@@ -671,7 +666,7 @@ mod inference_bundle_runtime_tests {
                     half_f16_available: false,
                     ..good
                 },
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             None
         );
@@ -683,7 +678,7 @@ mod inference_bundle_runtime_tests {
                     exact_available: false,
                     ..good
                 },
-                F32TriadPolicy::ExactScalarFmaV1,
+                F32TriadPolicy::ExactScalarFma,
             ),
             None
         );
@@ -863,7 +858,7 @@ mod inference_bundle_runtime_tests {
 
     #[test]
     fn inference_bundle_runtime_retains_bias_seed_before_first_mma() {
-        let source = include_str!("../../../../kernels/gemm_bi_inference/sm89_half_f32out_s3.cu");
+        let source = include_str!("../../../../kernels/gemm_bi_inference/sm89/half_f32out_s3.cu");
         let bias_seed = source.find("float first = bias != nullptr").unwrap();
         let first_mma = source
             .find("sm89_fixed_half_swizzle::consume_fragments<T>")

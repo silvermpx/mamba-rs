@@ -4,9 +4,12 @@ This manual target compares the functions selected by `MambaKernels` with an
 independent frozen Fixed-module composition. It does not install candidates
 or change the model's sequential/parallel scan policy.
 
-`legacy_fixed.cu` is the complete Ada Fixed composition at `96303b12`, before
-fold admission. SHA-256:
-`d402b603ad4d1b823cf9c3d632ba522303df73de4169129285b3885870fddbbd`.
+`legacy_fixed.cu` is the complete Ada Fixed composition at capacity 32, where
+no fold admission applies; its fold kernels are the ones that shipped before
+fold admission, and the file is regenerated from the capacity-32 composition
+whenever the composed source moves (a kernel rename moves it without moving
+a bit). SHA-256, the capacity-32 source digest the test pins:
+`457e2e4076342df786917ac1b0aeb2ed60fc2279ddd6dc644109cbbddb0c8348`.
 The full source is intentional: compiling just the fold function would change
 its compiler context. It is a test fixture, not another production module.
 

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 const PRELUDE: &str = include_str!("../../../../kernels/_typed_prelude.cuh");
 pub const OWNER_TEMPLATE: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89_exact_f32.cu");
+    include_str!("../../../../kernels/gemm_bi_triad/sm89/exact_f32.cu");
 
 pub const OWNER_SHA256: &str = "cdcb768216699f41553e73492a32d92717c62889a4a329ca1990360b361541c7";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [
@@ -10,9 +10,9 @@ pub const OWNER_SHA256_BYTES: [u8; 32] = [
     0x17, 0xc6, 0x28, 0x89, 0xa4, 0xa3, 0x29, 0xca, 0x19, 0x90, 0x36, 0x0b, 0x36, 0x15, 0x41, 0xc7,
 ];
 
-pub const D768_IN_FUSED_SYMBOL: &str = "gemm_bi_tn_sm89_f32_n64_dual_chunk_fused_finalize_v1";
-pub const D768_OUT_RAW_SYMBOL: &str = "gemm_bi_tn_sm89_f32_m64n64_bk16_s2_d768_out_raw_v1";
-pub const PRISM_RAW_SYMBOL: &str = "gemm_bi_tn_sm89_f32_m64n64_bk16_s2_prism_raw_v1";
+pub const D768_IN_FUSED_SYMBOL: &str = "tn_sm89_f32_n64_dual_chunk_fused_finalize";
+pub const D768_OUT_RAW_SYMBOL: &str = "tn_sm89_f32_m64n64_bk16_s2_d768_out_raw";
+pub const PRISM_RAW_SYMBOL: &str = "tn_sm89_f32_m64n64_bk16_s2_prism_raw";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sm89ExactF32TnRoute {

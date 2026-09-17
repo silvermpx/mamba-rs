@@ -1,18 +1,18 @@
-pub const SYMBOL: &str = "gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2";
-const PARENT_SYMBOL: &str = "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
-const EXPECTED_PARENT_FNV64: u64 = 0x2ded_0f1a_133e_5949;
+pub const SYMBOL: &str = "nt_test_compact_a_ldmatrix_sm80_mma_tf32_m128n64_bk32_s2";
+const PARENT_SYMBOL: &str = "nt_test_compact_eight_warp_sm80_mma_tf32_m128n64_bk32_s2";
+const EXPECTED_PARENT_FNV64: u64 = 0xf25d_5da7_9248_2a94;
 
 const A_LOAD: &str = r#"#pragma unroll
         for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
             int row = warp_m + m_atom * 16 + group;
             a_fragments[m_atom][0] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread));
             a_fragments[m_atom][1] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
             a_fragments[m_atom][2] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
             a_fragments[m_atom][3] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
         }
 "#;
 
@@ -23,26 +23,26 @@ const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
                 int row = warp_m + m_atom * 16 + (lane & 15);
                 int reduction = k8 + ((lane >> 4) << 2);
                 unsigned address = (unsigned)__cvta_generic_to_shared(
-                    &gemm_bi_tf32_a_slot<Op>(storage, stage, row, reduction));
+                    &tf32_a_slot<Op>(storage, stage, row, reduction));
                 unsigned raw0, raw1, raw2, raw3;
                 asm volatile(
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                     : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
                     : "r"(address));
-                a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
-                a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
-                a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
-                a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+                a_fragments[m_atom][0] = tf32_rna(__uint_as_float(raw0));
+                a_fragments[m_atom][1] = tf32_rna(__uint_as_float(raw1));
+                a_fragments[m_atom][2] = tf32_rna(__uint_as_float(raw2));
+                a_fragments[m_atom][3] = tf32_rna(__uint_as_float(raw3));
             } else {
                 int row = warp_m + m_atom * 16 + group;
                 a_fragments[m_atom][0] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread));
                 a_fragments[m_atom][1] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
                 a_fragments[m_atom][2] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
                 a_fragments[m_atom][3] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
             }
         }
 "#;

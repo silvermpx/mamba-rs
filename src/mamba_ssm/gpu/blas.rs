@@ -1336,7 +1336,7 @@ fn push_nn_half_graph_arguments(
     arguments.push(1.0_f32)?;
     arguments.push(0.0_f32)?;
     arguments.push(checked.m_i32)?;
-    if base == "gemm_bi_nn_gemv" {
+    if base == "nn_gemv" {
         arguments.push(checked.k_i32)?;
         arguments.push(checked.k_i32)?;
         arguments.push(1_i32)?;
@@ -1346,7 +1346,7 @@ fn push_nn_half_graph_arguments(
         arguments.push(i32::try_from(shape.lda).map_err(|_| "NN lda exceeds i32::MAX")?)?;
         arguments.push(i32::try_from(shape.ldb).map_err(|_| "NN ldb exceeds i32::MAX")?)?;
         arguments.push(i32::try_from(shape.ldc).map_err(|_| "NN ldc exceeds i32::MAX")?)?;
-        if matches!(base, "gemm_bi_nn_narrow" | "gemm_bi_nn_narrow_small") {
+        if matches!(base, "nn_narrow" | "nn_narrow_small") {
             arguments.push(0_i32)?;
         }
     }
@@ -1755,13 +1755,13 @@ fn prepare_native_half_graph_launch(
             arguments.push(alpha)?;
             arguments.push(checked.m_i32)?;
             arguments.push(checked.k_i32)?;
-            if base == "gemm_bi_tn_gemv" {
+            if base == "tn_gemv" {
                 arguments.push(checked.k_i32)?;
                 arguments.push(1_i32)?;
             } else {
                 arguments.push(checked.n_i32)?;
             }
-            if base == "gemm_bi_tn_tc64_streamk" {
+            if base == "tn_tc64_streamk" {
                 let (partial, flags) = super::gemm_bi_triad::sm80_streamk_workspace(
                     &ctx.stream,
                     &ctx.kernels,
@@ -1777,7 +1777,7 @@ fn prepare_native_half_graph_launch(
             arguments.push(request.b)?;
             arguments.push(alpha)?;
             arguments.push(checked.m_i32)?;
-            if base == "gemm_bi_nt_gemv" {
+            if base == "nt_gemv" {
                 arguments.push(checked.k_i32)?;
                 arguments.push(checked.k_i32)?;
                 arguments.push(1_i32)?;
@@ -1803,7 +1803,7 @@ fn native_half_graph_module_supported(module: ModuleKind) -> bool {
 }
 
 fn sm89_half_nn_graph_uses_parameter_bundle(base: &str) -> bool {
-    base == "gemm_bi_nn_sm89_m128n128_bk64_s3_v1"
+    base == "nn_sm89_m128n128_bk64_s3"
 }
 
 fn prepare_conversion_graph_launch(
@@ -2656,9 +2656,9 @@ mod physical_graph_tests {
 
     #[test]
     fn sm89_half_nn_graph_uses_the_five_argument_bundle_abi() {
-        let base = "gemm_bi_nn_sm89_m128n128_bk64_s3_v1";
+        let base = "nn_sm89_m128n128_bk64_s3";
         assert!(sm89_half_nn_graph_uses_parameter_bundle(base));
-        assert!(!sm89_half_nn_graph_uses_parameter_bundle("gemm_bi_nn_tc"));
+        assert!(!sm89_half_nn_graph_uses_parameter_bundle("nn_tc"));
         let dims = (2048, 1536, 768);
         let request = HalfPhysicalTraceRequest {
             op: ResolvedGemmOp::Nn,
@@ -2994,9 +2994,9 @@ mod physical_graph_tests {
         for forced_tf32 in [false, true] {
             let ctx = physical_graph_context();
             ctx.set_f32_triad_policy(if forced_tf32 {
-                F32TriadPolicy::AllowDeterministicTf32V1
+                F32TriadPolicy::AllowDeterministicTf32
             } else {
-                F32TriadPolicy::ExactScalarFmaV1
+                F32TriadPolicy::ExactScalarFma
             });
             let mut buffers = F32PhysicalGraphBuffers::new(&ctx, dims).unwrap();
             let request = super::super::gemm_bi_triad::F32TriadRequest {
@@ -4559,10 +4559,10 @@ mod matvec_inventory_cuda_tests {
                         assert_eq!(trace.nodes().len(), 1);
                         let node = trace.nodes()[0];
                         let route = node.gemm_route().unwrap();
-                        assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarpV1);
+                        assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarp);
                         assert_eq!(
                             route.numeric_contract,
-                            ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBiasV1
+                            ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBias
                         );
                         assert_eq!(route.tile, (1, 32));
                         assert_eq!(route.bk, 0);

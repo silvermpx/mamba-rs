@@ -3,7 +3,7 @@
 #[path = "triad_tf32_tn_transpose_rna_n96_source.rs"]
 pub mod parent;
 
-pub const GEMM_SYMBOL: &str = "gemm_bi_tn_test_transpose_pre_rna_m64n64_sm89_bk32_s3_wave";
+pub const GEMM_SYMBOL: &str = "tn_test_transpose_pre_rna_m64n64_sm89_bk32_s3_wave";
 pub const TRANSPOSE_SYMBOL: &str = parent::CANDIDATE_TRANSPOSE_SYMBOL;
 
 pub fn retained_parent_source(raw_tn_n96: &str) -> Result<String, String> {

@@ -23,91 +23,88 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
 
 #[cfg(target_os = "linux")]
 const SCALAR_ENTRIES: &[&str] = &[
-    "gemm_bi_nn",
-    "gemm_bi_nn_m64n64_bk16_s2_v1",
-    "gemm_bi_nn_splitk32_m32n64_exact_v1",
-    "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-    "gemm_bi_nn_zero_reduction_v1",
-    "gemm_bi_tn",
-    "gemm_bi_tn_aligned",
-    "gemm_bi_tn_zero_reduction_v1",
-    "gemm_bi_tn_splitm_partial",
-    "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
-    "gemm_bi_tn_splitm_partial_aligned",
-    "gemm_bi_splitm_reduce",
-    "gemm_bi_nt",
-    "gemm_bi_nt_m2n16_bk64_splitk32_v1",
-    "gemm_bi_nt_zero_reduction_v1",
-    "gemm_bi_nn_slim",
-    "gemm_bi_nn_splitk_slim_partial",
-    "gemm_bi_tn_slim",
-    "gemm_bi_nt_slim",
-    "gemm_bi_nn_ultra_thin",
-    "gemm_bi_nn_gemv",
-    "gemm_bi_tn_gemv",
-    "gemm_bi_nt_gemv",
-    "gemm_bi_nn_narrow",
-    "gemm_bi_nn_narrow_small",
-    "gemm_bi_tn_narrow",
-    "gemm_bi_tn_narrow_splitm_partial",
-    "gemm_bi_tn_narrow_splitm_partial_aligned",
-    "gemm_bi_nt_narrow",
-    "gemm_bi_nn_splitk32_partial",
-    "gemm_bi_splitk_reduce",
-    "gemm_bi_dx_col_gemv",
-    "gemm_bi_transpose_f32_2d",
-    "gemm_bi_transpose_f32_32x16_d768_v1",
-    "gemm_bi_nn_gemv_bf16",
-    "gemm_bi_nn_gemv_f16",
-    "gemm_bi_tn_gemv_bf16",
-    "gemm_bi_tn_gemv_f16",
-    "gemm_bi_nt_gemv_bf16",
-    "gemm_bi_nt_gemv_f16",
-    "gemm_bi_nn_ultra_thin_bf16",
-    "gemm_bi_nn_ultra_thin_f16",
-    "gemm_bi_nn_narrow_bf16",
-    "gemm_bi_nn_narrow_f16",
-    "gemm_bi_nn_narrow_small_bf16",
-    "gemm_bi_nn_narrow_small_f16",
-    "gemm_bi_tn_narrow_bf16",
-    "gemm_bi_tn_narrow_f16",
-    "gemm_bi_nt_narrow_bf16",
-    "gemm_bi_nt_narrow_f16",
-    "gemm_bi_nn_big_bf16",
-    "gemm_bi_nn_big_f16",
-    "gemm_bi_tn_big_bf16",
-    "gemm_bi_tn_big_f16",
-    "gemm_bi_nt_big_bf16",
-    "gemm_bi_nt_big_f16",
+    "nn_big",
+    "nn_m64n64_bk16_s2",
+    "nn_splitk32_m32n64_exact",
+    "nn_prism_m64n64_bk16_s2",
+    "nn_zero_reduction",
+    "tn_big",
+    "tn_aligned",
+    "tn_zero_reduction",
+    "tn_splitm_partial",
+    "tn_m16n16_bk16_s2_splitm16",
+    "tn_splitm_partial_aligned",
+    "splitm_reduce",
+    "nt_big",
+    "nt_m2n16_bk64_splitk32",
+    "nt_zero_reduction",
+    "nn_slim",
+    "nn_splitk_slim_partial",
+    "tn_slim",
+    "nt_slim",
+    "nn_ultra_thin",
+    "nn_gemv",
+    "tn_gemv",
+    "nt_gemv",
+    "nn_narrow",
+    "nn_narrow_small",
+    "tn_narrow",
+    "tn_narrow_splitm_partial",
+    "tn_narrow_splitm_partial_aligned",
+    "nt_narrow",
+    "nn_splitk32_partial",
+    "splitk_reduce",
+    "dx_col_gemv",
+    "transpose_f32_2d",
+    "transpose_f32_32x16_d768",
+    "nn_gemv_bf16",
+    "nn_gemv_f16",
+    "tn_gemv_bf16",
+    "tn_gemv_f16",
+    "nt_gemv_bf16",
+    "nt_gemv_f16",
+    "nn_ultra_thin_bf16",
+    "nn_ultra_thin_f16",
+    "nn_narrow_bf16",
+    "nn_narrow_f16",
+    "nn_narrow_small_bf16",
+    "nn_narrow_small_f16",
+    "tn_narrow_bf16",
+    "tn_narrow_f16",
+    "nt_narrow_bf16",
+    "nt_narrow_f16",
+    "nn_big_bf16",
+    "nn_big_f16",
+    "tn_big_bf16",
+    "tn_big_f16",
+    "nt_big_bf16",
+    "nt_big_f16",
 ];
 
 #[cfg(target_os = "linux")]
 const SM80_TYPED_ENTRIES: &[&str] = &[
-    "gemm_bi_nn_tc_bf16",
-    "gemm_bi_nn_tc_f16",
-    "gemm_bi_tn_tc_bf16",
-    "gemm_bi_tn_tc_f16",
-    "gemm_bi_nt_tc_bf16",
-    "gemm_bi_nt_tc_f16",
-    "gemm_bi_nn_tc64_bf16",
-    "gemm_bi_nn_tc64_f16",
-    "gemm_bi_nn_tc16_bf16",
-    "gemm_bi_nn_tc16_f16",
-    "gemm_bi_tn_tc64_bf16",
-    "gemm_bi_tn_tc64_f16",
-    "gemm_bi_tn_tc128x64_bf16",
-    "gemm_bi_tn_tc128x64_f16",
-    "gemm_bi_nt_tc64_bf16",
-    "gemm_bi_nt_tc64_f16",
+    "nn_tc_bf16",
+    "nn_tc_f16",
+    "tn_tc_bf16",
+    "tn_tc_f16",
+    "nt_tc_bf16",
+    "nt_tc_f16",
+    "nn_tc64_bf16",
+    "nn_tc64_f16",
+    "nn_tc16_bf16",
+    "nn_tc16_f16",
+    "tn_tc64_bf16",
+    "tn_tc64_f16",
+    "tn_tc128x64_bf16",
+    "tn_tc128x64_f16",
+    "nt_tc64_bf16",
+    "nt_tc64_f16",
 ];
 
 /// Composed into the portable module on every sm80-family target except
 /// CC 12.x, whose boards run the SM120 stream-K kernel instead.
 #[cfg(target_os = "linux")]
-const SM80_STREAMK_ENTRIES: &[&str] = &[
-    "gemm_bi_tn_tc64_streamk_bf16",
-    "gemm_bi_tn_tc64_streamk_f16",
-];
+const SM80_STREAMK_ENTRIES: &[&str] = &["tn_tc64_streamk_bf16", "tn_tc64_streamk_f16"];
 
 #[cfg(target_os = "linux")]
 fn sm80_target_composes_streamk(target: &str) -> bool {
@@ -116,51 +113,51 @@ fn sm80_target_composes_streamk(target: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 const SM80_SPLITK_ENTRIES: &[&str] = &[
-    "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
-    "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
-    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
-    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
-    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
+    "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
+    "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
+    "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
+    "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+    "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
 ];
 
 /// The TN split-K family of the extension fragment, composed with the
 /// stream-K kernels and the wide TF32 tile on the sm80-family targets.
 #[cfg(target_os = "linux")]
 const SM80_TN_SPLITK_ENTRIES: &[&str] = &[
-    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
-    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
-    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
-    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s2",
+    "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3",
+    "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
+    "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
 ];
 
 #[cfg(target_os = "linux")]
 /// The portable TF32 entries every Fixed PTX carries, whatever its target.
 const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
-    "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
-    "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
-    "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
-    "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
-    "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+    "nn_tf32_m128n64_bk32_s2",
+    "nn_tf32_m128n64_bk32_s3",
+    "nn_tf32_m64n64_bk32_s2",
+    "nn_tf32_m64n64_bk32_s3",
+    "nn_tf32_m16n32_bk32_s4",
 ];
 
 /// The TMA entries the Fixed source compiles only for the 12.0 and 12.1
 /// architectures; every other target's PTX must not carry them.
 #[cfg(target_os = "linux")]
 const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
-    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+    "nn_sm120_tma_tf32_m128n64_bk32_s2",
+    "nn_sm120_tma_tf32_m128n64_bk32_s3",
+    "nn_sm120_tma_tf32_m64n128_bk32_s2",
+    "nn_sm120_tma_tf32_m64n128_bk32_s3",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store",
 ];
 
 /// The Ada-qualified RNA TF32 tiles, composed only for the sm_89 target.
 const FIXED_TF32_ENTRIES_SM89: &[&str] = &[
-    "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-    "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+    "nn_rna_wide_tf32_m128n128_bk32_s3",
+    "nn_sm89_rna_tf32_m128n96_bk32_s3",
 ];
 
 /// The Fixed TF32 entries a PTX compiled for `target` carries: the portable
@@ -449,7 +446,7 @@ fn record_half_fixture(
         PhysicalQualificationRoute::HalfPolicy {
             dtype: fixture.dtype,
             tensor_cores: fixture.tensor_cores,
-            half_policy: HalfTriadPolicy::TiledParityV1,
+            half_policy: HalfTriadPolicy::TiledParity,
         }
     };
     let request = PhysicalQualificationRequest::contiguous(fixture.op, fixture.dims, route);
@@ -469,7 +466,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: true,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -478,7 +475,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -487,7 +484,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -496,7 +493,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
-                half_policy: HalfTriadPolicy::TiledParityV1,
+                half_policy: HalfTriadPolicy::TiledParity,
             },
         ),
     ];
@@ -569,17 +566,13 @@ fn half_physical_trace_records_complete_upcast_routes() {
         for (op, expected_gemms, has_downcast) in [
             (
                 ResolvedGemmOp::Nn,
-                &["gemm_bi_nn_splitk32_partial", "gemm_bi_splitk_reduce"][..],
+                &["nn_splitk32_partial", "splitk_reduce"][..],
                 true,
             ),
-            (ResolvedGemmOp::Tn, &["gemm_bi_tn_slim"][..], false),
+            (ResolvedGemmOp::Tn, &["tn_slim"][..], false),
             (
                 ResolvedGemmOp::Nt,
-                &[
-                    "gemm_bi_transpose_f32_2d",
-                    "gemm_bi_nn_splitk32_partial",
-                    "gemm_bi_splitk_reduce",
-                ][..],
+                &["transpose_f32_2d", "nn_splitk32_partial", "splitk_reduce"][..],
                 true,
             ),
         ] {
@@ -637,41 +630,26 @@ fn half_physical_trace_records_complete_upcast_routes() {
 fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     let ctx = half_trace_context();
     for (op, tile, expected_extent, symbol) in [
-        (
-            ResolvedGemmOp::Nn,
-            TcTile::Tile64,
-            (64, 64),
-            "gemm_bi_nn_tc64_bf16",
-        ),
+        (ResolvedGemmOp::Nn, TcTile::Tile64, (64, 64), "nn_tc64_bf16"),
         (
             ResolvedGemmOp::Nn,
             TcTile::Tile128,
             (128, 128),
-            "gemm_bi_nn_tc_bf16",
+            "nn_tc_bf16",
         ),
-        (
-            ResolvedGemmOp::Tn,
-            TcTile::Tile64,
-            (64, 64),
-            "gemm_bi_tn_tc64_bf16",
-        ),
+        (ResolvedGemmOp::Tn, TcTile::Tile64, (64, 64), "tn_tc64_bf16"),
         (
             ResolvedGemmOp::Tn,
             TcTile::Tile128,
             (128, 128),
-            "gemm_bi_tn_tc_bf16",
+            "tn_tc_bf16",
         ),
-        (
-            ResolvedGemmOp::Nt,
-            TcTile::Tile64,
-            (64, 64),
-            "gemm_bi_nt_tc64_bf16",
-        ),
+        (ResolvedGemmOp::Nt, TcTile::Tile64, (64, 64), "nt_tc64_bf16"),
         (
             ResolvedGemmOp::Nt,
             TcTile::Tile128,
             (128, 128),
-            "gemm_bi_nt_tc_bf16",
+            "nt_tc_bf16",
         ),
     ] {
         ctx.set_bi_tensor_cores(false);
@@ -876,11 +854,11 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         let fixed_entries = ptx_entries(&artifact_payload(&cached_entries, first_artifacts.fixed));
         let exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
             .iter()
-            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm89_f32_n64_copyplan"))
+            .filter(|name| name.starts_with("nn_sm89_f32_n64_copyplan"))
             .map(String::as_str)
             .collect();
         let expected_exact_n64 = if first.kernels.compiler_identity().target.as_str() == "sm_89" {
-            std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"])
+            std::collections::BTreeSet::from(["nn_sm89_f32_n64_copyplan"])
         } else {
             std::collections::BTreeSet::new()
         };
@@ -890,15 +868,15 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         );
         let sm120_exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
             .iter()
-            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm120_f32_n64_copyplan"))
+            .filter(|name| name.starts_with("nn_sm120_f32_n64_copyplan"))
             .map(String::as_str)
             .collect();
         let expected_sm120_exact_n64 =
             if first.kernels.compiler_identity().target.as_str() == "compute_120" {
                 std::collections::BTreeSet::from([
-                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
-                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
-                    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+                    "nn_sm120_f32_n64_copyplan",
+                    "nn_sm120_f32_n64_copyplan_t256",
+                    "nn_sm120_f32_n64_copyplan_m128n64_t256",
                 ])
             } else {
                 std::collections::BTreeSet::new()
@@ -909,12 +887,12 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         );
         let sm120_sliced_entries: std::collections::BTreeSet<_> = fixed_entries
             .iter()
-            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm120_f32_n64_sliced"))
+            .filter(|name| name.starts_with("nn_sm120_f32_n64_sliced"))
             .map(String::as_str)
             .collect();
         let expected_sm120_sliced =
             if first.kernels.compiler_identity().target.as_str() == "compute_120" {
-                std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"])
+                std::collections::BTreeSet::from(["nn_sm120_f32_n64_sliced"])
             } else {
                 std::collections::BTreeSet::new()
             };
@@ -928,7 +906,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         );
         let fixed_tf32_entries: std::collections::BTreeSet<_> = fixed_entries
             .iter()
-            .filter(|name| name.contains("_tf32_v1_"))
+            .filter(|name| name.contains("_tf32_"))
             .cloned()
             .collect();
         let expected_fixed_tf32 =
@@ -1024,14 +1002,14 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             })
             .expect("original Scalar cache payload");
         let mut scalar_payload = original_scalar_payload.clone();
-        let needle = b".entry gemm_bi_nn(";
-        let replacement = b".entry gemm_bi_nx(";
+        let needle = b".entry nn_big(";
+        let replacement = b".entry nn_bix(";
         let offsets: Vec<_> = scalar_payload
             .windows(needle.len())
             .enumerate()
             .filter_map(|(offset, value)| (value == needle).then_some(offset))
             .collect();
-        assert_eq!(offsets.len(), 1, "one Scalar gemm_bi_nn PTX entry");
+        assert_eq!(offsets.len(), 1, "one Scalar nn_big PTX entry");
         let offset = offsets[0];
         scalar_payload[offset..offset + needle.len()].copy_from_slice(replacement);
         std::fs::write(

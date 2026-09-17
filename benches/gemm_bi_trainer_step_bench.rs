@@ -82,14 +82,14 @@ fn bench_gemm_bi_vs_tf32() {
                 tr.ctx().set_bi_tensor_cores(tc);
                 if mode == GemmMode::Deterministic {
                     tr.ctx().set_f32_triad_policy(if tf32 {
-                        F32TriadPolicy::AllowDeterministicTf32V1
+                        F32TriadPolicy::AllowDeterministicTf32
                     } else {
-                        F32TriadPolicy::ExactScalarFmaV1
+                        F32TriadPolicy::ExactScalarFma
                     });
                     tr.ctx().set_half_triad_policy(if streamk {
-                        HalfTriadPolicy::AllowStreamKFixedOrderV1
+                        HalfTriadPolicy::AllowStreamKFixedOrder
                     } else {
-                        HalfTriadPolicy::TiledParityV1
+                        HalfTriadPolicy::TiledParity
                     });
                 }
                 for _ in 0..3 {

@@ -1,6 +1,6 @@
 //! Host-only regression gate for the SM120 TF32 issue-loop stack frame.
 
-const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
+const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
 
 fn issue_stage(source: &str) -> &str {
     let start = source

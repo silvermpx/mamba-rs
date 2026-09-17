@@ -29,7 +29,7 @@ __device__ __forceinline__ void transpose_f32_32x16_d768_body(
 }
 
 extern "C" __global__ __launch_bounds__(512, 2)
-void gemm_bi_transpose_f32_32x16_d768_v1(
+void transpose_f32_32x16_d768(
     float* __restrict__ destination,
     const float* __restrict__ source,
     int rows,

@@ -229,17 +229,17 @@ pub struct F32TriadOperands {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Tf32TensorMapFormat {
-    Tfloat32V1 = 1,
-    Uint32V1 = 2,
+    Tfloat32 = 1,
+    Uint32 = 2,
     /// Exact F32 words, no swizzle, dense boxes as the exact routes read them.
-    Uint32DenseV1 = 3,
+    Uint32Dense = 3,
     /// Exact F32 words behind the 64-byte swizzle of the NT B stage.
-    Uint32Swizzle64V1 = 4,
+    Uint32Swizzle64 = 4,
 }
 
 impl Tf32TensorMapFormat {
     const fn is_exact_fma(self) -> bool {
-        matches!(self, Self::Uint32DenseV1 | Self::Uint32Swizzle64V1)
+        matches!(self, Self::Uint32Dense | Self::Uint32Swizzle64)
     }
 }
 
@@ -278,7 +278,7 @@ impl Tf32TensorMapKey {
         if self.format.is_exact_fma() {
             let inner_bytes = self.box_dimensions[0] * 4;
             let swizzle_span = match self.format {
-                Tf32TensorMapFormat::Uint32Swizzle64V1 => 64,
+                Tf32TensorMapFormat::Uint32Swizzle64 => 64,
                 _ => 256 * 4,
             };
             if self.box_dimensions[0] == 0
@@ -319,27 +319,27 @@ impl Tf32TensorMap {
     fn encode(key: Tf32TensorMapKey) -> Result<Self, String> {
         key.validate()?;
         let data_type = match key.format {
-            Tf32TensorMapFormat::Tfloat32V1 => {
+            Tf32TensorMapFormat::Tfloat32 => {
                 sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_TFLOAT32
             }
-            Tf32TensorMapFormat::Uint32V1
-            | Tf32TensorMapFormat::Uint32DenseV1
-            | Tf32TensorMapFormat::Uint32Swizzle64V1 => {
+            Tf32TensorMapFormat::Uint32
+            | Tf32TensorMapFormat::Uint32Dense
+            | Tf32TensorMapFormat::Uint32Swizzle64 => {
                 sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32
             }
         };
         // The exact routes read dense stages and promote L2 lines, the TF32
         // routes keep their frozen 128-byte swizzle and promotion.
         let (swizzle, promotion) = match key.format {
-            Tf32TensorMapFormat::Uint32DenseV1 => (
+            Tf32TensorMapFormat::Uint32Dense => (
                 sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
                 sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
             ),
-            Tf32TensorMapFormat::Uint32Swizzle64V1 => (
+            Tf32TensorMapFormat::Uint32Swizzle64 => (
                 sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
                 sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
             ),
-            Tf32TensorMapFormat::Tfloat32V1 | Tf32TensorMapFormat::Uint32V1 => (
+            Tf32TensorMapFormat::Tfloat32 | Tf32TensorMapFormat::Uint32 => (
                 sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
                 sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
             ),
@@ -425,10 +425,10 @@ pub(super) struct F32ZeroReductionTensorMaps {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum F32PreparedTensorMaps {
-    EncodedV1 {
+    Encoded {
         data: Box<F32EncodedTensorMaps>,
     },
-    ZeroReductionV1 {
+    ZeroReduction {
         data: Box<F32ZeroReductionTensorMaps>,
     },
 }
@@ -440,7 +440,7 @@ impl F32PreparedTensorMaps {
         binding: Option<Tf32MapBinding>,
         format: Tf32TensorMapFormat,
     ) -> Self {
-        Self::ZeroReductionV1 {
+        Self::ZeroReduction {
             data: Box::new(F32ZeroReductionTensorMaps {
                 a: zeroed_tensor_map_sentinel(),
                 b: zeroed_tensor_map_sentinel(),
@@ -455,29 +455,29 @@ impl F32PreparedTensorMaps {
 
     pub fn maps(&self) -> [Tf32TensorMap; 2] {
         match self {
-            Self::EncodedV1 { data } => [data.a, data.b],
-            Self::ZeroReductionV1 { data } => [data.a, data.b],
+            Self::Encoded { data } => [data.a, data.b],
+            Self::ZeroReduction { data } => [data.a, data.b],
         }
     }
 
     pub fn origins(&self) -> Tf32TensorOrigins {
         match self {
-            Self::EncodedV1 { data } => data.origins,
-            Self::ZeroReductionV1 { .. } => Tf32TensorOrigins::default(),
+            Self::Encoded { data } => data.origins,
+            Self::ZeroReduction { .. } => Tf32TensorOrigins::default(),
         }
     }
 
     pub fn request(&self) -> F32TriadRequest {
         match self {
-            Self::EncodedV1 { data } => data.request,
-            Self::ZeroReductionV1 { data } => data.request,
+            Self::Encoded { data } => data.request,
+            Self::ZeroReduction { data } => data.request,
         }
     }
 
     pub fn binding(&self) -> Option<Tf32MapBinding> {
         match self {
-            Self::EncodedV1 { data } => Some(data.binding),
-            Self::ZeroReductionV1 { data } => data.binding,
+            Self::Encoded { data } => Some(data.binding),
+            Self::ZeroReduction { data } => data.binding,
         }
     }
 
@@ -508,7 +508,7 @@ impl F32PreparedTensorMaps {
     pub fn identity_digest(&self) -> Sha256Digest {
         let digest = self.identity_digest_header(b"tf32-tensor-map-pair.v1");
         match self {
-            Self::EncodedV1 { data } => append_tf32_encoded_map_identity(
+            Self::Encoded { data } => append_tf32_encoded_map_identity(
                 digest,
                 Tf32EncodedMapIdentity {
                     revision: TF32_TENSOR_MAP_REVISION,
@@ -521,7 +521,7 @@ impl F32PreparedTensorMaps {
                 },
             )
             .finish(),
-            Self::ZeroReductionV1 { data } => {
+            Self::ZeroReduction { data } => {
                 let digest = digest
                     .required(b"mode", ZERO_REDUCTION_DIGEST_DOMAIN)
                     .required(b"revision", &data.revision.to_le_bytes())
@@ -546,7 +546,7 @@ impl F32PreparedTensorMaps {
 
     pub(super) fn physical_identity_digest(&self) -> Sha256Digest {
         match self {
-            Self::EncodedV1 { data } => append_tf32_encoded_map_physical_identity(
+            Self::Encoded { data } => append_tf32_encoded_map_physical_identity(
                 self.identity_digest_header(b"tf32-tensor-map-pair-physical.v1"),
                 Tf32EncodedMapIdentity {
                     revision: TF32_TENSOR_MAP_REVISION,
@@ -559,7 +559,7 @@ impl F32PreparedTensorMaps {
                 },
             )
             .finish(),
-            Self::ZeroReductionV1 { .. } => self.identity_digest(),
+            Self::ZeroReduction { .. } => self.identity_digest(),
         }
     }
 
@@ -569,7 +569,7 @@ impl F32PreparedTensorMaps {
 
     pub fn validate_live_allocations(&self) -> Result<(), String> {
         match self {
-            Self::EncodedV1 { data } => {
+            Self::Encoded { data } => {
                 for (index, allocation) in data.allocations.into_iter().enumerate() {
                     let name = if index == 0 { "A" } else { "B" };
                     if allocation.requery("TF32", name)? != allocation {
@@ -581,7 +581,7 @@ impl F32PreparedTensorMaps {
                 }
                 Ok(())
             }
-            Self::ZeroReductionV1 { data } => {
+            Self::ZeroReduction { data } => {
                 if data.revision != ZERO_REDUCTION_MAP_REVISION
                     || data.request.shape.reduction(data.request.op) != 0
                     || !data.a.is_zero()
@@ -705,7 +705,7 @@ pub(super) fn append_tf32_route_digest(
     route: Tf32PhysicalRoute,
 ) -> FramedSha256 {
     match route {
-        Tf32PhysicalRoute::MmaTf32RnaV1(route) => {
+        Tf32PhysicalRoute::MmaTf32Rna(route) => {
             let tile = match route.tile {
                 Tf32PortableTile::M128N64 => 1,
                 Tf32PortableTile::M64N64 => 2,
@@ -719,7 +719,7 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
-        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(route) => {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4(route) => {
             let tile = match route.tile {
                 Tf32PortableTile::M128N64 => 1,
                 Tf32PortableTile::M64N64 => 2,
@@ -734,7 +734,7 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"stages", &[route.stages.count()])
                 .required(b"partitions", &[4])
         }
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(route) => {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(route) => {
             let tile = match route.tile {
                 Tf32PortableTile::M128N64 => 1,
                 Tf32PortableTile::M64N64 => 2,
@@ -749,7 +749,7 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"stages", &[route.stages.count()])
                 .required(b"partitions", &[2])
         }
-        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route) => {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8(route) => {
             let tile = match route.tile {
                 Tf32PortableTile::M128N64 => 1,
                 Tf32PortableTile::M64N64 => 2,
@@ -764,15 +764,15 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"stages", &[route.stages.count()])
                 .required(b"partitions", &[8])
         }
-        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(route) => digest
+        Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(route) => digest
             .required(b"route-family", &[2])
             .required(b"schedule-threads", &route.schedule.threads().to_le_bytes()),
-        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(route) => digest
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(route) => digest
             .required(b"route-family", &[3])
             .required(b"tile-columns", &route.tile.output_columns().to_le_bytes())
             .required(b"stages", &[route.stages.count()])
             .required(b"schedule-threads", &route.schedule.threads().to_le_bytes()),
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(route) => {
+        Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(route) => {
             let tile = match route.tile {
                 Tf32Sm120Tile::M128N64 => 1,
                 Tf32Sm120Tile::M64N128 => 2,
@@ -796,18 +796,18 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
-        Tf32PhysicalRoute::Sm120TmaFmaExactV1(route) => digest
+        Tf32PhysicalRoute::Sm120TmaFmaExact(route) => digest
             .required(b"route-family", &[9])
             .required(b"tile", &[route.tile.digest_code()])
             .required(b"kvec", &[u8::from(route.kvec)])
             .required(b"splits", &[route.splits]),
-        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => digest.required(b"route-family", &[10]),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96V1 => digest.required(b"route-family", &[11]),
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1 => digest.required(b"route-family", &[12]),
-        Tf32PhysicalRoute::Sm89NnDirectN96V1 => digest.required(b"route-family", &[13]),
-        Tf32PhysicalRoute::Sm89NnN96V1 => digest.required(b"route-family", &[14]),
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1 => digest.required(b"route-family", &[15]),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => digest.required(b"route-family", &[16]),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8 => digest.required(b"route-family", &[10]),
+        Tf32PhysicalRoute::Sm89TnPreRnaN96 => digest.required(b"route-family", &[11]),
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N64 => digest.required(b"route-family", &[12]),
+        Tf32PhysicalRoute::Sm89NnDirectN96 => digest.required(b"route-family", &[13]),
+        Tf32PhysicalRoute::Sm89NnN96 => digest.required(b"route-family", &[14]),
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => digest.required(b"route-family", &[15]),
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96 => digest.required(b"route-family", &[16]),
     }
 }
 
@@ -864,7 +864,7 @@ fn tf32_operand_layouts(
     if request.shape.reduction(request.op) == 0 {
         return Err("zero-reduction TF32 routes use the mapless sentinel".into());
     }
-    if matches!(route, Tf32PhysicalRoute::MmaTf32RnaV1(_)) {
+    if matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_)) {
         return Err("portable TF32 does not use tensor maps".into());
     }
     if route.is_exact_fma() {
@@ -1224,23 +1224,23 @@ pub(super) fn tf32_tensor_map_plan(
     allocation_domain: AllocationDomain,
 ) -> Result<Tf32TensorMapPlan, String> {
     let format = match route {
-        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
-            Tf32TensorMapFormat::Tfloat32V1
+        Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_) => {
+            Tf32TensorMapFormat::Tfloat32
         }
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1,
-        Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => Tf32TensorMapFormat::Uint32DenseV1,
-        Tf32PhysicalRoute::MmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
-        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
-        | Tf32PhysicalRoute::Sm89NnDirectN96V1
-        | Tf32PhysicalRoute::Sm89NnN96V1
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96V1 => {
+        Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32,
+        Tf32PhysicalRoute::Sm120TmaFmaExact(_) => Tf32TensorMapFormat::Uint32Dense,
+        Tf32PhysicalRoute::MmaTf32Rna(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::Sm89MmaTf32Compact8
+        | Tf32PhysicalRoute::Sm89TnPreRnaN96
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+        | Tf32PhysicalRoute::Sm89NnDirectN96
+        | Tf32PhysicalRoute::Sm89NnN96
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => {
             return Err("portable TF32 does not use tensor maps".into());
         }
     };
@@ -1249,7 +1249,7 @@ pub(super) fn tf32_tensor_map_plan(
         // The exact kernels take no subview origin: the map base is the
         // operand pointer itself and every coordinate starts at zero.
         let b_format = if request.op == ResolvedGemmOp::Nt {
-            Tf32TensorMapFormat::Uint32Swizzle64V1
+            Tf32TensorMapFormat::Uint32Swizzle64
         } else {
             format
         };
@@ -1288,7 +1288,7 @@ pub(super) fn encode_tf32_tensor_maps(
     route: Tf32PhysicalRoute,
     binding: Tf32MapBinding,
 ) -> Result<F32PreparedTensorMaps, String> {
-    Ok(F32PreparedTensorMaps::EncodedV1 {
+    Ok(F32PreparedTensorMaps::Encoded {
         data: Box::new(F32EncodedTensorMaps {
             a: Tf32TensorMap::encode(plan.keys[0])?,
             b: Tf32TensorMap::encode(plan.keys[1])?,
@@ -1748,66 +1748,66 @@ impl Sm120FmaRoute {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tf32PhysicalRoute {
-    MmaTf32RnaV1(Tf32PortableRoute),
-    MmaTf32RnaSplitK2V1(Tf32PortableRoute),
-    MmaTf32RnaSplitK4V1(Tf32PortableRoute),
-    MmaTf32RnaSplitK8V1(Tf32PortableRoute),
-    Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute),
-    Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route),
-    Sm120TmaMmaTf32RnaV1(Tf32Sm120Route),
+    MmaTf32Rna(Tf32PortableRoute),
+    MmaTf32RnaSplitK2(Tf32PortableRoute),
+    MmaTf32RnaSplitK4(Tf32PortableRoute),
+    MmaTf32RnaSplitK8(Tf32PortableRoute),
+    Sm90aWgmmaTf32Tma(Tf32Sm90aRoute),
+    Sm100Tcgen05Tf32Tma(Tf32Sm100Route),
+    Sm120TmaMmaTf32Rna(Tf32Sm120Route),
     Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route),
     /// Exact F32 through the scalar FMA chain, fed by TMA; lives in the
     /// SM120 module next to the TF32 routes but never rounds an operand.
-    Sm120TmaFmaExactV1(Sm120FmaRoute),
+    Sm120TmaFmaExact(Sm120FmaRoute),
     /// The isolated Ada NT finalist. It retains the portable RNA/MMA
     /// numerical contract, but owns a distinct exact-SM89 module and epoch.
-    Sm89MmaTf32Compact8V1,
+    Sm89MmaTf32Compact8,
     /// Ada TN after an explicit, separately observed RNA+transpose of A.
-    Sm89TnPreRnaN96V1,
+    Sm89TnPreRnaN96,
     /// Ada TN Prism after an explicit, separately observed RNA+transpose of A.
-    Sm89TnPreRnaM64N64V1,
+    Sm89TnPreRnaM64N64,
     /// Ada TN Prism M64xN96/BK32/S2 after an explicit RNA+transpose of A.
-    Sm89TnPreRnaM64N96S2V1,
+    Sm89TnPreRnaM64N96S2,
     /// Ada NN Prism with retained add-half conversion and direct full-tile stores.
-    Sm89NnDirectN96V1,
+    Sm89NnDirectN96,
     /// Ada NN d768-out with retained add-half conversion and shared epilogue.
-    Sm89NnN96V1,
+    Sm89NnN96,
     /// Ada NT d768-in direct A-ldmatrix N96 winner.
-    Sm89NtALdmatrixN96V1,
+    Sm89NtALdmatrixN96,
 }
 
 impl Tf32PhysicalRoute {
     pub const fn module_kind(self) -> ModuleKind {
         match self {
-            Self::MmaTf32RnaV1(_)
-            | Self::MmaTf32RnaSplitK2V1(_)
-            | Self::MmaTf32RnaSplitK4V1(_)
-            | Self::MmaTf32RnaSplitK8V1(_) => ModuleKind::TriadSm80,
-            Self::Sm90aWgmmaTf32TmaV1(_) => ModuleKind::TriadSm90a,
-            Self::Sm100Tcgen05Tf32TmaV1(_) => ModuleKind::TriadSm100,
-            Self::Sm120TmaMmaTf32RnaV1(_)
+            Self::MmaTf32Rna(_)
+            | Self::MmaTf32RnaSplitK2(_)
+            | Self::MmaTf32RnaSplitK4(_)
+            | Self::MmaTf32RnaSplitK8(_) => ModuleKind::TriadSm80,
+            Self::Sm90aWgmmaTf32Tma(_) => ModuleKind::TriadSm90a,
+            Self::Sm100Tcgen05Tf32Tma(_) => ModuleKind::TriadSm100,
+            Self::Sm120TmaMmaTf32Rna(_)
             | Self::Sm120TmaMmaTf32RnaStreamKV1(_)
-            | Self::Sm120TmaFmaExactV1(_) => ModuleKind::TriadSm120,
-            Self::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
-            Self::Sm89TnPreRnaN96V1
-            | Self::Sm89TnPreRnaM64N64V1
-            | Self::Sm89TnPreRnaM64N96S2V1
-            | Self::Sm89NnDirectN96V1
-            | Self::Sm89NnN96V1 => ModuleKind::TriadSm89Tf32Joint,
-            Self::Sm89NtALdmatrixN96V1 => ModuleKind::TriadSm89Tf32Joint,
+            | Self::Sm120TmaFmaExact(_) => ModuleKind::TriadSm120,
+            Self::Sm89MmaTf32Compact8 => ModuleKind::TriadSm89Finalist,
+            Self::Sm89TnPreRnaN96
+            | Self::Sm89TnPreRnaM64N64
+            | Self::Sm89TnPreRnaM64N96S2
+            | Self::Sm89NnDirectN96
+            | Self::Sm89NnN96 => ModuleKind::TriadSm89Tf32Joint,
+            Self::Sm89NtALdmatrixN96 => ModuleKind::TriadSm89Tf32Joint,
         }
     }
 
     /// True for the exact-F32 FMA routes, which the TF32 policy never
     /// selects and the exact policy owns.
     pub const fn is_exact_fma(self) -> bool {
-        matches!(self, Self::Sm120TmaFmaExactV1(_))
+        matches!(self, Self::Sm120TmaFmaExact(_))
     }
 
     /// The exact-F32 route payload, if this is one.
     pub const fn exact_fma(self) -> Option<Sm120FmaRoute> {
         match self {
-            Self::Sm120TmaFmaExactV1(route) => Some(route),
+            Self::Sm120TmaFmaExact(route) => Some(route),
             _ => None,
         }
     }
@@ -1816,7 +1816,7 @@ impl Tf32PhysicalRoute {
     /// its split count normalized to one.
     pub const fn spec_key(self) -> Self {
         match self {
-            Self::Sm120TmaFmaExactV1(route) => Self::Sm120TmaFmaExactV1(route.spec_key()),
+            Self::Sm120TmaFmaExact(route) => Self::Sm120TmaFmaExact(route.spec_key()),
             other => other,
         }
     }
@@ -1824,7 +1824,7 @@ impl Tf32PhysicalRoute {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum F32TriadSelection {
-    ScalarFmaV1,
+    ScalarFma,
     Tf32(Tf32PhysicalRoute),
     /// The exact policy's own SM120 route: scalar FMA numerics behind TMA,
     /// never a TF32 selection.
@@ -1838,7 +1838,7 @@ impl Sm120FmaExclusions {
     pub(crate) fn from_routes(routes: &[(ResolvedGemmOp, Sm120FmaRoute)]) -> Result<Self, String> {
         let mut bits = 0_u16;
         for &(op, route) in routes {
-            let key = Tf32PhysicalRoute::Sm120TmaFmaExactV1(route.spec_key());
+            let key = Tf32PhysicalRoute::Sm120TmaFmaExact(route.spec_key());
             let index = SM120_FMA_ROUTE_SPECS
                 .iter()
                 .position(|spec| spec.op == op && spec.route == key)
@@ -1849,7 +1849,7 @@ impl Sm120FmaExclusions {
     }
 
     pub(crate) fn is_excluded(self, op: ResolvedGemmOp, route: Sm120FmaRoute) -> bool {
-        let key = Tf32PhysicalRoute::Sm120TmaFmaExactV1(route.spec_key());
+        let key = Tf32PhysicalRoute::Sm120TmaFmaExact(route.spec_key());
         SM120_FMA_ROUTE_SPECS
             .iter()
             .position(|spec| spec.op == op && spec.route == key)
@@ -1929,11 +1929,11 @@ pub struct Tf32SplitKSpec {
 
 pub const TF32_SPLITK2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK2(Tf32PortableRoute {
         tile: Tf32PortableTile::M16N32,
         stages: Tf32PortableStages::S4,
     }),
-    symbol: "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+    symbol: "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
     tile: (16, 32),
     bk: 32,
     stages: 4,
@@ -1946,11 +1946,11 @@ pub const TF32_SPLITK2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 
 pub const TF32_SPLITK4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
         tile: Tf32PortableTile::M16N32,
         stages: Tf32PortableStages::S4,
     }),
-    symbol: "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+    symbol: "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
     tile: (16, 32),
     bk: 32,
     stages: 4,
@@ -1963,11 +1963,11 @@ pub const TF32_SPLITK4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 
 pub const TF32_NT_SPLITK4_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nt,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
         tile: Tf32PortableTile::M16N32,
         stages: Tf32PortableStages::S3,
     }),
-    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
+    symbol: "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
     tile: (16, 32),
     bk: 32,
     stages: 3,
@@ -1980,11 +1980,11 @@ pub const TF32_NT_SPLITK4_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 
 pub const TF32_NT_SPLITK4_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nt,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
         tile: Tf32PortableTile::M16N32,
         stages: Tf32PortableStages::S4,
     }),
-    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+    symbol: "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
     tile: (16, 32),
     bk: 32,
     stages: 4,
@@ -1997,11 +1997,11 @@ pub const TF32_NT_SPLITK4_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 
 pub const TF32_NT_SPLITK8_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nt,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M32N32,
         stages: Tf32PortableStages::S3,
     }),
-    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    symbol: "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
     tile: (32, 32),
     bk: 32,
     stages: 3,
@@ -2014,11 +2014,11 @@ pub const TF32_NT_SPLITK8_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 
 pub const TF32_NT_SPLITK8_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Nt,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M32N32,
         stages: Tf32PortableStages::S4,
     }),
-    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    symbol: "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
     tile: (32, 32),
     bk: 32,
     stages: 4,
@@ -2040,11 +2040,11 @@ pub const TF32_SPLITK_CANDIDATE_SPECS: [Tf32SplitKSpec; 6] = [
 
 pub const TF32_TN_SPLITK8_M64_S2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Tn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M64N64,
         stages: Tf32PortableStages::S2,
     }),
-    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+    symbol: "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s2",
     tile: (64, 64),
     bk: 32,
     stages: 2,
@@ -2056,11 +2056,11 @@ pub const TF32_TN_SPLITK8_M64_S2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 };
 pub const TF32_TN_SPLITK8_M64_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Tn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M64N64,
         stages: Tf32PortableStages::S3,
     }),
-    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+    symbol: "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3",
     tile: (64, 64),
     bk: 32,
     stages: 3,
@@ -2072,11 +2072,11 @@ pub const TF32_TN_SPLITK8_M64_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 };
 pub const TF32_TN_SPLITK8_M32_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Tn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M32N32,
         stages: Tf32PortableStages::S3,
     }),
-    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
     tile: (32, 32),
     bk: 32,
     stages: 3,
@@ -2088,11 +2088,11 @@ pub const TF32_TN_SPLITK8_M32_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
 };
 pub const TF32_TN_SPLITK8_M32_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
     op: ResolvedGemmOp::Tn,
-    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
         tile: Tf32PortableTile::M32N32,
         stages: Tf32PortableStages::S4,
     }),
-    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
     tile: (32, 32),
     bk: 32,
     stages: 4,
@@ -2207,15 +2207,15 @@ macro_rules! portable_tf32_specs {
         [
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N64,
                     stages: Tf32PortableStages::S2,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s2"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m128n64_bk32_s2"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (128, 64),
                 bk: 32,
                 map_bk: 32,
@@ -2231,15 +2231,15 @@ macro_rules! portable_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N64,
                     stages: Tf32PortableStages::S3,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s3"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m128n64_bk32_s3"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (128, 64),
                 bk: 32,
                 map_bk: 32,
@@ -2255,15 +2255,15 @@ macro_rules! portable_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M64N64,
                     stages: Tf32PortableStages::S2,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s2"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m64n64_bk32_s2"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (64, 64),
                 bk: 32,
                 map_bk: 32,
@@ -2279,15 +2279,15 @@ macro_rules! portable_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M64N64,
                     stages: Tf32PortableStages::S3,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s3"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m64n64_bk32_s3"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (64, 64),
                 bk: 32,
                 map_bk: 32,
@@ -2303,15 +2303,15 @@ macro_rules! portable_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n32_bk32_s4"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m16n32_bk32_s4"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (16, 32),
                 bk: 32,
                 map_bk: 32,
@@ -2327,15 +2327,15 @@ macro_rules! portable_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N16,
                     stages: Tf32PortableStages::S4,
                 }),
-                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n16_bk32_s4"),
+                symbol: concat!($op_name, "_sm80_mma_tf32_m16n16_bk32_s4"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
                 tile: (16, 16),
                 bk: 32,
                 map_bk: 32,
@@ -2358,14 +2358,10 @@ macro_rules! sm90a_tf32_specs {
         [
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                route: Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(Tf32Sm90aRoute {
                     schedule: Sm90aWarpgroupSchedule::Wg1,
                 }),
-                symbol: concat!(
-                    "gemm_bi_",
-                    $op_name,
-                    "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1"
-                ),
+                symbol: concat!($op_name, "_sm90a_wgmma_tf32_m64n128_bk32_s3_wg1"),
                 module_kind: ModuleKind::TriadSm90a,
                 instruction_family: ResolvedInstructionFamily::Wgmma,
                 instruction_shape: ResolvedInstructionShape {
@@ -2373,7 +2369,7 @@ macro_rules! sm90a_tf32_specs {
                     n: 128,
                     k: 8,
                 },
-                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32,
                 tile: (64, 128),
                 bk: 32,
                 map_bk: 32,
@@ -2385,14 +2381,10 @@ macro_rules! sm90a_tf32_specs {
             },
             Tf32KernelSpec {
                 op: $op,
-                route: Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                route: Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(Tf32Sm90aRoute {
                     schedule: Sm90aWarpgroupSchedule::Wg2,
                 }),
-                symbol: concat!(
-                    "gemm_bi_",
-                    $op_name,
-                    "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2"
-                ),
+                symbol: concat!($op_name, "_sm90a_wgmma_tf32_m64n128_bk32_s3_wg2"),
                 module_kind: ModuleKind::TriadSm90a,
                 instruction_family: ResolvedInstructionFamily::Wgmma,
                 instruction_shape: ResolvedInstructionShape {
@@ -2400,7 +2392,7 @@ macro_rules! sm90a_tf32_specs {
                     n: 128,
                     k: 8,
                 },
-                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32,
                 tile: (64, 128),
                 bk: 32,
                 map_bk: 32,
@@ -2418,15 +2410,14 @@ macro_rules! sm100_tf32_spec {
     ($op:expr, $op_name:literal, $tile:expr, $n:literal, $stage:expr, $s:literal, $schedule:expr, $schedule_name:literal, $threads:literal, $shared:literal) => {
         Tf32KernelSpec {
             op: $op,
-            route: Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+            route: Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(Tf32Sm100Route {
                 tile: $tile,
                 stages: $stage,
                 schedule: $schedule,
             }),
             symbol: concat!(
-                "gemm_bi_",
                 $op_name,
-                "_sm100_tcgen_tf32_v1_m128n",
+                "_sm100_tcgen_tf32_m128n",
                 $n,
                 "_bk32_s",
                 $s,
@@ -2440,7 +2431,7 @@ macro_rules! sm100_tf32_spec {
                 n: $n,
                 k: 8,
             },
-            operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+            operand_conversion: ResolvedOperandConversion::TensorMapTfloat32,
             tile: (128, $n),
             bk: 32,
             map_bk: 32,
@@ -2608,22 +2599,15 @@ macro_rules! sm120_tf32_spec {
     ($op:expr, $op_name:literal, $tile:expr, $tile_name:literal, $stage:expr, $s:literal, $shared:literal) => {
         Tf32KernelSpec {
             op: $op,
-            route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+            route: Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
                 tile: $tile,
                 stages: $stage,
             }),
-            symbol: concat!(
-                "gemm_bi_",
-                $op_name,
-                "_sm120_tma_mma_tf32_v1_",
-                $tile_name,
-                "_bk32_s",
-                $s
-            ),
+            symbol: concat!($op_name, "_sm120_tma_mma_tf32_", $tile_name, "_bk32_s", $s),
             module_kind: ModuleKind::TriadSm120,
             instruction_family: ResolvedInstructionFamily::MmaSync,
             instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-            operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+            operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32,
             tile: match $tile {
                 Tf32Sm120Tile::M128N64 => (128, 64),
                 Tf32Sm120Tile::M64N128 => (64, 128),
@@ -2703,12 +2687,12 @@ const SM80_TF32_NT: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::N
 
 pub const SM89_FINALIST_TF32_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
     op: ResolvedGemmOp::Nt,
-    route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+    route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
     symbol: super::sm89_finalist_source::SM89_FINALIST_SYMBOL,
     module_kind: ModuleKind::TriadSm89Finalist,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+    operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
     tile: (128, 64),
     bk: 32,
     map_bk: 32,
@@ -2725,12 +2709,12 @@ pub const SM89_TF32_JOINT_TUNING_REVISION: u16 = 3;
 pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     Tf32KernelSpec {
         op: ResolvedGemmOp::Nn,
-        route: Tf32PhysicalRoute::Sm89NnDirectN96V1,
+        route: Tf32PhysicalRoute::Sm89NnDirectN96,
         symbol: super::sm89_tf32_joint_source::NN_ADD_HALF_DIRECT_N96_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
         instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32,
         tile: (128, 96),
         bk: 32,
         map_bk: 32,
@@ -2742,12 +2726,12 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     },
     Tf32KernelSpec {
         op: ResolvedGemmOp::Nn,
-        route: Tf32PhysicalRoute::Sm89NnN96V1,
+        route: Tf32PhysicalRoute::Sm89NnN96,
         symbol: super::sm89_tf32_joint_source::NN_ADD_HALF_N96_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
         instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32,
         tile: (128, 96),
         bk: 32,
         map_bk: 32,
@@ -2759,7 +2743,7 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     },
     Tf32KernelSpec {
         op: ResolvedGemmOp::Tn,
-        route: Tf32PhysicalRoute::Sm89TnPreRnaN96V1,
+        route: Tf32PhysicalRoute::Sm89TnPreRnaN96,
         symbol: super::sm89_tf32_joint_source::TN_PRE_RNA_N96_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
@@ -2776,12 +2760,12 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     },
     Tf32KernelSpec {
         op: ResolvedGemmOp::Nt,
-        route: Tf32PhysicalRoute::Sm89NtALdmatrixN96V1,
+        route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
         symbol: super::sm89_tf32_joint_source::NT_A_LDMATRIX_N96_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
         instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+        operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32,
         tile: (128, 96),
         bk: 32,
         map_bk: 32,
@@ -2793,7 +2777,7 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     },
     Tf32KernelSpec {
         op: ResolvedGemmOp::Tn,
-        route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1,
+        route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
         symbol: super::sm89_tf32_joint_source::TN_PRE_RNA_M64N64_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
@@ -2810,7 +2794,7 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
     },
     Tf32KernelSpec {
         op: ResolvedGemmOp::Tn,
-        route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1,
+        route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
         symbol: super::sm89_tf32_joint_source::TN_PRE_RNA_M64N96_S2_SYMBOL,
         module_kind: ModuleKind::TriadSm89Tf32Joint,
         instruction_family: ResolvedInstructionFamily::MmaSync,
@@ -2831,15 +2815,15 @@ pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
 /// [`SM80_TF32_ROUTE_SPECS`] and join it through `tf32_route_specs_for`.
 pub const SM80_TF32_WIDE_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
     op: ResolvedGemmOp::Nn,
-    route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+    route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
         tile: Tf32PortableTile::M128N128,
         stages: Tf32PortableStages::S3,
     }),
-    symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+    symbol: "nn_sm80_mma_tf32_m128n128_bk32_s3",
     module_kind: ModuleKind::TriadSm80,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+    operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32,
     tile: (128, 128),
     bk: 32,
     map_bk: 32,
@@ -2980,15 +2964,15 @@ const SM120_TF32_TN: [Tf32KernelSpec; 5] = sm120_tf32_specs!(ResolvedGemmOp::Tn,
 const SM120_TF32_NT: [Tf32KernelSpec; 5] = sm120_tf32_specs!(ResolvedGemmOp::Nt, "nt");
 const SM120_TF32_TN_M64N128_S4_PAIR: Tf32KernelSpec = Tf32KernelSpec {
     op: ResolvedGemmOp::Tn,
-    route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+    route: Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
         tile: Tf32Sm120Tile::M64N128,
         stages: Tf32Sm120Stages::S4,
     }),
-    symbol: "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair",
+    symbol: "tn_sm120_tma_mma_tf32_m64n128_bk32_s4_pair",
     module_kind: ModuleKind::TriadSm120,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32,
     tile: (64, 128),
     bk: 32,
     map_bk: 32,
@@ -3001,15 +2985,15 @@ const SM120_TF32_TN_M64N128_S4_PAIR: Tf32KernelSpec = Tf32KernelSpec {
 
 const SM120_TF32_NN_M80N32_BK64_S2: Tf32KernelSpec = Tf32KernelSpec {
     op: ResolvedGemmOp::Nn,
-    route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+    route: Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
         tile: Tf32Sm120Tile::M80N32Bk64,
         stages: Tf32Sm120Stages::S2,
     }),
-    symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2",
+    symbol: "nn_sm120_tma_mma_tf32_m80n32_bk64_s2",
     module_kind: ModuleKind::TriadSm120,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32,
     tile: (80, 32),
     bk: 64,
     map_bk: 32,
@@ -3032,11 +3016,11 @@ const SM120_TF32_TN_M64N128_S3_PAIR_STREAMK: Tf32KernelSpec = Tf32KernelSpec {
         tile: Tf32Sm120Tile::M64N128,
         stages: Tf32Sm120Stages::S3,
     }),
-    symbol: "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    symbol: "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     module_kind: ModuleKind::TriadSm120,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32,
     tile: (64, 128),
     bk: 32,
     map_bk: 32,
@@ -3055,7 +3039,7 @@ const fn sm120_fma_spec(
 ) -> Tf32KernelSpec {
     Tf32KernelSpec {
         op,
-        route: Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+        route: Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
             tile,
             kvec,
             splits: 1,
@@ -3083,73 +3067,73 @@ pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 12] = [
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M128N64,
         false,
-        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        "nn_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M64N128,
         false,
-        "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        "nn_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M64N64,
         false,
-        "gemm_bi_nn_sm120_tma_fma_v1_m64n64_bk16_s2",
+        "nn_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M128N64,
         false,
-        "gemm_bi_tn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        "tn_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M64N128,
         false,
-        "gemm_bi_tn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        "tn_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M64N64,
         false,
-        "gemm_bi_tn_sm120_tma_fma_v1_m64n64_bk16_s2",
+        "tn_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M128N64,
         false,
-        "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2",
+        "nt_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N128,
         false,
-        "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2",
+        "nt_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N64,
         false,
-        "gemm_bi_nt_sm120_tma_fma_v1_m64n64_bk16_s2",
+        "nt_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M128N64,
         true,
-        "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2_kvec",
+        "nt_sm120_tma_fma_m128n64_bk16_s2_kvec",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N128,
         true,
-        "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2_kvec",
+        "nt_sm120_tma_fma_m64n128_bk16_s2_kvec",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N64,
         true,
-        "gemm_bi_nt_sm120_tma_fma_v1_m64n64_bk16_s2_kvec",
+        "nt_sm120_tma_fma_m64n64_bk16_s2_kvec",
     ),
 ];
 
@@ -3212,10 +3196,10 @@ pub fn tf32_kernel_spec(
     route: Tf32PhysicalRoute,
 ) -> Result<&'static Tf32KernelSpec, String> {
     match route {
-        Tf32PhysicalRoute::MmaTf32RnaV1(portable) => portable.validate()?,
-        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
+        Tf32PhysicalRoute::MmaTf32Rna(portable) => portable.validate()?,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
             return Err(format!(
                 "TF32 split-K route {op:?}/{route:?} has a fused-kernel specification"
             ));
@@ -3368,7 +3352,7 @@ pub struct Sm90aForcedRoute {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm90aNumericContract {
-    WgmmaV1,
+    Wgmma,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3408,40 +3392,40 @@ impl Sm90aForcedRoute {
     pub fn symbol(self) -> &'static str {
         match (self.op, self.dtype, self.schedule) {
             (Sm90aOp::Nn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_nn_sm90a_wgmma_wg1_bf16"
+                "nn_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Nn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_nn_sm90a_wgmma_wg1_f16"
+                "nn_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Tn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_tn_sm90a_wgmma_wg1_bf16"
+                "tn_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Tn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_tn_sm90a_wgmma_wg1_f16"
+                "tn_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Nt, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_nt_sm90a_wgmma_wg1_bf16"
+                "nt_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Nt, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "gemm_bi_nt_sm90a_wgmma_wg1_f16"
+                "nt_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Nn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_nn_sm90a_wgmma_wg2_bf16"
+                "nn_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Nn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_nn_sm90a_wgmma_wg2_f16"
+                "nn_sm90a_wgmma_wg2_f16"
             }
             (Sm90aOp::Tn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_tn_sm90a_wgmma_wg2_bf16"
+                "tn_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Tn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_tn_sm90a_wgmma_wg2_f16"
+                "tn_sm90a_wgmma_wg2_f16"
             }
             (Sm90aOp::Nt, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_nt_sm90a_wgmma_wg2_bf16"
+                "nt_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Nt, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "gemm_bi_nt_sm90a_wgmma_wg2_f16"
+                "nt_sm90a_wgmma_wg2_f16"
             }
             (_, WeightDtype::F32, _) => unreachable!("f32 has no SM90a WGMMA route"),
         }
@@ -3652,7 +3636,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3660,7 +3644,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3668,7 +3652,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3676,7 +3660,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3684,7 +3668,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3692,7 +3676,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3700,7 +3684,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3708,7 +3692,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3716,7 +3700,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3724,7 +3708,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3732,7 +3716,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3740,7 +3724,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "nn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3748,7 +3732,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3756,7 +3740,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3764,7 +3748,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3772,7 +3756,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3780,7 +3764,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3788,7 +3772,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3796,7 +3780,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3804,7 +3788,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3812,7 +3796,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3820,7 +3804,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3828,7 +3812,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -3836,7 +3820,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "nn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3844,7 +3828,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3852,7 +3836,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3860,7 +3844,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3868,7 +3852,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3876,7 +3860,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3884,7 +3868,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3892,7 +3876,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3900,7 +3884,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3908,7 +3892,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3916,7 +3900,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3924,7 +3908,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3932,7 +3916,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "tn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3940,7 +3924,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3948,7 +3932,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3956,7 +3940,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3964,7 +3948,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3972,7 +3956,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3980,7 +3964,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3988,7 +3972,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -3996,7 +3980,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -4004,7 +3988,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -4012,7 +3996,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -4020,7 +4004,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -4028,7 +4012,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "tn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4036,7 +4020,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4044,7 +4028,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4052,7 +4036,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4060,7 +4044,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4068,7 +4052,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4076,7 +4060,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4084,7 +4068,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4092,7 +4076,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4100,7 +4084,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4108,7 +4092,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4116,7 +4100,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4124,7 +4108,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "nt_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4132,7 +4116,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4140,7 +4124,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4148,7 +4132,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4156,7 +4140,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4164,7 +4148,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4172,7 +4156,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4180,7 +4164,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4188,7 +4172,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4196,7 +4180,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4204,7 +4188,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4212,7 +4196,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -4220,7 +4204,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "nt_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
 ];
 
@@ -4237,7 +4221,7 @@ impl Sm100ForcedRoute {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm100NumericContract {
-    Tcgen05F32V1,
+    Tcgen05F32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5980,21 +5964,21 @@ macro_rules! sm120_specs {
     ($(($op:expr, $op_name:literal, $tile:expr, $tile_name:literal)),+ $(,)?) => {
         [$(
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_bf16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk32_s2_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_f16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk32_s2_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_bf16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk32_s3_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_f16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk32_s3_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_bf16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk64_s2_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_f16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk64_s2_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_bf16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk64_s3_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
-                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_f16")),
+                concat!($op_name, "_sm120_tma_", $tile_name, "_bk64_s3_f16")),
         )+]
     };
 }
@@ -6025,7 +6009,7 @@ pub const SM120_STREAMK_KERNEL_SPECS: [Sm120KernelSpec; 2] = [
         Sm120Bk::Bk64,
         Sm120Stages::S3,
         Sm120Schedule::StreamK,
-        "gemm_bi_tn_sm120_tma_64x64_bk64_s3_streamk_bf16"
+        "tn_sm120_tma_64x64_bk64_s3_streamk_bf16"
     ),
     sm120_spec!(
         Sm120Op::Tn,
@@ -6034,7 +6018,7 @@ pub const SM120_STREAMK_KERNEL_SPECS: [Sm120KernelSpec; 2] = [
         Sm120Bk::Bk64,
         Sm120Stages::S3,
         Sm120Schedule::StreamK,
-        "gemm_bi_tn_sm120_tma_64x64_bk64_s3_streamk_f16"
+        "tn_sm120_tma_64x64_bk64_s3_streamk_f16"
     ),
 ];
 
@@ -6060,7 +6044,7 @@ impl Sm120ForcedRoute {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120NumericContract {
     /// BF16/F16 operands, `mma.sync` FP32 accumulation, deterministic route order.
-    TmaMma16F32V1,
+    TmaMma16F32,
     /// The same operands and accumulation over the stream-K schedule: the
     /// reduction is split across a persistent grid and the partial slabs
     /// fold in a fixed order, so the bits are stable for a shape on a
@@ -6072,7 +6056,7 @@ impl Sm120NumericContract {
     /// The contract a physical route's schedule carries.
     pub const fn for_schedule(schedule: Sm120Schedule) -> Self {
         match schedule {
-            Sm120Schedule::Tiled => Self::TmaMma16F32V1,
+            Sm120Schedule::Tiled => Self::TmaMma16F32,
             Sm120Schedule::StreamK => Self::TmaMma16F32StreamKV1,
         }
     }
@@ -6193,18 +6177,18 @@ impl Sm120RouteIdentity {
         Ok(ResolvedGemmRoute {
             op,
             dtype,
-            backend: PhysicalGemmBackend::Sm120TmaMma16V1,
+            backend: PhysicalGemmBackend::Sm120TmaMma16,
             numeric_contract: match self.physical.schedule {
-                Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
-                Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+                Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32,
+                Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrder,
             },
             instruction_family: ResolvedInstructionFamily::MmaSync,
             instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             operand_conversion: ResolvedOperandConversion::None,
             ownership: match self.physical.schedule {
-                Sm120Schedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                Sm120Schedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTile,
                 Sm120Schedule::StreamK => {
-                    ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+                    ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder
                 }
             },
             symbol: self.symbol,
@@ -7044,8 +7028,8 @@ impl Sm100RouteIdentity {
         Ok(ResolvedGemmRoute {
             op,
             dtype,
-            backend: PhysicalGemmBackend::Sm100Tcgen05V1,
-            numeric_contract: ResolvedNumericContract::Tcgen05F32V1,
+            backend: PhysicalGemmBackend::Sm100Tcgen05,
+            numeric_contract: ResolvedNumericContract::Tcgen05F32,
             instruction_family: ResolvedInstructionFamily::Tcgen05,
             instruction_shape: ResolvedInstructionShape {
                 m: 128,
@@ -7054,7 +7038,7 @@ impl Sm100RouteIdentity {
                 k: 16,
             },
             operand_conversion: ResolvedOperandConversion::None,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
             symbol: self.symbol,
             module_kind: self.module_kind,
             target: self.compiler.target,
@@ -7141,8 +7125,8 @@ impl Sm90aRouteIdentity {
         Ok(ResolvedGemmRoute {
             op,
             dtype,
-            backend: PhysicalGemmBackend::Sm90aWgmmaV1,
-            numeric_contract: ResolvedNumericContract::WgmmaF32V1,
+            backend: PhysicalGemmBackend::Sm90aWgmma,
+            numeric_contract: ResolvedNumericContract::WgmmaF32,
             instruction_family: ResolvedInstructionFamily::Wgmma,
             instruction_shape: ResolvedInstructionShape {
                 m: 64,
@@ -7151,7 +7135,7 @@ impl Sm90aRouteIdentity {
                 k: 16,
             },
             operand_conversion: ResolvedOperandConversion::None,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTile,
             symbol: self.symbol,
             module_kind: self.module_kind,
             target: self.compiler.target,
@@ -7244,12 +7228,8 @@ mod tests {
             box_dimensions: [32, 32],
             name: "A",
         };
-        let error = tf32_subview_plan(
-            layout,
-            TEST_ALLOCATION_DOMAIN,
-            Tf32TensorMapFormat::Uint32V1,
-        )
-        .expect_err("TMA must reject a four-byte-aligned logical pointer");
+        let error = tf32_subview_plan(layout, TEST_ALLOCATION_DOMAIN, Tf32TensorMapFormat::Uint32)
+            .expect_err("TMA must reject a four-byte-aligned logical pointer");
         assert!(error.contains("TMA pointer must be 16-byte aligned"));
     }
 
@@ -7411,18 +7391,18 @@ mod tests {
                 assert_eq!(spec.module_kind, module_kind);
                 assert_eq!(tf32_kernel_spec(spec.op, spec.route).unwrap(), spec);
                 match spec.route {
-                    super::Tf32PhysicalRoute::MmaTf32RnaV1(_)
-                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
-                    | super::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
-                    | super::Tf32PhysicalRoute::Sm89TnPreRnaN96V1
-                    | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N64V1
-                    | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2V1
-                    | super::Tf32PhysicalRoute::Sm89NnDirectN96V1
-                    | super::Tf32PhysicalRoute::Sm89NnN96V1
-                    | super::Tf32PhysicalRoute::Sm89NtALdmatrixN96V1
-                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+                    super::Tf32PhysicalRoute::MmaTf32Rna(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+                    | super::Tf32PhysicalRoute::Sm89MmaTf32Compact8
+                    | super::Tf32PhysicalRoute::Sm89TnPreRnaN96
+                    | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+                    | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+                    | super::Tf32PhysicalRoute::Sm89NnDirectN96
+                    | super::Tf32PhysicalRoute::Sm89NnN96
+                    | super::Tf32PhysicalRoute::Sm89NtALdmatrixN96
+                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
@@ -7430,7 +7410,7 @@ mod tests {
                             ResolvedInstructionShape { m: 16, n: 8, k: 8 }
                         );
                     }
-                    super::Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
+                    super::Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::Wgmma);
                         assert_eq!(
                             spec.instruction_shape,
@@ -7441,7 +7421,7 @@ mod tests {
                             }
                         );
                     }
-                    super::Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => {
+                    super::Tf32PhysicalRoute::Sm120TmaFmaExact(_) => {
                         assert_eq!(
                             spec.instruction_family,
                             ResolvedInstructionFamily::ScalarFma
@@ -7454,7 +7434,7 @@ mod tests {
                         assert_eq!(spec.bk, super::SM120_FMA_BK);
                         assert_eq!(spec.stages, 2);
                     }
-                    super::Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
+                    super::Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::Tcgen05);
                         assert_eq!(spec.instruction_shape.k, 8);
                         assert_eq!(
@@ -7475,7 +7455,7 @@ mod tests {
         assert_eq!(all_symbols.len(), expected_total);
         for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn] {
             assert!(
-                tf32_kernel_spec(op, super::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1).is_err(),
+                tf32_kernel_spec(op, super::Tf32PhysicalRoute::Sm89MmaTf32Compact8).is_err(),
                 "the NT-only finalist unexpectedly accepts {op:?}"
             );
         }
@@ -7486,15 +7466,12 @@ mod tests {
 
     #[test]
     fn rect_wide_spec_keeps_logical_bk64_and_bk32_tensor_maps() {
-        let route = Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+        let route = Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
             tile: Tf32Sm120Tile::M80N32Bk64,
             stages: Tf32Sm120Stages::S2,
         });
         let spec = tf32_kernel_spec(ResolvedGemmOp::Nn, route).unwrap();
-        assert_eq!(
-            spec.symbol,
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2"
-        );
+        assert_eq!(spec.symbol, "nn_sm120_tma_mma_tf32_m80n32_bk64_s2");
         assert_eq!(spec.tile, (80, 32));
         assert_eq!((spec.bk, spec.map_bk), (64, 32));
         assert_eq!(
@@ -7539,7 +7516,7 @@ mod tests {
             assert!(
                 tf32_kernel_spec(
                     op,
-                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                    Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
                         tile: Tf32Sm120Tile::M80N32Bk64,
                         stages,
                     }),
@@ -7551,11 +7528,11 @@ mod tests {
 
     #[test]
     fn portable_tf32_nn_splitk2_and_splitk4_are_distinct_bit_families() {
-        let splitk2 = Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+        let splitk2 = Tf32PhysicalRoute::MmaTf32RnaSplitK2(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         });
-        let route = Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        let route = Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         });
@@ -7564,7 +7541,7 @@ mod tests {
         assert_eq!(splitk2_spec.route, splitk2);
         assert_eq!(
             splitk2_spec.symbol,
-            "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4"
+            "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4"
         );
         assert_eq!(splitk2_spec.tile, (16, 32));
         assert_eq!(splitk2_spec.bk, 32);
@@ -7576,10 +7553,7 @@ mod tests {
         let spec = tf32_splitk_spec(ResolvedGemmOp::Nn, route).unwrap();
         assert_eq!(spec, &TF32_SPLITK4_SPEC);
         assert_eq!(spec.route, route);
-        assert_eq!(
-            spec.symbol,
-            "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
-        );
+        assert_eq!(spec.symbol, "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4");
         assert_eq!(spec.tile, (16, 32));
         assert_eq!(spec.bk, 32);
         assert_eq!(spec.stages, 4);
@@ -7591,7 +7565,7 @@ mod tests {
         assert!(
             tf32_splitk_spec(
                 ResolvedGemmOp::Nn,
-                Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+                Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S3,
                 }),
@@ -7642,7 +7616,7 @@ mod tests {
         assert!(
             tf32_splitk_spec(
                 ResolvedGemmOp::Nn,
-                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
@@ -7673,7 +7647,7 @@ mod tests {
             [
                 (
                     ResolvedGemmOp::Nn,
-                    "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+                    "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
                     (16, 32),
                     4,
                     2,
@@ -7683,7 +7657,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Nn,
-                    "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                    "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
                     (16, 32),
                     4,
                     4,
@@ -7693,7 +7667,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Nt,
-                    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
+                    "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
                     (16, 32),
                     3,
                     4,
@@ -7703,7 +7677,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Nt,
-                    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                    "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
                     (16, 32),
                     4,
                     4,
@@ -7713,7 +7687,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Nt,
-                    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                    "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
                     (32, 32),
                     3,
                     8,
@@ -7723,7 +7697,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Nt,
-                    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                    "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
                     (32, 32),
                     4,
                     8,
@@ -7757,7 +7731,7 @@ mod tests {
             [
                 (
                     ResolvedGemmOp::Tn,
-                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+                    "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s2",
                     (64, 64),
                     2,
                     8,
@@ -7767,7 +7741,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Tn,
-                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+                    "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3",
                     (64, 64),
                     3,
                     8,
@@ -7777,7 +7751,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Tn,
-                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                    "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
                     (32, 32),
                     3,
                     8,
@@ -7787,7 +7761,7 @@ mod tests {
                 ),
                 (
                     ResolvedGemmOp::Tn,
-                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                    "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
                     (32, 32),
                     4,
                     8,
@@ -7798,7 +7772,7 @@ mod tests {
             ]
         );
         assert!(TF32_SPLITK_EXTENSION_SPECS.iter().all(|spec| spec.route
-            == Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+            == Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile: match spec.tile {
                     (64, 64) => Tf32PortableTile::M64N64,
                     _ => Tf32PortableTile::M32N32,
@@ -7816,17 +7790,17 @@ mod tests {
 
     #[test]
     fn portable_tf32_splitk_lookup_and_partitioning_are_operation_aware() {
-        let p4 = Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        let p4 = Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
         });
         assert_eq!(
             tf32_splitk_spec(ResolvedGemmOp::Nn, p4).unwrap().symbol,
-            "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+            "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4"
         );
         assert_eq!(
             tf32_splitk_spec(ResolvedGemmOp::Nt, p4).unwrap().symbol,
-            "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+            "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4"
         );
 
         let p8 = TF32_NT_SPLITK8_S3_SPEC.route;
@@ -8324,7 +8298,7 @@ mod tests {
     }
 
     fn tf32_sm100_route() -> Tf32PhysicalRoute {
-        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(Tf32Sm100Route {
             tile: Sm100Tile::M128N128,
             stages: Sm100Stages::S2,
             schedule: Sm100Schedule::C4,
@@ -8413,7 +8387,7 @@ mod tests {
     fn specialized_tf32_issued_coordinates_include_tail_plane_starts() {
         let routes = [
             (
-                Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(Tf32Sm90aRoute {
                     schedule: Sm90aWarpgroupSchedule::Wg1,
                 }),
                 [
@@ -8431,7 +8405,7 @@ mod tests {
                 ],
             ),
             (
-                Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+                Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(Tf32Sm100Route {
                     tile: Sm100Tile::M128N64,
                     stages: Sm100Stages::S2,
                     schedule: Sm100Schedule::C4,
@@ -8443,7 +8417,7 @@ mod tests {
                 ],
             ),
             (
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
                     tile: Tf32Sm120Tile::M128N64,
                     stages: Tf32Sm120Stages::S2,
                 }),
@@ -8454,7 +8428,7 @@ mod tests {
                 ],
             ),
             (
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
                     tile: Tf32Sm120Tile::M64N128,
                     stages: Tf32Sm120Stages::S2,
                 }),
@@ -8515,7 +8489,7 @@ mod tests {
     }
 
     fn zero_reduction_fixture(a: Tf32TensorMap, b: Tf32TensorMap) -> F32PreparedTensorMaps {
-        F32PreparedTensorMaps::ZeroReductionV1 {
+        F32PreparedTensorMaps::ZeroReduction {
             data: Box::new(F32ZeroReductionTensorMaps {
                 a,
                 b,
@@ -8525,7 +8499,7 @@ mod tests {
                 },
                 route: Some(tf32_sm100_route()),
                 binding: Some(tf32_test_binding()),
-                format: Tf32TensorMapFormat::Tfloat32V1,
+                format: Tf32TensorMapFormat::Tfloat32,
                 revision: ZERO_REDUCTION_MAP_REVISION,
             }),
         }
@@ -8562,14 +8536,14 @@ mod tests {
                 global_dimensions: [127, 65],
                 outer_byte_stride: 512,
                 box_dimensions: [32, 128],
-                format: Tf32TensorMapFormat::Tfloat32V1,
+                format: Tf32TensorMapFormat::Tfloat32,
             },
             Tf32TensorMapKey {
                 base: 0x2000,
                 global_dimensions: [129, 127],
                 outer_byte_stride: 528,
                 box_dimensions: [32, 32],
-                format: Tf32TensorMapFormat::Tfloat32V1,
+                format: Tf32TensorMapFormat::Tfloat32,
             },
         ];
         let allocations = [
@@ -8607,13 +8581,13 @@ mod tests {
                 b_x: 8,
                 b_y: 2,
             },
-            format: Tf32TensorMapFormat::Tfloat32V1,
+            format: Tf32TensorMapFormat::Tfloat32,
             route: tf32_sm100_route(),
         }
     }
 
     fn encoded_prepared_fixture(identity: Tf32EncodedMapIdentity) -> F32PreparedTensorMaps {
-        F32PreparedTensorMaps::EncodedV1 {
+        F32PreparedTensorMaps::Encoded {
             data: Box::new(F32EncodedTensorMaps {
                 a: identity.maps[0],
                 b: identity.maps[1],
@@ -8880,7 +8854,7 @@ mod tests {
         assert_ne!(encoded_identity_digest(revision), expected);
 
         let mut format = identity;
-        format.format = Tf32TensorMapFormat::Uint32V1;
+        format.format = Tf32TensorMapFormat::Uint32;
         assert_ne!(encoded_identity_digest(format), expected);
 
         let mut origin = identity;
@@ -9012,7 +8986,12 @@ mod tests {
         let mut symbols = std::collections::BTreeSet::new();
         for spec in SM120_KERNEL_SPECS {
             assert!(symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
-            assert!(spec.symbol.starts_with("gemm_bi_"), "{}", spec.symbol);
+            let op_prefix = match spec.op {
+                Sm120Op::Nn => "nn_",
+                Sm120Op::Tn => "tn_",
+                Sm120Op::Nt => "nt_",
+            };
+            assert!(spec.symbol.starts_with(op_prefix), "{}", spec.symbol);
         }
 
         for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {

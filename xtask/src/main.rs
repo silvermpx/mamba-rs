@@ -4,9 +4,11 @@
 //!
 //! Rules today: `comments` - a code comment is plain English prose that
 //! says WHY (no Cyrillic, no task indexes, dates, document numbers or
-//! audit tags), ratcheted against a shrink-only baseline.
+//! audit tags), ratcheted against a shrink-only baseline; `names` - no
+//! identifier carries a version suffix, zero and stay zero.
 
 mod comments;
+mod names;
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +48,18 @@ const COMMENT_SCANS: &[comments::Scan<'static>] = &[
 ];
 const COMMENT_BASELINE: &str = "tools/comment_kitchen_baseline.txt";
 
+/// What the naming gate reads: every Rust and CUDA source the crate ships
+/// or tests with.
+const NAME_SCANS: &[(&str, &[&str])] = &[
+    ("src", &["rs"]),
+    ("tests", &["rs"]),
+    ("tools", &["rs"]),
+    ("benches", &["rs"]),
+    ("examples", &["rs"]),
+    ("xtask", &["rs"]),
+    ("kernels", &["cu", "cuh"]),
+];
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let update = args.iter().any(|a| a == "--update-baseline");
@@ -56,11 +70,15 @@ fn main() -> std::process::ExitCode {
         .unwrap_or("gate");
     let root = workspace_root();
     let result = match verb {
-        "gate" | "comments" => {
-            comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update)
-        }
+        "gate" => comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update)
+            .and_then(|mut v| {
+                v.extend(names::run(&root, NAME_SCANS)?);
+                Ok(v)
+            }),
+        "comments" => comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update),
+        "names" => names::run(&root, NAME_SCANS),
         other => Err(format!(
-            "unknown rule: {other}\nusage: cargo run -q -p xtask -- [gate | comments] [--update-baseline]"
+            "unknown rule: {other}\nusage: cargo run -q -p xtask -- [gate | comments | names] [--update-baseline]"
         )),
     };
     match result {
@@ -69,7 +87,11 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::SUCCESS
         }
         Ok(v) => {
-            eprintln!("xtask gate: {} violation(s)", v.len().saturating_sub(1));
+            let trailers = v.iter().filter(|l| !l.contains(':')).count();
+            eprintln!(
+                "xtask gate: {} violation(s)",
+                v.len().saturating_sub(trailers)
+            );
             for line in v {
                 eprintln!("  {line}");
             }

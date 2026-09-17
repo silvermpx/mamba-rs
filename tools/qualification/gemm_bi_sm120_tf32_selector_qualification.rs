@@ -925,7 +925,7 @@ fn require_exact_route(launch: &QualifiedPhysicalLaunch<'_>) -> Result<(), Strin
     );
     let exact_symbols = evidence.nodes().iter().all(|node| {
         !node.symbol.contains("tf32")
-            && (node.module_kind != ModuleKind::TriadSm120 || node.symbol.contains("_tma_fma_v1_"))
+            && (node.module_kind != ModuleKind::TriadSm120 || node.symbol.contains("_tma_fma_"))
     });
     if !evidence.eager_graph_equal() || !exact_module || !exact_symbols {
         return Err(format!(
@@ -994,9 +994,9 @@ impl Candidate {
     const fn is_split_k(self) -> bool {
         matches!(
             self.route,
-            Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
-                | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-                | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+            Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
         )
     }
 
@@ -1029,9 +1029,9 @@ impl Candidate {
 
     const fn partitions(self) -> Option<usize> {
         match self.route {
-            Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => Some(2),
-            Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_) => Some(4),
-            Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => Some(8),
+            Tf32PhysicalRoute::MmaTf32RnaSplitK2(_) => Some(2),
+            Tf32PhysicalRoute::MmaTf32RnaSplitK4(_) => Some(4),
+            Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => Some(8),
             _ => None,
         }
     }
@@ -1042,87 +1042,87 @@ fn split_candidates(op: ResolvedGemmOp) -> Vec<Candidate> {
     match op {
         ResolvedGemmOp::Nn => vec![
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK2(route(
                     Tf32PortableTile::M16N32,
                     Tf32PortableStages::S4,
                 )),
-                symbol: "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+                symbol: "nn_sm80_mma_tf32_splitk2_m16n32_bk32_s4",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(route(
                     Tf32PortableTile::M16N32,
                     Tf32PortableStages::S4,
                 )),
-                symbol: "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                symbol: "nn_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
                 module: ModuleKind::TriadSm80,
             },
         ],
         ResolvedGemmOp::Nt => vec![
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(route(
                     Tf32PortableTile::M16N32,
                     Tf32PortableStages::S3,
                 )),
-                symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
+                symbol: "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(route(
                     Tf32PortableTile::M16N32,
                     Tf32PortableStages::S4,
                 )),
-                symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                symbol: "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M32N32,
                     Tf32PortableStages::S3,
                 )),
-                symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                symbol: "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M32N32,
                     Tf32PortableStages::S4,
                 )),
-                symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                symbol: "nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
                 module: ModuleKind::TriadSm80,
             },
         ],
         ResolvedGemmOp::Tn => vec![
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M64N64,
                     Tf32PortableStages::S2,
                 )),
-                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+                symbol: "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s2",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M64N64,
                     Tf32PortableStages::S3,
                 )),
-                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+                symbol: "tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M32N32,
                     Tf32PortableStages::S3,
                 )),
-                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s3",
                 module: ModuleKind::TriadSm80,
             },
             Candidate {
-                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8(route(
                     Tf32PortableTile::M32N32,
                     Tf32PortableStages::S4,
                 )),
-                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                symbol: "tn_sm80_mma_tf32_splitk8_m32n32_bk32_s4",
                 module: ModuleKind::TriadSm80,
             },
         ],
@@ -1269,7 +1269,7 @@ fn explicit_candidate_filter_is_fail_closed_and_preserves_admission() {
     let cell = PROJECTION_CELLS[0];
     let inventory = || candidate_inventory(cell, false, true);
     let (all, exclusions) = inventory();
-    let wide = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+    let wide = "nn_sm80_mma_tf32_m128n128_bk32_s3";
     assert!(all.iter().any(|candidate| candidate.symbol == wide));
     let (kept, omitted) = filter_candidates(all.clone(), exclusions.clone(), None).unwrap();
     assert_eq!(kept.len(), all.len());
@@ -1622,7 +1622,7 @@ fn select_winner(
                 .0
                 .total_cmp(&stats[&(path, right.symbol)].0)
         })
-        .map_or("scalar_fma_v1", |candidate| candidate.symbol)
+        .map_or("scalar_fma", |candidate| candidate.symbol)
 }
 
 fn stable_candidate_score(
@@ -1662,7 +1662,7 @@ fn select_stable_winner(
                 .then_with(|| left_score.1.total_cmp(&right_score.1))
                 .then_with(|| right.symbol.cmp(left.symbol))
         })
-        .map_or("scalar_fma_v1", |(candidate, _)| candidate.symbol)
+        .map_or("scalar_fma", |(candidate, _)| candidate.symbol)
 }
 
 struct JsonlSink {
@@ -1795,8 +1795,8 @@ fn run_cell(
     quiet: &QuietGpu,
     candidate_filter: Option<&str>,
 ) -> Result<CellResult, String> {
-    let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32V1)?;
-    let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFmaV1)?;
+    let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32)?;
+    let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFma)?;
     // The identity the route set is frozen against: the SM120 module where the
     // board has one, otherwise the portable SM80 module the board runs.
     let availability = candidate_ctx.kernels.f32_triad_availability();
@@ -1816,7 +1816,7 @@ fn run_cell(
         &scalar_ctx,
         request(
             cell,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
         ),
     )?;
     require_exact_route(&scalar_gate)?;
@@ -1976,7 +1976,7 @@ fn run_cell(
     let final_winners =
         [Path::Eager, Path::Graph].map(|path| select_winner(&timed, &final_stats, path));
     let chosen_selection = select_stable_winner(&timed, &discovery, &final_stats);
-    if chosen_selection != "scalar_fma_v1" {
+    if chosen_selection != "scalar_fma" {
         for path in [Path::Eager, Path::Graph] {
             let (median, p05) = final_stats[&(path, chosen_selection)];
             gate_stats(median, p05).map_err(|error| {
@@ -2031,7 +2031,7 @@ fn run_cell(
         final_winners,
         chosen_selection,
         qualified: true,
-        admitted: chosen_selection != "scalar_fma_v1",
+        admitted: chosen_selection != "scalar_fma",
     })
 }
 
@@ -2055,7 +2055,7 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let device = GpuDevice::new(0)?;
     // Any board with a bound TF32 module qualifies its own route set; the JSONL
     // records the board, and the route set it freezes is scoped to it.
-    if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
+    if configure(&device, F32TriadPolicy::AllowDeterministicTf32)?
         .kernels
         .f32_triad_availability()
         .portable
@@ -2137,7 +2137,7 @@ fn run_projection_selector_qualification(cells: &[Cell]) -> Result<(), String> {
     let device = GpuDevice::new(0)?;
     // Any board with a bound TF32 module qualifies its own route set; the JSONL
     // records the board, and the route set it freezes is scoped to it.
-    if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
+    if configure(&device, F32TriadPolicy::AllowDeterministicTf32)?
         .kernels
         .f32_triad_availability()
         .portable
@@ -2418,7 +2418,7 @@ fn selector_returns_scalar_unless_one_candidate_clears_both_gates() {
     }
     assert_eq!(
         select_winner(&candidates, &stats, Path::Eager),
-        "scalar_fma_v1"
+        "scalar_fma"
     );
     stats.insert((Path::Eager, candidates[3].symbol), (1.02, 1.001));
     assert_eq!(
@@ -2471,14 +2471,23 @@ fn split_candidate_inventory_is_exact_and_operation_scoped() {
     assert_eq!(nn.len(), 2);
     assert_eq!(tn.len(), 4);
     assert_eq!(nt.len(), 4);
-    assert!(tn.iter().all(|candidate| candidate.symbol.contains("_tn_")));
+    assert!(
+        tn.iter()
+            .all(|candidate| candidate.symbol.starts_with("tn_"))
+    );
     assert!(tn.iter().all(|candidate| {
         TF32_SPLITK_EXTENSION_SPECS
             .iter()
             .any(|spec| spec.symbol == candidate.symbol && spec.route == candidate.route)
     }));
-    assert!(nn.iter().all(|candidate| candidate.symbol.contains("_nn_")));
-    assert!(nt.iter().all(|candidate| candidate.symbol.contains("_nt_")));
+    assert!(
+        nn.iter()
+            .all(|candidate| candidate.symbol.starts_with("nn_"))
+    );
+    assert!(
+        nt.iter()
+            .all(|candidate| candidate.symbol.starts_with("nt_"))
+    );
     assert!(
         nn.iter()
             .chain(&nt)
@@ -2653,7 +2662,7 @@ fn split_numeric_gate_accepts_rounding_drift_and_rejects_corruption() {
 fn tf32_candidate_mismatch_map() -> Result<(), String> {
     let cell_id = std::env::var("MAMBA_RS_TF32_DIAG_CELL").unwrap_or("tn_batch_input_proj".into());
     let symbol = std::env::var("MAMBA_RS_TF32_DIAG_SYMBOL")
-        .unwrap_or("gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3".into());
+        .unwrap_or("tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3".into());
     let cell = *CELLS
         .iter()
         .chain(PROJECTION_CELLS.iter())
@@ -2664,14 +2673,14 @@ fn tf32_candidate_mismatch_map() -> Result<(), String> {
         .find(|candidate| candidate.symbol == symbol)
         .ok_or_else(|| format!("unknown candidate {symbol}"))?;
     let device = GpuDevice::new(0)?;
-    let candidate_ctx = configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?;
-    let scalar_ctx = configure(&device, F32TriadPolicy::ExactScalarFmaV1)?;
+    let candidate_ctx = configure(&device, F32TriadPolicy::AllowDeterministicTf32)?;
+    let scalar_ctx = configure(&device, F32TriadPolicy::ExactScalarFma)?;
     let reference = portable_reference(&candidate_ctx, cell)?;
     let mut scalar = qualify(
         &scalar_ctx,
         request(
             cell,
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
         ),
     )?;
     let exact = eager_graph_bits(&mut scalar, &scalar_ctx)?;

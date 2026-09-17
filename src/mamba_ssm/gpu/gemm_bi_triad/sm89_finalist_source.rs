@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 
-pub(super) const SM89_FINALIST_SYMBOL: &str =
-    "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
+pub(super) const SM89_FINALIST_SYMBOL: &str = "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2";
 
-const SM80_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80.cu");
-const COMPACT_HELPER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_nt_compact.cuh");
+const SM80_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/mma.cu");
+const COMPACT_HELPER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/nt_compact.cuh");
 const PREAMBLES: [&str; 5] = [
     include_str!("../../../../kernels/_typed_prelude.cuh"),
     include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -13,29 +12,29 @@ const PREAMBLES: [&str; 5] = [
     include_str!("../../../../kernels/gemm_bi_triad/mma16.cuh"),
 ];
 
-const ORIGINAL_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+const ORIGINAL_SYMBOL: &str = "nt_sm80_mma_tf32_m128n64_bk32_s2";
 
 const ASYNC_MAINLOOP_MARKER: &str = r#"template <SgbTf32Op Op, int BM, int BN, int Stages,
           int MAtoms, int NAtoms, bool NarrowA, bool NarrowB>
-__device__ __forceinline__ void gemm_bi_tf32_async_mainloop("#;
+__device__ __forceinline__ void tf32_async_mainloop("#;
 
 const WIDE_BRANCH: &str = r#"    if (wide_a && wide_b) {
-        gemm_bi_tf32_async_mainloop<
+        tf32_async_mainloop<
             Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
             storage, problem, tile_count, thread_plan, accumulators);
-    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+    } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
 const A_LOAD: &str = r#"#pragma unroll
         for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
             int row = warp_m + m_atom * 16 + group;
             a_fragments[m_atom][0] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread));
             a_fragments[m_atom][1] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
             a_fragments[m_atom][2] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
             a_fragments[m_atom][3] =
-                gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+                tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
         }
 "#;
 
@@ -46,26 +45,26 @@ const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
                 int row = warp_m + m_atom * 16 + (lane & 15);
                 int reduction = k8 + ((lane >> 4) << 2);
                 unsigned address = (unsigned)__cvta_generic_to_shared(
-                    &gemm_bi_tf32_a_slot<Op>(storage, stage, row, reduction));
+                    &tf32_a_slot<Op>(storage, stage, row, reduction));
                 unsigned raw0, raw1, raw2, raw3;
                 asm volatile(
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                     : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
                     : "r"(address));
-                a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
-                a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
-                a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
-                a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+                a_fragments[m_atom][0] = tf32_rna(__uint_as_float(raw0));
+                a_fragments[m_atom][1] = tf32_rna(__uint_as_float(raw1));
+                a_fragments[m_atom][2] = tf32_rna(__uint_as_float(raw2));
+                a_fragments[m_atom][3] = tf32_rna(__uint_as_float(raw3));
             } else {
                 int row = warp_m + m_atom * 16 + group;
                 a_fragments[m_atom][0] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread));
                 a_fragments[m_atom][1] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread));
                 a_fragments[m_atom][2] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row, k8 + thread + 4));
                 a_fragments[m_atom][3] =
-                    gemm_bi_tf32_rna(gemm_bi_tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
+                    tf32_rna(tf32_a_slot<Op>(storage, stage, row + 8, k8 + thread + 4));
             }
         }
 "#;
@@ -83,16 +82,16 @@ const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
                 gemm_bi_tf32_nt_compact_sliced_mainloop(
                     storage, problem, tile_count, thread_plan, accumulators);
             } else {
-                gemm_bi_tf32_async_mainloop<
+                tf32_async_mainloop<
                     Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
                     storage, problem, tile_count, thread_plan, accumulators);
             }
         } else {
-            gemm_bi_tf32_async_mainloop<
+            tf32_async_mainloop<
                 Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
                 storage, problem, tile_count, thread_plan, accumulators);
         }
-    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+    } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
 const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_compact_stage_slice(
     SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage, int stage,
@@ -109,11 +108,11 @@ const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_
         int bytes = valid * 4;
         long long valid_offset =
             (long long)global_row * problem.params.lda + global_reduction;
-        const float* source = gemm_bi_cp_async_source(
+        const float* source = cp_async_source(
             problem.a, bytes == 0 ? 0 : valid_offset, bytes);
         unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &gemm_bi_tf32_a_slot<SgbTf32Nt>(storage, stage, row, reduction));
-        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            &tf32_a_slot<SgbTf32Nt>(storage, stage, row, reduction));
+        tf32_cp_async_zfill<false, 128>(
             destination, source, bytes);
     }
     if (issue < 2) {
@@ -128,11 +127,11 @@ const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_
         int bytes = valid * 4;
         long long valid_offset =
             (long long)global_column * problem.params.ldb + global_reduction;
-        const float* source = gemm_bi_cp_async_source(
+        const float* source = cp_async_source(
             problem.b, bytes == 0 ? 0 : valid_offset, bytes);
         unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &gemm_bi_tf32_b_slot<SgbTf32Nt>(storage, stage, reduction, column));
-        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            &tf32_b_slot<SgbTf32Nt>(storage, stage, reduction, column));
+        tf32_cp_async_zfill<false, 128>(
             destination, source, bytes);
     }
 }
@@ -169,33 +168,33 @@ __device__ __forceinline__ void gemm_bi_tf32_nt_compact_compute_sliced(
             int row = warp_m + m_atom * 16 + (lane & 15);
             int reduction = k8 + ((lane >> 4) << 2);
             unsigned address = (unsigned)__cvta_generic_to_shared(
-                &gemm_bi_tf32_a_slot<SgbTf32Nt>(
+                &tf32_a_slot<SgbTf32Nt>(
                     storage, read_stage, row, reduction));
             unsigned raw0, raw1, raw2, raw3;
             asm volatile(
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                 : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
                 : "r"(address));
-            a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
-            a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
-            a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
-            a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+            a_fragments[m_atom][0] = tf32_rna(__uint_as_float(raw0));
+            a_fragments[m_atom][1] = tf32_rna(__uint_as_float(raw1));
+            a_fragments[m_atom][2] = tf32_rna(__uint_as_float(raw2));
+            a_fragments[m_atom][3] = tf32_rna(__uint_as_float(raw3));
         }
 #pragma unroll
         for (int n_atom = 0; n_atom < 4; ++n_atom) {
             int column = warp_n + n_atom * 8 + group;
-            b_fragments[n_atom][0] = gemm_bi_tf32_rna(
-                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+            b_fragments[n_atom][0] = tf32_rna(
+                tf32_b_slot<SgbTf32Nt>(
                     storage, read_stage, k8 + thread, column));
-            b_fragments[n_atom][1] = gemm_bi_tf32_rna(
-                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+            b_fragments[n_atom][1] = tf32_rna(
+                tf32_b_slot<SgbTf32Nt>(
                     storage, read_stage, k8 + thread + 4, column));
         }
 #pragma unroll
         for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
             for (int n_atom = 0; n_atom < 4; ++n_atom) {
-                gemm_bi_tf32_mma_m16n8k8(
+                tf32_mma_m16n8k8(
                     accumulators[m_atom][n_atom],
                     a_fragments[m_atom], b_fragments[n_atom]);
             }
@@ -275,7 +274,7 @@ const TRANSFORMATIONS: [Transformation; 9] = [
             "        return storage->a[stage][reduction][row];\n",
             "    }\n",
             "    if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {\n",
-            "        return storage->a[stage][row][gemm_bi_nt_compact8_xor_k(row, reduction)];\n",
+            "        return storage->a[stage][row][nt_compact8_xor_k(row, reduction)];\n",
             "    }\n",
             "    return storage->a[stage][row][reduction];"
         ),
@@ -291,7 +290,7 @@ const TRANSFORMATIONS: [Transformation; 9] = [
         to: concat!(
             "    if constexpr (Op == SgbTf32Nt) {\n",
             "        if constexpr (BM == 128 && BN == 64 && Stages == 2) {\n",
-            "            return storage->b[stage][column][gemm_bi_nt_compact8_xor_k(column, reduction)];\n",
+            "            return storage->b[stage][column][nt_compact8_xor_k(column, reduction)];\n",
             "        }\n",
             "        return storage->b[stage][column][reduction];\n",
             "    }\n",
@@ -306,13 +305,13 @@ const TRANSFORMATIONS: [Transformation; 9] = [
     Transformation {
         label: "compact finalist accumulator ownership",
         from: concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);"
         ),
         to: concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr bool compact_eight_warp_s2 =\n",
@@ -344,12 +343,12 @@ const TRANSFORMATIONS: [Transformation; 9] = [
         label: "compact finalist target export",
         from: concat!(
             "GEMM_BI_TF32_DEFINE_KERNEL(",
-            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "nt_sm80_mma_tf32_m128n64_bk32_s2, ",
             "SgbTf32Nt, 128, 64, 2, 256, 1)"
         ),
         to: concat!(
             "GEMM_BI_TF32_DEFINE_KERNEL(",
-            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2, ",
+            "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2, ",
             "SgbTf32Nt, 128, 64, 2, 256, 1)"
         ),
     },
@@ -357,11 +356,11 @@ const TRANSFORMATIONS: [Transformation; 9] = [
         label: "compact finalist target signature",
         from: concat!(
             "TF32_ASSERT_KERNEL_SIGNATURE(",
-            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2);"
+            "nt_sm80_mma_tf32_m128n64_bk32_s2);"
         ),
         to: concat!(
             "TF32_ASSERT_KERNEL_SIGNATURE(",
-            "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2);"
+            "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2);"
         ),
     },
 ];
@@ -400,7 +399,7 @@ fn install_stage_sliced_winners(source: &mut String) -> Result<(), String> {
 }
 
 fn finalist_body_from(helper: &str, source: &str) -> Result<String, String> {
-    reject_quoted_include("kernels/gemm_bi_triad/sm89_nt_compact.cuh", helper)?;
+    reject_quoted_include("kernels/gemm_bi_triad/sm89/nt_compact.cuh", helper)?;
     let transformed = transform_sm80_source(source)?;
     let exports = macro_names(&transformed, "GEMM_BI_TF32_DEFINE_KERNEL")?;
     let assertions = macro_names(&transformed, "TF32_ASSERT_KERNEL_SIGNATURE")?;
@@ -487,8 +486,8 @@ fn compose_from_parts(preambles: [&str; 5], helper: &str, source: &str) -> Resul
     ] {
         reject_quoted_include(logical_name, preamble)?;
     }
-    reject_quoted_include("kernels/gemm_bi_triad/sm89_nt_compact.cuh", helper)?;
-    reject_quoted_include("kernels/gemm_bi_triad/sm80.cu", source)?;
+    reject_quoted_include("kernels/gemm_bi_triad/sm89/nt_compact.cuh", helper)?;
+    reject_quoted_include("kernels/gemm_bi_triad/sm80/mma.cu", source)?;
 
     let body = finalist_body_from(helper, source)?;
     Ok(preambles
@@ -553,7 +552,7 @@ fn compose_from_parts_for_test(
 mod tests {
     use super::*;
 
-    const TEST_HELPER_NAME: &str = "gemm_bi_nt_test_compact_xor_k";
+    const TEST_HELPER_NAME: &str = "nt_test_compact_xor_k";
     const FROZEN_HELPER: &str = include_str!("../../../../tests/gemm_bi_tf32_nt_compact_xor.cu");
     const FROZEN_SLICED_ADAPTER: &str =
         include_str!("../../../../tests/support/triad_tf32_nt_compact_a_ldmatrix_sliced_source.rs");
@@ -564,9 +563,9 @@ mod tests {
         let mut source = super::frozen_a_ldmatrix_adapter::candidate_source(&compact)
             .expect("compose frozen compact A-only ldmatrix candidate")
             .replacen(FROZEN_HELPER, COMPACT_HELPER, 1)
-            .replace(TEST_HELPER_NAME, "gemm_bi_nt_compact8_xor_k")
+            .replace(TEST_HELPER_NAME, "nt_compact8_xor_k")
             .replace(
-                "gemm_bi_nt_test_compact_a_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s2",
+                "nt_test_compact_a_ldmatrix_sm80_mma_tf32_m128n64_bk32_s2",
                 SM89_FINALIST_SYMBOL,
             );
         install_stage_sliced_winners(&mut source).expect("install frozen stage-sliced winners");
@@ -655,8 +654,8 @@ mod tests {
             "__device__ __forceinline__ float to_f(float v)",
             "Three operand layouts for training:",
             "__device__ __forceinline__ float4 ld_global_L2_128B",
-            "__device__ __forceinline__ void gemm_bi_store_pair_rne",
-            "gemm_bi_cp_async_source",
+            "__device__ __forceinline__ void store_pair_rne",
+            "cp_async_source",
         ] {
             assert!(
                 composed.contains(marker),
@@ -728,7 +727,7 @@ mod tests {
             "                gemm_bi_tf32_nt_compact_sliced_mainloop(\n",
             "                    storage, problem, tile_count, thread_plan, accumulators);\n",
             "            } else {\n",
-            "                gemm_bi_tf32_async_mainloop<\n",
+            "                tf32_async_mainloop<\n",
             "                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
             "                    storage, problem, tile_count, thread_plan, accumulators);\n",
             "            }"

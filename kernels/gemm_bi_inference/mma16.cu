@@ -127,7 +127,7 @@
 
 #define DEFINE_GEMM_BI_NN_TC128(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(256, 1)                                \
-void gemm_bi_nn_tc128_##SUFFIX(                                                  \
+void nn_tc128_##SUFFIX(                                                  \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -397,7 +397,7 @@ DEFINE_GEMM_BI_NN_TC128(f32out_f16,  __half,        float, from_f_f16,  from_f_f
 
 #define DEFINE_GEMM_BI_NN_TC64(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF64_THREADS, 1)                   \
-void gemm_bi_nn_tc64_##SUFFIX(                                                \
+void nn_tc64_##SUFFIX(                                                \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -655,7 +655,7 @@ DEFINE_GEMM_BI_NN_TC64(f32out_f16,  __half,        float, from_f_f16,  from_f_f3
 
 #define DEFINE_GEMM_BI_NN_TC16(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF16_THREADS, 3)                   \
-void gemm_bi_nn_tc16_##SUFFIX(                                                \
+void nn_tc16_##SUFFIX(                                                \
     T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \

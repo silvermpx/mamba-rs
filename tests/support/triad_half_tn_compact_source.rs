@@ -1,4 +1,4 @@
-pub const SYMBOL_PREFIX: &str = "gemm_bi_tn_test_tc64_bk64_s2_xor_";
+pub const SYMBOL_PREFIX: &str = "tn_test_tc64_bk64_s2_xor_";
 
 /// Reuses Fixed's row*64 + (column XOR ((row&7)*8)) half layout for both
 /// TN operands. Only shared addresses change; incumbent BK64/S2 math remains.
@@ -38,8 +38,8 @@ pub fn candidate_source(production: &str) -> Result<String, String> {
             1,
         ),
         (
-            "void gemm_bi_tn_tc64_##SUFFIX",
-            "void gemm_bi_tn_test_tc64_bk64_s2_xor_##SUFFIX",
+            "void tn_tc64_##SUFFIX",
+            "void tn_test_tc64_bk64_s2_xor_##SUFFIX",
             1,
         ),
     ] {
@@ -67,9 +67,9 @@ fn require_count(source: &str, anchor: &str, expected: usize) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
     const FIXED_LAYOUT: &str =
-        include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
+        include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh");
 
     fn offset(row: usize, column: usize) -> usize {
         row * 64 + (column ^ ((row & 7) * 8))
@@ -147,13 +147,13 @@ mod tests {
         assert!(source.contains("#define GEMM_BI_TC64_LDB 64"));
         assert!(source.contains("Xs[2][GEMM_BI_TC64_BK][GEMM_BI_TC64_LDB]"));
         assert!(source.contains("Ys[2][GEMM_BI_TC64_BK][GEMM_BI_TC64_LDB]"));
-        assert!(source.contains("void gemm_bi_tn_test_tc64_bk64_s2_xor_##SUFFIX"));
+        assert!(source.contains("void tn_test_tc64_bk64_s2_xor_##SUFFIX"));
         assert_eq!(source.matches("GEMM_BI_HALF_TN_INDEX(").count(), 7);
         assert!(!source.contains("_r * GEMM_BI_TC64_LDB + _c"));
         assert!(!source.contains("srow * GEMM_BI_TC64_LDB + scol"));
         assert!(!source.contains("srow * GEMM_BI_TC64_LDB + warpN + fn * 8"));
-        assert!(!source.contains("void gemm_bi_nn_"));
-        assert!(!source.contains("void gemm_bi_nt_"));
+        assert!(!source.contains("void nn_"));
+        assert!(!source.contains("void nt_"));
 
         let old_section = &PRODUCTION[PRODUCTION
             .find("#define GEMM_BI_TC64_STAGE_TN_ASYNC")

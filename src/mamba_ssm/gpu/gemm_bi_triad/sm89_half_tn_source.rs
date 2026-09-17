@@ -5,7 +5,7 @@ const CONTRACT: &str = include_str!("../../../../kernels/gemm_bi_triad/contract.
 const COMMON: &str = include_str!("../../../../kernels/gemm_bi_triad/common.cuh");
 const EPILOGUE: &str = include_str!("../../../../kernels/gemm_bi_triad/epilogue.cuh");
 const MMA16: &str = include_str!("../../../../kernels/gemm_bi_triad/mma16.cuh");
-pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_half_tn.cu");
+pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half_tn.cu");
 
 pub const OWNER_SHA256: &str = "e01bc5d622c9fc3a71841217a69031580b5f4d94d590d2d8c90931aec2741dcb";
 pub const PRELUDE_SHA256: &str = "0c9b2345c643417406d75403df11f6fb96af7ce82f198ee551086f7c19020948";
@@ -16,22 +16,22 @@ pub const EPILOGUE_SHA256: &str =
     "88f198be891f1316ee540f210e014b55d61e14263d71cd710c17762fb9d1674a";
 pub const MMA16_SHA256: &str = "8906c2da4db43c1b51a1ebed5d3ab8c9da29c4c4f8a248131ead8df7149d54f1";
 
-const OWNER_FNV64: u64 = 0x1180_c4b3_bff2_b53c;
+const OWNER_FNV64: u64 = 0xb4d9_9185_f5af_9250;
 const PRELUDE_FNV64: u64 = 0x672e_6c67_8676_9881;
 const CONTRACT_FNV64: u64 = 0xaab2_41d0_80b4_217d;
-const COMMON_FNV64: u64 = 0x199a_1555_a3d9_c8e9;
-const EPILOGUE_FNV64: u64 = 0xf130_0828_f8fd_80e7;
-const MMA16_FNV64: u64 = 0x7d35_8a5f_648e_1b9a;
+const COMMON_FNV64: u64 = 0xd069_42d6_c5b4_4868;
+const EPILOGUE_FNV64: u64 = 0xa9bc_47a2_e161_5149;
+const MMA16_FNV64: u64 = 0x5407_785d_d217_d044;
 
-pub const COMPACT_SYMBOL_PREFIX: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_";
-pub const REGPIPE_VEC2_SYMBOL_PREFIX: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_";
-pub const SMALL16_SYMBOL_PREFIX: &str = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_";
-pub const COMPACT_BF16_SYMBOL: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_bf16";
-pub const COMPACT_F16_SYMBOL: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_compact_bxor_v1_f16";
-pub const REGPIPE_VEC2_BF16_SYMBOL: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_bf16";
-pub const REGPIPE_VEC2_F16_SYMBOL: &str = "gemm_bi_tn_sm89_m64n64_bk64_s2_regpipe_vec2_v1_f16";
-pub const SMALL16_BF16_SYMBOL: &str = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_bf16";
-pub const SMALL16_F16_SYMBOL: &str = "gemm_bi_tn_sm89_m16n16_bk64_s2_ldb72_v1_f16";
+pub const COMPACT_SYMBOL_PREFIX: &str = "tn_sm89_m64n64_bk64_s2_compact_bxor_";
+pub const REGPIPE_VEC2_SYMBOL_PREFIX: &str = "tn_sm89_m64n64_bk64_s2_regpipe_vec2_";
+pub const SMALL16_SYMBOL_PREFIX: &str = "tn_sm89_m16n16_bk64_s2_ldb72_";
+pub const COMPACT_BF16_SYMBOL: &str = "tn_sm89_m64n64_bk64_s2_compact_bxor_bf16";
+pub const COMPACT_F16_SYMBOL: &str = "tn_sm89_m64n64_bk64_s2_compact_bxor_f16";
+pub const REGPIPE_VEC2_BF16_SYMBOL: &str = "tn_sm89_m64n64_bk64_s2_regpipe_vec2_bf16";
+pub const REGPIPE_VEC2_F16_SYMBOL: &str = "tn_sm89_m64n64_bk64_s2_regpipe_vec2_f16";
+pub const SMALL16_BF16_SYMBOL: &str = "tn_sm89_m16n16_bk64_s2_ldb72_bf16";
+pub const SMALL16_F16_SYMBOL: &str = "tn_sm89_m16n16_bk64_s2_ldb72_f16";
 
 pub const HALF_TN_DRIVER_ABI: [(u32, u32); 7] =
     [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)];
@@ -298,13 +298,7 @@ pub fn export_inventory(source: &str) -> Result<Vec<&'static str>, String> {
 }
 
 pub fn validate_source_text(source: &str) -> Result<(), String> {
-    for marker in [
-        "_test_",
-        "_exp_",
-        "gemm_bi_tn_tc64_",
-        "__SM89_HALF_TN_",
-        "small32",
-    ] {
+    for marker in ["_test_", "_exp_", "tn_tc64_", "__SM89_HALF_TN_", "small32"] {
         if source.contains(marker) {
             return Err(format!(
                 "SM89 half-TN source retained forbidden marker {marker}"

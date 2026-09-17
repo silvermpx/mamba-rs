@@ -398,10 +398,7 @@ fn forced_route(ctx: &GpuCtx, case: &CensusCase, physical: Sm100PhysicalRoute) -
 
 fn assert_identity(prepared: &Sm100PreparedLaunch, route: Sm100ForcedRoute) {
     let identity = prepared.identity();
-    assert_eq!(
-        identity.numeric_contract,
-        Sm100NumericContract::Tcgen05F32V1
-    );
+    assert_eq!(identity.numeric_contract, Sm100NumericContract::Tcgen05F32);
     assert_eq!(identity.op, route.op);
     assert_eq!(identity.dtype, route.dtype);
     assert_eq!(identity.physical, route.physical);

@@ -3,11 +3,11 @@ mod m96;
 
 use m96::m64n192::m64n128::fixed_s3 as bxor;
 
-const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89_half.cu");
+const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89/half.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
-const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
-const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
-const S3: &str = include_str!("../kernels/gemm_bi_inference/sm89_half_s3.cu");
+const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh");
+const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
+const S3: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_s3.cu");
 
 #[test]
 fn standalone_source_defines_each_fixed_common_half_helper_once() {
@@ -33,7 +33,12 @@ fn callable_exports(source: &str) -> std::collections::BTreeSet<String> {
     let lines = source.lines().collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("void gemm_bi_") {
+        // A callable export names its operand layout first; helpers and
+        // macro bodies never start a line with `void nn_`/`tn_`/`nt_`.
+        if let Some(rest) = trimmed
+            .strip_prefix("void ")
+            .filter(|rest| ["nn_", "tn_", "nt_"].iter().any(|op| rest.starts_with(op)))
+        {
             let name = rest.split('(').next().unwrap().trim();
             if let Some(prefix) = name.strip_suffix("##SUFFIX") {
                 let macro_name = lines[..index]
@@ -42,9 +47,9 @@ fn callable_exports(source: &str) -> std::collections::BTreeSet<String> {
                     .find_map(|candidate| candidate.trim().strip_prefix("#define "))
                     .and_then(|definition| definition.split('(').next())
                     .unwrap();
-                token_paste.insert(macro_name.to_owned(), format!("gemm_bi_{prefix}"));
+                token_paste.insert(macro_name.to_owned(), prefix.to_owned());
             } else {
-                exports.insert(format!("gemm_bi_{name}"));
+                exports.insert(name.to_owned());
             }
         }
     }
@@ -66,12 +71,12 @@ fn callable_exports(source: &str) -> std::collections::BTreeSet<String> {
 #[test]
 fn production_source_exposes_only_the_six_owned_callable_symbols() {
     let expected = [
-        "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
-        "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
-        "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_bf16",
-        "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_f16",
-        "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_bf16",
-        "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
+        "nn_sm89_m128n128_bk64_s3_bf16",
+        "nn_sm89_m128n128_bk64_s3_f16",
+        "nt_sm89_m128n128_bk64_s3_bxor_bf16",
+        "nt_sm89_m128n128_bk64_s3_bxor_f16",
+        "nt_sm89_m96n128_bk64_s3_bf16",
+        "nt_sm89_m96n128_bk64_s3_f16",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -101,7 +106,7 @@ fn without_legacy_exports(mut source: String) -> String {
         source.replace_range(start..end, "");
     }
     source.replace(
-        "// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and\n// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.",
+        "// Exports: nn_sm89_tc128_swizzle_bf16 and\n// nn_sm89_tc128_swizzle_f16.",
         "// Provider helpers are composed here without their legacy Fixed exports.",
     )
 }
@@ -119,14 +124,8 @@ fn production_source_is_the_measured_three_family_composition() {
             ("sm89_fixed_half_swizzle_layout", "sm89_half_nn_s3_layout"),
             ("sm89_fixed_half_swizzle", "sm89_half_nn_s3_support"),
             ("sm89_fixed_half_s3", "sm89_half_nn_s3"),
-            (
-                "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
-                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_bf16",
-            ),
-            (
-                "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
-                "gemm_bi_nn_sm89_m128n128_bk64_s3_v1_f16",
-            ),
+            ("nn_sm89_tc128_s3_bf16", "nn_sm89_m128n128_bk64_s3_bf16"),
+            ("nn_sm89_tc128_s3_f16", "nn_sm89_m128n128_bk64_s3_f16"),
         ],
     ));
     let bxor = without_legacy_exports(renamed(
@@ -139,10 +138,7 @@ fn production_source_is_the_measured_three_family_composition() {
             ),
             ("sm89_fixed_half_swizzle", "sm89_half_nt_bxor_s3_support"),
             ("sm89_test_half_nt_s3", "sm89_half_nt_bxor_s3"),
-            (
-                "gemm_bi_nt_test_fixed_s3_bxor_",
-                "gemm_bi_nt_sm89_m128n128_bk64_s3_bxor_v1_",
-            ),
+            ("nt_test_fixed_s3_bxor_", "nt_sm89_m128n128_bk64_s3_bxor_"),
         ],
     ));
     let m96 = without_legacy_exports(renamed(
@@ -156,8 +152,8 @@ fn production_source_is_the_measured_three_family_composition() {
             ("sm89_fixed_half_swizzle", "sm89_half_nt_m96_s3_support"),
             ("sm89_test_half_nt_m96n128_s3", "sm89_half_nt_m96n128_s3"),
             (
-                "gemm_bi_nt_test_fixed_s3_m96n128_f16",
-                "gemm_bi_nt_sm89_m96n128_bk64_s3_v1_f16",
+                "nt_test_fixed_s3_m96n128_f16",
+                "nt_sm89_m96n128_bk64_s3_f16",
             ),
         ],
     ));

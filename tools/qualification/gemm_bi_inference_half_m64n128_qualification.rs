@@ -27,10 +27,10 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
 use sha2::{Digest as _, Sha256};
 
 const OUTPUT_ENV: &str = "MAMBA_RS_FIXED_HALF_M64N128_JSONL";
-const SCHEMA: &str = "MambaBiFixedHalfM64N128QualificationV1";
+const SCHEMA: &str = "MambaBiFixedHalfM64N128Qualification";
 const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_inference_half_m64n128_qualification.rs");
 const RUST_DISPATCH_SOURCE: &str = include_str!("../../src/mamba_ssm/gpu/gemm_bi_inference.rs");
-const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm120_tma.cu");
+const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm120/tma.cu");
 const CANDIDATE_TILE: InferenceSm120HalfTile = InferenceSm120HalfTile::M64N128Bk64S2;
 const EAGER_REPEATS: usize = 10;
 const GRAPH_WARMUPS: usize = 1;
@@ -364,7 +364,7 @@ impl RunMetadata {
             RUST_DISPATCH_SOURCE,
         )?;
         let cuda_source_sha256 = verify_compiled_source(
-            &manifest.join("kernels/gemm_bi_inference/sm120_tma.cu"),
+            &manifest.join("kernels/gemm_bi_inference/sm120/tma.cu"),
             CUDA_SOURCE,
         )?;
         let executable_sha256 = sha256_file(
@@ -947,34 +947,34 @@ fn physical_snapshot(graph: &CudaGraph) -> Result<PhysicalSnapshot, String> {
 fn half_symbol(tile: InferenceSm120HalfTile, dtype: WeightDtype) -> &'static str {
     match (tile, dtype) {
         (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::Bf16) => {
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16"
+            "nn_sm120_tma_64x64_bk64_s2_bf16"
         }
         (InferenceSm120HalfTile::M64N64Bk64S2, WeightDtype::F16) => {
-            "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16"
+            "nn_sm120_tma_64x64_bk64_s2_f16"
         }
         (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::Bf16) => {
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16"
+            "nn_sm120_tma_64x128_bk64_s2_bf16"
         }
         (InferenceSm120HalfTile::M64N128Bk64S2, WeightDtype::F16) => {
-            "gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16"
+            "nn_sm120_tma_64x128_bk64_s2_f16"
         }
         (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::Bf16) => {
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16"
+            "nn_sm120_tma_128x64_bk32_s3_bf16"
         }
         (InferenceSm120HalfTile::M128N64Bk32S3, WeightDtype::F16) => {
-            "gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16"
+            "nn_sm120_tma_128x64_bk32_s3_f16"
         }
         (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::Bf16) => {
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16"
+            "nn_sm120_tma_128x128_bk32_s2_bf16"
         }
         (InferenceSm120HalfTile::M128N128Bk32S2, WeightDtype::F16) => {
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16"
+            "nn_sm120_tma_128x128_bk32_s2_f16"
         }
         (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::Bf16) => {
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16"
+            "nn_sm120_tma_128x128_bk32_s3_bf16"
         }
         (InferenceSm120HalfTile::M128N128Bk32S3, WeightDtype::F16) => {
-            "gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16"
+            "nn_sm120_tma_128x128_bk32_s3_f16"
         }
         (_, WeightDtype::F32) => panic!("SM120 half qualification cannot use F32"),
     }
@@ -2188,7 +2188,7 @@ mod tests {
                 RUST_DISPATCH_SOURCE,
             ),
             (
-                manifest.join("kernels/gemm_bi_inference/sm120_tma.cu"),
+                manifest.join("kernels/gemm_bi_inference/sm120/tma.cu"),
                 CUDA_SOURCE,
             ),
         ] {
@@ -2225,7 +2225,7 @@ mod tests {
         };
         assert_eq!(
             cell_json(&metadata, cell),
-            r#""schema":"MambaBiFixedHalfM64N128QualificationV1","run_identity_sha256":"run\"\\\n","cell":"shape\tname_f16_synthesized","shape_name":"shape\tname","shape":{"m":1,"k":2,"n":3},"dtype":"f16","bias":"synthesized""#
+            r#""schema":"MambaBiFixedHalfM64N128Qualification","run_identity_sha256":"run\"\\\n","cell":"shape\tname_f16_synthesized","shape_name":"shape\tname","shape":{"m":1,"k":2,"n":3},"dtype":"f16","bias":"synthesized""#
         );
     }
 }

@@ -1,8 +1,8 @@
-pub const M16N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m16n16_f64fold_v1";
-pub const M8N32_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n32_f64fold_v1";
-pub const M8N16_SYMBOL: &str = "gemm_bi_tn_ada_d128_direct_m8n16_f64fold_v1";
-pub const OUT_M16N16_SYMBOL: &str = "gemm_bi_tn_ada_d128out_direct_m16n16_f64fold_v1";
-pub const OUT_M8N16_SYMBOL: &str = "gemm_bi_tn_ada_d128out_direct_m8n16_f64fold_v1";
+pub const M16N16_SYMBOL: &str = "tn_ada_d128_direct_m16n16_f64fold";
+pub const M8N32_SYMBOL: &str = "tn_ada_d128_direct_m8n32_f64fold";
+pub const M8N16_SYMBOL: &str = "tn_ada_d128_direct_m8n16_f64fold";
+pub const OUT_M16N16_SYMBOL: &str = "tn_ada_d128out_direct_m16n16_f64fold";
+pub const OUT_M8N16_SYMBOL: &str = "tn_ada_d128out_direct_m8n16_f64fold";
 
 const ORIGINAL_NAMESPACE: &str = "namespace GemmBiTnUnderfillDirect {";
 const ADAPTED_NAMESPACE: &str = "namespace GemmBiTnAdaD128Direct {";
@@ -27,10 +27,7 @@ pub fn compose_out_source(original: &str) -> Result<String, String> {
         ),
         (M16N16_SYMBOL, OUT_M16N16_SYMBOL),
         (M8N16_SYMBOL, OUT_M8N16_SYMBOL),
-        (
-            M8N32_SYMBOL,
-            "gemm_bi_tn_ada_d128out_direct_m8n32_f64fold_v1",
-        ),
+        (M8N32_SYMBOL, "tn_ada_d128out_direct_m8n32_f64fold"),
     ] {
         replace_once(&mut source, from, to, "d128-out specialization")?;
     }

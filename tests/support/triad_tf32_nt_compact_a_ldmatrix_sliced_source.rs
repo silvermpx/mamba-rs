@@ -2,7 +2,7 @@
 mod retained_a;
 
 pub const SYMBOL: &str =
-    "gemm_bi_nt_test_compact_a_ldmatrix_sliced_sm80_mma_tf32_v1_m128n64_bk32_s2";
+    "nt_test_compact_a_ldmatrix_sliced_sm80_mma_tf32_m128n64_bk32_s2";
 pub const RETAINED_SYMBOL: &str = retained_a::SYMBOL;
 pub const BLOCK_THREADS: u32 = 256;
 pub const DYNAMIC_SHARED_BYTES: u32 = 49_152;
@@ -12,29 +12,29 @@ pub const TARGET: (usize, usize, usize) = (2_048, 1_536, 768);
 pub const TARGET_GRID: u32 = 384;
 
 const COMPACT_PARENT_SYMBOL: &str =
-    "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
-const PRODUCTION_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+    "nt_test_compact_eight_warp_sm80_mma_tf32_m128n64_bk32_s2";
+const PRODUCTION_SYMBOL: &str = "nt_sm80_mma_tf32_m128n64_bk32_s2";
 
 const ASYNC_MAINLOOP_MARKER: &str = r#"template <SgbTf32Op Op, int BM, int BN, int Stages,
           int MAtoms, int NAtoms, bool NarrowA, bool NarrowB>
-__device__ __forceinline__ void gemm_bi_tf32_async_mainloop("#;
+__device__ __forceinline__ void tf32_async_mainloop("#;
 
 const WIDE_BRANCH: &str = r#"    if (wide_a && wide_b) {
-        gemm_bi_tf32_async_mainloop<
+        tf32_async_mainloop<
             Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
             storage, problem, tile_count, thread_plan, accumulators);
-    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+    } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
 const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
         if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {
             gemm_bi_tf32_nt_compact_sliced_mainloop(
                 storage, problem, tile_count, thread_plan, accumulators);
         } else {
-            gemm_bi_tf32_async_mainloop<
+            tf32_async_mainloop<
                 Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
                 storage, problem, tile_count, thread_plan, accumulators);
         }
-    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"#;
+    } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
 const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_compact_stage_slice(
     SgbTf32Storage<SgbTf32Nt, 128, 64, 2>* storage, int stage,
@@ -51,11 +51,11 @@ const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_
         int bytes = valid * 4;
         long long valid_offset =
             (long long)global_row * problem.params.lda + global_reduction;
-        const float* source = gemm_bi_cp_async_source(
+        const float* source = cp_async_source(
             problem.a, bytes == 0 ? 0 : valid_offset, bytes);
         unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &gemm_bi_tf32_a_slot<SgbTf32Nt>(storage, stage, row, reduction));
-        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            &tf32_a_slot<SgbTf32Nt>(storage, stage, row, reduction));
+        tf32_cp_async_zfill<false, 128>(
             destination, source, bytes);
     }
     if (issue < 2) {
@@ -70,11 +70,11 @@ const SLICED_HELPERS: &str = r#"__device__ __forceinline__ void gemm_bi_tf32_nt_
         int bytes = valid * 4;
         long long valid_offset =
             (long long)global_column * problem.params.ldb + global_reduction;
-        const float* source = gemm_bi_cp_async_source(
+        const float* source = cp_async_source(
             problem.b, bytes == 0 ? 0 : valid_offset, bytes);
         unsigned destination = (unsigned)__cvta_generic_to_shared(
-            &gemm_bi_tf32_b_slot<SgbTf32Nt>(storage, stage, reduction, column));
-        gemm_bi_tf32_cp_async_zfill<false, 128>(
+            &tf32_b_slot<SgbTf32Nt>(storage, stage, reduction, column));
+        tf32_cp_async_zfill<false, 128>(
             destination, source, bytes);
     }
 }
@@ -111,33 +111,33 @@ __device__ __forceinline__ void gemm_bi_tf32_nt_compact_compute_sliced(
             int row = warp_m + m_atom * 16 + (lane & 15);
             int reduction = k8 + ((lane >> 4) << 2);
             unsigned address = (unsigned)__cvta_generic_to_shared(
-                &gemm_bi_tf32_a_slot<SgbTf32Nt>(
+                &tf32_a_slot<SgbTf32Nt>(
                     storage, read_stage, row, reduction));
             unsigned raw0, raw1, raw2, raw3;
             asm volatile(
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                 : "=r"(raw0), "=r"(raw1), "=r"(raw2), "=r"(raw3)
                 : "r"(address));
-            a_fragments[m_atom][0] = gemm_bi_tf32_rna(__uint_as_float(raw0));
-            a_fragments[m_atom][1] = gemm_bi_tf32_rna(__uint_as_float(raw1));
-            a_fragments[m_atom][2] = gemm_bi_tf32_rna(__uint_as_float(raw2));
-            a_fragments[m_atom][3] = gemm_bi_tf32_rna(__uint_as_float(raw3));
+            a_fragments[m_atom][0] = tf32_rna(__uint_as_float(raw0));
+            a_fragments[m_atom][1] = tf32_rna(__uint_as_float(raw1));
+            a_fragments[m_atom][2] = tf32_rna(__uint_as_float(raw2));
+            a_fragments[m_atom][3] = tf32_rna(__uint_as_float(raw3));
         }
 #pragma unroll
         for (int n_atom = 0; n_atom < 4; ++n_atom) {
             int column = warp_n + n_atom * 8 + group;
-            b_fragments[n_atom][0] = gemm_bi_tf32_rna(
-                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+            b_fragments[n_atom][0] = tf32_rna(
+                tf32_b_slot<SgbTf32Nt>(
                     storage, read_stage, k8 + thread, column));
-            b_fragments[n_atom][1] = gemm_bi_tf32_rna(
-                gemm_bi_tf32_b_slot<SgbTf32Nt>(
+            b_fragments[n_atom][1] = tf32_rna(
+                tf32_b_slot<SgbTf32Nt>(
                     storage, read_stage, k8 + thread + 4, column));
         }
 #pragma unroll
         for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
             for (int n_atom = 0; n_atom < 4; ++n_atom) {
-                gemm_bi_tf32_mma_m16n8k8(
+                tf32_mma_m16n8k8(
                     accumulators[m_atom][n_atom],
                     a_fragments[m_atom], b_fragments[n_atom]);
             }
@@ -271,7 +271,7 @@ fn compact_parent_source(production: &str, compact_layout: &str) -> Result<Strin
             "        return storage->a[stage][reduction][row];\n",
             "    }\n",
             "    if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {\n",
-            "        return storage->a[stage][row][gemm_bi_nt_test_compact_xor_k(row, reduction)];\n",
+            "        return storage->a[stage][row][nt_test_compact_xor_k(row, reduction)];\n",
             "    }\n",
             "    return storage->a[stage][row][reduction];"
         ),
@@ -289,7 +289,7 @@ fn compact_parent_source(production: &str, compact_layout: &str) -> Result<Strin
         concat!(
             "    if constexpr (Op == SgbTf32Nt) {\n",
             "        if constexpr (BM == 128 && BN == 64 && Stages == 2) {\n",
-            "            return storage->b[stage][column][gemm_bi_nt_test_compact_xor_k(column, reduction)];\n",
+            "            return storage->b[stage][column][nt_test_compact_xor_k(column, reduction)];\n",
             "        }\n",
             "        return storage->b[stage][column][reduction];\n",
             "    }\n",
@@ -308,13 +308,13 @@ fn compact_parent_source(production: &str, compact_layout: &str) -> Result<Strin
     replace_exact(
         &mut source,
         concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);"
         ),
         concat!(
-            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "__device__ __forceinline__ void tf32_kernel(\n",
             "    float* output, const float* a, const float* b, const float* bias,\n",
             "    Sm80Tf32KernelParams params) {\n",
             "    constexpr bool compact_eight_warp_s2 =\n",
@@ -381,7 +381,7 @@ fn replace_exact(
 mod tests {
     use super::*;
 
-    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
     const COMPACT_LAYOUT: &str = include_str!("../gemm_bi_tf32_nt_compact_xor.cu");
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
         let load = body
             .find("ldmatrix.sync.aligned.m8n8.x4.shared.b16")
             .unwrap();
-        let mma = body.find("gemm_bi_tf32_mma_m16n8k8").unwrap();
+        let mma = body.find("tf32_mma_m16n8k8").unwrap();
         assert!(copy < load && load < mma);
         assert!(compute.contains("const int k_offsets[4] = {0, 8, 16, 24};"));
         assert!(

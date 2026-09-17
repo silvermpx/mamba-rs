@@ -1,7 +1,7 @@
 #[path = "triad_half_tn_compact_source.rs"]
 pub mod compact;
 
-pub const SYMBOL_PREFIX: &str = "gemm_bi_tn_test_tc64_bk64_s2_regpipe_";
+pub const SYMBOL_PREFIX: &str = "tn_test_tc64_bk64_s2_regpipe_";
 
 pub fn candidate_source(production: &str) -> Result<String, String> {
     let source = compact::candidate_source(production)?;
@@ -90,12 +90,12 @@ fn decode_macro(source: &str) -> String {
 mod tests {
     use super::*;
 
-    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80.cu");
+    const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
 
     #[test]
     fn source_primes_and_alternates_fragment_slots_without_changing_the_tn_epilogue() {
         let actual = candidate_source(PRODUCTION).unwrap();
-        assert!(actual.contains("void gemm_bi_tn_test_tc64_bk64_s2_regpipe_##SUFFIX"));
+        assert!(actual.contains("void tn_test_tc64_bk64_s2_regpipe_##SUFFIX"));
         assert!(actual.contains("unsigned a_frag[2][2][4];"));
         assert!(actual.contains("unsigned b_frag[2][4][2];"));
         assert!(actual.contains("a_frag[(ks + 1) & 1][fm]"));

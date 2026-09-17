@@ -615,6 +615,115 @@ fn scalar_group_m_option(arch: &str) -> String {
     format!("-D{SCALAR_GROUP_M_MACRO}={group_m}")
 }
 
+/// The compile-time identity of one module, computed the way
+/// [`compile_module`] computes it but without a device: the composed source,
+/// the NVRTC invocation, the PTX it produces and the header closure it read.
+/// The qualification tools print these for every toolkit so the frozen
+/// cohorts can be re-pinned after a source change that moves no bits.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct MintedModuleIdentity {
+    pub module_kind: ModuleKind,
+    pub target: &'static str,
+    pub state_cap: usize,
+    pub device_cc: Option<(i32, i32)>,
+    pub nvrtc_version: (i32, i32),
+    pub source_digest: Sha256Digest,
+    pub compile_key: Option<Sha256Digest>,
+    pub invocation_digest: Sha256Digest,
+    pub artifact_digest: Sha256Digest,
+    pub header_manifest_digest: Sha256Digest,
+    pub nvrtc_library_domain: Sha256Digest,
+}
+
+#[doc(hidden)]
+pub fn mint_module_identity(
+    module_kind: ModuleKind,
+    arch: &'static str,
+    state_cap: usize,
+    device_cc: Option<(i32, i32)>,
+) -> Result<MintedModuleIdentity, String> {
+    validate_module_target(module_kind, arch)?;
+    let nvrtc = nvrtc_version();
+    let combined = compose_compile_module_source(module_kind, device_cc, arch, state_cap, nvrtc)?;
+    if let Some(directory) = std::env::var_os("MAMBA_RS_MINT_DUMP") {
+        let file = std::path::Path::new(&directory).join(format!(
+            "{module_kind:?}-{arch}-cap{state_cap}-nvrtc{}.{}.cu",
+            nvrtc.0, nvrtc.1
+        ));
+        std::fs::write(&file, combined.as_bytes())
+            .map_err(|error| format!("could not write {file:?}: {error}"))?;
+    }
+    let mut option_strings = vec![
+        "--fmad=true".to_string(),
+        "--extra-device-vectorization".to_string(),
+        "-DNDEBUG".to_string(),
+        scalar_group_m_option(arch),
+    ];
+    if module_kind == ModuleKind::Fixed {
+        option_strings.push(format!("-DMAMBA_RS_STATE_CAP={state_cap}"));
+    }
+    option_strings.extend(
+        crate::mamba_ssm::gpu::kernel_identity::deterministic_nvrtc_options(nvrtc, "1295072049"),
+    );
+    let include_paths = cuda_include_paths();
+    let opts = cudarc::nvrtc::CompileOptions {
+        arch: Some(arch),
+        options: option_strings.clone(),
+        include_paths: include_paths.clone(),
+        ..Default::default()
+    };
+    let nvrtc_library_domain = crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain();
+    let header_manifest = crate::mamba_ssm::gpu::kernel_identity::header_manifest(
+        combined.as_bytes(),
+        &include_paths,
+    );
+    let mut argv = vec![format!("--gpu-architecture={arch}").into_bytes()];
+    argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
+    let key_material = crate::mamba_ssm::gpu::kernel_identity::CompileKeyMaterial {
+        module_kind,
+        source: combined.as_bytes().to_vec(),
+        target: arch.as_bytes().to_vec(),
+        argv,
+        header_manifest: header_manifest.clone(),
+        nvrtc_version: nvrtc,
+        nvrtc_library_domain: nvrtc_library_domain.clone(),
+        output_kind: ArtifactKind::Ptx,
+        composer_revision: crate::mamba_ssm::gpu::kernel_identity::COMPOSER_REVISION,
+        compiler_revision: crate::mamba_ssm::gpu::kernel_identity::COMPILER_REVISION,
+        numeric_abi_revision: crate::mamba_ssm::gpu::kernel_identity::NUMERIC_ABI_REVISION,
+        schedule_revision: crate::mamba_ssm::gpu::kernel_identity::SCHEDULE_REVISION,
+    };
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|error| {
+        format!(
+            "{module_kind:?} NVRTC compile failed: {}",
+            format!("{error:?}").replace("\\n", "\n")
+        )
+    })?;
+    let ptx_image = ptx
+        .as_bytes()
+        .ok_or_else(|| format!("{module_kind:?} NVRTC returned no PTX image"))?;
+    let ptx_source = crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
+    validate_module_ptx(module_kind, arch, &ptx_source)?;
+    Ok(MintedModuleIdentity {
+        module_kind,
+        target: arch,
+        state_cap,
+        device_cc,
+        nvrtc_version: nvrtc,
+        source_digest: FramedSha256::bytes(combined.as_bytes()),
+        compile_key: key_material.digest(),
+        invocation_digest: key_material.invocation_digest(),
+        artifact_digest: FramedSha256::bytes(ptx_source.as_bytes()),
+        header_manifest_digest: FramedSha256::new(b"cuda-header-manifest.v1")
+            .optional(b"manifest", header_manifest.as_deref())
+            .finish(),
+        nvrtc_library_domain: FramedSha256::new(b"nvrtc-library-set-identity.v2")
+            .optional(b"domain", nvrtc_library_domain.as_deref())
+            .finish(),
+    })
+}
+
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
     validate_module_target(request.module_kind, request.arch)?;
     let nvrtc = nvrtc_version();
@@ -1683,7 +1792,7 @@ fn validate_tf32_ptx_inventory(
     let actual: Vec<_> = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.contains("_tf32_v1_") || symbol.contains("_tma_fma_v1_"))
+        .filter(|symbol| symbol.contains("_tf32_") || symbol.contains("_tma_fma_"))
         .collect();
     let unique: BTreeSet<_> = actual.iter().copied().collect();
     if actual.len() != unique.len() || unique != expected {
@@ -1695,7 +1804,7 @@ fn validate_tf32_ptx_inventory(
 }
 
 fn validate_sm89_finalist_ptx_inventory(ptx: &str) -> Result<(), String> {
-    let original = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+    let original = "nt_sm80_mma_tf32_m128n64_bk32_s2";
     let mut expected = super::contract::tf32_module_symbols(ModuleKind::TriadSm80)
         .filter(|&symbol| symbol != original)
         .collect::<BTreeSet<_>>();
@@ -1703,20 +1812,23 @@ fn validate_sm89_finalist_ptx_inventory(ptx: &str) -> Result<(), String> {
         return Err("TriadSm89Finalist contract contains a duplicate symbol".into());
     }
     let symbols = ptx_entry_symbols(ptx)?;
+    // The split-K kernels ride along in the same source but belong to the
+    // extension contract, which the finalist module never serves.
     let actual = symbols
         .iter()
         .map(String::as_str)
         .filter(|symbol| {
-            symbol.contains("_tf32_v1_")
-                || symbol.contains("_tma_fma_v1_")
-                || symbol.contains("_tf32_compact8_v1_")
+            (symbol.contains("_tf32_") || symbol.contains("_tma_fma_"))
+                && !symbol.contains("_splitk")
         })
         .collect::<Vec<_>>();
     let unique = actual.iter().copied().collect::<BTreeSet<_>>();
     if actual.len() != unique.len() || unique != expected {
-        return Err(
-            "TriadSm89Finalist TF32 PTX inventory is incomplete, duplicated, or foreign".into(),
-        );
+        let missing = expected.difference(&unique).copied().collect::<Vec<_>>();
+        let foreign = unique.difference(&expected).copied().collect::<Vec<_>>();
+        return Err(format!(
+            "TriadSm89Finalist TF32 PTX inventory is incomplete, duplicated, or foreign: missing {missing:?}, foreign {foreign:?}"
+        ));
     }
     Ok(())
 }
@@ -1755,11 +1867,9 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .map(|spec| spec.symbol)
         .collect::<BTreeSet<_>>();
     let symbols = ptx_entry_symbols(ptx)?;
-    let actual = symbols
-        .iter()
-        .map(String::as_str)
-        .filter(|symbol| symbol.starts_with("gemm_bi_"))
-        .collect::<Vec<_>>();
+    // The module composes nothing but its own kernels, so every PTX entry
+    // must be one of the planned symbols.
+    let actual = symbols.iter().map(String::as_str).collect::<Vec<_>>();
     let unique = actual.iter().copied().collect::<BTreeSet<_>>();
     if actual.len() != unique.len() || unique != expected {
         return Err("TriadSm89Half PTX inventory is incomplete, duplicated, or foreign".into());
@@ -2206,25 +2316,21 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
 }
 
 const FIXED_TF32_SYMBOLS: [&str; 5] = [
-    "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
-    "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
-    "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
-    "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
-    "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+    "nn_tf32_m128n64_bk32_s2",
+    "nn_tf32_m128n64_bk32_s3",
+    "nn_tf32_m64n64_bk32_s2",
+    "nn_tf32_m64n64_bk32_s3",
+    "nn_tf32_m16n32_bk32_s4",
 ];
 
-pub(crate) const FIXED_SM89_RNA_WIDE_SYMBOL: &str =
-    "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
+pub(crate) const FIXED_SM89_RNA_WIDE_SYMBOL: &str = "nn_rna_wide_tf32_m128n128_bk32_s3";
 const FIXED_SM89_RNA_WIDE_SHARED_BYTES: u32 = 98_304;
 const FIXED_SM89_RNA_WIDE_THREADS: u32 = 256;
 const FIXED_SM89_RNA_WIDE_REGISTER_CAP: u32 = 224;
 
-pub(crate) const FIXED_SM89_RNA_N96_SYMBOL: &str =
-    "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
-pub(crate) const FIXED_SM89_HALF_M64N64_S3_SYMBOL: &str =
-    "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16";
-pub(crate) const FIXED_SM89_HALF_M128N64_S2_SYMBOL: &str =
-    "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16";
+pub(crate) const FIXED_SM89_RNA_N96_SYMBOL: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
+pub(crate) const FIXED_SM89_HALF_M64N64_S3_SYMBOL: &str = "nn_sm89_m64n64_bk64_s3_f16";
+pub(crate) const FIXED_SM89_HALF_M128N64_S2_SYMBOL: &str = "nn_sm89_m128n64_bk64_s2_f16";
 
 const FIXED_SM89_RNA_N96_SHARED_BYTES: u32 = 86_016;
 const FIXED_SM89_RNA_N96_THREADS: u32 = 256;
@@ -2243,7 +2349,7 @@ fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String>
     let actual: Vec<_> = parsed
         .entries
         .iter()
-        .filter(|entry| entry.symbol.contains("_fixed_rna_wide_tf32_v1_"))
+        .filter(|entry| entry.symbol.contains("_rna_wide_tf32_"))
         .collect();
     let expected = usize::from(fixed_sm89_rna_wide_composed(arch));
     if actual.len() != expected || (expected == 1 && actual[0].symbol != FIXED_SM89_RNA_WIDE_SYMBOL)
@@ -2359,7 +2465,7 @@ fn validate_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String>
         .iter()
         .map(|entry| entry.symbol.as_str())
         .filter(|symbol| {
-            symbol.contains("_sm89_rna_tf32_v1_m128n96_")
+            symbol.contains("_sm89_rna_tf32_m128n96_")
                 || symbol.contains("_sm89_m64n64_bk64_s3_")
                 || symbol.contains("_sm89_m128n64_bk64_s2_")
         })
@@ -2459,42 +2565,35 @@ fn validate_fixed_sm89_finalist_entry_ptx(
 }
 
 const FIXED_SM120_TF32_SYMBOLS: [&str; 7] = [
-    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
-    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+    "nn_sm120_tma_tf32_m128n64_bk32_s2",
+    "nn_sm120_tma_tf32_m128n64_bk32_s3",
+    "nn_sm120_tma_tf32_m64n128_bk32_s2",
+    "nn_sm120_tma_tf32_m64n128_bk32_s3",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2",
+    "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store",
 ];
 
 const FIXED_SM120_HALF_BASES: [&str; 5] = [
-    "gemm_bi_nn_sm120_tma_64x64_bk64_s2",
-    "gemm_bi_nn_sm120_tma_64x128_bk64_s2",
-    "gemm_bi_nn_sm120_tma_128x64_bk32_s3",
-    "gemm_bi_nn_sm120_tma_128x128_bk32_s2",
-    "gemm_bi_nn_sm120_tma_128x128_bk32_s3",
+    "nn_sm120_tma_64x64_bk64_s2",
+    "nn_sm120_tma_64x128_bk64_s2",
+    "nn_sm120_tma_128x64_bk32_s3",
+    "nn_sm120_tma_128x128_bk32_s2",
+    "nn_sm120_tma_128x128_bk32_s3",
 ];
 
-const FIXED_SM89_HALF_SYMBOLS: [&str; 2] = [
-    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
-    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
-];
+const FIXED_SM89_HALF_SYMBOLS: [&str; 2] =
+    ["nn_sm89_tc128_pipeline_bf16", "nn_sm89_tc128_pipeline_f16"];
 const FIXED_SM89_HALF_SHARED_BYTES: u32 = 71_680;
 const FIXED_SM89_HALF_THREADS: u32 = 256;
 const FIXED_SM89_HALF_REGISTER_CAP: u32 = 224;
-const FIXED_SM89_HALF_SWIZZLE_SYMBOLS: [&str; 2] = [
-    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
-    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
-];
+const FIXED_SM89_HALF_SWIZZLE_SYMBOLS: [&str; 2] =
+    ["nn_sm89_tc128_swizzle_bf16", "nn_sm89_tc128_swizzle_f16"];
 const FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES: u32 = 69_632;
 const FIXED_SM89_HALF_SWIZZLE_THREADS: u32 = 256;
 const FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP: u32 = 224;
 
-const FIXED_SM89_HALF_S3_SYMBOLS: [&str; 2] = [
-    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
-    "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
-];
+const FIXED_SM89_HALF_S3_SYMBOLS: [&str; 2] = ["nn_sm89_tc128_s3_bf16", "nn_sm89_tc128_s3_f16"];
 const FIXED_SM89_HALF_S3_SHARED_BYTES: u32 = 98_304;
 const FIXED_SM89_HALF_S3_THREADS: u32 = 256;
 // Production NVRTC BF16/F16: 182 on CUDA12.8/13.0, 188 on CUDA13.2.
@@ -2510,7 +2609,7 @@ fn validate_fixed_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .entries
         .iter()
         .map(|entry| entry.symbol.as_str())
-        .filter(|symbol| symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_pipeline"))
+        .filter(|symbol| symbol.starts_with("nn_sm89_tc128_pipeline"))
         .collect();
     let expected: BTreeSet<_> = if fixed_sm89_half_composed(arch) {
         FIXED_SM89_HALF_SYMBOLS.into_iter().collect()
@@ -2580,7 +2679,7 @@ fn validate_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) -> Result<(), Str
         .entries
         .iter()
         .map(|entry| entry.symbol.as_str())
-        .filter(|symbol| symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_swizzle"))
+        .filter(|symbol| symbol.starts_with("nn_sm89_tc128_swizzle"))
         .collect();
     let expected: BTreeSet<_> = if fixed_sm89_half_composed(arch) {
         FIXED_SM89_HALF_SWIZZLE_SYMBOLS.into_iter().collect()
@@ -2655,7 +2754,7 @@ fn validate_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) -> Result<(), String> 
         .entries
         .iter()
         .map(|entry| entry.symbol.as_str())
-        .filter(|symbol| symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_s3"))
+        .filter(|symbol| symbol.starts_with("nn_sm89_tc128_s3"))
         .collect();
     let expected: BTreeSet<_> = if fixed_sm89_half_composed(arch) {
         FIXED_SM89_HALF_S3_SYMBOLS.into_iter().collect()
@@ -4037,7 +4136,7 @@ pub(crate) fn load_fixed_sm89_half_s3(
     }
 }
 
-const FIXED_SM89_EXACT_N64_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
+const FIXED_SM89_EXACT_N64_SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
 const FIXED_SM89_EXACT_N64_THREADS: u32 = 128;
 const FIXED_SM89_EXACT_N64_STATIC_SHARED: i32 = 32_768;
 
@@ -4045,23 +4144,22 @@ fn fixed_sm89_exact_n64_composed(arch: &str) -> bool {
     arch == "sm_89"
 }
 
-const FIXED_SM120_EXACT_N64_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
-const FIXED_SM120_COPYPLAN_T256_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
-const FIXED_SM120_COPYPLAN_M128_T256_SYMBOL: &str =
-    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+const FIXED_SM120_EXACT_N64_SYMBOL: &str = "nn_sm120_f32_n64_copyplan";
+const FIXED_SM120_COPYPLAN_T256_SYMBOL: &str = "nn_sm120_f32_n64_copyplan_t256";
+const FIXED_SM120_COPYPLAN_M128_T256_SYMBOL: &str = "nn_sm120_f32_n64_copyplan_m128n64_t256";
 
 fn fixed_sm120_exact_n64_composed(arch: &str) -> bool {
     arch == "compute_120"
 }
 
-const FIXED_SM120_SLICED_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+const FIXED_SM120_SLICED_SYMBOL: &str = "nn_sm120_f32_n64_sliced";
 const FIXED_SM120_POSTBIAS_SYMBOLS: [&str; 6] = [
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
-    "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+    "nn_sm120_tma_fma_postbias_m128n64_bk16_s2",
+    "nn_sm120_tma_fma_postbias_m64n128_bk16_s2",
+    "nn_sm120_tma_fma_postbias_m128n96_bk16_s2",
+    "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4",
+    "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2",
+    "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2",
 ];
 const FIXED_SM120_POSTBIAS_REGISTER_CAP: i32 = 168;
 
@@ -4076,30 +4174,24 @@ fn fixed_sm120_postbias_launch_contract(
     symbol: &str,
 ) -> Result<FixedSm120PostbiasLaunchContract, String> {
     match symbol {
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
-        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4"
-        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => {
-            Ok(FixedSm120PostbiasLaunchContract {
-                threads: 128,
-                dynamic_shared: 24_592,
-                min_active_blocks: 3,
-            })
-        }
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
-        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => {
-            Ok(FixedSm120PostbiasLaunchContract {
-                threads: 256,
-                dynamic_shared: 24_592,
-                min_active_blocks: 3,
-            })
-        }
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => {
-            Ok(FixedSm120PostbiasLaunchContract {
-                threads: 256,
-                dynamic_shared: 28_688,
-                min_active_blocks: 3,
-            })
-        }
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2"
+        | "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4"
+        | "nn_sm120_tma_fma_postbias_m64n128_bk16_s2" => Ok(FixedSm120PostbiasLaunchContract {
+            threads: 128,
+            dynamic_shared: 24_592,
+            min_active_blocks: 3,
+        }),
+        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2"
+        | "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => Ok(FixedSm120PostbiasLaunchContract {
+            threads: 256,
+            dynamic_shared: 24_592,
+            min_active_blocks: 3,
+        }),
+        "nn_sm120_tma_fma_postbias_m128n96_bk16_s2" => Ok(FixedSm120PostbiasLaunchContract {
+            threads: 256,
+            dynamic_shared: 28_688,
+            min_active_blocks: 3,
+        }),
         _ => Err(format!(
             "{symbol} has no Fixed SM120 post-dot-bias launch contract"
         )),
@@ -4123,7 +4215,7 @@ fn validate_fixed_sm120_postbias_ptx_for_cuda_major(
     let actual: Vec<_> = parsed
         .entries
         .iter()
-        .filter(|entry| entry.symbol.contains("_sm120_tma_fma_v1_fixed_"))
+        .filter(|entry| entry.symbol.contains("_sm120_tma_fma_"))
         .collect();
     if !fixed_sm120_exact_n64_composed(arch) {
         return if actual.is_empty() {
@@ -4226,7 +4318,7 @@ fn validate_fixed_sm120_postbias_ptx_for_cuda_major(
                 return Err(format!("{symbol} is missing {required}"));
             }
         }
-        let has_bias = !symbol.contains("_fixed_nobias_");
+        let has_bias = !symbol.contains("_nobias_");
         if has_bias != ptx_has_unquoted_token(&entry.body, |token| token == "add.rn.f32") {
             return Err(format!("{symbol} has the wrong bias epilogue"));
         }
@@ -4264,11 +4356,7 @@ fn validate_fixed_sm120_sliced_ptx(arch: &str, ptx: &str) -> Result<(), String> 
     let actual: Vec<_> = parsed
         .entries
         .iter()
-        .filter(|entry| {
-            entry
-                .symbol
-                .starts_with("gemm_bi_nn_fixed_sm120_f32_n64_sliced")
-        })
+        .filter(|entry| entry.symbol.starts_with("nn_sm120_f32_n64_sliced"))
         .collect();
     if !fixed_sm120_exact_n64_composed(arch) {
         return if actual.is_empty() {
@@ -4374,11 +4462,7 @@ fn validate_fixed_sm120_exact_n64_ptx(arch: &str, ptx: &str) -> Result<(), Strin
     let actual: Vec<_> = parsed
         .entries
         .iter()
-        .filter(|entry| {
-            entry
-                .symbol
-                .starts_with("gemm_bi_nn_fixed_sm120_f32_n64_copyplan")
-        })
+        .filter(|entry| entry.symbol.starts_with("nn_sm120_f32_n64_copyplan"))
         .collect();
     if !fixed_sm120_exact_n64_composed(arch) {
         return if actual.is_empty() {
@@ -4507,11 +4591,7 @@ fn validate_fixed_sm89_exact_n64_ptx(arch: &str, ptx: &str) -> Result<(), String
     let actual: Vec<_> = parsed
         .entries
         .iter()
-        .filter(|entry| {
-            entry
-                .symbol
-                .starts_with("gemm_bi_nn_fixed_sm89_f32_n64_copyplan")
-        })
+        .filter(|entry| entry.symbol.starts_with("nn_sm89_f32_n64_copyplan"))
         .collect();
     if !fixed_sm89_exact_n64_composed(arch) {
         return if actual.is_empty() {
@@ -4844,8 +4924,8 @@ fn validate_fixed_sm120_postbias_resources(
     let launch = fixed_sm120_postbias_launch_contract(symbol)?;
     let register_cap = match symbol {
         // Three 256-thread CTAs must fit within 65,536 registers.
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
-        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => 85,
+        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2"
+        | "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => 85,
         _ => FIXED_SM120_POSTBIAS_REGISTER_CAP,
     };
     if resources.local_bytes != 0
@@ -5272,7 +5352,7 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let actual: BTreeSet<_> = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.contains("_tf32_v1_"))
+        .filter(|symbol| symbol.contains("_tf32_"))
         .collect();
     let expected: BTreeSet<_> = expected.into_iter().collect();
     if actual != expected {
@@ -5377,8 +5457,8 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         let actual_half: BTreeSet<_> = symbols
             .iter()
             .filter(|symbol| {
-                symbol.starts_with("gemm_bi_nn_sm120_tma_")
-                    && !symbol.contains("_tf32_v1_")
+                symbol.starts_with("nn_sm120_tma_")
+                    && !symbol.contains("_tf32_")
                     && (symbol.ends_with("_bf16") || symbol.ends_with("_f16"))
             })
             .cloned()
@@ -5473,7 +5553,7 @@ fn validate_scalar_zero_reduction_ptx(ptx: &str) -> Result<(), String> {
     let actual: Vec<_> = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.ends_with("_zero_reduction_v1"))
+        .filter(|symbol| symbol.ends_with("_zero_reduction"))
         .collect();
     let unique: BTreeSet<_> = actual.iter().copied().collect();
     if actual.len() != unique.len() || unique != expected {
@@ -5512,7 +5592,7 @@ fn validate_scalar_zero_reduction_ptx(ptx: &str) -> Result<(), String> {
 }
 
 fn validate_scalar_nt_m2n16_ptx(ptx: &str) -> Result<(), String> {
-    const SYMBOL: &str = "gemm_bi_nt_m2n16_bk64_splitk32_v1";
+    const SYMBOL: &str = "nt_m2n16_bk64_splitk32";
     let entry = ptx_entry(ptx, SYMBOL)?;
     let parameters = entry
         .split_once('(')
@@ -5559,7 +5639,7 @@ fn validate_scalar_nt_m2n16_ptx(ptx: &str) -> Result<(), String> {
 }
 
 fn validate_scalar_nn_m32n64_splitk32_ptx(ptx: &str) -> Result<(), String> {
-    const SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
+    const SYMBOL: &str = "nn_splitk32_m32n64_exact";
     let entry = ptx_entry(ptx, SYMBOL)?;
     let parameters = entry
         .split_once('(')
@@ -5603,7 +5683,7 @@ fn validate_scalar_nn_m32n64_splitk32_ptx(ptx: &str) -> Result<(), String> {
 }
 
 fn validate_scalar_tn_m16n16_ptx(ptx: &str) -> Result<(), String> {
-    const SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+    const SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
     let entry = ptx_entry(ptx, SYMBOL)?;
     let parameters = entry
         .split_once('(')
@@ -6585,7 +6665,7 @@ fn validate_tf32_splitk_ptx(extensions: bool, ptx: &str) -> Result<(), String> {
 fn validate_tn_narrow_splitm_partial_ptx(ptx: &str) -> Result<(), String> {
     validate_tn_splitm_partial_ptx_cohort(
         ptx,
-        "_tn_narrow_splitm_partial",
+        "tn_narrow_splitm_partial",
         SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS,
         "TriadScalar TN narrow split-M partial",
         true,
@@ -6595,7 +6675,7 @@ fn validate_tn_narrow_splitm_partial_ptx(ptx: &str) -> Result<(), String> {
 fn validate_tn_splitm_partial_ptx(ptx: &str) -> Result<(), String> {
     validate_tn_splitm_partial_ptx_cohort(
         ptx,
-        "_tn_splitm_partial",
+        "tn_splitm_partial",
         SCALAR_TN_SPLITM_PARTIAL_SYMBOLS,
         "TriadScalar TN split-M partial",
         false,
@@ -6613,7 +6693,7 @@ fn validate_tn_splitm_partial_ptx_cohort(
     let actual = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.contains(symbol_marker))
+        .filter(|symbol| symbol.starts_with(symbol_marker))
         .collect::<BTreeSet<_>>();
     let expected = expected_symbols.iter().copied().collect::<BTreeSet<_>>();
     if actual != expected {
@@ -6831,7 +6911,7 @@ fn validate_sm90a_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
         require_ptx_entry_tokens("TriadSm90a", entry, PRODUCER)?;
         require_ptx_entry_tokens("TriadSm90a", entry, &[TF32_CORE])?;
         reject_ptx_entry_tokens("TriadSm90a", entry, &[BF16_CORE, F16_CORE])?;
-        let super::contract::Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(route) = spec.route else {
+        let super::contract::Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(route) = spec.route else {
             return Err(format!(
                 "TriadSm90a/{} has foreign route metadata",
                 spec.symbol
@@ -7196,19 +7276,19 @@ fn validate_tf32_feature_instructions(
     let expected_contract = match module_kind {
         ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist => (
             ResolvedInstructionFamily::MmaSync,
-            ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+            ResolvedOperandConversion::RegisterCvtRnaTf32F32,
         ),
         ModuleKind::TriadSm90a => (
             ResolvedInstructionFamily::Wgmma,
-            ResolvedOperandConversion::TensorMapTfloat32V1,
+            ResolvedOperandConversion::TensorMapTfloat32,
         ),
         ModuleKind::TriadSm100 => (
             ResolvedInstructionFamily::Tcgen05,
-            ResolvedOperandConversion::TensorMapTfloat32V1,
+            ResolvedOperandConversion::TensorMapTfloat32,
         ),
         ModuleKind::TriadSm120 => (
             ResolvedInstructionFamily::MmaSync,
-            ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+            ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32,
         ),
         _ => return Ok(()),
     };
@@ -7225,7 +7305,7 @@ fn validate_tf32_feature_instructions(
                 && contract
                     == (
                         ResolvedInstructionFamily::MmaSync,
-                        ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+                        ResolvedOperandConversion::RegisterAddHalfUlpTf32,
                     ))
     };
     if super::contract::tf32_route_specs_all(module_kind)
@@ -7276,7 +7356,7 @@ fn validate_tf32_feature_instructions(
     for kernel_spec in super::contract::tf32_route_specs_for(module_kind, extensions) {
         let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
         let add_half_ulp =
-            kernel_spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32V1;
+            kernel_spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32;
         let required = if kernel_spec.route.is_exact_fma() {
             EXACT_REQUIRED
         } else if add_half_ulp {
@@ -7345,9 +7425,9 @@ const TYPED_PRELUDE: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
-// The files physically live under `kernels/gemm_bi_inference/`, but their
-// legacy `logical_name` values are compiler-visible `#line` boundaries and
-// remain frozen to preserve source, compile-key, and artifact identities.
+// Each `logical_name` is the file's real path and becomes a compiler-visible
+// `#line` boundary, so it is part of the source, compile-key, and artifact
+// identities: moving a file re-pins every cohort that composes it.
 const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TYPED_PRELUDE,
     SourceFragment {
@@ -7396,125 +7476,125 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/common.cuh",
+        logical_name: "kernels/gemm_bi_inference/common.cuh",
         source: include_str!("../../../../kernels/gemm_bi_inference/common.cuh"),
         allowed_quoted_includes: &["_typed_prelude.cuh"],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/ffma.cu",
+        logical_name: "kernels/gemm_bi_inference/ffma.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/ffma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/tf32.cu",
+        logical_name: "kernels/gemm_bi_inference/tf32.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/tf32.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/tf32_sm120.cu",
-        source: include_str!("../../../../kernels/gemm_bi_inference/tf32_sm120.cu"),
+        logical_name: "kernels/gemm_bi_inference/sm120/tf32.cu",
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm120/tf32.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/sm120_tma.cu",
-        source: include_str!("../../../../kernels/gemm_bi_inference/sm120_tma.cu"),
+        logical_name: "kernels/gemm_bi_inference/sm120/tma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm120/tma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/wmma_legacy.cu",
+        logical_name: "kernels/gemm_bi_inference/wmma_legacy.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/wmma_legacy.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/matvec.cu",
+        logical_name: "kernels/gemm_bi_inference/matvec.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/matvec.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/mma16.cu",
+        logical_name: "kernels/gemm_bi_inference/mma16.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/mma16.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/tcw64.cu",
+        logical_name: "kernels/gemm_bi_inference/tcw64.cu",
         source: include_str!("../../../../kernels/gemm_bi_inference/tcw64.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/sm90_wgmma.cu",
-        source: include_str!("../../../../kernels/gemm_bi_inference/sm90_wgmma.cu"),
+        logical_name: "kernels/gemm_bi_inference/sm90a/wgmma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm90a/wgmma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
-        source: include_str!("../../../../kernels/gemm_bi_inference/sm100_tcgen05.cu"),
+        logical_name: "kernels/gemm_bi_inference/sm100/tcgen05.cu",
+        source: include_str!("../../../../kernels/gemm_bi_inference/sm100/tcgen05.cu"),
         allowed_quoted_includes: &[],
     },
 ];
 
 const FIXED_SM89_HALF_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_pipeline.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_pipeline.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_f32_n64_copyplan.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/tf32_rna_wide.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh"),
+    logical_name: "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_swizzle.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_swizzle.cu"),
     allowed_quoted_includes: &["sm89_half_swizzle_layout.cuh"],
 };
 
 const FIXED_SM89_HALF_S3_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_half_s3.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_s3.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/half_s3.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_s3.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_N96_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/tf32_rna_n96.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm89_half_n64.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89_half_n64.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm89/half_n64.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_n64.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_n64_copyplan.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_SLICED_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_n64_sliced.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm120/f32_n64_sliced.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120/f32_n64_sliced.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_fixed/sm120_f32_postbias.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm120_f32_postbias.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm120/f32_postbias.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm120/f32_postbias.cu"),
     allowed_quoted_includes: &[],
 };
 
@@ -7584,8 +7664,8 @@ const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/sm80.cu",
-        source: include_str!("../../../../kernels/gemm_bi_triad/sm80.cu"),
+        logical_name: "kernels/gemm_bi_triad/sm80/mma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm80/mma.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -7594,24 +7674,24 @@ const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
 /// every sm80-family target except CC 12.x (see
 /// [`sm80_target_composes_streamk`]).
 const SM80_STREAMK_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_triad/sm80_streamk.cu",
-    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_streamk.cu"),
+    logical_name: "kernels/gemm_bi_triad/sm80/streamk.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80/streamk.cu"),
     allowed_quoted_includes: &[],
 };
 
 /// The wide deterministic TF32 tile (NN, 128 x 128, eight computing
 /// warps), composed with the stream-K fragment on the same targets.
 const SM80_TF32_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_triad/sm80_tf32_wide.cu",
-    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_tf32_wide.cu"),
+    logical_name: "kernels/gemm_bi_triad/sm80/tf32_wide.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide.cu"),
     allowed_quoted_includes: &[],
 };
 
 /// The TN split-K family (eight partitions on the m64n64 and m32n32 tiles),
 /// composed with the other two extension fragments on the same targets.
 const SM80_TN_SPLITK_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_triad/sm80_tn_splitk.cu",
-    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_tn_splitk.cu"),
+    logical_name: "kernels/gemm_bi_triad/sm80/tn_splitk.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80/tn_splitk.cu"),
     allowed_quoted_includes: &[],
 };
 
@@ -7637,8 +7717,8 @@ const SM90A_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TRIAD_COMMON,
     TRIAD_EPILOGUE,
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/sm90a.cu",
-        source: include_str!("../../../../kernels/gemm_bi_triad/sm90a.cu"),
+        logical_name: "kernels/gemm_bi_triad/sm90a/wgmma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm90a/wgmma.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -7649,8 +7729,8 @@ const SM100_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TRIAD_COMMON,
     TRIAD_EPILOGUE,
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/sm100.cu",
-        source: include_str!("../../../../kernels/gemm_bi_triad/sm100.cu"),
+        logical_name: "kernels/gemm_bi_triad/sm100/tcgen05.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm100/tcgen05.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -7661,131 +7741,126 @@ const SM120_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TRIAD_COMMON,
     TRIAD_EPILOGUE,
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/sm120.cu",
-        source: include_str!("../../../../kernels/gemm_bi_triad/sm120.cu"),
+        logical_name: "kernels/gemm_bi_triad/sm120/tma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm120/tma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/sm120_exact.cu",
-        source: include_str!("../../../../kernels/gemm_bi_triad/sm120_exact.cu"),
+        logical_name: "kernels/gemm_bi_triad/sm120/exact.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm120/exact.cu"),
         allowed_quoted_includes: &[],
     },
 ];
 
 pub(super) const SCALAR_ZERO_REDUCTION_SYMBOLS: &[&str] = &[
-    "gemm_bi_nn_zero_reduction_v1",
-    "gemm_bi_tn_zero_reduction_v1",
-    "gemm_bi_nt_zero_reduction_v1",
+    "nn_zero_reduction",
+    "tn_zero_reduction",
+    "nt_zero_reduction",
 ];
 
 pub(super) const SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS: &[&str] = &[
-    "gemm_bi_tn_narrow_splitm_partial",
-    "gemm_bi_tn_narrow_splitm_partial_aligned",
+    "tn_narrow_splitm_partial",
+    "tn_narrow_splitm_partial_aligned",
 ];
 
-pub(super) const SCALAR_TN_SPLITM_PARTIAL_SYMBOLS: &[&str] = &[
-    "gemm_bi_tn_splitm_partial",
-    "gemm_bi_tn_splitm_partial_aligned",
-];
+pub(super) const SCALAR_TN_SPLITM_PARTIAL_SYMBOLS: &[&str] =
+    &["tn_splitm_partial", "tn_splitm_partial_aligned"];
 
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
-    "gemm_bi_nn",
-    "gemm_bi_nn_m64n64_bk16_s2_v1",
-    "gemm_bi_nn_splitk32_m32n64_exact_v1",
-    "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-    "gemm_bi_nn_zero_reduction_v1",
-    "gemm_bi_tn",
-    "gemm_bi_tn_aligned",
-    "gemm_bi_tn_zero_reduction_v1",
-    "gemm_bi_tn_narrow_splitm_partial",
-    "gemm_bi_tn_narrow_splitm_partial_aligned",
-    "gemm_bi_tn_splitm_partial",
-    "gemm_bi_tn_splitm_partial_aligned",
-    "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
-    "gemm_bi_splitm_reduce",
-    "gemm_bi_nt",
-    "gemm_bi_nt_m2n16_bk64_splitk32_v1",
-    "gemm_bi_nt_zero_reduction_v1",
-    "gemm_bi_nn_slim",
-    "gemm_bi_nn_splitk_slim_partial",
-    "gemm_bi_tn_slim",
-    "gemm_bi_nt_slim",
-    "gemm_bi_nn_ultra_thin",
-    "gemm_bi_nn_gemv",
-    "gemm_bi_tn_gemv",
-    "gemm_bi_nt_gemv",
-    "gemm_bi_nn_narrow",
-    "gemm_bi_nn_narrow_small",
-    "gemm_bi_tn_narrow",
-    "gemm_bi_nt_narrow",
-    "gemm_bi_nn_splitk32_partial",
-    "gemm_bi_splitk_reduce",
-    "gemm_bi_dx_col_gemv",
-    "gemm_bi_transpose_f32_2d",
-    "gemm_bi_transpose_f32_32x16_d768_v1",
-    "gemm_bi_nn_gemv_bf16",
-    "gemm_bi_nn_gemv_f16",
-    "gemm_bi_tn_gemv_bf16",
-    "gemm_bi_tn_gemv_f16",
-    "gemm_bi_nt_gemv_bf16",
-    "gemm_bi_nt_gemv_f16",
-    "gemm_bi_nn_ultra_thin_bf16",
-    "gemm_bi_nn_ultra_thin_f16",
-    "gemm_bi_nn_narrow_bf16",
-    "gemm_bi_nn_narrow_f16",
-    "gemm_bi_nn_narrow_small_bf16",
-    "gemm_bi_nn_narrow_small_f16",
-    "gemm_bi_tn_narrow_bf16",
-    "gemm_bi_tn_narrow_f16",
-    "gemm_bi_nt_narrow_bf16",
-    "gemm_bi_nt_narrow_f16",
-    "gemm_bi_nn_big_bf16",
-    "gemm_bi_nn_big_f16",
-    "gemm_bi_tn_big_bf16",
-    "gemm_bi_tn_big_f16",
-    "gemm_bi_nt_big_bf16",
-    "gemm_bi_nt_big_f16",
+    "nn_big",
+    "nn_m64n64_bk16_s2",
+    "nn_splitk32_m32n64_exact",
+    "nn_prism_m64n64_bk16_s2",
+    "nn_zero_reduction",
+    "tn_big",
+    "tn_aligned",
+    "tn_zero_reduction",
+    "tn_narrow_splitm_partial",
+    "tn_narrow_splitm_partial_aligned",
+    "tn_splitm_partial",
+    "tn_splitm_partial_aligned",
+    "tn_m16n16_bk16_s2_splitm16",
+    "splitm_reduce",
+    "nt_big",
+    "nt_m2n16_bk64_splitk32",
+    "nt_zero_reduction",
+    "nn_slim",
+    "nn_splitk_slim_partial",
+    "tn_slim",
+    "nt_slim",
+    "nn_ultra_thin",
+    "nn_gemv",
+    "tn_gemv",
+    "nt_gemv",
+    "nn_narrow",
+    "nn_narrow_small",
+    "tn_narrow",
+    "nt_narrow",
+    "nn_splitk32_partial",
+    "splitk_reduce",
+    "dx_col_gemv",
+    "transpose_f32_2d",
+    "transpose_f32_32x16_d768",
+    "nn_gemv_bf16",
+    "nn_gemv_f16",
+    "tn_gemv_bf16",
+    "tn_gemv_f16",
+    "nt_gemv_bf16",
+    "nt_gemv_f16",
+    "nn_ultra_thin_bf16",
+    "nn_ultra_thin_f16",
+    "nn_narrow_bf16",
+    "nn_narrow_f16",
+    "nn_narrow_small_bf16",
+    "nn_narrow_small_f16",
+    "tn_narrow_bf16",
+    "tn_narrow_f16",
+    "nt_narrow_bf16",
+    "nt_narrow_f16",
+    "nn_big_bf16",
+    "nn_big_f16",
+    "tn_big_bf16",
+    "tn_big_f16",
+    "nt_big_bf16",
+    "nt_big_f16",
 ];
 
 pub(super) const SM80_SYMBOLS: &[&str] = &[
-    "gemm_bi_nn_tc_bf16",
-    "gemm_bi_nn_tc_f16",
-    "gemm_bi_tn_tc_bf16",
-    "gemm_bi_tn_tc_f16",
-    "gemm_bi_nt_tc_bf16",
-    "gemm_bi_nt_tc_f16",
-    "gemm_bi_nn_tc64_bf16",
-    "gemm_bi_nn_tc64_f16",
-    "gemm_bi_nn_tc16_bf16",
-    "gemm_bi_nn_tc16_f16",
-    "gemm_bi_tn_tc64_bf16",
-    "gemm_bi_tn_tc64_f16",
-    "gemm_bi_tn_tc128x64_bf16",
-    "gemm_bi_tn_tc128x64_f16",
-    "gemm_bi_nt_tc64_bf16",
-    "gemm_bi_nt_tc64_f16",
+    "nn_tc_bf16",
+    "nn_tc_f16",
+    "tn_tc_bf16",
+    "tn_tc_f16",
+    "nt_tc_bf16",
+    "nt_tc_f16",
+    "nn_tc64_bf16",
+    "nn_tc64_f16",
+    "nn_tc16_bf16",
+    "nn_tc16_f16",
+    "tn_tc64_bf16",
+    "tn_tc64_f16",
+    "tn_tc128x64_bf16",
+    "tn_tc128x64_f16",
+    "nt_tc64_bf16",
+    "nt_tc64_f16",
 ];
 
 /// Exports of the stream-K fragment; present only where
 /// [`sm80_target_composes_streamk`] holds.
-pub(super) const SM80_STREAMK_SYMBOLS: &[&str] = &[
-    "gemm_bi_tn_tc64_streamk_bf16",
-    "gemm_bi_tn_tc64_streamk_f16",
-];
+pub(super) const SM80_STREAMK_SYMBOLS: &[&str] = &["tn_tc64_streamk_bf16", "tn_tc64_streamk_f16"];
 
 pub const SM90A_SYMBOLS: &[&str] = &[
-    "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
-    "gemm_bi_nn_sm90a_wgmma_wg1_f16",
-    "gemm_bi_tn_sm90a_wgmma_wg1_bf16",
-    "gemm_bi_tn_sm90a_wgmma_wg1_f16",
-    "gemm_bi_nt_sm90a_wgmma_wg1_bf16",
-    "gemm_bi_nt_sm90a_wgmma_wg1_f16",
-    "gemm_bi_nn_sm90a_wgmma_wg2_bf16",
-    "gemm_bi_nn_sm90a_wgmma_wg2_f16",
-    "gemm_bi_tn_sm90a_wgmma_wg2_bf16",
-    "gemm_bi_tn_sm90a_wgmma_wg2_f16",
-    "gemm_bi_nt_sm90a_wgmma_wg2_bf16",
-    "gemm_bi_nt_sm90a_wgmma_wg2_f16",
+    "nn_sm90a_wgmma_wg1_bf16",
+    "nn_sm90a_wgmma_wg1_f16",
+    "tn_sm90a_wgmma_wg1_bf16",
+    "tn_sm90a_wgmma_wg1_f16",
+    "nt_sm90a_wgmma_wg1_bf16",
+    "nt_sm90a_wgmma_wg1_f16",
+    "nn_sm90a_wgmma_wg2_bf16",
+    "nn_sm90a_wgmma_wg2_f16",
+    "tn_sm90a_wgmma_wg2_bf16",
+    "tn_sm90a_wgmma_wg2_f16",
+    "nt_sm90a_wgmma_wg2_bf16",
+    "nt_sm90a_wgmma_wg2_f16",
 ];
 
 fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], String> {
@@ -8883,14 +8958,14 @@ pub struct GemmBiKernels {
     sm120_tensor_maps: Sm120MapCache,
 
     pub gemm_bi_nn: CudaFunction,
-    pub gemm_bi_nn_m64n64_bk16_s2_v1: CudaFunction,
-    pub gemm_bi_nn_splitk32_m32n64_exact_v1: CudaFunction,
-    pub gemm_bi_nn_prism_m64n64_bk16_s2_v1: CudaFunction,
+    pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction,
+    pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
+    pub gemm_bi_nn_prism_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_tn: CudaFunction,
     pub gemm_bi_tn_aligned: CudaFunction,
-    pub gemm_bi_tn_m16n16_bk16_s2_splitm16_v1: CudaFunction,
+    pub gemm_bi_tn_m16n16_bk16_s2_splitm16: CudaFunction,
     pub gemm_bi_nt: CudaFunction,
-    pub gemm_bi_nt_m2n16_bk64_splitk32_v1: CudaFunction,
+    pub gemm_bi_nt_m2n16_bk64_splitk32: CudaFunction,
     pub gemm_bi_nn_slim: CudaFunction,
     pub gemm_bi_tn_slim: CudaFunction,
     pub gemm_bi_nt_slim: CudaFunction,
@@ -8911,7 +8986,7 @@ pub struct GemmBiKernels {
     pub gemm_bi_splitm_reduce: CudaFunction,
     pub gemm_bi_nn_splitk_slim_partial: CudaFunction,
     pub gemm_bi_transpose_f32_2d: CudaFunction,
-    pub gemm_bi_transpose_f32_32x16_d768_v1: CudaFunction,
+    pub gemm_bi_transpose_f32_32x16_d768: CudaFunction,
     pub gemm_bi_dx_col_gemv: CudaFunction,
     pub gemm_bi_nn_zero_reduction: CudaFunction,
     pub gemm_bi_tn_zero_reduction: CudaFunction,
@@ -9252,7 +9327,7 @@ impl GemmBiKernels {
 
         let gemm_bi_tn_tc64_streamk_typed =
             if sm80_target_composes_streamk(sm80.compiler_identity.target.as_str()) {
-                Some(load_half("gemm_bi_tn_tc64_streamk")?)
+                Some(load_half("tn_tc64_streamk")?)
             } else {
                 None
             };
@@ -9260,44 +9335,44 @@ impl GemmBiKernels {
             Some(kernel) => streamk_resident_ctas(kernel)?,
             None => 0,
         };
-        let gemm_bi_nn = load("gemm_bi_nn")?;
-        set_dynamic_shared(&gemm_bi_nn, "gemm_bi_nn", 34 * 1024)?;
-        let gemm_bi_nn_m64n64_bk16_s2_v1 = load("gemm_bi_nn_m64n64_bk16_s2_v1")?;
+        let gemm_bi_nn = load("nn_big")?;
+        set_dynamic_shared(&gemm_bi_nn, "nn_big", 34 * 1024)?;
+        let gemm_bi_nn_m64n64_bk16_s2 = load("nn_m64n64_bk16_s2")?;
         set_dynamic_shared(
-            &gemm_bi_nn_m64n64_bk16_s2_v1,
-            "gemm_bi_nn_m64n64_bk16_s2_v1",
+            &gemm_bi_nn_m64n64_bk16_s2,
+            "nn_m64n64_bk16_s2",
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let gemm_bi_nn_splitk32_m32n64_exact_v1 = load("gemm_bi_nn_splitk32_m32n64_exact_v1")?;
-        let gemm_bi_nn_prism_m64n64_bk16_s2_v1 = load("gemm_bi_nn_prism_m64n64_bk16_s2_v1")?;
+        let gemm_bi_nn_splitk32_m32n64_exact = load("nn_splitk32_m32n64_exact")?;
+        let gemm_bi_nn_prism_m64n64_bk16_s2 = load("nn_prism_m64n64_bk16_s2")?;
         set_dynamic_shared(
-            &gemm_bi_nn_prism_m64n64_bk16_s2_v1,
-            "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+            &gemm_bi_nn_prism_m64n64_bk16_s2,
+            "nn_prism_m64n64_bk16_s2",
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let gemm_bi_tn = load("gemm_bi_tn")?;
-        set_dynamic_shared(&gemm_bi_tn, "gemm_bi_tn", 34 * 1024)?;
-        let gemm_bi_tn_aligned = load("gemm_bi_tn_aligned")?;
-        set_dynamic_shared(&gemm_bi_tn_aligned, "gemm_bi_tn_aligned", 34 * 1024)?;
-        let gemm_bi_tn_m16n16_bk16_s2_splitm16_v1 = load("gemm_bi_tn_m16n16_bk16_s2_splitm16_v1")?;
+        let gemm_bi_tn = load("tn_big")?;
+        set_dynamic_shared(&gemm_bi_tn, "tn_big", 34 * 1024)?;
+        let gemm_bi_tn_aligned = load("tn_aligned")?;
+        set_dynamic_shared(&gemm_bi_tn_aligned, "tn_aligned", 34 * 1024)?;
+        let gemm_bi_tn_m16n16_bk16_s2_splitm16 = load("tn_m16n16_bk16_s2_splitm16")?;
         set_dynamic_shared(
-            &gemm_bi_tn_m16n16_bk16_s2_splitm16_v1,
-            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+            &gemm_bi_tn_m16n16_bk16_s2_splitm16,
+            "tn_m16n16_bk16_s2_splitm16",
             super::contract::SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let gemm_bi_nt = load("gemm_bi_nt")?;
+        let gemm_bi_nt = load("nt_big")?;
         set_dynamic_shared(
             &gemm_bi_nt,
-            "gemm_bi_nt",
+            "nt_big",
             super::contract::SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let gemm_bi_nt_m2n16_bk64_splitk32_v1 = load("gemm_bi_nt_m2n16_bk64_splitk32_v1")?;
+        let gemm_bi_nt_m2n16_bk64_splitk32 = load("nt_m2n16_bk64_splitk32")?;
         set_dynamic_shared(
-            &gemm_bi_nt_m2n16_bk64_splitk32_v1,
-            "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+            &gemm_bi_nt_m2n16_bk64_splitk32,
+            "nt_m2n16_bk64_splitk32",
             super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let gemm_bi_transpose_f32_32x16_d768_v1 = load("gemm_bi_transpose_f32_32x16_d768_v1")?;
+        let gemm_bi_transpose_f32_32x16_d768 = load("transpose_f32_32x16_d768")?;
         let scalar_compiler = scalar.compiler_identity;
         let scalar_artifact = scalar.artifact_identity;
         if qualified_scalar_resource_environment(
@@ -9306,10 +9381,10 @@ impl GemmBiKernels {
             scalar_compiler,
             scalar_artifact,
         ) {
-            qualify_scalar_nt_d768_transpose(&gemm_bi_transpose_f32_32x16_d768_v1)?;
-            qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact_v1)?;
-            qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32_v1)?;
-            qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16_v1)?;
+            qualify_scalar_nt_d768_transpose(&gemm_bi_transpose_f32_32x16_d768)?;
+            qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact)?;
+            qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32)?;
+            qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16)?;
         }
 
         let specialized_functions = specialized
@@ -9399,62 +9474,60 @@ impl GemmBiKernels {
             sm100_tensor_maps: Mutex::new(HashMap::new()),
             sm120_tensor_maps: Mutex::new(HashMap::new()),
             gemm_bi_nn,
-            gemm_bi_nn_m64n64_bk16_s2_v1,
-            gemm_bi_nn_splitk32_m32n64_exact_v1,
-            gemm_bi_nn_prism_m64n64_bk16_s2_v1,
+            gemm_bi_nn_m64n64_bk16_s2,
+            gemm_bi_nn_splitk32_m32n64_exact,
+            gemm_bi_nn_prism_m64n64_bk16_s2,
             gemm_bi_tn,
             gemm_bi_tn_aligned,
-            gemm_bi_tn_m16n16_bk16_s2_splitm16_v1,
+            gemm_bi_tn_m16n16_bk16_s2_splitm16,
             gemm_bi_nt,
-            gemm_bi_nt_m2n16_bk64_splitk32_v1,
-            gemm_bi_nn_slim: load("gemm_bi_nn_slim")?,
-            gemm_bi_tn_slim: load("gemm_bi_tn_slim")?,
-            gemm_bi_nt_slim: load("gemm_bi_nt_slim")?,
-            gemm_bi_nn_ultra_thin: load("gemm_bi_nn_ultra_thin")?,
-            gemm_bi_nn_gemv: load("gemm_bi_nn_gemv")?,
-            gemm_bi_tn_gemv: load("gemm_bi_tn_gemv")?,
-            gemm_bi_nt_gemv: load("gemm_bi_nt_gemv")?,
-            gemm_bi_nn_narrow: load("gemm_bi_nn_narrow")?,
-            gemm_bi_nn_narrow_small: load("gemm_bi_nn_narrow_small")?,
-            gemm_bi_tn_narrow: load("gemm_bi_tn_narrow")?,
-            gemm_bi_tn_narrow_splitm_partial: load("gemm_bi_tn_narrow_splitm_partial")?,
-            gemm_bi_tn_narrow_splitm_partial_aligned: load(
-                "gemm_bi_tn_narrow_splitm_partial_aligned",
-            )?,
-            gemm_bi_nt_narrow: load("gemm_bi_nt_narrow")?,
-            gemm_bi_nn_splitk32_partial: load("gemm_bi_nn_splitk32_partial")?,
-            gemm_bi_splitk_reduce: load("gemm_bi_splitk_reduce")?,
-            gemm_bi_tn_splitm_partial: load("gemm_bi_tn_splitm_partial")?,
-            gemm_bi_tn_splitm_partial_aligned: load("gemm_bi_tn_splitm_partial_aligned")?,
-            gemm_bi_splitm_reduce: load("gemm_bi_splitm_reduce")?,
-            gemm_bi_nn_splitk_slim_partial: load("gemm_bi_nn_splitk_slim_partial")?,
-            gemm_bi_transpose_f32_2d: load("gemm_bi_transpose_f32_2d")?,
-            gemm_bi_transpose_f32_32x16_d768_v1,
-            gemm_bi_dx_col_gemv: load("gemm_bi_dx_col_gemv")?,
-            gemm_bi_nn_zero_reduction: load("gemm_bi_nn_zero_reduction_v1")?,
-            gemm_bi_tn_zero_reduction: load("gemm_bi_tn_zero_reduction_v1")?,
-            gemm_bi_nt_zero_reduction: load("gemm_bi_nt_zero_reduction_v1")?,
-            gemm_bi_nn_gemv_typed: load_half("gemm_bi_nn_gemv")?,
-            gemm_bi_tn_gemv_typed: load_half("gemm_bi_tn_gemv")?,
-            gemm_bi_nt_gemv_typed: load_half("gemm_bi_nt_gemv")?,
-            gemm_bi_nn_ultra_thin_typed: load_half("gemm_bi_nn_ultra_thin")?,
-            gemm_bi_nn_narrow_typed: load_half("gemm_bi_nn_narrow")?,
-            gemm_bi_nn_narrow_small_typed: load_half("gemm_bi_nn_narrow_small")?,
-            gemm_bi_tn_narrow_typed: load_half("gemm_bi_tn_narrow")?,
-            gemm_bi_nt_narrow_typed: load_half("gemm_bi_nt_narrow")?,
-            gemm_bi_nn_big_typed: load_half_dynsmem("gemm_bi_nn_big", 34 * 1024)?,
-            gemm_bi_tn_big_typed: load_half_dynsmem("gemm_bi_tn_big", 34 * 1024)?,
-            gemm_bi_nt_big_typed: load_half_dynsmem("gemm_bi_nt_big", 34 * 1024)?,
-            gemm_bi_nn_tc_typed: load_half_dynsmem("gemm_bi_nn_tc", 75_776)?,
-            gemm_bi_tn_tc_typed: load_half_dynsmem("gemm_bi_tn_tc", 75_776)?,
-            gemm_bi_nt_tc_typed: load_half_dynsmem("gemm_bi_nt_tc", 75_776)?,
-            gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
-            gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
-            gemm_bi_tn_tc64_typed: load_half("gemm_bi_tn_tc64")?,
+            gemm_bi_nt_m2n16_bk64_splitk32,
+            gemm_bi_nn_slim: load("nn_slim")?,
+            gemm_bi_tn_slim: load("tn_slim")?,
+            gemm_bi_nt_slim: load("nt_slim")?,
+            gemm_bi_nn_ultra_thin: load("nn_ultra_thin")?,
+            gemm_bi_nn_gemv: load("nn_gemv")?,
+            gemm_bi_tn_gemv: load("tn_gemv")?,
+            gemm_bi_nt_gemv: load("nt_gemv")?,
+            gemm_bi_nn_narrow: load("nn_narrow")?,
+            gemm_bi_nn_narrow_small: load("nn_narrow_small")?,
+            gemm_bi_tn_narrow: load("tn_narrow")?,
+            gemm_bi_tn_narrow_splitm_partial: load("tn_narrow_splitm_partial")?,
+            gemm_bi_tn_narrow_splitm_partial_aligned: load("tn_narrow_splitm_partial_aligned")?,
+            gemm_bi_nt_narrow: load("nt_narrow")?,
+            gemm_bi_nn_splitk32_partial: load("nn_splitk32_partial")?,
+            gemm_bi_splitk_reduce: load("splitk_reduce")?,
+            gemm_bi_tn_splitm_partial: load("tn_splitm_partial")?,
+            gemm_bi_tn_splitm_partial_aligned: load("tn_splitm_partial_aligned")?,
+            gemm_bi_splitm_reduce: load("splitm_reduce")?,
+            gemm_bi_nn_splitk_slim_partial: load("nn_splitk_slim_partial")?,
+            gemm_bi_transpose_f32_2d: load("transpose_f32_2d")?,
+            gemm_bi_transpose_f32_32x16_d768,
+            gemm_bi_dx_col_gemv: load("dx_col_gemv")?,
+            gemm_bi_nn_zero_reduction: load("nn_zero_reduction")?,
+            gemm_bi_tn_zero_reduction: load("tn_zero_reduction")?,
+            gemm_bi_nt_zero_reduction: load("nt_zero_reduction")?,
+            gemm_bi_nn_gemv_typed: load_half("nn_gemv")?,
+            gemm_bi_tn_gemv_typed: load_half("tn_gemv")?,
+            gemm_bi_nt_gemv_typed: load_half("nt_gemv")?,
+            gemm_bi_nn_ultra_thin_typed: load_half("nn_ultra_thin")?,
+            gemm_bi_nn_narrow_typed: load_half("nn_narrow")?,
+            gemm_bi_nn_narrow_small_typed: load_half("nn_narrow_small")?,
+            gemm_bi_tn_narrow_typed: load_half("tn_narrow")?,
+            gemm_bi_nt_narrow_typed: load_half("nt_narrow")?,
+            gemm_bi_nn_big_typed: load_half_dynsmem("nn_big", 34 * 1024)?,
+            gemm_bi_tn_big_typed: load_half_dynsmem("tn_big", 34 * 1024)?,
+            gemm_bi_nt_big_typed: load_half_dynsmem("nt_big", 34 * 1024)?,
+            gemm_bi_nn_tc_typed: load_half_dynsmem("nn_tc", 75_776)?,
+            gemm_bi_tn_tc_typed: load_half_dynsmem("tn_tc", 75_776)?,
+            gemm_bi_nt_tc_typed: load_half_dynsmem("nt_tc", 75_776)?,
+            gemm_bi_nn_tc64_typed: load_half("nn_tc64")?,
+            gemm_bi_nn_tc16_typed: load_half("nn_tc16")?,
+            gemm_bi_tn_tc64_typed: load_half("tn_tc64")?,
             gemm_bi_tn_tc64_streamk_typed,
             tc64_streamk_resident_ctas,
-            gemm_bi_tn_tc128x64_typed: load_half("gemm_bi_tn_tc128x64")?,
-            gemm_bi_nt_tc64_typed: load_half("gemm_bi_nt_tc64")?,
+            gemm_bi_tn_tc128x64_typed: load_half("tn_tc128x64")?,
+            gemm_bi_nt_tc64_typed: load_half("nt_tc64")?,
             splitk_scratch: std::sync::OnceLock::new(),
             tf32_splitk_counters: std::sync::OnceLock::new(),
             transpose_scratch: std::sync::OnceLock::new(),
@@ -9753,7 +9826,7 @@ impl GemmBiKernels {
         binding: super::contract::Tf32MapBinding,
     ) -> Result<super::contract::F32PreparedTensorMaps, String> {
         let expected = match route {
-            super::contract::Tf32PhysicalRoute::MmaTf32RnaV1(_) => {
+            super::contract::Tf32PhysicalRoute::MmaTf32Rna(_) => {
                 self.f32_triad_availability.portable
             }
             _ => self.f32_triad_availability.specialized,
@@ -10237,7 +10310,7 @@ fn tf32_required_occupancy(module_kind: ModuleKind, symbol: &str) -> u32 {
 }
 
 fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, String> {
-    const SM120_TAG33_SYMBOL: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
+    const SM120_TAG33_SYMBOL: &str = "nn_sm120_tma_mma_tf32_m80n32_bk64_s2";
 
     match module_kind {
         // The compiled kernel uses 125 registers on CUDA 12.8 and 13.0 and
@@ -10264,10 +10337,10 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
         // The exact FMA routes hold a 64-accumulator microtile; the NT
         // k-vector arms also keep a float4 B fragment per column.
-        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_v1_") && symbol.ends_with("_kvec") => {
+        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") && symbol.ends_with("_kvec") => {
             Ok(super::contract::SM120_FMA_KVEC_REGISTER_CAP)
         }
-        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_v1_") => {
+        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") => {
             Ok(super::contract::SM120_FMA_REGISTER_CAP)
         }
         ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => Ok(128),
@@ -10368,7 +10441,7 @@ fn qualify_loaded_tf32_artifact(
     let spec = if finalist {
         super::contract::tf32_kernel_spec(
             ResolvedGemmOp::Nt,
-            super::contract::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            super::contract::Tf32PhysicalRoute::Sm89MmaTf32Compact8,
         )?
     } else {
         super::contract::tf32_route_specs(module_kind)
@@ -11000,9 +11073,7 @@ fn streamk_resident_ctas(kernel: &HalfKernel) -> Result<u32, String> {
     for (name, function) in [("bf16", &kernel.bf16), ("f16", &kernel.f16)] {
         let blocks = function
             .occupancy_max_active_blocks_per_multiprocessor(128, 0, None)
-            .map_err(|error| {
-                format!("query gemm_bi_tn_tc64_streamk_{name} occupancy: {error:?}")
-            })?;
+            .map_err(|error| format!("query tn_tc64_streamk_{name} occupancy: {error:?}"))?;
         resident = resident.min(blocks);
     }
     Ok(resident.max(1))
@@ -11051,32 +11122,32 @@ mod tests {
             (
                 (12, 8),
                 16,
-                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
             ),
             (
                 (12, 8),
                 64,
-                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
             ),
             (
                 (13, 0),
                 16,
-                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
             ),
             (
                 (13, 0),
                 64,
-                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
             ),
             (
                 (13, 2),
                 16,
-                "0cd8a8fb46ebde788d4d26707f88e6d34ef6dca7709aac1189b01837f8bdfe0e",
+                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
             ),
             (
                 (13, 2),
                 64,
-                "46af525527197e579b1509e69c58cf67ed19c59ef70c133cd830f32cf1368fdc",
+                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
             ),
         ] {
             assert_eq!(
@@ -11097,9 +11168,9 @@ mod tests {
     #[test]
     fn inference_source_bundle_appends_each_retained_export_once() {
         let symbols = [
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
-            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+            "nn_sm89_tc128_f32out_s3_bf16",
+            "nn_sm89_tc128_f32out_s3_f16",
+            "nn_sm89_f32_m128n64_tail_copyplan",
         ];
         for cap in [16, 64] {
             for nvrtc in [(12, 8), (13, 0), (13, 2)] {
@@ -11203,9 +11274,9 @@ mod tests {
     #[test]
     fn inference_source_bundle_appends_after_the_complete_fold_overlay() {
         let symbols = [
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_bf16",
-            "gemm_bi_nn_inference_sm89_tc128_f32out_s3_v1_f16",
-            "gemm_bi_nn_inference_sm89_f32_m128n64_tail_copyplan_v1",
+            "nn_sm89_tc128_f32out_s3_bf16",
+            "nn_sm89_tc128_f32out_s3_f16",
+            "nn_sm89_f32_m128n64_tail_copyplan",
         ];
         for state_cap in [16, 64] {
             for nvrtc in [(12, 8), (13, 0), (13, 2)] {
@@ -11592,7 +11663,7 @@ mod tests {
         assert!(
             super::super::sm89_exact_f32_source::SM89_EXACT_F32_KERNEL_SPECS
                 .iter()
-                .all(|spec| source.matches(spec.symbol).count() == 1)
+                .all(|spec| source.matches(&format!("{}(", spec.symbol)).count() == 1)
         );
         assert!(compose_module_source_for(ModuleKind::TriadSm89ExactF32, "compute_89").is_err());
     }
@@ -11624,7 +11695,7 @@ mod tests {
             );
         }
         for foreign in [
-            ".visible .entry gemm_bi_tn_sm89_f32_d128_foreign() { ret; }\n",
+            ".visible .entry tn_sm89_f32_d128_foreign() { ret; }\n",
             ".visible .entry unrelated_callable_export() { ret; }\n",
         ] {
             assert!(
@@ -11815,7 +11886,7 @@ mod tests {
                 "sm_89",
                 &format!(
                     "{baseline}{}",
-                    sm89_exact_f32_d128_test_entry("gemm_bi_tn_sm89_f32_d128_foreign")
+                    sm89_exact_f32_d128_test_entry("tn_sm89_f32_d128_foreign")
                 ),
             )
             .is_err(),
@@ -12097,7 +12168,7 @@ mod tests {
         assert!(
             super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
                 .iter()
-                .all(|spec| source.matches(spec.symbol).count() == 1)
+                .all(|spec| source.matches(&format!("{}(", spec.symbol)).count() == 1)
         );
         assert!(compose_module_source_for(ModuleKind::TriadSm89Tf32Joint, "compute_89").is_err());
     }
@@ -12129,7 +12200,7 @@ mod tests {
             );
         }
         for foreign in [
-            ".visible .entry gemm_bi_tn_sm89_tf32_foreign() { ret; }\n",
+            ".visible .entry tn_sm89_tf32_foreign() { ret; }\n",
             ".visible .entry unrelated_callable_export() { ret; }\n",
         ] {
             assert!(
@@ -12275,7 +12346,7 @@ mod tests {
         );
         assert!(compose_module_source_for(ModuleKind::TriadSm89Finalist, "compute_89").is_err());
 
-        let original = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+        let original = "nt_sm80_mma_tf32_m128n64_bk32_s2";
         let mut symbols = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm80)
             .filter(|&symbol| symbol != original)
             .collect::<Vec<_>>();
@@ -12298,7 +12369,7 @@ mod tests {
         );
         assert!(
             validate_sm89_finalist_ptx_inventory(&format!(
-                "{complete}.visible .entry gemm_bi_nn_sm90a_wgmma_tf32_v1_foreign() {{ ret; }}\n"
+                "{complete}.visible .entry nn_sm90a_wgmma_tf32_foreign() {{ ret; }}\n"
             ))
             .is_err()
         );
@@ -12420,14 +12491,14 @@ mod tests {
             kvec: false,
             splits: 2,
         };
-        let excluded_symbol = "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2";
+        let excluded_symbol = "nt_sm120_tma_fma_m64n128_bk16_s2";
         let exclusions = [
             Tf32SymbolExclusion {
                 symbol: excluded_symbol,
                 reason: "test exact exclusion".into(),
             },
             Tf32SymbolExclusion {
-                symbol: "gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2",
+                symbol: "nt_sm120_tma_mma_tf32_m64n64_bk32_s2",
                 reason: "test non-exact exclusion".into(),
             },
         ];
@@ -12527,7 +12598,7 @@ mod tests {
 
     #[test]
     fn tf32_driver_jit_local_memory_admission_requires_zero() {
-        let symbol = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3";
+        let symbol = "nn_sm120_tma_mma_tf32_m64n128_bk32_s3";
         let qualified = Tf32DriverJitLocalMemoryFacts {
             module_kind: ModuleKind::TriadSm120,
             symbol,
@@ -12548,7 +12619,7 @@ mod tests {
 
     #[test]
     fn tf32_register_caps_freeze_the_rect_wide_symbol_without_weakening_generic_caps() {
-        const TAG33: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
+        const TAG33: &str = "nn_sm120_tma_mma_tf32_m80n32_bk64_s2";
 
         assert_eq!(
             tf32_register_cap(
@@ -12572,15 +12643,15 @@ mod tests {
         assert_eq!(
             tf32_register_cap(
                 ModuleKind::TriadSm120,
-                "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"
+                "nn_sm120_tma_mma_tf32_m64n64_bk32_s2"
             ),
             Ok(128)
         );
         for mutated in [
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s3",
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk32_s2",
-            "gemm_bi_tn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2",
-            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2_exp",
+            "nn_sm120_tma_mma_tf32_m80n32_bk64_s3",
+            "nn_sm120_tma_mma_tf32_m80n32_bk32_s2",
+            "tn_sm120_tma_mma_tf32_m80n32_bk64_s2",
+            "nn_sm120_tma_mma_tf32_m80n32_bk64_s2_exp",
         ] {
             assert_eq!(
                 tf32_register_cap(ModuleKind::TriadSm120, mutated),
@@ -12744,7 +12815,7 @@ mod tests {
     #[test]
     fn specialized_tf32_qualification_error_is_not_reported_as_unavailable() {
         let functions = HashMap::from([("tf32", 7_u8)]);
-        let rejected_symbol = "gemm_bi_nn_sm120_mma_tf32_v1_m16n32_bk16_s4";
+        let rejected_symbol = "nn_sm120_mma_tf32_m16n32_bk16_s4";
         let qualification_error = format!(
             "specialized TF32 symbol {rejected_symbol} rejected: registers 129 exceed limit 128"
         );
@@ -12769,7 +12840,7 @@ mod tests {
 
     #[test]
     fn specialized_tf32_function_load_preserves_symbol_and_resource_error() {
-        let rejected_symbol = "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4";
+        let rejected_symbol = "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s4";
         let load_error = format!(
             "load specialized TF32 symbol {rejected_symbol}: dynamic shared memory 65536 exceeds device limit 49152"
         );
@@ -12887,7 +12958,7 @@ mod tests {
         }
         let foreign = valid.replace(
             ".version 9.0",
-            ".version 9.0\n.visible .entry foreign_tf32_splitk2_v1_kernel() { ret; }",
+            ".version 9.0\n.visible .entry foreign_tf32_splitk2_kernel() { ret; }",
         );
         assert!(validate_tf32_splitk_ptx(false, &foreign).is_err());
         let wrong_bundle = valid.replacen("bundle[32]", "bundle[40]", 1);
@@ -13065,10 +13136,7 @@ mod tests {
                 ".visible .entry {symbol}(\n{partial_parameters}\n) {{ {partial_body} }}\n"
             ));
         }
-        for symbol in [
-            "gemm_bi_tn_splitm_partial",
-            "gemm_bi_tn_splitm_partial_aligned",
-        ] {
+        for symbol in ["tn_splitm_partial", "tn_splitm_partial_aligned"] {
             ptx.push_str(&format!(
                 ".visible .entry {symbol}(\n{partial_parameters}\n) {{ {generic_partial_body} }}\n"
             ));
@@ -13080,7 +13148,7 @@ mod tests {
             {
                 continue;
             }
-            if *symbol == "gemm_bi_nt_m2n16_bk64_splitk32_v1" {
+            if *symbol == "nt_m2n16_bk64_splitk32" {
                 let parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .f32 alpha,\n.param .u32 m,\n.param .u32 n,\n.param .u32 k_out";
                 let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f32 %f5, %f1, %f4; mul.rn.f32 %f6, %f5, %f2; ret;";
                 ptx.push_str(&format!(
@@ -13088,7 +13156,7 @@ mod tests {
                 ));
                 continue;
             }
-            if *symbol == "gemm_bi_nn_splitk32_m32n64_exact_v1" {
+            if *symbol == "nn_splitk32_m32n64_exact" {
                 let parameters = ".param .u64 partial,\n.param .u64 a,\n.param .u64 b,\n.param .u32 m,\n.param .u32 n,\n.param .u32 chunks,\n.param .u32 lda";
                 let body = "fma.rn.f32 %f1, %f2, %f3, %f4; ret;";
                 ptx.push_str(&format!(
@@ -13096,7 +13164,7 @@ mod tests {
                 ));
                 continue;
             }
-            if *symbol == "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1" {
+            if *symbol == "tn_m16n16_bk16_s2_splitm16" {
                 let parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .f32 alpha,\n.param .u32 m,\n.param .u32 k,\n.param .u32 n";
                 let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f64 %fd1, %fd2, %fd3; mul.rn.f64 %fd4, %fd1, %fd2; cvt.rn.f32.f64 %f6, %fd4; add.rn.f32 %f5, %f1, %f6; ret;";
                 ptx.push_str(&format!(
@@ -13111,7 +13179,7 @@ mod tests {
 
     #[test]
     fn triad_scalar_module_validation_rejects_m2n16_contract_mutations() {
-        const SYMBOL: &str = "gemm_bi_nt_m2n16_bk64_splitk32_v1";
+        const SYMBOL: &str = "nt_m2n16_bk64_splitk32";
         let valid = synthetic_scalar_splitm_module_ptx();
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
 
@@ -13161,7 +13229,7 @@ mod tests {
 
     #[test]
     fn triad_scalar_module_validation_rejects_nn_m32n64_splitk32_mutations() {
-        const SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
+        const SYMBOL: &str = "nn_splitk32_m32n64_exact";
         let valid = synthetic_scalar_splitm_module_ptx();
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
 
@@ -13209,7 +13277,7 @@ mod tests {
 
     #[test]
     fn triad_scalar_module_validation_rejects_tn_m16n16_contract_mutations() {
-        const SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+        const SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
 
@@ -13272,10 +13340,7 @@ mod tests {
     fn triad_scalar_module_validation_rejects_generic_splitm_contract_mutations() {
         let valid = synthetic_scalar_splitm_module_ptx();
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
-        for symbol in [
-            "gemm_bi_tn_splitm_partial",
-            "gemm_bi_tn_splitm_partial_aligned",
-        ] {
+        for symbol in ["tn_splitm_partial", "tn_splitm_partial_aligned"] {
             let missing = valid.replacen(symbol, "removed_tn_splitm_partial", 1);
             assert!(
                 validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing).is_err(),
@@ -13315,11 +13380,11 @@ mod tests {
 
     #[test]
     fn triad_scalar_module_validation_requires_the_exact_whole_module_exports() {
-        const M64N64_SYMBOL: &str = "gemm_bi_nn_m64n64_bk16_s2_v1";
-        const M32N64_SPLITK32_SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
-        const PRISM_M64N64_SYMBOL: &str = "gemm_bi_nn_prism_m64n64_bk16_s2_v1";
-        const D768_TRANSPOSE_SYMBOL: &str = "gemm_bi_transpose_f32_32x16_d768_v1";
-        const TN_M16N16_SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+        const M64N64_SYMBOL: &str = "nn_m64n64_bk16_s2";
+        const M32N64_SPLITK32_SYMBOL: &str = "nn_splitk32_m32n64_exact";
+        const PRISM_M64N64_SYMBOL: &str = "nn_prism_m64n64_bk16_s2";
+        const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
+        const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
         assert_eq!(super::SCALAR_SYMBOLS.len(), 56);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
@@ -13469,12 +13534,12 @@ mod tests {
                 });
             }
             ModuleKind::TriadSm100 => {
-                instructions.push(if symbol.contains("_tf32_v1_") {
+                instructions.push(if symbol.contains("_tf32_") {
                     "tcgen05.mma.cta_group::1.kind::tf32"
                 } else {
                     "tcgen05.mma.cta_group::1.kind::f16"
                 });
-                if symbol.contains("_nn_") {
+                if symbol.starts_with("nn_") {
                     instructions.extend([
                         "tcgen05.st.sync.aligned.32x32b.x8.b32",
                         "tcgen05.wait::st.sync.aligned",
@@ -13482,9 +13547,9 @@ mod tests {
                 }
             }
             ModuleKind::TriadSm120 => {
-                if symbol.contains("_tma_fma_v1_") {
+                if symbol.contains("_tma_fma_") {
                     instructions.push("fma.rn.f32");
-                } else if symbol.contains("_tf32_v1_") {
+                } else if symbol.contains("_tf32_") {
                     instructions.extend([
                         "cvt.rna.tf32.f32",
                         "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
@@ -13497,12 +13562,12 @@ mod tests {
                         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
                     };
                     instructions.push(dtype);
-                    instructions.extend(if symbol.contains("_tn_") {
+                    instructions.extend(if symbol.starts_with("tn_") {
                         [
                             "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
                             "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
                         ]
-                    } else if symbol.contains("_nt_") {
+                    } else if symbol.starts_with("nt_") {
                         [
                             "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                             "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
@@ -14367,9 +14432,9 @@ mod tests {
             [(0, 8), (128, 128), (256, 128), (384, 8), (392, 40)]
         );
         assert_eq!(
-            abi.tsv_record("gemm_bi_nn_tf32_sm100_m128n256_s2")
+            abi.tsv_record("nn_tf32_sm100_m128n256_s2")
                 .expect("safe symbol"),
-            "gemm_bi_nn_tf32_sm100_m128n256_s2\t5\tptx_contract+cuFuncGetParamInfo_terminal_probe\t0:8,128:128,256:128,384:8,392:40"
+            "nn_tf32_sm100_m128n256_s2\t5\tptx_contract+cuFuncGetParamInfo_terminal_probe\t0:8,128:128,256:128,384:8,392:40"
         );
     }
 
@@ -14543,25 +14608,25 @@ mod tests {
         "kernels/loss_scaler.cu",
         "kernels/grad_clip.cu",
         "kernels/adamw.cu",
-        "kernels/gemm_bi_fixed/common.cuh",
-        "kernels/gemm_bi_fixed/ffma.cu",
-        "kernels/gemm_bi_fixed/tf32.cu",
-        "kernels/gemm_bi_fixed/tf32_sm120.cu",
-        "kernels/gemm_bi_fixed/sm120_tma.cu",
-        "kernels/gemm_bi_fixed/wmma_legacy.cu",
-        "kernels/gemm_bi_fixed/matvec.cu",
-        "kernels/gemm_bi_fixed/mma16.cu",
-        "kernels/gemm_bi_fixed/tcw64.cu",
-        "kernels/gemm_bi_fixed/sm90_wgmma.cu",
-        "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
-        "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
-        "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
-        "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
-        "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
-        "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
-        "kernels/gemm_bi_fixed/sm89_half_s3.cu",
-        "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
-        "kernels/gemm_bi_fixed/sm89_half_n64.cu",
+        "kernels/gemm_bi_inference/common.cuh",
+        "kernels/gemm_bi_inference/ffma.cu",
+        "kernels/gemm_bi_inference/tf32.cu",
+        "kernels/gemm_bi_inference/sm120/tf32.cu",
+        "kernels/gemm_bi_inference/sm120/tma.cu",
+        "kernels/gemm_bi_inference/wmma_legacy.cu",
+        "kernels/gemm_bi_inference/matvec.cu",
+        "kernels/gemm_bi_inference/mma16.cu",
+        "kernels/gemm_bi_inference/tcw64.cu",
+        "kernels/gemm_bi_inference/sm90a/wgmma.cu",
+        "kernels/gemm_bi_inference/sm100/tcgen05.cu",
+        "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
+        "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
+        "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
+        "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
+        "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
+        "kernels/gemm_bi_inference/sm89/half_s3.cu",
+        "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
+        "kernels/gemm_bi_inference/sm89/half_n64.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -14583,10 +14648,10 @@ mod tests {
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/mma16.cuh",
-        "kernels/gemm_bi_triad/sm80.cu",
-        "kernels/gemm_bi_triad/sm80_streamk.cu",
-        "kernels/gemm_bi_triad/sm80_tf32_wide.cu",
-        "kernels/gemm_bi_triad/sm80_tn_splitk.cu",
+        "kernels/gemm_bi_triad/sm80/mma.cu",
+        "kernels/gemm_bi_triad/sm80/streamk.cu",
+        "kernels/gemm_bi_triad/sm80/tf32_wide.cu",
+        "kernels/gemm_bi_triad/sm80/tn_splitk.cu",
     ];
 
     const SM90A_FRAGMENTS: &[&str] = &[
@@ -14594,7 +14659,7 @@ mod tests {
         "kernels/gemm_bi_triad/contract.cuh",
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
-        "kernels/gemm_bi_triad/sm90a.cu",
+        "kernels/gemm_bi_triad/sm90a/wgmma.cu",
     ];
 
     const SM100_FRAGMENTS: &[&str] = &[
@@ -14602,7 +14667,7 @@ mod tests {
         "kernels/gemm_bi_triad/contract.cuh",
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
-        "kernels/gemm_bi_triad/sm100.cu",
+        "kernels/gemm_bi_triad/sm100/tcgen05.cu",
     ];
 
     const SM120_FRAGMENTS: &[&str] = &[
@@ -14610,86 +14675,86 @@ mod tests {
         "kernels/gemm_bi_triad/contract.cuh",
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
-        "kernels/gemm_bi_triad/sm120.cu",
-        "kernels/gemm_bi_triad/sm120_exact.cu",
+        "kernels/gemm_bi_triad/sm120/tma.cu",
+        "kernels/gemm_bi_triad/sm120/exact.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
-        "gemm_bi_nn",
-        "gemm_bi_nn_m64n64_bk16_s2_v1",
-        "gemm_bi_nn_splitk32_m32n64_exact_v1",
-        "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
-        "gemm_bi_nn_zero_reduction_v1",
-        "gemm_bi_tn",
-        "gemm_bi_tn_aligned",
-        "gemm_bi_tn_zero_reduction_v1",
-        "gemm_bi_tn_narrow_splitm_partial",
-        "gemm_bi_tn_narrow_splitm_partial_aligned",
-        "gemm_bi_tn_splitm_partial",
-        "gemm_bi_tn_splitm_partial_aligned",
-        "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
-        "gemm_bi_splitm_reduce",
-        "gemm_bi_nt",
-        "gemm_bi_nt_m2n16_bk64_splitk32_v1",
-        "gemm_bi_nt_zero_reduction_v1",
-        "gemm_bi_nn_slim",
-        "gemm_bi_nn_splitk_slim_partial",
-        "gemm_bi_tn_slim",
-        "gemm_bi_nt_slim",
-        "gemm_bi_nn_ultra_thin",
-        "gemm_bi_nn_gemv",
-        "gemm_bi_tn_gemv",
-        "gemm_bi_nt_gemv",
-        "gemm_bi_nn_narrow",
-        "gemm_bi_nn_narrow_small",
-        "gemm_bi_tn_narrow",
-        "gemm_bi_nt_narrow",
-        "gemm_bi_nn_splitk32_partial",
-        "gemm_bi_splitk_reduce",
-        "gemm_bi_dx_col_gemv",
-        "gemm_bi_transpose_f32_2d",
-        "gemm_bi_transpose_f32_32x16_d768_v1",
-        "gemm_bi_nn_gemv_bf16",
-        "gemm_bi_nn_gemv_f16",
-        "gemm_bi_tn_gemv_bf16",
-        "gemm_bi_tn_gemv_f16",
-        "gemm_bi_nt_gemv_bf16",
-        "gemm_bi_nt_gemv_f16",
-        "gemm_bi_nn_ultra_thin_bf16",
-        "gemm_bi_nn_ultra_thin_f16",
-        "gemm_bi_nn_narrow_bf16",
-        "gemm_bi_nn_narrow_f16",
-        "gemm_bi_nn_narrow_small_bf16",
-        "gemm_bi_nn_narrow_small_f16",
-        "gemm_bi_tn_narrow_bf16",
-        "gemm_bi_tn_narrow_f16",
-        "gemm_bi_nt_narrow_bf16",
-        "gemm_bi_nt_narrow_f16",
-        "gemm_bi_nn_big_bf16",
-        "gemm_bi_nn_big_f16",
-        "gemm_bi_tn_big_bf16",
-        "gemm_bi_tn_big_f16",
-        "gemm_bi_nt_big_bf16",
-        "gemm_bi_nt_big_f16",
+        "nn_big",
+        "nn_m64n64_bk16_s2",
+        "nn_splitk32_m32n64_exact",
+        "nn_prism_m64n64_bk16_s2",
+        "nn_zero_reduction",
+        "tn_big",
+        "tn_aligned",
+        "tn_zero_reduction",
+        "tn_narrow_splitm_partial",
+        "tn_narrow_splitm_partial_aligned",
+        "tn_splitm_partial",
+        "tn_splitm_partial_aligned",
+        "tn_m16n16_bk16_s2_splitm16",
+        "splitm_reduce",
+        "nt_big",
+        "nt_m2n16_bk64_splitk32",
+        "nt_zero_reduction",
+        "nn_slim",
+        "nn_splitk_slim_partial",
+        "tn_slim",
+        "nt_slim",
+        "nn_ultra_thin",
+        "nn_gemv",
+        "tn_gemv",
+        "nt_gemv",
+        "nn_narrow",
+        "nn_narrow_small",
+        "tn_narrow",
+        "nt_narrow",
+        "nn_splitk32_partial",
+        "splitk_reduce",
+        "dx_col_gemv",
+        "transpose_f32_2d",
+        "transpose_f32_32x16_d768",
+        "nn_gemv_bf16",
+        "nn_gemv_f16",
+        "tn_gemv_bf16",
+        "tn_gemv_f16",
+        "nt_gemv_bf16",
+        "nt_gemv_f16",
+        "nn_ultra_thin_bf16",
+        "nn_ultra_thin_f16",
+        "nn_narrow_bf16",
+        "nn_narrow_f16",
+        "nn_narrow_small_bf16",
+        "nn_narrow_small_f16",
+        "tn_narrow_bf16",
+        "tn_narrow_f16",
+        "nt_narrow_bf16",
+        "nt_narrow_f16",
+        "nn_big_bf16",
+        "nn_big_f16",
+        "tn_big_bf16",
+        "tn_big_f16",
+        "nt_big_bf16",
+        "nt_big_f16",
     ];
 
     const SM80_SYMBOLS: &[&str] = &[
-        "gemm_bi_nn_tc_bf16",
-        "gemm_bi_nn_tc_f16",
-        "gemm_bi_tn_tc_bf16",
-        "gemm_bi_tn_tc_f16",
-        "gemm_bi_nt_tc_bf16",
-        "gemm_bi_nt_tc_f16",
-        "gemm_bi_nn_tc64_bf16",
-        "gemm_bi_nn_tc64_f16",
-        "gemm_bi_nn_tc16_bf16",
-        "gemm_bi_nn_tc16_f16",
-        "gemm_bi_tn_tc64_bf16",
-        "gemm_bi_tn_tc64_f16",
-        "gemm_bi_tn_tc128x64_bf16",
-        "gemm_bi_tn_tc128x64_f16",
-        "gemm_bi_nt_tc64_bf16",
-        "gemm_bi_nt_tc64_f16",
+        "nn_tc_bf16",
+        "nn_tc_f16",
+        "tn_tc_bf16",
+        "tn_tc_f16",
+        "nt_tc_bf16",
+        "nt_tc_f16",
+        "nn_tc64_bf16",
+        "nn_tc64_f16",
+        "nn_tc16_bf16",
+        "nn_tc16_f16",
+        "tn_tc64_bf16",
+        "tn_tc64_f16",
+        "tn_tc128x64_bf16",
+        "tn_tc128x64_f16",
+        "nt_tc64_bf16",
+        "nt_tc64_f16",
     ];
 
     fn assert_composition(kind: ModuleKind, expected_names: &[&str]) {
@@ -14720,20 +14785,20 @@ mod tests {
             .filter(|name| {
                 !matches!(
                     *name,
-                    "kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
-                        | "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
-                        | "kernels/gemm_bi_fixed/tf32_rna_wide.cu"
-                        | "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
-                        | "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
-                        | "kernels/gemm_bi_fixed/sm89_half_s3.cu"
-                        | "kernels/gemm_bi_fixed/tf32_rna_n96.cu"
-                        | "kernels/gemm_bi_fixed/sm89_half_n64.cu"
+                    "kernels/gemm_bi_inference/sm89/half_pipeline.cu"
+                        | "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"
+                        | "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"
+                        | "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
+                        | "kernels/gemm_bi_inference/sm89/half_swizzle.cu"
+                        | "kernels/gemm_bi_inference/sm89/half_s3.cu"
+                        | "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
+                        | "kernels/gemm_bi_inference/sm89/half_n64.cu"
                 )
             })
             .collect::<Vec<_>>();
-        expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
-        expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
-        expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_postbias.cu");
+        expected_fixed_cc12.push("kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu");
+        expected_fixed_cc12.push("kernels/gemm_bi_inference/sm120/f32_n64_sliced.cu");
+        expected_fixed_cc12.push("kernels/gemm_bi_inference/sm120/f32_postbias.cu");
         assert_eq!(fixed_boundaries, expected_fixed_cc12);
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
@@ -14766,20 +14831,20 @@ mod tests {
             (
                 "base",
                 compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
-                588_547,
-                "e655aaa1d5be584115692fb1db26e6b2f694965d251b50b835e9e93aea28ec69",
+                588_316,
+                "0069db587259bae91bb80ced886022c67155e3571c6fdb3bc7b16038940e93f2",
             ),
             (
                 "sm_89",
                 compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
-                696_159,
-                "d402b603ad4d1b823cf9c3d632ba522303df73de4169129285b3885870fddbbd",
+                695_736,
+                "457e2e4076342df786917ac1b0aeb2ed60fc2279ddd6dc644109cbbddb0c8348",
             ),
             (
                 "compute_120",
                 compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap(),
-                691_965,
-                "0a11f23b3a45387b97a88be77db64190a8c7fb6cca2102b121a63506807b2049",
+                691_504,
+                "73c8f1c603c878a349eb066d7fcb1670601a50e30f9557584bbd67ea8bcd748a",
             ),
         ];
 
@@ -14813,9 +14878,9 @@ mod tests {
     #[test]
     fn scalar_big_nt_source_uses_raw_to_conflict_free_b_staging() {
         let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
-        let start = source.find("void gemm_bi_nt(").expect("Big NT entry");
+        let start = source.find("void nt_big(").expect("Big NT entry");
         let end = source[start..]
-            .find("void gemm_bi_nn_slim(")
+            .find("void nn_slim(")
             .map(|offset| start + offset)
             .expect("Slim NN entry after Big NT");
         let kernel = &source[start..end];
@@ -14849,7 +14914,7 @@ mod tests {
     fn scalar_splitm_reducer_declares_a_portable_four_cta_bound() {
         let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
         let entry = source
-            .find("void gemm_bi_splitm_reduce(")
+            .find("void splitm_reduce(")
             .expect("split-M reducer entry");
         let declaration = &source[entry.saturating_sub(160)..entry];
         assert!(declaration.contains("__launch_bounds__(256, 4)"));
@@ -14870,77 +14935,69 @@ mod tests {
 
         for (start_name, end_name, guards) in [
             (
-                "void gemm_bi_nn(",
-                "void gemm_bi_tn_impl(",
-                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+                "void nn_big(",
+                "void tn_impl(",
+                &["is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_tn_impl(",
-                "void gemm_bi_tn(",
-                &[
-                    "gemm_bi_is_aligned_16(A)",
-                    "gemm_bi_is_aligned_16(B)",
-                    "gemm_bi_is_aligned_16(C)",
-                ][..],
+                "void tn_impl(",
+                "void tn_big(",
+                &["is_aligned_16(A)", "is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_tn_splitm_partial_impl(",
-                "void gemm_bi_tn_splitm_partial(",
-                &["gemm_bi_is_aligned_16(A)", "gemm_bi_is_aligned_16(B)"][..],
+                "void tn_splitm_partial_impl(",
+                "void tn_splitm_partial(",
+                &["is_aligned_16(A)", "is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_nt(",
-                "void gemm_bi_nn_slim(",
-                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+                "void nt_big(",
+                "void nn_slim(",
+                &["is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_nn_slim(",
-                "void gemm_bi_nn_splitk_slim_partial(",
-                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+                "void nn_slim(",
+                "void nn_splitk_slim_partial(",
+                &["is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_nn_splitk_slim_partial(",
-                "void gemm_bi_tn_slim(",
-                &["gemm_bi_is_aligned_16(B)"][..],
+                "void nn_splitk_slim_partial(",
+                "void tn_slim(",
+                &["is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_tn_slim(",
-                "void gemm_bi_nt_slim(",
-                &[
-                    "gemm_bi_is_aligned_16(A)",
-                    "gemm_bi_is_aligned_16(B)",
-                    "gemm_bi_is_aligned_16(C)",
-                ][..],
+                "void tn_slim(",
+                "void nt_slim(",
+                &["is_aligned_16(A)", "is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_nt_slim(",
-                "void gemm_bi_nn_ultra_thin(",
-                &["gemm_bi_is_aligned_16(C)"][..],
+                "void nt_slim(",
+                "void nn_ultra_thin(",
+                &["is_aligned_16(C)"][..],
             ),
             (
-                "void gemm_bi_nn_narrow(",
-                "void gemm_bi_nn_narrow_small(",
-                &["gemm_bi_is_aligned_16(B)"][..],
+                "void nn_narrow(",
+                "void nn_narrow_small(",
+                &["is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_nn_narrow_small(",
-                "void gemm_bi_tn_narrow_splitm_impl(",
-                &["gemm_bi_is_aligned_16(B)"][..],
+                "void nn_narrow_small(",
+                "void tn_narrow_splitm_impl(",
+                &["is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_tn_narrow(",
-                "void gemm_bi_nt_narrow(",
-                &["gemm_bi_is_aligned_16(A)", "gemm_bi_is_aligned_16(B)"][..],
+                "void tn_narrow(",
+                "void nt_narrow(",
+                &["is_aligned_16(A)", "is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_nt_narrow(",
-                "void gemm_bi_nn_splitk32_partial(",
-                &["gemm_bi_is_aligned_16(B)"][..],
+                "void nt_narrow(",
+                "void nn_splitk32_partial(",
+                &["is_aligned_16(B)"][..],
             ),
             (
-                "void gemm_bi_nn_splitk32_partial(",
-                "void gemm_bi_splitk_reduce(",
-                &["gemm_bi_is_aligned_16(B)"][..],
+                "void nn_splitk32_partial(",
+                "void splitk_reduce(",
+                &["is_aligned_16(B)"][..],
             ),
         ] {
             let start = source.find(start_name).expect("scalar f32 kernel start");
@@ -14959,10 +15016,10 @@ mod tests {
             }
         }
         for instantiation in [
-            "gemm_bi_tn_impl<false>(C, A, B, alpha, M_red, K_out, N);",
-            "gemm_bi_tn_impl<true>(C, A, B, alpha, M_red, K_out, N);",
-            "gemm_bi_tn_splitm_partial_impl<false>(",
-            "gemm_bi_tn_splitm_partial_impl<true>(",
+            "tn_impl<false>(C, A, B, alpha, M_red, K_out, N);",
+            "tn_impl<true>(C, A, B, alpha, M_red, K_out, N);",
+            "tn_splitm_partial_impl<false>(",
+            "tn_splitm_partial_impl<true>(",
         ] {
             assert!(
                 source.contains(instantiation),
@@ -15073,7 +15130,7 @@ mod tests {
         assert!(sm80_streamk.is_disjoint(&scalar));
         // The fragment instantiates its kernels through one macro per dtype.
         let fragment = super::SM80_STREAMK_SOURCE_FRAGMENT.source;
-        assert!(fragment.contains("void gemm_bi_tn_tc64_streamk_##SUFFIX("));
+        assert!(fragment.contains("void tn_tc64_streamk_##SUFFIX("));
         for suffix in ["bf16", "f16"] {
             assert!(
                 fragment.contains(&format!("GEMM_BI_DEFINE_GEMM_BI_TN_TC64_STREAMK({suffix},")),
@@ -15114,12 +15171,21 @@ mod tests {
             scalar
                 .union(&sm80)
                 .copied()
-                .all(|name| name.starts_with("gemm_bi_"))
+                .all(|name| !carries_family_prefix(name))
         );
     }
 
+    /// A kernel is named by what it computes; the family it belongs to is
+    /// the module that composes it, never part of the symbol.
+    fn carries_family_prefix(name: &str) -> bool {
+        name.starts_with("gemm_bi_")
+            || name.starts_with("fixed_")
+            || name.starts_with("inference_")
+            || name.starts_with("triad_")
+    }
+
     #[test]
-    fn triad_cuda_sources_and_export_inventories_use_gemm_bi_prefix() {
+    fn triad_cuda_sources_and_export_inventories_carry_no_family_prefix() {
         let legacy_prefix = ["s", "gemm_bi_"].concat();
         let module_kinds = [
             ModuleKind::TriadScalar,
@@ -15130,7 +15196,15 @@ mod tests {
         ];
         for module_kind in module_kinds {
             let source = compose_module_source(module_kind).expect("compose Triad CUDA source");
-            let identifiers = source
+            // Prose may name a test file or an old symbol, and the #line boundaries
+            // carry the family folder path; only code identifiers count.
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("#line "))
+                .map(|line| line.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let identifiers = code
                 .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
                 .collect::<Vec<_>>();
             assert!(
@@ -15145,11 +15219,12 @@ mod tests {
                     .any(|identifier| identifier.contains("_SGEMM_BI_")),
                 "{module_kind:?} source retains a legacy SGEMM macro identifier"
             );
+            let offending = identifiers
+                .iter()
+                .find(|identifier| carries_family_prefix(identifier));
             assert!(
-                identifiers
-                    .iter()
-                    .any(|identifier| identifier.starts_with("gemm_bi_")),
-                "{module_kind:?} source has no gemm_bi_ ABI exports"
+                offending.is_none(),
+                "{module_kind:?} source names a kernel after its family: {offending:?}"
             );
         }
 
@@ -15173,8 +15248,8 @@ mod tests {
         ];
         for (inventory, symbols) in inventories {
             assert!(
-                symbols.iter().all(|symbol| symbol.starts_with("gemm_bi_")),
-                "{inventory} export inventory retains a non-gemm_bi_ ABI symbol"
+                symbols.iter().all(|symbol| !carries_family_prefix(symbol)),
+                "{inventory} export inventory names a kernel after its family"
             );
         }
 
@@ -15186,8 +15261,8 @@ mod tests {
         ] {
             assert!(
                 super::super::contract::tf32_module_symbols(module_kind)
-                    .all(|symbol| symbol.starts_with("gemm_bi_")),
-                "{module_kind:?} TF32 export inventory retains a non-gemm_bi_ ABI symbol"
+                    .all(|symbol| !carries_family_prefix(symbol)),
+                "{module_kind:?} TF32 export inventory names a kernel after its family"
             );
         }
     }
@@ -15250,7 +15325,7 @@ mod tests {
         assert!(SM100_PROBE_SOURCE.contains("tcgen05_probe"));
         assert!(SM100_PROBE_SOURCE.contains("cp.async.bulk.tensor.2d"));
         assert!(SM100_PROBE_SOURCE.contains("tcgen05.mma.cta_group::1.kind::f16"));
-        assert!(!SM100_PROBE_SOURCE.contains("gemm_bi_nn_sm100"));
+        assert!(!SM100_PROBE_SOURCE.contains("nn_sm100"));
 
         let valid = sm100_probe_fixture(&sm100_probe_instructions().join("\n"));
         validate_sm100_probe_ptx("compute_100f", &valid).unwrap();
@@ -15629,7 +15704,7 @@ mod tests {
         ] {
             let mut ptx = ".version 9.0\n.target sm_90a\n".to_string();
             for symbol in super::super::contract::tf32_module_symbols(module_kind) {
-                let body: &[&str] = if symbol.contains("_tma_fma_v1_") {
+                let body: &[&str] = if symbol.contains("_tma_fma_") {
                     &[
                         "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
                         "fma.rn.f32",
@@ -15656,33 +15731,24 @@ mod tests {
 
     // These fixtures exercise the production composer and PTX admission
     // boundary. They are parser fixtures, not executable CUDA programs.
-    const FIXED_SM89_HALF_TEST_SYMBOLS: [&str; 2] = [
-        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
-        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
-    ];
-    const FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS: [&str; 2] = [
-        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
-        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
-    ];
-    const FIXED_SM89_HALF_S3_TEST_SYMBOLS: [&str; 2] = [
-        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
-        "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
-    ];
-    const FIXED_SM89_RNA_N96_TEST_SYMBOL: &str =
-        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
-    const FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL: &str =
-        "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16";
-    const FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL: &str =
-        "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16";
+    const FIXED_SM89_HALF_TEST_SYMBOLS: [&str; 2] =
+        ["nn_sm89_tc128_pipeline_bf16", "nn_sm89_tc128_pipeline_f16"];
+    const FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS: [&str; 2] =
+        ["nn_sm89_tc128_swizzle_bf16", "nn_sm89_tc128_swizzle_f16"];
+    const FIXED_SM89_HALF_S3_TEST_SYMBOLS: [&str; 2] =
+        ["nn_sm89_tc128_s3_bf16", "nn_sm89_tc128_s3_f16"];
+    const FIXED_SM89_RNA_N96_TEST_SYMBOL: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
+    const FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL: &str = "nn_sm89_m64n64_bk64_s3_f16";
+    const FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL: &str = "nn_sm89_m128n64_bk64_s2_f16";
 
     fn fixed_sm89_half_test_base_ptx() -> String {
         let mut ptx = ".version 8.7\n.target sm_89\n.address_size 64\n".to_string();
         for symbol in [
-            "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
-            "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
-            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
-            "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
-            "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+            "nn_tf32_m128n64_bk32_s2",
+            "nn_tf32_m128n64_bk32_s3",
+            "nn_tf32_m64n64_bk32_s2",
+            "nn_tf32_m64n64_bk32_s3",
+            "nn_tf32_m16n32_bk32_s4",
         ] {
             ptx.push_str(&format!(
                 ".visible .entry {symbol}(\n\
@@ -15787,14 +15853,14 @@ mod tests {
         assert_eq!(
             boundaries,
             [
-                "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
-                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
-                "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
-                "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
-                "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
-                "kernels/gemm_bi_fixed/sm89_half_s3.cu",
-                "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
-                "kernels/gemm_bi_fixed/sm89_half_n64.cu",
+                "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
+                "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
+                "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
+                "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
+                "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
+                "kernels/gemm_bi_inference/sm89/half_s3.cu",
+                "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
+                "kernels/gemm_bi_inference/sm89/half_n64.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
         );
@@ -15812,9 +15878,9 @@ mod tests {
             "Ada composition must preserve every pre-finalist suffix byte"
         );
         for symbol in [
-            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
-            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
-            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+            "nn_sm89_rna_tf32_m128n96_bk32_s3",
+            "nn_sm89_m64n64_bk64_s3_f16",
+            "nn_sm89_m128n64_bk64_s2_f16",
         ] {
             assert!(ada.contains(symbol), "Fixed/sm_89 omitted {symbol}");
         }
@@ -15860,7 +15926,7 @@ mod tests {
                     .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
                     .collect();
                 assert!(
-                    !boundaries.contains(&"kernels/gemm_bi_fixed/sm89_half_pipeline.cu"),
+                    !boundaries.contains(&"kernels/gemm_bi_inference/sm89/half_pipeline.cu"),
                     "Fixed half extension leaked into {kind:?}/{target}"
                 );
             }
@@ -15903,8 +15969,8 @@ mod tests {
     fn fixed_sm89_half_pipeline_ptx_rejects_duplicate_or_foreign_exports() {
         for extra in [
             FIXED_SM89_HALF_TEST_SYMBOLS[0],
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f32",
-            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_vec_bf16",
+            "nn_sm89_tc128_pipeline_f32",
+            "nn_sm89_tc128_pipeline_vec_bf16",
         ] {
             let ptx = fixed_sm89_half_test_ptx() + &fixed_sm89_half_test_entry(extra, "bf16");
             validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
@@ -16163,7 +16229,7 @@ mod tests {
         super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &duplicate)
             .expect_err("duplicate swizzle export must reject");
         let foreign = baseline.clone()
-            + &fixed_sm89_half_test_entry("gemm_bi_nn_fixed_sm89_tc128_swizzle_v2_bf16", "bf16");
+            + &fixed_sm89_half_test_entry("nn_sm89_tc128_swizzle_decoy_bf16", "bf16");
         super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &foreign)
             .expect_err("foreign swizzle export must reject");
         for target in ["sm_80", "compute_120", "sm_120"] {
@@ -16278,7 +16344,7 @@ mod tests {
         super::validate_fixed_sm89_half_s3_ptx("sm_89", &duplicate)
             .expect_err("duplicate s3 export must reject");
         let foreign = baseline.clone()
-            + &fixed_sm89_half_s3_test_entry("gemm_bi_nn_fixed_sm89_tc128_s3_v2_bf16", "bf16");
+            + &fixed_sm89_half_s3_test_entry("nn_sm89_tc128_s3_decoy_bf16", "bf16");
         super::validate_fixed_sm89_half_s3_ptx("sm_89", &foreign)
             .expect_err("foreign s3 export must reject");
         for target in ["sm_80", "compute_120", "sm_120"] {
@@ -16288,12 +16354,10 @@ mod tests {
         }
     }
 
-    const FIXED_SM89_RNA_WIDE_TEST_SYMBOL: &str =
-        "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
-    const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
-    const FIXED_SM120_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
-    const FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL: &str =
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
+    const FIXED_SM89_RNA_WIDE_TEST_SYMBOL: &str = "nn_rna_wide_tf32_m128n128_bk32_s3";
+    const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
+    const FIXED_SM120_EXACT_N64_TEST_SYMBOL: &str = "nn_sm120_f32_n64_copyplan";
+    const FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL: &str = "nn_sm120_f32_n64_copyplan_t256";
 
     fn fixed_sm89_rna_wide_test_entry() -> String {
         format!(
@@ -16395,7 +16459,7 @@ mod tests {
             format!("{baseline}{entry}"),
             baseline.replacen(
                 &entry,
-                &entry.replacen("fixed_rna_wide_tf32_v1", "fixed_rna_wide_tf32_v2", 1),
+                &entry.replacen("rna_wide_tf32", "rna_wide_tf32_decoy", 1),
                 1,
             ),
         ] {
@@ -16507,7 +16571,7 @@ mod tests {
             format!("{baseline}{n96_entry}"),
             baseline.replacen(
                 FIXED_SM89_RNA_N96_TEST_SYMBOL,
-                "gemm_bi_nn_fixed_sm89_rna_tf32_v2_m128n96_bk32_s3",
+                "nn_sm89_rna_tf32_decoy_m128n96_bk32_s3",
                 1,
             ),
         ] {
@@ -16599,13 +16663,13 @@ mod tests {
     }
 
     fn fixed_sm120_copyplan_m128_test_entry() -> String {
-        fixed_sm89_exact_n64_test_entry("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1")
+        fixed_sm89_exact_n64_test_entry("nn_sm120_f32_n64_copyplan_m128n64_t256")
             .replace(".maxntid 128", ".maxntid 256")
     }
 
     #[test]
     fn fixed_sm120_copyplan_m128n64_t256_requires_own_export_and_two_cta_resources() {
-        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+        let symbol = "nn_sm120_f32_n64_copyplan_m128n64_t256";
         let source = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
         assert!(
             source.contains(symbol),
@@ -16615,7 +16679,7 @@ mod tests {
 
     #[test]
     fn fixed_sm120_copyplan_m128n64_t256_resource_contract_is_independent() {
-        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+        let symbol = "nn_sm120_f32_n64_copyplan_m128n64_t256";
         let admitted = super::FixedSm89ExactN64Resources {
             local_bytes: 0,
             registers: 128,
@@ -16732,12 +16796,12 @@ mod tests {
         }
     }
     const FIXED_SM120_POSTBIAS_TEST_SYMBOLS: [&str; 6] = [
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
-        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m64n128_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n96_bk16_s2",
+        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4",
+        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2",
+        "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2",
     ];
 
     fn fixed_sm120_postbias_test_entry(symbol: &str, tensor_map_alignment: usize) -> String {
@@ -16746,7 +16810,7 @@ mod tests {
         } else {
             128
         };
-        let epilogue = if symbol.contains("_fixed_nobias_") {
+        let epilogue = if symbol.contains("_nobias_") {
             "st.global.f32 [%rd0], %f3;"
         } else {
             "add.rn.f32 %f5, %f3, %f6;\nst.global.f32 [%rd0], %f5;"
@@ -16823,8 +16887,8 @@ mod tests {
             valid.replacen(&t256, &t256.replace(".maxntid 256", ".maxntid 128"), 1),
             valid.replacen(&t256, &t256.replace(".u64 bias", ".u32 bias"), 1),
             format!("{valid}{first}"),
-            valid.replacen("fixed_postbias_m128n64", "fixed_postbias_m128n64_v2", 1),
-            valid.replacen("gemm_bi_nn_sm120", "gemm_bi_tn_sm120", 1),
+            valid.replacen("postbias_m128n64", "postbias_m128n64_decoy", 1),
+            valid.replacen("nn_sm120", "tn_sm120", 1),
             valid.replacen(".param .u64 flags", ".param .u32 flags", 1),
             valid.replacen(".align 128 .b8 a_map", ".align 64 .b8 a_map", 1),
             valid.replacen(".align 128 .b8 a_map[128]", ".align 128 .b8 a_map[64]", 1),
@@ -16893,7 +16957,7 @@ mod tests {
     #[test]
     fn fixed_sm120_nobias_ptx_requires_own_export_and_scale_only_epilogue() {
         let valid = fixed_sm120_postbias_test_ptx(128);
-        let symbol = "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2";
+        let symbol = "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2";
         let entry = fixed_sm120_postbias_test_entry(symbol, 128);
         super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &valid, 13).unwrap();
         for malformed in [
@@ -16929,7 +16993,7 @@ mod tests {
             FixedSm120PostbiasResources, fixed_sm120_postbias_launch_contract,
             validate_fixed_sm120_postbias_resources,
         };
-        let symbol = "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2";
+        let symbol = "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2";
         let launch = fixed_sm120_postbias_launch_contract(symbol).unwrap();
         assert_eq!(launch.threads, 256);
         assert_eq!(launch.dynamic_shared, 24_592);
@@ -17141,7 +17205,7 @@ mod tests {
 
     #[test]
     fn fixed_sm120_sliced_composition_is_fixed_compute120_only() {
-        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+        let symbol = "nn_sm120_f32_n64_sliced";
         let before = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
         assert!(
             before.contains(symbol),
@@ -17185,13 +17249,13 @@ mod tests {
 
     #[test]
     fn fixed_sm120_sliced_ptx_fails_closed_on_abi_body_inventory_and_target() {
-        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+        let symbol = "nn_sm120_f32_n64_sliced";
         let valid = fixed_sm89_exact_n64_test_entry(symbol);
         super::validate_fixed_sm120_sliced_ptx("compute_120", &valid).unwrap();
         for malformed in [
             String::new(),
             format!("{valid}{valid}"),
-            valid.replace("sliced_v1", "sliced_v2"),
+            valid.replace("sliced", "sliced_decoy"),
             valid.replace("params[32]", "params[36]"),
             valid.replace("fma.rn.f32", "add.rn.f32"),
             valid.replace("cp.async.wait_group", "mov.u32"),
@@ -17243,13 +17307,13 @@ mod tests {
         assert_eq!(
             boundaries,
             [
-                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
-                "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
-                "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
-                "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
-                "kernels/gemm_bi_fixed/sm89_half_s3.cu",
-                "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
-                "kernels/gemm_bi_fixed/sm89_half_n64.cu",
+                "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
+                "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
+                "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
+                "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
+                "kernels/gemm_bi_inference/sm89/half_s3.cu",
+                "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
+                "kernels/gemm_bi_inference/sm89/half_n64.cu",
             ]
         );
     }
@@ -17301,7 +17365,7 @@ mod tests {
         for malformed in [
             String::new(),
             format!("{valid}{valid}"),
-            fixed_sm89_exact_n64_test_entry("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v2"),
+            fixed_sm89_exact_n64_test_entry("nn_sm120_f32_n64_copyplan_decoy"),
             valid.replacen(".param .align 4 .b8 params[32]", ".param .u64 params", 1),
             valid.replacen("fma.rn.f32", "add.rn.f32", 1),
             valid.replacen("cp.async.commit_group", "mov.u32", 1),
@@ -17386,8 +17450,8 @@ mod tests {
             .expect_err("Ada Fixed must contain the new exact N64 export");
         for extra in [
             FIXED_SM89_EXACT_N64_TEST_SYMBOL,
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1_f16",
-            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v2",
+            "nn_sm89_f32_n64_copyplan_f16",
+            "nn_sm89_f32_n64_copyplan_decoy",
         ] {
             let ptx = fixed_sm89_exact_n64_test_ptx() + &fixed_sm89_exact_n64_test_entry(extra);
             validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
@@ -17705,7 +17769,7 @@ mod tests {
         let scalar_calls = std::cell::Cell::new(0);
         let sm80_calls = std::cell::Cell::new(0);
         let value: usize = resolve_owned_symbol(
-            "gemm_bi_nn",
+            "nn_big",
             |name| {
                 scalar_calls.set(scalar_calls.get() + 1);
                 Ok(name.len())
@@ -17713,12 +17777,12 @@ mod tests {
             |_| panic!("scalar symbol consulted the SM80 module"),
         )
         .unwrap();
-        assert_eq!(value, "gemm_bi_nn".len());
+        assert_eq!(value, "nn_big".len());
         assert_eq!(scalar_calls.get(), 1);
         assert_eq!(sm80_calls.get(), 0);
 
         let missing: Result<(), String> = resolve_owned_symbol(
-            "gemm_bi_nn_tc_bf16",
+            "nn_tc_bf16",
             |_| panic!("SM80 symbol consulted the scalar module"),
             |name| {
                 sm80_calls.set(sm80_calls.get() + 1);
@@ -17727,7 +17791,7 @@ mod tests {
         );
         let error = missing.expect_err("missing owned symbol must abort initialization");
         assert!(error.contains("TriadSm80"), "{error}");
-        assert!(error.contains("gemm_bi_nn_tc_bf16"), "{error}");
+        assert!(error.contains("nn_tc_bf16"), "{error}");
         assert_eq!(sm80_calls.get(), 1);
     }
 }

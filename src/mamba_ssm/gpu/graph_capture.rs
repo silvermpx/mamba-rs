@@ -330,8 +330,8 @@ pub(crate) mod model_gemm_guard_tests {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(family);
         ctx.set_bi_tensor_cores(tc);
-        ctx.set_f32_triad_policy(crate::mamba_ssm::gpu::context::F32TriadPolicy::ExactScalarFmaV1);
-        ctx.set_half_triad_policy(crate::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParityV1);
+        ctx.set_f32_triad_policy(crate::mamba_ssm::gpu::context::F32TriadPolicy::ExactScalarFma);
+        ctx.set_half_triad_policy(crate::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity);
     }
 
     pub(crate) fn assert_inventory(

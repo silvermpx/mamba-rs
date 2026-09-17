@@ -17,8 +17,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
-const SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
-const LEGACY_SYMBOL: &str = "gemm_bi_f32_f32_s2";
+const SYMBOL: &str = "nn_sm120_f32_n64_copyplan";
+const LEGACY_SYMBOL: &str = "f32_f32_s2";
 const CANDIDATE: InferenceTile = InferenceTile::F32Sm120N64CopyPlan;
 const GUARD: usize = 64;
 const POISON: u32 = 0xa5a5_a5a5;

@@ -61,7 +61,7 @@ fn triad_ctx(device: &GpuDevice) -> GpuCtx {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     ctx
 }
 
@@ -99,7 +99,7 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
     trainer.ctx().set_bi_tensor_cores(false);
     trainer
         .ctx()
-        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     let warmup = trainer
         .step(&input, &d_temporal)
         .expect("warm up M1 Triad graph resources");

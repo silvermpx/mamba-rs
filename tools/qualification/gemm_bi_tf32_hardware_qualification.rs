@@ -295,7 +295,7 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
 
     const DIMS: (usize, usize, usize) = (2_048, 1_536, 768);
     const SALT: u64 = 0x1205_1300;
-    const SYMBOL: &str = "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2_kvec";
+    const SYMBOL: &str = "nt_sm120_tma_fma_m128n64_bk16_s2_kvec";
     let device = GpuDevice::new(0)?;
     if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
         return Err(format!(
@@ -307,7 +307,7 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
     let ctx = GpuCtx::new(&device)?;
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     let specialized = ctx
         .kernels
         .f32_triad_availability()
@@ -322,7 +322,7 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
     let request = PhysicalQualificationRequest::contiguous_f32(
         ResolvedGemmOp::Nt,
         DIMS,
-        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
         PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
     );
     presize_physical_qualification_suite(&ctx, &[request])?;
@@ -335,8 +335,8 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
     if node.symbol != SYMBOL
         || node.tile != Some((128, 64))
         || node.launch.grid_dim != (768, 1, 1)
-        || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaFixedSplitFoldV1)
-        || node.ownership != Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFoldV1)
+        || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaFixedSplitFold)
+        || node.ownership != Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFold)
     {
         return Err(format!(
             "fallback probe selected the wrong same-split route: {node:?}"

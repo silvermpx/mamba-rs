@@ -1,6 +1,6 @@
 //! Host-only regression gates for the SM120 TF32 consumer pipeline.
 
-const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
+const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
 
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source
@@ -171,8 +171,8 @@ fn tf32_tn_s4_pair_store_is_narrow_and_tail_safe() {
     let pair_kernel = compact(function_body(SM120_SOURCE, "void sm120_tf32_pair_kernel("));
     let generic_kernel = compact(function_body(SM120_SOURCE, "void sm120_tf32_kernel("));
 
-    assert!(SM120_SOURCE.contains("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair"));
-    assert!(SM120_SOURCE.contains("SM120_DEFINE_TF32_PAIR_KERNEL(gemm_bi_tn_sm120"));
+    assert!(SM120_SOURCE.contains("tn_sm120_tma_mma_tf32_m64n128_bk32_s4_pair"));
+    assert!(SM120_SOURCE.contains("SM120_DEFINE_TF32_PAIR_KERNEL(tn_sm120"));
     assert!(pair_kernel.contains("boolfull_tile=output_row+M<=rows"));
     assert!(pair_kernel.contains("sm120_tf32_store_pair<Op>("));
     assert!(!generic_kernel.contains("sm120_tf32_store_pair<Op>("));

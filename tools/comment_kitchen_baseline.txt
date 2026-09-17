@@ -5,7 +5,7 @@ kernels/gemm_bi_triad/scalar.cu	// IEEE 754-2008 §5.4.1 fma is single-rounding 
 kernels/gemm_bi_triad/scalar.cu	// Source: NVIDIA CUDA C++ Programming Guide §8.7.2 "Matrix Transpose".
 kernels/gemm_bi_triad/scalar.cu	// fuse to `__fmaf_rn(α, Σ, bias)` even though IEEE 754-2008 §5.4.1 says
 kernels/gemm_bi_triad/scalar.cu	// §5.4.1, fused single-round vs separate FMUL+FADD differs ≤ 1 ULP
-kernels/gemm_bi_triad/sm80.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
+kernels/gemm_bi_triad/sm80/mma.cu	// the in-flight count is uniform and `wait_group STAGES-2` always
 kernels/mamba3_chunked.cu	// K state:   extract last timestep (T-1) from k_flat[B * T * nh * ds]
 kernels/mamba3_chunked.cu	// V state:   extract last timestep (T-1) from x_flat[B * T * d_inner]
 kernels/mamba3_siso.cu	// Carry flush timing (reverse loop, processing t = T-1, T-2, ..., 0):

@@ -1,4 +1,4 @@
-const LAYOUT: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle_layout.cuh");
+const LAYOUT: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh");
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     const SUPPORT_END: &str =
@@ -13,8 +13,8 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     for anchor in [
         "namespace sm89_fixed_half_s3 {",
         "} // namespace sm89_fixed_half_s3",
-        "void gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16(",
-        "void gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16(",
+        "void nn_sm89_tc128_s3_bf16(",
+        "void nn_sm89_tc128_s3_f16(",
     ] {
         require_count(s3, anchor, 1)?;
     }
@@ -165,7 +165,7 @@ const NT_EPILOGUE: &str = r#"    {
 const NT_EXPORTS: &str = r#"
 #define SM89_HALF_NT_S3_EXPORT(TYPE, SUFFIX)                                 \
 extern "C" __global__ __launch_bounds__(256, 1)                              \
-void gemm_bi_nt_test_fixed_s3_bxor_##SUFFIX(                                 \
+void nt_test_fixed_s3_bxor_##SUFFIX(                                 \
     TYPE* __restrict__ C, const TYPE* __restrict__ A,                        \
     const TYPE* __restrict__ B, float alpha, int M, int N, int K_out) {      \
     sm89_test_half_nt_s3::kernel<TYPE>(C, A, B, alpha, M, N, K_out);         \
@@ -333,8 +333,8 @@ fn require_count(source: &str, anchor: &str, expected: usize) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89_half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_s3.cu");
 
     fn index(row: usize, k: usize) -> usize {
         row * 64 + (k ^ ((row & 7) * 8))
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn composed_source_is_nt_only_and_keeps_s3_issue_order() {
         let source = candidate_source(SWIZZLE, S3).unwrap();
-        assert!(source.contains("void gemm_bi_nt_test_fixed_s3_bxor_##SUFFIX"));
+        assert!(source.contains("void nt_test_fixed_s3_bxor_##SUFFIX"));
         let nt_load = source
             .split("static __device__ __forceinline__ void nt_load_fragments(")
             .nth(1)
@@ -432,7 +432,7 @@ mod tests {
         assert!(source.contains("*output = HalfOps<T>::from_float(value);"));
         assert!(!source.contains("#include \"sm89_half_swizzle_layout.cuh\""));
         assert!(!source.contains(" = sm89_fixed_half_swizzle::fragment_offsets"));
-        assert!(!source.contains("void gemm_bi_nn_fixed_sm89_tc128_s3_v1_"));
+        assert!(!source.contains("void nn_sm89_tc128_s3_"));
         let kernel = source
             .split("namespace sm89_test_half_nt_s3 {")
             .nth(1)

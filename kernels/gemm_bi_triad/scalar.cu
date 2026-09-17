@@ -44,7 +44,7 @@
 // carry a four-float pad and the per-thread offsets are multiples of the
 // fragment width.
 template <int Count>
-__device__ __forceinline__ void gemm_bi_scalar_load_fragment(float* out, const float* src) {
+__device__ __forceinline__ void scalar_load_fragment(float* out, const float* src) {
     // The fragment loads are fixed PTX shared-memory vector loads rather
     // than C++ vector types: given plain element or float4 loads, the NVRTC
     // optimizer sometimes re-loads part of a fragment later (an extra v2
@@ -113,7 +113,7 @@ static_assert(sizeof(((SgbZeroReductionParams*)0)->ldc) == 4,
 enum SgbZeroReductionOp { SgbZeroNn, SgbZeroTn, SgbZeroNt };
 
 template <SgbZeroReductionOp Op>
-__device__ __forceinline__ void gemm_bi_zero_reduction_entry(
+__device__ __forceinline__ void zero_reduction_entry(
     float* output, const float* a, const float* b, const float* bias,
     SgbZeroReductionParams params) {
     (void)a;
@@ -147,12 +147,12 @@ __device__ __forceinline__ void gemm_bi_zero_reduction_entry(
 extern "C" __global__ __launch_bounds__(256, 4) void NAME(                    \
     float* output, const float* a, const float* b, const float* bias,          \
     SgbZeroReductionParams params) {                                           \
-    gemm_bi_zero_reduction_entry<OP>(output, a, b, bias, params);                  \
+    zero_reduction_entry<OP>(output, a, b, bias, params);                  \
 }
 
-GEMM_BI_DEFINE_ZERO_REDUCTION(gemm_bi_nn_zero_reduction_v1, SgbZeroNn)
-GEMM_BI_DEFINE_ZERO_REDUCTION(gemm_bi_tn_zero_reduction_v1, SgbZeroTn)
-GEMM_BI_DEFINE_ZERO_REDUCTION(gemm_bi_nt_zero_reduction_v1, SgbZeroNt)
+GEMM_BI_DEFINE_ZERO_REDUCTION(nn_zero_reduction, SgbZeroNn)
+GEMM_BI_DEFINE_ZERO_REDUCTION(tn_zero_reduction, SgbZeroTn)
+GEMM_BI_DEFINE_ZERO_REDUCTION(nt_zero_reduction, SgbZeroNt)
 
 template <typename A, typename B> struct SgbZeroSameType { static constexpr bool value = false; };
 template <typename A> struct SgbZeroSameType<A, A> { static constexpr bool value = true; };
@@ -161,9 +161,9 @@ using SgbZeroKernelSignature = void (*)(
 #define GEMM_BI_ASSERT_ZERO_SIGNATURE(NAME) \
     static_assert(SgbZeroSameType<decltype(&NAME), SgbZeroKernelSignature>::value, "zero-reduction kernel signature")
 
-GEMM_BI_ASSERT_ZERO_SIGNATURE(gemm_bi_nn_zero_reduction_v1);
-GEMM_BI_ASSERT_ZERO_SIGNATURE(gemm_bi_tn_zero_reduction_v1);
-GEMM_BI_ASSERT_ZERO_SIGNATURE(gemm_bi_nt_zero_reduction_v1);
+GEMM_BI_ASSERT_ZERO_SIGNATURE(nn_zero_reduction);
+GEMM_BI_ASSERT_ZERO_SIGNATURE(tn_zero_reduction);
+GEMM_BI_ASSERT_ZERO_SIGNATURE(nt_zero_reduction);
 
 #undef GEMM_BI_ASSERT_ZERO_SIGNATURE
 #undef GEMM_BI_DEFINE_ZERO_REDUCTION
@@ -202,7 +202,7 @@ GEMM_BI_ASSERT_ZERO_SIGNATURE(gemm_bi_nt_zero_reduction_v1);
 // thread so two CTAs fit in the 64K register file. The architecture gate also
 // requires zero stack and spill traffic for this entry point.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_nn(
+void nn_big(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -376,7 +376,7 @@ void gemm_bi_nn(
                 + innerColB * 4) * (unsigned)sizeof(float);                               \
             const float* _src = B + (long long)_g_row * ldb + _g_col;                     \
             bool _full16 = (_g_row < K) && (_g_col + 3 < N) && ((ldb % 4) == 0)          \
-                           && gemm_bi_is_aligned_16(B);                                       \
+                           && is_aligned_16(B);                                       \
             if (_full16) {                                                                \
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"            \
                              :: "r"(_dst), "l"(_src), "n"(16));                           \
@@ -424,20 +424,20 @@ void gemm_bi_nn(
         // Prime fragment 0.
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             // Prefetch fragment dotIdx+1 into *_next while we FMA on *_curr.
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // FMAs on current fragment — IDENTICAL order to single-buffer.
             #pragma unroll
@@ -493,7 +493,7 @@ void gemm_bi_nn(
                     // STG.128 needs 16-byte aligned address — row-stride in bytes
                     // (ldc * 4) must be a multiple of 16, so ldc must be a multiple
                     // of 4. Otherwise odd rows hit CUDA_ERROR_MISALIGNED_ADDRESS.
-                    if (g_col + 3 >= N || (ldc & 3) != 0 || !gemm_bi_is_aligned_16(C)) {
+                    if (g_col + 3 >= N || (ldc & 3) != 0 || !is_aligned_16(C)) {
                         #pragma unroll
                         for (int j = 0; j < 4 && g_col + j < N; j++) {
                             int idx = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM) * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN) +
@@ -548,7 +548,7 @@ void gemm_bi_nn(
 // architecture gate requires at most 128 registers and zero stack/spill
 // traffic for this entry point.
 template <bool BASES_ALIGNED>
-__device__ __forceinline__ void gemm_bi_tn_impl(
+__device__ __forceinline__ void tn_impl(
     float* __restrict__ C,
     const float* __restrict__ A,  // X [M, K_out]
     const float* __restrict__ B,  // dY [M, N]
@@ -586,7 +586,7 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
 
-    // Direct one-tile CTA mapping follows gemm_bi_nn.
+    // Direct one-tile CTA mapping follows nn_big.
     // `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
@@ -646,7 +646,7 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
                     * (unsigned)sizeof(float);                                            \
                 bool _full16 = (_g_m < M_red) && (_g_k + 3 < K_out)                       \
                                && ((K_out & 3) == 0)                                     \
-                               && (BASES_ALIGNED || gemm_bi_is_aligned_16(A));               \
+                               && (BASES_ALIGNED || is_aligned_16(A));               \
                 if (_full16) {                                                            \
                     const float* _src = A + (long long)_g_m * K_out + _g_k;               \
                     asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"        \
@@ -673,7 +673,7 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
                 * (unsigned)sizeof(float);                                                \
             const float* _src = B + (long long)_g_m * N + _g_n;                           \
             bool _full16 = (_g_m < M_red) && (_g_n + 3 < N) && ((N % 4) == 0)            \
-                           && (BASES_ALIGNED || gemm_bi_is_aligned_16(B));                   \
+                           && (BASES_ALIGNED || is_aligned_16(B));                   \
             if (_full16) {                                                                \
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"            \
                              :: "r"(_dst), "l"(_src), "n"(16));                           \
@@ -712,23 +712,23 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
         float regN_next[GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN];
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
         #pragma unroll 16
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // explicit __fmaf_rn for bit-exact
-            // match with CPU `_mm256_fmadd_ps`. gemm_bi_tn (GEMM_BI_SCALAR_TN GEMM, K-pipelined).
+            // match with CPU `_mm256_fmadd_ps`. tn_big (GEMM_BI_SCALAR_TN GEMM, K-pipelined).
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
                 #pragma unroll
@@ -772,7 +772,7 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
                     // Fallback to scalar on tail OR when N (row-stride) % 4 != 0
                     // (STG.128 / LDG.128 need 16-byte aligned address).
                     if (g_col + 3 >= N || (N & 3) != 0
-                        || (!BASES_ALIGNED && !gemm_bi_is_aligned_16(C))) {
+                        || (!BASES_ALIGNED && !is_aligned_16(C))) {
                         #pragma unroll
                         for (int j = 0; j < 4 && g_col + j < N; j++) {
                             int idx = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM) * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN) + wSubColIdx * GEMM_BI_SCALAR_TN + resIdxN + j;
@@ -796,37 +796,37 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_tn(
+void tn_big(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
     float alpha,
     int M_red, int K_out, int N
 ) {
-    gemm_bi_tn_impl<false>(C, A, B, alpha, M_red, K_out, N);
+    tn_impl<false>(C, A, B, alpha, M_red, K_out, N);
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_tn_aligned(
+void tn_aligned(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
     float alpha,
     int M_red, int K_out, int N
 ) {
-    gemm_bi_tn_impl<true>(C, A, B, alpha, M_red, K_out, N);
+    tn_impl<true>(C, A, B, alpha, M_red, K_out, N);
 }
 
 // ============================================================================
 // Split-M GEMM_BI_SCALAR_TN backward dW: per-chunk partial of X^T @ dY (CUTLASS parallel-split pattern).
 // ============================================================================
-// Paired with gemm_bi_splitm_reduce for fixed-order tree sum across chunks.
+// Paired with splitm_reduce for fixed-order tree sum across chunks.
 // Grid: (K_tiles * N_tiles, 1, F)  where blockIdx.z = fc (chunk index).
 // Each block reduces M_CHUNK samples starting at m_begin = fc * M_CHUNK.
 // Writes partial[fc, pid_k_out_tile*GEMM_BI_SCALAR_BM+row, pid_n_tile*GEMM_BI_SCALAR_BN+col] = raw sum (no alpha).
 //
 // Invariants:
-//   - Inside each chunk: GEMM_BI_SCALAR_BK-tiled accumulation IDENTICAL to gemm_bi_tn → bit-exact
+//   - Inside each chunk: GEMM_BI_SCALAR_BK-tiled accumulation IDENTICAL to tn_big → bit-exact
 //     per-chunk partial.
 //   - Each (fc, k, n) slot has exactly ONE writer → no atomics, no race.
 //   - Last chunk may be short (M % M_CHUNK != 0) — handled by existing g_m<m_end
@@ -835,7 +835,7 @@ void gemm_bi_tn_aligned(
 // Gain: inflates grid by F× for Big GEMM_BI_SCALAR_TN shapes where K_tiles*N_tiles < 2*NUM_SMS.
 // ============================================================================
 template <bool BASES_ALIGNED>
-__device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
+__device__ __forceinline__ void tn_splitm_partial_impl(
     float* __restrict__ partial,       // [F * K_out * N] — unique slot per block
     const float* __restrict__ A,       // X [M, K_out]
     const float* __restrict__ B,       // dY [M, N]
@@ -877,7 +877,7 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // coalesce (mirrors gemm_bi_tn ISSUE_TILE_TN A-loader).
+    // coalesce (mirrors tn_big ISSUE_TILE_TN A-loader).
     constexpr int WARPS_SM = GEMM_BI_SCALAR_NUM_THREADS / GEMM_BI_SCALAR_WARP_SIZE;
     constexpr int ROWS_PER_WARP_SM = GEMM_BI_SCALAR_BK / WARPS_SM;
     static_assert(GEMM_BI_SCALAR_BK % WARPS_SM == 0, "GEMM_BI_SCALAR_BK must be divisible by warp count");
@@ -922,7 +922,7 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
                    + output_local) * (unsigned)sizeof(float);                          \
             bool full = global_m < m_end && global_k + 3 < K_out                      \
                 && (K_out & 3) == 0                                                    \
-                && (BASES_ALIGNED || gemm_bi_is_aligned_16(A));                       \
+                && (BASES_ALIGNED || is_aligned_16(A));                       \
             if (full) {                                                                \
                 const float* source = A + (long long)global_m * K_out + global_k;      \
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"       \
@@ -953,7 +953,7 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
                    + innerColB * 4) * (unsigned)sizeof(float);                         \
             bool full = global_m < m_end && global_n + 3 < N                          \
                 && (N & 3) == 0                                                        \
-                && (BASES_ALIGNED || gemm_bi_is_aligned_16(B));                       \
+                && (BASES_ALIGNED || is_aligned_16(B));                       \
             if (full) {                                                                \
                 const float* source = B + (long long)global_m * N + global_n;          \
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"       \
@@ -995,10 +995,10 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_read[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_read[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             #pragma unroll
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_read[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_read[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
@@ -1042,7 +1042,7 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
                     // a 16-byte destination. The aligned export proves the
                     // base condition at dispatch; the portable export checks it.
                     if (g_col + 3 >= N || (N & 3) != 0
-                        || (!BASES_ALIGNED && !gemm_bi_is_aligned_16(destination))) {
+                        || (!BASES_ALIGNED && !is_aligned_16(destination))) {
                         for (int j = 0; j < 4 && g_col + j < N; j++) {
                             destination[j] = threadResults[idx + j];
                         }
@@ -1062,31 +1062,31 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_tn_splitm_partial(
+void tn_splitm_partial(
     float* __restrict__ partial,
     const float* __restrict__ A,
     const float* __restrict__ B,
     int M_red, int K_out, int N,
     int M_CHUNK
 ) {
-    gemm_bi_tn_splitm_partial_impl<false>(partial, A, B, M_red, K_out, N, M_CHUNK);
+    tn_splitm_partial_impl<false>(partial, A, B, M_red, K_out, N, M_CHUNK);
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_tn_splitm_partial_aligned(
+void tn_splitm_partial_aligned(
     float* __restrict__ partial,
     const float* __restrict__ A,
     const float* __restrict__ B,
     int M_red, int K_out, int N,
     int M_CHUNK
 ) {
-    gemm_bi_tn_splitm_partial_impl<true>(partial, A, B, M_red, K_out, N, M_CHUNK);
+    tn_splitm_partial_impl<true>(partial, A, B, M_red, K_out, N, M_CHUNK);
 }
 
 // ============================================================================
 // Split-M reducer: dW[K_out, N] += alpha * Σ_fc partial[fc, :, :].
 // Fixed ascending-fc order — bit-exact reduction tree per output slot.
-// Accumulate (+=) semantic matches gemm_bi_tn contract.
+// Accumulate (+=) semantic matches tn_big contract.
 // Each thread owns one (k, n) output — no atomics, no race.
 //
 // f64 accumulator (Option B): F-step linear sum lives in double, cast back to
@@ -1098,7 +1098,7 @@ void gemm_bi_tn_splitm_partial_aligned(
 extern "C" __global__ __launch_bounds__(256, 4)
 // `K_out` is the row count and leading dimension of the per-chunk partial
 // layout `[F, K_out, N]`.
-void gemm_bi_splitm_reduce(
+void splitm_reduce(
     float* __restrict__ dW,
     const float* __restrict__ partial,
     float alpha,
@@ -1124,7 +1124,7 @@ void gemm_bi_splitm_reduce(
 // C = dX [M, K] — overwrite
 // __launch_bounds__(256, 2) — Ada sm_89: 128 registers, no stack or spills.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_nt(
+void nt_big(
     float* __restrict__ C,
     const float* __restrict__ A,  // dY [M, N]
     const float* __restrict__ B,  // W [K, N]
@@ -1166,7 +1166,7 @@ void gemm_bi_nt(
 
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Braw_base = __cvta_generic_to_shared(Braw);
-    bool b_vec16_aligned = (N & 3) == 0 && gemm_bi_is_aligned_16(B);
+    bool b_vec16_aligned = (N & 3) == 0 && is_aligned_16(B);
 
     // One CTA owns one output tile. Keeping tile_id immutable avoids
     // loop-carried state without changing output ownership or FMA order.
@@ -1292,16 +1292,16 @@ void gemm_bi_nt(
         float regN_next[GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN];
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[BCOMPUTE_OFFSET_NT( 0, warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN)]);
+            scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[BCOMPUTE_OFFSET_NT( 0, warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN)]);
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
                     #pragma unroll
@@ -1311,7 +1311,7 @@ void gemm_bi_nt(
                                 + threadColInWarp * GEMM_BI_SCALAR_TN + i)];
             }
             // explicit __fmaf_rn for bit-exact
-            // match with CPU `_mm256_fmadd_ps`. gemm_bi_nt (NT GEMM, K-pipelined).
+            // match with CPU `_mm256_fmadd_ps`. nt_big (NT GEMM, K-pipelined).
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
                 #pragma unroll
@@ -1350,7 +1350,7 @@ void gemm_bi_nt(
                 for (int resIdxN = 0; resIdxN < GEMM_BI_SCALAR_TN; resIdxN += 4) {
                     int g_col = pid_n * GEMM_BI_SCALAR_BN + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + resIdxN;
                     // float4 write only when K_out is %4-aligned (K_out=257 → scalar).
-                    if (g_col + 3 >= K_out || (K_out % 4 != 0) || !gemm_bi_is_aligned_16(C)) {
+                    if (g_col + 3 >= K_out || (K_out % 4 != 0) || !is_aligned_16(C)) {
                         int idx_base = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM) * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN) + wSubColIdx * GEMM_BI_SCALAR_TN + resIdxN;
                         for (int j = 0; j < 4 && g_col + j < K_out; j++) {
                             __stwt(&C_sub[(threadRowInWarp * GEMM_BI_SCALAR_TM + resIdxM) * K_out + threadColInWarp * GEMM_BI_SCALAR_TN + resIdxN + j], alpha * threadResults[idx_base + j]);
@@ -1421,7 +1421,7 @@ void gemm_bi_nt(
 // At (128, 3) without dynamic opt-in, effective occupancy = 2 blocks/SM due to smem limit.
 // ptxas: 128 regs, 0 spill.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_nn_slim(
+void nn_slim(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -1431,7 +1431,7 @@ void gemm_bi_nn_slim(
     int lda, int ldb, int ldc
 ) {
     // α=1 contract for bias-IN-FMA seed. Same contract and rationale as
-    // gemm_bi_nn — see the bias-pre-seed block in the Big NN kernel.
+    // nn_big — see the bias-pre-seed block in the Big NN kernel.
     assert(alpha == 1.0f || bias == nullptr);
     // Smem: A transposed [GEMM_BI_SCALAR_BK * GEMM_BI_SCALAR_BM], B normal [GEMM_BI_SCALAR_BK * GEMM_BI_SCALAR_BN]
     __shared__ float As[GEMM_BI_SCALAR_BK * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD)];  // 16 * 128 = 2048 floats = 8KB
@@ -1556,7 +1556,7 @@ void gemm_bi_nn_slim(
             int g_row = bkIdx + innerRowB + offset;
             int g_col = pid_n * GEMM_BI_SCALAR_BN + innerColB * 4;
             unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
-            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && is_aligned_16(B)) {
                 const float* src = B_block + (innerRowB + offset) * ldb + innerColB * 4;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                              :: "r"(dst), "l"(src));
@@ -1575,11 +1575,11 @@ void gemm_bi_nn_slim(
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             // Load A column into registers (transposed smem = contiguous)
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             }
             // Load B row into registers
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // Outer product: 256 FMA
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
@@ -1620,7 +1620,7 @@ void gemm_bi_nn_slim(
                     // STG.128 needs 16-byte aligned address — row-stride in bytes
                     // (ldc * 4) must be a multiple of 16, so ldc must be a multiple
                     // of 4. Otherwise odd rows hit CUDA_ERROR_MISALIGNED_ADDRESS.
-                    if (g_col + 3 >= N || (ldc & 3) != 0 || !gemm_bi_is_aligned_16(C)) {
+                    if (g_col + 3 >= N || (ldc & 3) != 0 || !is_aligned_16(C)) {
                         for (int j = 0; j < 4 && g_col + j < N; j++) {
                             int idx = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM) * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN) +
                                       wSubColIdx * GEMM_BI_SCALAR_TN + resIdxN + j;
@@ -1664,12 +1664,12 @@ void gemm_bi_nn_slim(
 
 // ============================================================================
 // Split-K Slim NN partial — wave-fill extension for underfilled
-// Slim NN shapes. Identical per-block FMA order to gemm_bi_nn_slim on its
+// Slim NN shapes. Identical per-block FMA order to nn_slim on its
 // K-slice → bit-exact. Grid: (M_tiles * N_tiles, 1, F). blockIdx.z = fc ∈ [0, F).
 // Each fc owns K-chunk [fc*K_chunk, min(K, (fc+1)*K_chunk)) and writes to
 // partial[fc, m, n].
 //
-// Caller follows with gemm_bi_splitk_reduce(y, partial, bias, null_tail,
+// Caller follows with splitk_reduce(y, partial, bias, null_tail,
 // null_tail, alpha, M, N, F, 0, 0, 0) — reducer applies alpha + bias,
 // overwrites y (x_tail_ptr==null path).
 //
@@ -1683,7 +1683,7 @@ void gemm_bi_nn_slim(
 // GEMM_BI_SCALAR_BK=32 tile that fires on b=64 production GEMMs.
 // ============================================================================
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_nn_splitk_slim_partial(
+void nn_splitk_slim_partial(
     float* __restrict__ partial,       // [F * M * N] — unique slot per fc
     const float* __restrict__ A,       // [M, K_full]
     const float* __restrict__ B,       // [K_full, N]
@@ -1786,7 +1786,7 @@ void gemm_bi_nn_splitk_slim_partial(
             int g_col = pid_n * GEMM_BI_SCALAR_BN + innerColB * 4;
             unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
             if (g_row < k_end && g_col + 3 < N && (ldb % 4 == 0)
-                && gemm_bi_is_aligned_16(B)) {
+                && is_aligned_16(B)) {
                 const float* src = B_block + (innerRowB + offset) * ldb + innerColB * 4;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                              :: "r"(dst), "l"(src));
@@ -1804,10 +1804,10 @@ void gemm_bi_nn_splitk_slim_partial(
         // Compute: same warptile matmul as Slim NN — identical FMA order.
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             }
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
@@ -1884,7 +1884,7 @@ void gemm_bi_nn_splitk_slim_partial(
 // __launch_bounds__(128, 2) — target 2 blocks/SM (ptxas: 128 regs, 0 spill).
 // 2 blocks × 24KB smem = 48KB static limit exactly.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_tn_slim(
+void tn_slim(
     float* __restrict__ C,
     const float* __restrict__ A,  // X [M, K]
     const float* __restrict__ B,  // dY [M, N]
@@ -1966,7 +1966,7 @@ void gemm_bi_tn_slim(
                 + (k_local * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + m_local)
                 * (unsigned)sizeof(float);
             bool _full16 = (_g_m < M_red) && (_g_k + 3 < K_out) && ((K_out & 3) == 0)
-                && gemm_bi_is_aligned_16(A);
+                && is_aligned_16(A);
             if (_full16) {
                 const float* _src = A + (long long)_g_m * K_out + _g_k;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
@@ -1992,7 +1992,7 @@ void gemm_bi_tn_slim(
             int g_m = mIdx + innerRowB + offset;
             int g_n = pid_n * GEMM_BI_SCALAR_BN + innerColB * 4;
             unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
-            if (g_m < M_red && g_n + 3 < N && (N % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_m < M_red && g_n + 3 < N && (N % 4 == 0) && is_aligned_16(B)) {
                 const float* src = B + ((long long)g_m) * N + pid_n * GEMM_BI_SCALAR_BN + innerColB * 4;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                              :: "r"(dst), "l"(src));
@@ -2010,9 +2010,9 @@ void gemm_bi_tn_slim(
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             // explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. This matches the sibling kernels
             // (RoPE backward FMA pin).
@@ -2042,7 +2042,7 @@ void gemm_bi_tn_slim(
                     int g_col = pid_n * GEMM_BI_SCALAR_BN + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + resIdxN;
                     // Fallback to scalar on tail OR when N (row-stride) % 4 != 0
                     // (STG.128 / LDG.128 need 16-byte aligned address).
-                    if (g_col + 3 >= N || (N & 3) != 0 || !gemm_bi_is_aligned_16(C)) {
+                    if (g_col + 3 >= N || (N & 3) != 0 || !is_aligned_16(C)) {
                         for (int j = 0; j < 4 && g_col + j < N; j++) {
                             int idx = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM) * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN) + wSubColIdx * GEMM_BI_SCALAR_TN + resIdxN + j;
                             C_sub[(threadRowInWarp * GEMM_BI_SCALAR_TM + resIdxM) * N + threadColInWarp * GEMM_BI_SCALAR_TN + resIdxN + j] += alpha * threadResults[idx];
@@ -2072,7 +2072,7 @@ void gemm_bi_tn_slim(
 // C = dX [M, K] — overwrite
 // __launch_bounds__(128, 2) — qualified at 254 registers and two CTAs/SM on SM120.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void gemm_bi_nt_slim(
+void nt_slim(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -2147,7 +2147,7 @@ void gemm_bi_nt_slim(
         int _lane = threadIdx.x % GEMM_BI_SCALAR_WARP_SIZE;
         int _m_in_warp_ntsl = _lane / GEMM_BI_SCALAR_BK;
         int _n_local_lane = _lane % GEMM_BI_SCALAR_BK;
-        bool b_vec16_aligned = (N & 3) == 0 && gemm_bi_is_aligned_16(B);
+        bool b_vec16_aligned = (N & 3) == 0 && is_aligned_16(B);
 
         for (int nIdx = 0; nIdx < N; nIdx += GEMM_BI_SCALAR_BK) {
             #pragma unroll
@@ -2216,9 +2216,9 @@ void gemm_bi_nt_slim(
 
             for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
+                    scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
                 // Keep the qualified NT Slim operation order exactly: one
                 // round-to-nearest FFMA update per dotIdx for every output.
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
@@ -2250,7 +2250,7 @@ void gemm_bi_nt_slim(
                             + wSubColIdx * GEMM_BI_SCALAR_WSUBN
                             + threadColInWarp * GEMM_BI_SCALAR_TN + resIdxN;
                         if (g_col + 3 >= K_out || (K_out % 4 != 0)
-                            || !gemm_bi_is_aligned_16(C)) {
+                            || !is_aligned_16(C)) {
                             int idx_base = (wSubRowIdx * GEMM_BI_SCALAR_TM + resIdxM)
                                 * (GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN)
                                 + wSubColIdx * GEMM_BI_SCALAR_TN + resIdxN;
@@ -2323,7 +2323,7 @@ void gemm_bi_nt_slim(
 // and REGRESS the bit-exact contract. The bias-POST single-add IS the
 // canonical unify for this kernel.
 extern "C" __global__ __launch_bounds__(256, 4)
-void gemm_bi_nn_ultra_thin(
+void nn_ultra_thin(
     float* __restrict__ Y,          // [M, N] output (ldc stride)
     const float* __restrict__ X,    // [M, K] input (lda stride)
     const float* __restrict__ W,    // [K, N] weights (ldb stride)
@@ -2410,14 +2410,14 @@ void gemm_bi_nn_ultra_thin(
 // Works for any M, K, alpha, beta, bias — fully runtime-parametric.
 // K can be non-multiple-of-4 (scalar loads). No SMEM, no float4.
 //
-// Bias-fold rationale: same as `gemm_bi_nn_ultra_thin` — bias is
+// Bias-fold rationale: same as `nn_ultra_thin` — bias is
 // POST-tree-reduce, `val = α·acc; val += bias[0]`. CPU mirror's caller
 // pre-seeds Y with bias so CPU computes `bias + sum`, GPU computes
 // `sum + bias`; both bit-exact via f32 FADD commutativity at α=1.
 // Seeding into one warp's K=0 acc would break the warp-shuffle butterfly
 // reduce. No change needed.
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_nn_gemv(
+void nn_gemv(
     float* __restrict__ Y,          // [M] — output, stride ldy in elements (usually 1)
     const float* __restrict__ X,    // [M, K]
     const float* __restrict__ W,    // [K] — weight vector
@@ -2435,7 +2435,7 @@ void gemm_bi_nn_gemv(
 
     // Each thread accumulates X[row, lane + n*32] * W[lane + n*32] for n=0..K/32-1.
     // Fixed in-thread k-order → deterministic per-thread accumulation.
-    // see gemm_bi_nn_ultra_thin pin.
+    // see nn_ultra_thin pin.
     float acc = 0.0f;
     const float* X_row = X + row * lda;
     for (int k = lane; k < K; k += 32) {
@@ -2472,7 +2472,7 @@ void gemm_bi_nn_gemv(
 //
 // GEMM_BI_SCALAR_TN semantics: beta=1 (accumulation into existing dW).
 extern "C" __global__ __launch_bounds__(128, 4)
-void gemm_bi_tn_gemv(
+void tn_gemv(
     float* __restrict__ dW,         // [K_out] — weight gradient (accumulated)
     const float* __restrict__ X,    // [M_red, K_out]
     const float* __restrict__ dY,   // [M_red] — output gradient (N=1)
@@ -2489,7 +2489,7 @@ void gemm_bi_tn_gemv(
     if (k >= K_out) return;
 
     // Each thread accumulates X[lane + n*32, k] * dY[lane + n*32] for n=0..M_red/32-1.
-    // see gemm_bi_nn_ultra_thin pin.
+    // see nn_ultra_thin pin.
     float acc = 0.0f;
     for (int m = lane; m < M_red; m += 32) {
         acc = __fmaf_rn(X[m * lda + k], dY[m * ldy], acc);
@@ -2517,7 +2517,7 @@ void gemm_bi_tn_gemv(
 //
 // NT semantics: beta=0 (overwrite dX).
 extern "C" __global__ __launch_bounds__(256)
-void gemm_bi_nt_gemv(
+void nt_gemv(
     float* __restrict__ dX,         // [M, K] — output (overwritten)
     const float* __restrict__ dY,   // [M] — upstream gradient (N=1)
     const float* __restrict__ W,    // [K] — weight
@@ -2562,7 +2562,7 @@ void gemm_bi_nt_gemv(
 #define GEMM_BI_NARROW_ROW_STRIDE_B (GEMM_BI_NARROW_NUM_THREADS / (GEMM_BI_NARROW_BN / 4))  // 16
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_NUM_THREADS, 4)
-void gemm_bi_nn_narrow(
+void nn_narrow(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -2687,7 +2687,7 @@ void gemm_bi_nn_narrow(
             int g_row = bkIdx + innerRowB + offset;
             int g_col = pid_n * GEMM_BI_NARROW_BN + innerColB * 4;
             unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
-            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && is_aligned_16(B)) {
                 const float* src = B_block + (innerRowB + offset) * ldb + innerColB * 4;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                              :: "r"(dst), "l"(src));
@@ -2704,10 +2704,10 @@ void gemm_bi_nn_narrow(
 
         // Compute.
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
+            scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             // explicit __fmaf_rn for bit-exact
-            // match with CPU `_mm256_fmadd_ps`. gemm_bi_nn_narrow.
+            // match with CPU `_mm256_fmadd_ps`. nn_narrow.
             for (int resIdxM = 0; resIdxM < GEMM_BI_NARROW_TM; ++resIdxM) {
                 for (int resIdxN = 0; resIdxN < GEMM_BI_NARROW_TN; ++resIdxN) {
                     int idx = resIdxM * GEMM_BI_NARROW_TN + resIdxN;
@@ -2760,10 +2760,10 @@ void gemm_bi_nn_narrow(
 // ============================================================================
 // Narrow-N NN small-tile variant — for low-M shapes (batch ≤ 64).
 // ============================================================================
-// Bit-exact clone of gemm_bi_nn_narrow with shrunken tile. Per-output FMA
+// Bit-exact clone of nn_narrow with shrunken tile. Per-output FMA
 // chain `bias + Σ A[m,k]·B[k,n]` ascending K is identical regardless of tile
 // — same single-rounding __fmaf_rn order, same bias pre-seed at K=0, same
-// scalar N-tail epilogue. Output is byte-identical to gemm_bi_nn_narrow on
+// scalar N-tail epilogue. Output is byte-identical to nn_narrow on
 // any shape; the only difference is GPU CTA grid layout (smaller tile = more
 // CTAs = more SMs busy).
 //
@@ -2793,7 +2793,7 @@ void gemm_bi_nn_narrow(
 #define GEMM_BI_NARROW_SMALL_ROW_STRIDE_B (GEMM_BI_NARROW_SMALL_NUM_THREADS / (GEMM_BI_NARROW_SMALL_BN / 4))  // 16
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_SMALL_NUM_THREADS, 8)
-void gemm_bi_nn_narrow_small(
+void nn_narrow_small(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -2842,10 +2842,10 @@ void gemm_bi_nn_narrow_small(
         const float* B_block = B + pid_n * GEMM_BI_NARROW_SMALL_BN;
         float* C_warp = C + (pid_m * GEMM_BI_NARROW_SMALL_BM + warpRow * GEMM_BI_NARROW_SMALL_WM) * ldc + pid_n * GEMM_BI_NARROW_SMALL_BN + warpCol * GEMM_BI_NARROW_SMALL_WN;
 
-        // Bias pre-seed matches gemm_bi_nn_narrow
+        // Bias pre-seed matches nn_narrow
         // semantic): seed threadResults with bias[g_col] BEFORE K-loop so FMA
         // chain begins with `(bias + A[m,0]*B[0,n])` to match CPU order. The
-        // per-output FMA chain is identical to gemm_bi_nn_narrow regardless
+        // per-output FMA chain is identical to nn_narrow regardless
         // of tile size. Only valid for alpha=1 (training forward calls).
         float threadResults[GEMM_BI_NARROW_SMALL_WMITER * GEMM_BI_NARROW_SMALL_TM * GEMM_BI_NARROW_SMALL_WNITER * GEMM_BI_NARROW_SMALL_TN];
         #pragma unroll
@@ -2900,7 +2900,7 @@ void gemm_bi_nn_narrow_small(
             int g_row = bkIdx + innerRowB + offset;
             int g_col = pid_n * GEMM_BI_NARROW_SMALL_BN + innerColB * 4;
             unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_NARROW_SMALL_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
-            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_row < K && g_col + 3 < N && (ldb % 4 == 0) && is_aligned_16(B)) {
                 const float* src = B_block + (innerRowB + offset) * ldb + innerColB * 4;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                              :: "r"(dst), "l"(src));
@@ -2916,12 +2916,12 @@ void gemm_bi_nn_narrow_small(
         __syncthreads();
 
         // Compute. Identical per-output ascending K __fmaf_rn chain as
-        // gemm_bi_nn_narrow — bit-exact f32 output regardless of tile size.
+        // nn_narrow — bit-exact f32 output regardless of tile size.
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_SMALL_BK; ++dotIdx) {
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_SMALL_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_SMALL_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_SMALL_WM + threadRowInWarp * GEMM_BI_NARROW_SMALL_TM]);
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_SMALL_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_SMALL_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_SMALL_WN + threadColInWarp * GEMM_BI_NARROW_SMALL_TN]);
+            scalar_load_fragment<GEMM_BI_NARROW_SMALL_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_SMALL_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_SMALL_WM + threadRowInWarp * GEMM_BI_NARROW_SMALL_TM]);
+            scalar_load_fragment<GEMM_BI_NARROW_SMALL_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_SMALL_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_SMALL_WN + threadColInWarp * GEMM_BI_NARROW_SMALL_TN]);
             // explicit __fmaf_rn for bit-exact match with CPU
-            // `f32::mul_add` ascending K — same chain as gemm_bi_nn_narrow.
+            // `f32::mul_add` ascending K — same chain as nn_narrow.
             for (int resIdxM = 0; resIdxM < GEMM_BI_NARROW_SMALL_TM; ++resIdxM) {
                 for (int resIdxN = 0; resIdxN < GEMM_BI_NARROW_SMALL_TN; ++resIdxN) {
                     int idx = resIdxM * GEMM_BI_NARROW_SMALL_TN + resIdxN;
@@ -2937,7 +2937,7 @@ void gemm_bi_nn_narrow_small(
     }
 
     // Epilogue: bias-IN-FMA already absorbed via pre-K-loop seed. Scalar N
-    // fallback for non-%4 N (e.g. N=25). Same write path as gemm_bi_nn_narrow.
+    // fallback for non-%4 N (e.g. N=25). Same write path as nn_narrow.
     for (int resIdxM = 0; resIdxM < GEMM_BI_NARROW_SMALL_TM; ++resIdxM) {
         int g_row = pid_m * GEMM_BI_NARROW_SMALL_BM + warpRow * GEMM_BI_NARROW_SMALL_WM + threadRowInWarp * GEMM_BI_NARROW_SMALL_TM + resIdxM;
         if (g_row >= M) continue;
@@ -2988,7 +2988,7 @@ void gemm_bi_nn_narrow_small(
 #define GEMM_BI_NARROW_ROW_STRIDE_B (GEMM_BI_NARROW_NUM_THREADS / (GEMM_BI_NARROW_BN / 4))
 
 template <bool BASES_ALIGNED>
-__device__ __forceinline__ void gemm_bi_tn_narrow_splitm_impl(
+__device__ __forceinline__ void tn_narrow_splitm_impl(
     float* __restrict__ partial,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -3037,7 +3037,7 @@ __device__ __forceinline__ void gemm_bi_tn_narrow_splitm_impl(
                     + column_chunk) * (unsigned)sizeof(float);
             bool vector = g_m < m_end && g_k + 3 < K_out
                 && (K_out & 3) == 0
-                && (BASES_ALIGNED || gemm_bi_is_aligned_16(A));
+                && (BASES_ALIGNED || is_aligned_16(A));
             if (vector) {
                 const float* source = A + (long long)g_m * K_out + g_k;
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
@@ -3066,7 +3066,7 @@ __device__ __forceinline__ void gemm_bi_tn_narrow_splitm_impl(
             float* destination = &Bs[(inner_row_b + offset)
                 * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + inner_col_b * 4];
             bool vector = g_m < m_end && g_n + 3 < N && (N & 3) == 0
-                && (BASES_ALIGNED || gemm_bi_is_aligned_16(B));
+                && (BASES_ALIGNED || is_aligned_16(B));
             if (vector) {
                 reinterpret_cast<float4*>(destination)[0] =
                     ld_global_L2_128B(B + (long long)g_m * N + g_n);
@@ -3134,34 +3134,34 @@ __device__ __forceinline__ void gemm_bi_tn_narrow_splitm_impl(
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_NUM_THREADS, 4)
-void gemm_bi_tn_narrow_splitm_partial(
+void tn_narrow_splitm_partial(
     float* partial, const float* A, const float* B,
     int M_red, int K_out, int N, int M_CHUNK
 ) {
-    gemm_bi_tn_narrow_splitm_impl<false>(partial, A, B, M_red, K_out, N, M_CHUNK);
+    tn_narrow_splitm_impl<false>(partial, A, B, M_red, K_out, N, M_CHUNK);
 }
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_NUM_THREADS, 4)
-void gemm_bi_tn_narrow_splitm_partial_aligned(
+void tn_narrow_splitm_partial_aligned(
     float* partial, const float* A, const float* B,
     int M_red, int K_out, int N, int M_CHUNK
 ) {
-    gemm_bi_tn_narrow_splitm_impl<true>(partial, A, B, M_red, K_out, N, M_CHUNK);
+    tn_narrow_splitm_impl<true>(partial, A, B, M_red, K_out, N, M_CHUNK);
 }
 
 using TnNarrowSplitMPartialSignature = void (*)(
     float*, const float*, const float*, int, int, int, int);
 static_assert(SgbZeroSameType<
-                  decltype(&gemm_bi_tn_narrow_splitm_partial),
+                  decltype(&tn_narrow_splitm_partial),
                   TnNarrowSplitMPartialSignature>::value,
               "TN narrow split-M partial signature drift");
 static_assert(SgbZeroSameType<
-                  decltype(&gemm_bi_tn_narrow_splitm_partial_aligned),
+                  decltype(&tn_narrow_splitm_partial_aligned),
                   TnNarrowSplitMPartialSignature>::value,
               "TN narrow split-M aligned partial signature drift");
 
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_NUM_THREADS, 4)
-void gemm_bi_tn_narrow(
+void tn_narrow(
     float* __restrict__ C,         // [K_out, N]
     const float* __restrict__ A,   // [M_red, K_out]
     const float* __restrict__ B,   // [M_red, N]
@@ -3245,7 +3245,7 @@ void gemm_bi_tn_narrow(
                     + (_k_outer * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + _m_inner)
                     * (unsigned)sizeof(float);
                 bool _full16 = (_g_m < M_red) && (_g_k + 3 < K_out) && ((K_out & 3) == 0)
-                    && gemm_bi_is_aligned_16(A);
+                    && is_aligned_16(A);
                 if (_full16) {
                     const float* _src = A + (long long)_g_m * K_out + _g_k;
                     asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
@@ -3271,7 +3271,7 @@ void gemm_bi_tn_narrow(
         for (int offset = 0; offset + GEMM_BI_NARROW_ROW_STRIDE_B <= GEMM_BI_NARROW_BK; offset += GEMM_BI_NARROW_ROW_STRIDE_B) {
             int g_m = mIdx + innerRowB + offset;
             int g_n = pid_n * GEMM_BI_NARROW_BN + innerColB * 4;
-            if (g_m < M_red && g_n + 3 < N && (N % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_m < M_red && g_n + 3 < N && (N % 4 == 0) && is_aligned_16(B)) {
                 reinterpret_cast<float4*>(&Bs[(innerRowB + offset) * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4])[0] =
                     ld_global_L2_128B(&B[g_m * N + pid_n * GEMM_BI_NARROW_BN + innerColB * 4]);
             } else {
@@ -3286,8 +3286,8 @@ void gemm_bi_tn_narrow(
         __syncthreads();
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
+            scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             for (int rm = 0; rm < GEMM_BI_NARROW_TM; ++rm) {
                 for (int rn = 0; rn < GEMM_BI_NARROW_TN; ++rn) {
                     // explicit __fmaf_rn for
@@ -3324,7 +3324,7 @@ void gemm_bi_tn_narrow(
 // B = W [K_out, N] — read transposed as W^T[N, K_out]
 // C = dX [M, K_out] — overwrite (beta=0)
 extern "C" __global__ __launch_bounds__(GEMM_BI_NARROW_NUM_THREADS, 4)
-void gemm_bi_nt_narrow(
+void nt_narrow(
     float* __restrict__ C,
     const float* __restrict__ A,   // dY [M, N]
     const float* __restrict__ B,   // W [K_out, N]
@@ -3416,7 +3416,7 @@ void gemm_bi_nt_narrow(
             int g_k = pid_n * GEMM_BI_NARROW_BN + k_base;
             int g_n = nIdx + n_local;
             float4 tmp;
-            if (g_k < K_out && g_n + 3 < N && (N % 4 == 0) && gemm_bi_is_aligned_16(B)) {
+            if (g_k < K_out && g_n + 3 < N && (N % 4 == 0) && is_aligned_16(B)) {
                 tmp = ld_global_L2_128B(&B[g_k * N + g_n]);
             } else {
                 tmp.x = (g_k < K_out && g_n + 0 < N) ? B[g_k * N + g_n + 0] : 0.0f;
@@ -3434,8 +3434,8 @@ void gemm_bi_nt_narrow(
         __syncthreads();
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
-            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
+            scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             for (int rm = 0; rm < GEMM_BI_NARROW_TM; ++rm) {
                 for (int rn = 0; rn < GEMM_BI_NARROW_TN; ++rn) {
                     // explicit __fmaf_rn for
@@ -3511,14 +3511,14 @@ void gemm_bi_nt_narrow(
 // K-bound contract.
 // `K_CHUNKS = K_main / GEMM_BI_SPLITK32_BK` is the count of FULL chunks the kernel processes;
 // it covers columns [0..K_main). Anything past K_main (the tail) is handled
-// EXTERNALLY by `gemm_bi_splitk_reduce` via `x_tail_ptr` / `w_tail_ptr` /
+// EXTERNALLY by `splitk_reduce` via `x_tail_ptr` / `w_tail_ptr` /
 // `tail_cnt`. There is NO in-kernel K-bound runtime check here — the
 // dispatcher contract guarantees `K_main ≤ K_full` and the kernel reads
 // strictly from [0..K_main). If a future dispatcher change ever passes
 // `K_CHUNKS · GEMM_BI_SPLITK32_BK > lda`, the kernel will OOB-read silently. Keep the
 // Rust dispatch contract honest.
 extern "C" __global__ __launch_bounds__(GEMM_BI_SPLITK32_NUM_THREADS, 4)
-void gemm_bi_nn_splitk32_partial(
+void nn_splitk32_partial(
     float* __restrict__ partial,  // [K_CHUNKS * M * N]
     const float* __restrict__ A,  // [M, K_full]
     const float* __restrict__ B,  // [K_full, N]
@@ -3560,7 +3560,7 @@ void gemm_bi_nn_splitk32_partial(
     // tile_id over BOTH K-chunk and (pid_m, pid_n) — pid_k / pid_mn / pid_m / pid_n
     // all derive from tile_id per iteration. Each (pid_k, pid_m, pid_n) tile is
     // independent — partial slot is unique → no race.
-    // Direct CTA mapping avoids the persistent-loop overhead (see gemm_bi_nn). splitk32
+    // Direct CTA mapping avoids the persistent-loop overhead (see nn_big). splitk32
     // case uses total_blocks = K_CHUNKS * total_mn since it iterates across
     // K-chunks too. Bit-exact: each (pid_k, pid_m, pid_n) tile is still
     // independent and gets its own CTA via gridDim = K_CHUNKS * total_mn.
@@ -3605,7 +3605,7 @@ void gemm_bi_nn_splitk32_partial(
     for (int offset = 0; offset < GEMM_BI_SPLITK32_BK; offset += 8) {
         int g_col = pid_n * GEMM_BI_SPLITK32_BN + innerColB * 4;
         unsigned dst = Bs_base + ((innerRowB + offset) * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + innerColB * 4) * (unsigned)sizeof(float);
-        if (g_col + 3 < N && (N & 3) == 0 && gemm_bi_is_aligned_16(B)) {
+        if (g_col + 3 < N && (N & 3) == 0 && is_aligned_16(B)) {
             const float* src = B_block + (innerRowB + offset) * N + innerColB * 4;
             asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
                          :: "r"(dst), "l"(src));
@@ -3621,20 +3621,20 @@ void gemm_bi_nn_splitk32_partial(
     __syncthreads();
 
     // Register double-buffer: prefetch dotIdx=0 into buf=0.
-    gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[0][0], &As[0 * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
-    gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[0][0], &Bs[0 * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
+    scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[0][0], &As[0 * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
+    scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[0][0], &Bs[0 * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
     for (int dotIdx = 0; dotIdx < GEMM_BI_SPLITK32_BK; ++dotIdx) {
         int cur = dotIdx & 1;
         int nxt = cur ^ 1;
         // Prefetch next iteration's fragments (skip on last iter).
         if (dotIdx + 1 < GEMM_BI_SPLITK32_BK) {
             int next_k = dotIdx + 1;
-            gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[nxt][0], &As[next_k * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
-            gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[nxt][0], &Bs[next_k * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
+            scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[nxt][0], &As[next_k * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
+            scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[nxt][0], &Bs[next_k * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
         }
         // FMA consumes current buffer — bit-exact: same rm-major, rn-minor order.
         // explicit __fmaf_rn for bit-exact match
-        // with CPU `_mm256_fmadd_ps`. gemm_bi_nn_splitk32_partial.
+        // with CPU `_mm256_fmadd_ps`. nn_splitk32_partial.
         #pragma unroll
         for (int rm = 0; rm < GEMM_BI_SPLITK32_TM; ++rm) {
             #pragma unroll
@@ -3682,7 +3682,7 @@ void gemm_bi_nn_splitk32_partial(
 //   tail_cnt           — number of tail columns (0..31), 0 = skip
 //   out_col_stride     — if > 0, output row stride = out_col_stride (default = N)
 extern "C" __global__ __launch_bounds__(256, 8)
-void gemm_bi_splitk_reduce(
+void splitk_reduce(
     float* __restrict__ C,
     const float* __restrict__ partial,
     const float* __restrict__ bias,
@@ -3734,7 +3734,7 @@ void gemm_bi_splitk_reduce(
 // (e.g. SALE action K_out=257 → main 256 via Split-K NT-via-T + 1 tail here).
 // One block per M row-group; each thread handles one m, sequential N reduction.
 extern "C" __global__ __launch_bounds__(256, 8)
-void gemm_bi_dx_col_gemv(
+void dx_col_gemv(
     float* __restrict__ dX,           // [M, out_col_stride]
     const float* __restrict__ dY,     // [M, N]
     const float* __restrict__ w_row,  // [N] — W[K_tail_row, :]
@@ -3771,7 +3771,7 @@ void gemm_bi_dx_col_gemv(
 // Source: NVIDIA CUDA C++ Programming Guide §8.7.2 "Matrix Transpose".
 // ============================================================================
 extern "C" __global__ __launch_bounds__(1024, 2)
-void gemm_bi_transpose_f32_2d(
+void transpose_f32_2d(
     float* __restrict__ dst,        // [cols, rows]
     const float* __restrict__ src,  // [rows, cols]
     int rows, int cols
@@ -3800,7 +3800,7 @@ void gemm_bi_transpose_f32_2d(
 
 #define GEMM_BI_DEFINE_GEMM_BI_NN_GEMV(SUFFIX, T_ACT, FROM_F)                        \
 extern "C" __global__ __launch_bounds__(128, 4)                               \
-void gemm_bi_nn_gemv_##SUFFIX(                                               \
+void nn_gemv_##SUFFIX(                                               \
     T_ACT* __restrict__ Y,                                                    \
     const T_ACT* __restrict__ X,                                              \
     const T_ACT* __restrict__ W,                                              \
@@ -3838,7 +3838,7 @@ GEMM_BI_DEFINE_GEMM_BI_NN_GEMV(f16,  __half,        from_f_f16)
 // GEMM_BI_SCALAR_TN GEMV: dW[K] += alpha * X^T[K,M] @ dY[M]. dW stays f32 (master grad).
 #define GEMM_BI_DEFINE_GEMM_BI_TN_GEMV(SUFFIX, T_ACT, FROM_F)                        \
 extern "C" __global__ __launch_bounds__(128, 4)                               \
-void gemm_bi_tn_gemv_##SUFFIX(                                               \
+void tn_gemv_##SUFFIX(                                               \
     float* __restrict__ dW,                                                   \
     const T_ACT* __restrict__ X,                                              \
     const T_ACT* __restrict__ dY,                                             \
@@ -3872,7 +3872,7 @@ GEMM_BI_DEFINE_GEMM_BI_TN_GEMV(f16,  __half,        from_f_f16)
 // NT GEMV: dX[M,K] = alpha * dY[M] @ W^T[K]. Pure outer product.
 #define GEMM_BI_DEFINE_GEMM_BI_NT_GEMV(SUFFIX, T_ACT, FROM_F)                        \
 extern "C" __global__ __launch_bounds__(256)                                  \
-void gemm_bi_nt_gemv_##SUFFIX(                                               \
+void nt_gemv_##SUFFIX(                                               \
     T_ACT* __restrict__ dX,                                                   \
     const T_ACT* __restrict__ dY,                                             \
     const T_ACT* __restrict__ W,                                              \
@@ -3896,7 +3896,7 @@ GEMM_BI_DEFINE_GEMM_BI_NT_GEMV(f16,  __half,        from_f_f16)
 // the FMA chain is then bit-identical to the f32 kernel on upcast inputs.
 #define GEMM_BI_DEFINE_GEMM_BI_NN_ULTRA_THIN(SUFFIX, T_ACT, FROM_F)                  \
 extern "C" __global__ __launch_bounds__(256, 4)                               \
-void gemm_bi_nn_ultra_thin_##SUFFIX(                                         \
+void nn_ultra_thin_##SUFFIX(                                         \
     T_ACT* __restrict__ Y,                                                    \
     const T_ACT* __restrict__ X,                                              \
     const T_ACT* __restrict__ W,                                              \
@@ -4030,8 +4030,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < BK_; ++dotIdx) {                    \
-                gemm_bi_scalar_load_fragment<TM_>(&regM[0], &As[dotIdx * (BM_ + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * WM_ + threadRowInWarp * TM_]); \
-                gemm_bi_scalar_load_fragment<TN_>(&regN[0], &Bs[dotIdx * (BN_ + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * WN_ + threadColInWarp * TN_]); \
+                scalar_load_fragment<TM_>(&regM[0], &As[dotIdx * (BM_ + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * WM_ + threadRowInWarp * TM_]); \
+                scalar_load_fragment<TN_>(&regN[0], &Bs[dotIdx * (BN_ + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * WN_ + threadColInWarp * TN_]); \
                 for (int resIdxM = 0; resIdxM < TM_; ++resIdxM) {             \
                     for (int resIdxN = 0; resIdxN < TN_; ++resIdxN) {         \
                         threadResults[resIdxM * TN_ + resIdxN] = __fmaf_rn(   \
@@ -4061,10 +4061,10 @@ void NAME(                                                                    \
     }                                                                         \
 }
 
-GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(gemm_bi_nn_narrow_bf16, __nv_bfloat16, from_f_bf16, 64, 32, 16, 32, 16, 4, 4, 128, 4)
-GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(gemm_bi_nn_narrow_f16,  __half,        from_f_f16,  64, 32, 16, 32, 16, 4, 4, 128, 4)
-GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(gemm_bi_nn_narrow_small_bf16, __nv_bfloat16, from_f_bf16, 16, 16, 16, 8, 16, 2, 2, 64, 8)
-GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(gemm_bi_nn_narrow_small_f16,  __half,        from_f_f16,  16, 16, 16, 8, 16, 2, 2, 64, 8)
+GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(nn_narrow_bf16, __nv_bfloat16, from_f_bf16, 64, 32, 16, 32, 16, 4, 4, 128, 4)
+GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(nn_narrow_f16,  __half,        from_f_f16,  64, 32, 16, 32, 16, 4, 4, 128, 4)
+GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(nn_narrow_small_bf16, __nv_bfloat16, from_f_bf16, 16, 16, 16, 8, 16, 2, 2, 64, 8)
+GEMM_BI_DEFINE_GEMM_BI_NN_NARROW_T(nn_narrow_small_f16,  __half,        from_f_f16,  16, 16, 16, 8, 16, 2, 2, 64, 8)
 
 // Typed narrow GEMM_BI_SCALAR_TN (dW): C stays f32 (master grad, += epilogue); A=X and
 // B=dY are typed. Same A1 route: f32 smem, sync typed stage-in with the
@@ -4122,8 +4122,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
-                gemm_bi_scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
-                gemm_bi_scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
+                scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
+                scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
                 for (int rm = 0; rm < 4; ++rm) {                              \
                     for (int rn = 0; rn < 4; ++rn) {                          \
                         threadResults[rm * 4 + rn] = __fmaf_rn(               \
@@ -4147,8 +4147,8 @@ void NAME(                                                                    \
     }                                                                         \
 }
 
-GEMM_BI_DEFINE_GEMM_BI_TN_NARROW_T(gemm_bi_tn_narrow_bf16, __nv_bfloat16)
-GEMM_BI_DEFINE_GEMM_BI_TN_NARROW_T(gemm_bi_tn_narrow_f16,  __half)
+GEMM_BI_DEFINE_GEMM_BI_TN_NARROW_T(tn_narrow_bf16, __nv_bfloat16)
+GEMM_BI_DEFINE_GEMM_BI_TN_NARROW_T(tn_narrow_f16,  __half)
 
 // Typed narrow NT (dX): C=dX typed output (overwrite), A=dY and B=W typed.
 // B tile staged TRANSPOSED (rows = reduction n, cols = k_out), exactly as
@@ -4204,8 +4204,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
-                gemm_bi_scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
-                gemm_bi_scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
+                scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
+                scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
                 for (int rm = 0; rm < 4; ++rm) {                              \
                     for (int rn = 0; rn < 4; ++rn) {                          \
                         threadResults[rm * 4 + rn] = __fmaf_rn(               \
@@ -4232,8 +4232,8 @@ void NAME(                                                                    \
     }                                                                         \
 }
 
-GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(gemm_bi_nt_narrow_bf16, __nv_bfloat16, from_f_bf16)
-GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(gemm_bi_nt_narrow_f16,  __half,        from_f_f16)
+GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(nt_narrow_bf16, __nv_bfloat16, from_f_bf16)
+GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(nt_narrow_f16,  __half,        from_f_f16)
 
 // ============================================================================
 // The Slim/narrow sections above redefine the tile constants (GEMM_BI_SCALAR_BM/GEMM_BI_SCALAR_BN/GEMM_BI_SCALAR_BK,
@@ -4287,18 +4287,18 @@ GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(gemm_bi_nt_narrow_f16,  __half,        from_f
         float regN_next[GEMM_BI_T_WNITER * GEMM_BI_T_TN];                                          \
         _Pragma("unroll")                                                      \
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)            \
-            gemm_bi_scalar_load_fragment<GEMM_BI_T_TM>(&regM[wSubRowIdx * GEMM_BI_T_TM], &As_rd[0 * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
+            scalar_load_fragment<GEMM_BI_T_TM>(&regM[wSubRowIdx * GEMM_BI_T_TM], &As_rd[0 * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
         _Pragma("unroll")                                                      \
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_T_WNITER; ++wSubColIdx)            \
-            gemm_bi_scalar_load_fragment<GEMM_BI_T_TN>(&regN[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[0 * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
+            scalar_load_fragment<GEMM_BI_T_TN>(&regN[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[0 * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
         for (int dotIdx = 0; dotIdx < GEMM_BI_T_BK; ++dotIdx) {                          \
             if (dotIdx + 1 < GEMM_BI_T_BK) {                                             \
                 _Pragma("unroll")                                              \
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)    \
-                    gemm_bi_scalar_load_fragment<GEMM_BI_T_TM>(&regM_next[wSubRowIdx * GEMM_BI_T_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
+                    scalar_load_fragment<GEMM_BI_T_TM>(&regM_next[wSubRowIdx * GEMM_BI_T_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
                 _Pragma("unroll")                                              \
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_T_WNITER; ++wSubColIdx)    \
-                    gemm_bi_scalar_load_fragment<GEMM_BI_T_TN>(&regN_next[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
+                    scalar_load_fragment<GEMM_BI_T_TN>(&regN_next[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
             }                                                                  \
             _Pragma("unroll")                                                  \
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)        \
@@ -4414,7 +4414,7 @@ GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(gemm_bi_nt_narrow_f16,  __half,        from_f
 
 #define GEMM_BI_DEFINE_GEMM_BI_NN_BIG_T(SUFFIX, T_ACT, FROM_F)                        \
 extern "C" __global__ __launch_bounds__(GEMM_BI_T_NTHREADS, 2)                        \
-void gemm_bi_nn_big_##SUFFIX(                                                 \
+void nn_big_##SUFFIX(                                                 \
     T_ACT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -4519,7 +4519,7 @@ GEMM_BI_DEFINE_GEMM_BI_NN_BIG_T(f16,  __half,        from_f_f16)
 
 #define GEMM_BI_DEFINE_GEMM_BI_TN_BIG_T(SUFFIX, T_ACT)                                \
 extern "C" __global__ __launch_bounds__(GEMM_BI_T_NTHREADS, 2)                        \
-void gemm_bi_tn_big_##SUFFIX(                                                 \
+void tn_big_##SUFFIX(                                                 \
     float* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
@@ -4594,7 +4594,7 @@ GEMM_BI_DEFINE_GEMM_BI_TN_BIG_T(f16,  __half)
 
 #define GEMM_BI_DEFINE_GEMM_BI_NT_BIG_T(SUFFIX, T_ACT, FROM_F)                        \
 extern "C" __global__ __launch_bounds__(GEMM_BI_T_NTHREADS, 2)                        \
-void gemm_bi_nt_big_##SUFFIX(                                                 \
+void nt_big_##SUFFIX(                                                 \
     T_ACT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \

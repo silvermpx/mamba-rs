@@ -368,7 +368,7 @@ fn run_route(
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>();
-        assert_eq!(identity.numeric_contract, Sm90aNumericContract::WgmmaV1);
+        assert_eq!(identity.numeric_contract, Sm90aNumericContract::Wgmma);
         assert_eq!(identity.op, case.op);
         assert_eq!(identity.dtype, case.dtype);
         assert_eq!(identity.schedule, schedule);

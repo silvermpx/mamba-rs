@@ -84,10 +84,10 @@ fn gpu_context_constructors_use_explicit_modes_and_deterministic_defaults() {
         ctx.bi_tensor_cores(),
         "deterministic tensor-core permission default"
     );
-    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
     assert_eq!(
         ctx.half_triad_policy(),
-        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+        HalfTriadPolicy::AllowStreamKFixedOrder,
         "the tensor-core tier takes the stream-K weight gradient by default"
     );
     drop(ctx);
@@ -171,8 +171,8 @@ fn vendor_mode_round_trip_preserves_custom_deterministic_policy() {
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(true);
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrderV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32);
+    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
 
     for vendor_mode in [GemmMode::CublasFast, GemmMode::CublasPedantic] {
         ctx.set_gemm_mode(vendor_mode).expect("select vendor mode");
@@ -184,11 +184,11 @@ fn vendor_mode_round_trip_preserves_custom_deterministic_policy() {
         assert!(ctx.bi_tensor_cores());
         assert_eq!(
             ctx.f32_triad_policy(),
-            F32TriadPolicy::AllowDeterministicTf32V1
+            F32TriadPolicy::AllowDeterministicTf32
         );
         assert_eq!(
             ctx.half_triad_policy(),
-            HalfTriadPolicy::AllowStreamKFixedOrderV1
+            HalfTriadPolicy::AllowStreamKFixedOrder
         );
     }
 }

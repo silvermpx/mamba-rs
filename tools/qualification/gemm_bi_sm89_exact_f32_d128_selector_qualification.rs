@@ -128,7 +128,7 @@ mod live {
     const OPS_PER_WINDOW: usize = 20;
     const RAW_GUARD_ELEMENTS: usize = 64;
     const RAW_GUARD_BITS: u32 = 0x7fc0_d128;
-    const PRIOR_SYMBOLS: [&str; 2] = ["gemm_bi_tn_splitm_partial_aligned", "gemm_bi_splitm_reduce"];
+    const PRIOR_SYMBOLS: [&str; 2] = ["tn_splitm_partial_aligned", "splitm_reduce"];
 
     #[derive(Clone, Copy)]
     struct Case {
@@ -308,7 +308,7 @@ mod live {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_bi_tensor_cores(false);
-        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
         Ok(ctx)
     }
 
@@ -652,8 +652,8 @@ mod live {
             || node.shape != case.dims
             || node.strides != (k, n, n)
             || node.tile != Some(case.tile)
-            || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1)
-            || node.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTileV1)
+            || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce)
+            || node.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTile)
             || node.launch.grid_dim != (256, 1, 1)
             || node.launch.block_dim != (64, 1, 1)
             || node.launch.shared_mem_bytes != case.dynamic_shared_bytes
@@ -675,12 +675,12 @@ mod live {
         let (_, k, n) = case.dims;
         let expected_tiles = [(128, 128), (1, 1)];
         let expected_numeric = [
-            ResolvedNumericContract::ScalarFmaV1,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1,
+            ResolvedNumericContract::ScalarFma,
+            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
         ];
         let expected_ownership = [
-            ResolvedOutputOwnership::OneCtaPerOutputTileV1,
-            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduceV1,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
+            ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
         ];
         if evidence.route_identity() != &ctx.gemm_route()
             || evidence.evidence_scope() != "eager_preflight_same_launcher"
@@ -765,7 +765,7 @@ mod live {
 
     fn auto_request(case: Case) -> PhysicalQualificationRequest {
         request(
-            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
             case.dims,
             1.0,
             1.0,
@@ -939,7 +939,7 @@ mod live {
         if qualify_physical_launch(
             auto_ctx,
             request(
-                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
                 case.dims,
                 -0.75,
                 1.0,

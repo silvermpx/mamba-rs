@@ -10,7 +10,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     sm100_target_candidates, validate_sm100_map_request,
 };
 
-const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100.cu");
+const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100/tcgen05.cu");
 const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
 
 fn public_function_source(source: &str, name: &str) -> String {
@@ -32,7 +32,7 @@ fn expected_symbols() -> BTreeSet<String> {
                 for schedule in ["c4", "p8"] {
                     for dtype in ["bf16", "f16"] {
                         symbols.insert(format!(
-                            "gemm_bi_{op}_sm100_tcgen_{tile}_bk64_{stages}_{schedule}_{dtype}"
+                            "{op}_sm100_tcgen_{tile}_bk64_{stages}_{schedule}_{dtype}"
                         ));
                     }
                 }

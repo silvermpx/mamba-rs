@@ -1436,7 +1436,7 @@ fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
 #[test]
 fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     let mma_source = include_str!("../kernels/gemm_bi_triad/mma16.cuh");
-    let sm80_source = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+    let sm80_source = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
     let (typed_sm80, tf32_sm80) = sm80_source
         .split_once("struct Sm80Tf32KernelParams")
         .expect("SM80 typed/TF32 source boundary");
@@ -1448,14 +1448,12 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
         sm80_source,
     ]
     .concat();
-    let typed_helper = cuda_braced_scope_after(mma_source, "void gemm_bi_cp_async_16_zfill(");
-    let typed_l2_helper = cuda_braced_scope_after(mma_source, "void gemm_bi_cp_async_16_zfill_l2(");
-    let tf32_stage = cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_stage_async(");
+    let typed_helper = cuda_braced_scope_after(mma_source, "void cp_async_16_zfill(");
+    let typed_l2_helper = cuda_braced_scope_after(mma_source, "void cp_async_16_zfill_l2(");
+    let tf32_stage = cuda_braced_scope_after(tf32_sm80, "void tf32_stage_async(");
 
     assert_eq!(
-        mma_source
-            .matches("void gemm_bi_cp_async_16_zfill(")
-            .count(),
+        mma_source.matches("void cp_async_16_zfill(").count(),
         1,
         "the shared typed async-copy helper must have one definition"
     );
@@ -1466,9 +1464,7 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     );
     assert!(typed_helper.contains("[%0], [%1], 16, %2"));
     assert_eq!(
-        mma_source
-            .matches("void gemm_bi_cp_async_16_zfill_l2(")
-            .count(),
+        mma_source.matches("void cp_async_16_zfill_l2(").count(),
         1,
         "the L2-only typed async-copy helper must have one definition"
     );
@@ -1482,19 +1478,19 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     assert_eq!(
         typed_sm80.matches("cp.async.ca.shared.global").count(),
         0,
-        "typed SM80 kernels must not bypass gemm_bi_cp_async_16_zfill"
+        "typed SM80 kernels must not bypass cp_async_16_zfill"
     );
     assert_eq!(
         typed_sm80.matches("cp.async.cg.shared.global").count(),
         0,
         "typed SM80 kernels must not bypass the named async-copy helpers"
     );
-    let typed_copies = typed_sm80.matches("gemm_bi_cp_async_16_zfill(").count()
-        + typed_sm80.matches("gemm_bi_cp_async_16_zfill_l2(").count();
+    let typed_copies = typed_sm80.matches("cp_async_16_zfill(").count()
+        + typed_sm80.matches("cp_async_16_zfill_l2(").count();
     assert!(typed_copies > 0, "typed SM80 kernels must use async copies");
     assert_eq!(
         typed_copies,
-        typed_sm80.matches("gemm_bi_cp_async_source(").count(),
+        typed_sm80.matches("cp_async_source(").count(),
         "every typed async copy must select an in-allocation source"
     );
     assert_eq!(
@@ -1513,9 +1509,7 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     // one named helper; nothing else in the portable TF32 source may carry
     // the scalar-width opcode.
     assert_eq!(
-        tf32_sm80
-            .matches("void gemm_bi_tf32_cp_async_4x4_zfill(")
-            .count(),
+        tf32_sm80.matches("void tf32_cp_async_4x4_zfill(").count(),
         1,
         "portable TF32 staging must own exactly one narrow-stride helper"
     );
@@ -1524,35 +1518,25 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
         1,
         "portable TF32 staging must use only the named 16-byte helper"
     );
-    let tf32_copy_helper =
-        cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_16_zfill(");
+    let tf32_copy_helper = cuda_braced_scope_after(tf32_sm80, "void tf32_cp_async_16_zfill(");
     assert_eq!(
-        tf32_sm80
-            .matches("void gemm_bi_tf32_cp_async_16_zfill(")
-            .count(),
+        tf32_sm80.matches("void tf32_cp_async_16_zfill(").count(),
         1,
         "portable TF32 staging must centralize its tile-aware cache policy"
     );
     assert!(tf32_copy_helper.contains("if constexpr (BM == 16)"));
-    assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill("));
-    assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill_l2("));
+    assert!(tf32_copy_helper.contains("cp_async_16_zfill("));
+    assert!(tf32_copy_helper.contains("cp_async_16_zfill_l2("));
     // The staging loop routes every copy through the stride-aware wrapper,
     // which picks the 16-byte helper or the narrow 4x4 helper per call.
-    let tf32_wide_copies = tf32_stage.matches("gemm_bi_tf32_cp_async_zfill<").count();
+    let tf32_wide_copies = tf32_stage.matches("tf32_cp_async_zfill<").count();
     assert_eq!(tf32_wide_copies, 4);
-    let tf32_wrapper = cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_zfill(");
+    let tf32_wrapper = cuda_braced_scope_after(tf32_sm80, "void tf32_cp_async_zfill(");
     assert_eq!(
-        tf32_wrapper
-            .matches("gemm_bi_tf32_cp_async_16_zfill<BM>(")
-            .count(),
+        tf32_wrapper.matches("tf32_cp_async_16_zfill<BM>(").count(),
         2
     );
-    assert_eq!(
-        tf32_wrapper
-            .matches("gemm_bi_tf32_cp_async_4x4_zfill(")
-            .count(),
-        2
-    );
+    assert_eq!(tf32_wrapper.matches("tf32_cp_async_4x4_zfill(").count(), 2);
     let tf32_copies = tf32_wide_copies;
     assert_eq!(
         tf32_copies,
@@ -1563,12 +1547,12 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     );
     assert_eq!(
         tf32_copies,
-        tf32_stage.matches("gemm_bi_cp_async_source(").count(),
+        tf32_stage.matches("cp_async_source(").count(),
         "every TF32 async copy must select an in-allocation source"
     );
     for line in tf32_stage
         .lines()
-        .filter(|line| line.contains("gemm_bi_cp_async_source("))
+        .filter(|line| line.contains("cp_async_source("))
     {
         assert!(
             line.contains("safe_offset, _bytes"),
@@ -1577,15 +1561,14 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     }
     for line in tf32_stage
         .lines()
-        .filter(|line| line.contains("gemm_bi_tf32_cp_async_zfill<"))
+        .filter(|line| line.contains("tf32_cp_async_zfill<"))
     {
         assert!(
             line.contains("dst, src, _bytes"),
             "TF32 async-copy call bypasses its selected source: {line}"
         );
     }
-    let tf32_narrow_helper =
-        cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_4x4_zfill(");
+    let tf32_narrow_helper = cuda_braced_scope_after(tf32_sm80, "void tf32_cp_async_4x4_zfill(");
     assert_eq!(
         source.matches("cp.async.ca.shared.global").count(),
         typed_helper.matches("cp.async.ca.shared.global").count()
@@ -1622,7 +1605,7 @@ fn typed_native_api_names_are_distinct_from_full_policy_entries() {
 
 #[test]
 fn tn_rect128x64_source_contract_is_forced_tn_ca_one_bank_bk32_s3() {
-    let source = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+    let source = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
     let marker = "#define GEMM_BI_TN_RECT_BM";
     let candidate = &source[source.find(marker).expect("TN Rect128x64 source marker")..];
     let candidate = candidate
@@ -1639,7 +1622,7 @@ fn tn_rect128x64_source_contract_is_forced_tn_ca_one_bank_bk32_s3() {
         "__launch_bounds__(256, 2)",
         "Xs[GEMM_BI_TN_RECT_STAGES][GEMM_BI_TN_RECT_BK][GEMM_BI_TN_RECT_LDX]",
         "Ys[GEMM_BI_TN_RECT_STAGES][GEMM_BI_TN_RECT_BK][GEMM_BI_TN_RECT_LDY]",
-        "gemm_bi_cp_async_16_zfill(_dst, _src, _bytes)",
+        "cp_async_16_zfill(_dst, _src, _bytes)",
         "cp.async.wait_group 1",
         "int macro64_tiles = (M_red - 1) / 64 + 1",
         "int k32_tiles = 2 * macro64_tiles",
@@ -1656,15 +1639,15 @@ fn tn_rect128x64_source_contract_is_forced_tn_ca_one_bank_bk32_s3() {
         );
     }
     for forbidden in [
-        "gemm_bi_cp_async_16_zfill_l2",
+        "cp_async_16_zfill_l2",
         "cp.async.cg",
         "float2",
-        "gemm_bi_accumulate_float2_or_scalar",
+        "accumulate_float2_or_scalar",
         "atomic",
         "split",
         "REDUX",
-        "gemm_bi_nn_tc128x64",
-        "gemm_bi_nt_tc128x64",
+        "nn_tc128x64",
+        "nt_tc128x64",
         "a_frag_next",
         "b_frag_next",
     ] {
@@ -1682,7 +1665,7 @@ fn tc128_output_pointer_formation_is_column_guarded() {
         include_str!("../kernels/gemm_bi_triad/common.cuh"),
         include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
         include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
-        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+        include_str!("../kernels/gemm_bi_triad/sm80/mma.cu"),
     ]
     .concat();
     let tc128_source = source
@@ -1691,9 +1674,7 @@ fn tc128_output_pointer_formation_is_column_guarded() {
         .0;
 
     assert_eq!(
-        tc128_source
-            .matches("gemm_bi_output_start_if_valid(")
-            .count(),
+        tc128_source.matches("output_start_if_valid(").count(),
         4,
         "the helper definition and all three TC128 epilogues must use the guarded output start"
     );
@@ -1702,10 +1683,10 @@ fn tc128_output_pointer_formation_is_column_guarded() {
         "TC128 epilogues must not form output pointers before validating c0"
     );
     let helper = tc128_source
-        .split_once("T* gemm_bi_output_start_if_valid(")
+        .split_once("T* output_start_if_valid(")
         .expect("guarded output helper")
         .1
-        .split_once("__device__ __forceinline__ int gemm_bi_cp_async_valid_elems")
+        .split_once("__device__ __forceinline__ int cp_async_valid_elems")
         .expect("next device helper")
         .0;
     let guard = helper

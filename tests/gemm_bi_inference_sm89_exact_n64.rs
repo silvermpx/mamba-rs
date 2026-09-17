@@ -17,8 +17,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
-const SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
-const LEGACY_SYMBOL: &str = "gemm_bi_f32_f32_s2";
+const SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
+const LEGACY_SYMBOL: &str = "f32_f32_s2";
 const CANDIDATE: InferenceTile = InferenceTile::F32Sm89N64CopyPlan;
 const GUARD: usize = 64;
 const POISON: u32 = 0xa5a5_a5a5;
@@ -1185,7 +1185,7 @@ fn run_auto_view(
     }
     drop(graph);
     inputs.unchanged(ctx);
-    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFmaV1);
+    assert_eq!(ctx.f32_triad_policy(), F32TriadPolicy::ExactScalarFma);
     let actual_symbol = match actual_tile {
         CANDIDATE => SYMBOL,
         InferenceTile::Legacy => LEGACY_SYMBOL,
@@ -1238,7 +1238,7 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.set_bi_gemm_family(BiGemmFamily::Inference);
     ctx.set_bi_tensor_cores(false);
-    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
     // The eight exact rows were independently admitted by 101-window production
     // pairs. This test is the full-hot *raw* batch/view gate, not a replacement
     // for that test's independent PEDANTIC/dyadic numerical gates.

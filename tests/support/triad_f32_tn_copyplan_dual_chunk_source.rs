@@ -1,6 +1,5 @@
-pub const DUAL_RAW_SYMBOL: &str = "gemm_bi_tn_test_fixed_sm89_f32_n64_dual_chunk_raw_v1";
-pub const DUAL_FUSED_SYMBOL: &str =
-    "gemm_bi_tn_test_fixed_sm89_f32_n64_dual_chunk_fused_finalize_v1";
+pub const DUAL_RAW_SYMBOL: &str = "tn_test_fixed_sm89_f32_n64_dual_chunk_raw";
+pub const DUAL_FUSED_SYMBOL: &str = "tn_test_fixed_sm89_f32_n64_dual_chunk_fused_finalize";
 
 const PRELUDE: &str = include_str!("../../kernels/_typed_prelude.cuh");
 

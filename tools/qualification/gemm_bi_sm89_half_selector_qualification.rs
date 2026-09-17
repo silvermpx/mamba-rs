@@ -108,7 +108,7 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 PhysicalQualificationRoute::HalfPolicy {
                     dtype,
                     tensor_cores: true,
-                    half_policy: HalfTriadPolicy::TiledParityV1,
+                    half_policy: HalfTriadPolicy::TiledParity,
                 },
             )
         })
@@ -191,27 +191,27 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
-            ) => "gemm_bi_nn_tc_f16",
+            ) => "nn_tc_f16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
-            ) => "gemm_bi_nn_tc_bf16",
+            ) => "nn_tc_bf16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
-            ) => "gemm_bi_tn_tc64_f16",
+            ) => "tn_tc64_f16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
-            ) => "gemm_bi_tn_tc64_bf16",
+            ) => "tn_tc64_bf16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
-            ) => "gemm_bi_nt_tc_f16",
+            ) => "nt_tc_f16",
             (
                 mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
                 mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
-            ) => "gemm_bi_nt_tc_bf16",
+            ) => "nt_tc_bf16",
             _ => {
                 return Err(format!(
                     "unsupported retained oracle route {op:?}/{dtype:?}"

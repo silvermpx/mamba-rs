@@ -88,7 +88,7 @@ static_assert(GemmBiNtM2N16Kernel::SHARED_BYTES == 17984,
               "M2N16 shared-memory contract drift");
 
 extern "C" __global__ __launch_bounds__(64, 4)
-void gemm_bi_nt_m2n16_bk64_splitk32_v1(
+void nt_m2n16_bk64_splitk32(
     float* output, const float* a, const float* b, float alpha,
     int m, int n, int k_out) {
     GemmBiNtM2N16Kernel::run(output, a, b, alpha, m, n, k_out);

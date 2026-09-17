@@ -708,9 +708,7 @@ pub(crate) fn expected_sm80_symbols() -> BTreeSet<String> {
             ("m16n16", &[4][..]),
         ] {
             for stage in stages {
-                symbols.insert(format!(
-                    "gemm_bi_{op}_sm80_mma_tf32_v1_{tile}_bk32_s{stage}"
-                ));
+                symbols.insert(format!("{op}_sm80_mma_tf32_{tile}_bk32_s{stage}"));
             }
         }
     }
@@ -721,7 +719,7 @@ pub(crate) fn expected_sm90a_symbols() -> BTreeSet<String> {
     for op in ["nn", "tn", "nt"] {
         for warpgroups in [1, 2] {
             symbols.insert(format!(
-                "gemm_bi_{op}_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg{warpgroups}"
+                "{op}_sm90a_wgmma_tf32_m64n128_bk32_s3_wg{warpgroups}"
             ));
         }
     }
@@ -734,7 +732,7 @@ pub(crate) fn expected_sm100_symbols() -> BTreeSet<String> {
             for stages in [2, 3, 4] {
                 for schedule in ["c4", "p8"] {
                     symbols.insert(format!(
-                        "gemm_bi_{op}_sm100_tcgen_tf32_v1_m128n{columns}_bk32_s{stages}_{schedule}"
+                        "{op}_sm100_tcgen_tf32_m128n{columns}_bk32_s{stages}_{schedule}"
                     ));
                 }
             }
@@ -747,22 +745,20 @@ pub(crate) fn expected_sm120_symbols() -> BTreeSet<String> {
     for op in ["nn", "tn", "nt"] {
         for tile in ["m128n64", "m64n128"] {
             for stages in [2, 3] {
-                symbols.insert(format!(
-                    "gemm_bi_{op}_sm120_tma_mma_tf32_v1_{tile}_bk32_s{stages}"
-                ));
+                symbols.insert(format!("{op}_sm120_tma_mma_tf32_{tile}_bk32_s{stages}"));
             }
         }
-        symbols.insert(format!("gemm_bi_{op}_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"));
+        symbols.insert(format!("{op}_sm120_tma_mma_tf32_m64n64_bk32_s2"));
     }
-    symbols.insert("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair".to_string());
-    symbols.insert("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk".to_string());
-    symbols.insert("gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2".to_string());
+    symbols.insert("tn_sm120_tma_mma_tf32_m64n128_bk32_s4_pair".to_string());
+    symbols.insert("tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk".to_string());
+    symbols.insert("nn_sm120_tma_mma_tf32_m80n32_bk64_s2".to_string());
     symbols
 }
 pub(crate) fn expected_hardware_symbols(cc: (u32, u32)) -> BTreeSet<String> {
     let mut symbols = expected_sm80_symbols();
     if matches!(cc, (8, 0 | 6 | 7 | 9) | (9, 0) | (10, 0 | 3) | (11, 0)) {
-        symbols.insert("gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3".to_string());
+        symbols.insert("nn_sm80_mma_tf32_m128n128_bk32_s3".to_string());
     }
     let specialized = match cc.0 {
         8 => BTreeSet::new(),
@@ -1176,7 +1172,7 @@ pub(crate) fn qualification_driver_jit_resource_summary(
     }
     Ok((max_local_bytes, exception_count, digest.finish()))
 }
-pub(crate) fn qualification_v5_route_rows<'a>(
+pub(crate) fn qualification_route_rows<'a>(
     artifact: &'a [u8],
     fields: &BTreeMap<String, StrictJsonValue>,
 ) -> Result<Vec<Vec<&'a str>>, String> {
@@ -1377,7 +1373,7 @@ pub(crate) fn verify_qualification_digests(
     if artifact.starts_with(b"MambaBiTf32QualificationArtifactV5\n")
         || fields.contains_key("boundary_output_digest")
     {
-        let rows = qualification_v5_route_rows(artifact, fields)?;
+        let rows = qualification_route_rows(artifact, fields)?;
         for (artifact_field, report_field, domain) in [
             (
                 1,

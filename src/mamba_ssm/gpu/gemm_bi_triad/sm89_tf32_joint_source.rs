@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
-pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89_tf32_joint.cu");
+pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint.cu");
 pub const PRIMITIVES: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89_tf32_joint_primitives.cuh");
+    include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint_primitives.cuh");
 
-pub const SOURCE_SHA256: &str = "ecb068cd5a5e2cefe342d95b88b520f566981bc1fa1d88457659313d8db0042e";
+pub const SOURCE_SHA256: &str = "00b56974628530ac57fb45df26404920655c6c0e21e12db4cb64d8fe9207134c";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
 
@@ -12,18 +12,19 @@ pub const COPY_CG_PRIMITIVE: &str = "gbf_tf32_copy_cg";
 pub const MMA_M16N8K8_PRIMITIVE: &str = "gbf_tf32_mma_m16n8k8";
 pub const ALIGNMENT_PRIMITIVE: &str = "gbf_aligned16";
 
-pub const TN_PRE_RNA_TRANSPOSE_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_transpose_32x32_v1";
-pub const TN_PRE_RNA_N96_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m128n96_bk32_s3_v1";
-pub const TN_PRE_RNA_M64N64_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n64_bk32_s3_v1";
-pub const TN_PRE_RNA_M64N96_S2_SYMBOL: &str = "gemm_bi_tn_sm89_tf32_pre_rna_m64n96_bk32_s2_v1";
-pub const NN_ADD_HALF_DIRECT_N96_SYMBOL: &str =
-    "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct_v1";
-pub const NN_ADD_HALF_N96_SYMBOL: &str = "gemm_bi_nn_sm89_tf32_addhalf_m128n96_bk32_s3_v1";
-pub const NT_A_LDMATRIX_N96_SYMBOL: &str = "gemm_bi_nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3_v1";
+pub const TN_PRE_RNA_TRANSPOSE_SYMBOL: &str = "tn_sm89_tf32_pre_rna_transpose_32x32";
+pub const TN_PRE_RNA_N96_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m128n96_bk32_s3";
+pub const TN_PRE_RNA_M64N64_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
+pub const TN_PRE_RNA_M64N96_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n96_bk32_s2";
+pub const NN_ADD_HALF_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
+pub const NN_ADD_HALF_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
+pub const NT_A_LDMATRIX_N96_SYMBOL: &str = "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3";
 
+/// The seven exports in lexicographic order, the order the inventory
+/// scan reports them in.
 pub const SM89_TF32_JOINT_SYMBOLS: [&str; 7] = [
-    NN_ADD_HALF_DIRECT_N96_SYMBOL,
     NN_ADD_HALF_N96_SYMBOL,
+    NN_ADD_HALF_DIRECT_N96_SYMBOL,
     NT_A_LDMATRIX_N96_SYMBOL,
     TN_PRE_RNA_N96_SYMBOL,
     TN_PRE_RNA_M64N64_SYMBOL,
@@ -154,15 +155,15 @@ const fn gemm_spec(
 // Occupancy remains sealed independently below.
 pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
     gemm_spec(
-        NN_ADD_HALF_DIRECT_N96_SYMBOL,
-        Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
+        NN_ADD_HALF_N96_SYMBOL,
+        Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
         86_016,
         131,
         1,
     ),
     gemm_spec(
-        NN_ADD_HALF_N96_SYMBOL,
-        Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
+        NN_ADD_HALF_DIRECT_N96_SYMBOL,
+        Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
         86_016,
         131,
         1,

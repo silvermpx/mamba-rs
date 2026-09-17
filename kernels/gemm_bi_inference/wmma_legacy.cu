@@ -125,13 +125,13 @@ NAME(                                                                           
 }
 
 // Tensor-Core instantiations for half-precision paths (the regression source).
-DEFINE_GEMM_BI_TC(gemm_bi_bf16_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, zero_bf16)
-DEFINE_GEMM_BI_TC(gemm_bi_f16_f16,   __half,        __half,        from_f_f16,  zero_f16)
-DEFINE_GEMM_BI_TC(gemm_bi_bf16_f32,  __nv_bfloat16, float,         from_f_f32,  zero_bf16)
-DEFINE_GEMM_BI_TC(gemm_bi_f16_f32,   __half,        float,         from_f_f32,  zero_f16)
+DEFINE_GEMM_BI_TC(bf16_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, zero_bf16)
+DEFINE_GEMM_BI_TC(f16_f16,   __half,        __half,        from_f_f16,  zero_f16)
+DEFINE_GEMM_BI_TC(bf16_f32,  __nv_bfloat16, float,         from_f_f32,  zero_bf16)
+DEFINE_GEMM_BI_TC(f16_f32,   __half,        float,         from_f_f32,  zero_f16)
 
 // f32 path stays on CUDA cores (Tensor Cores require fp16/bf16/tf32 inputs;
 // converting f32→tf32 would lose 13 mantissa bits — not acceptable for the
 // f32 training path that exists specifically because the user wants exact
 // f32 math). cuBLAS f32 was never the regression source.
-DEFINE_GEMM_BI_FFMA(gemm_bi_f32_f32, float, float, from_f_f32, zero_f32)
+DEFINE_GEMM_BI_FFMA(f32_f32, float, float, from_f_f32, zero_f32)

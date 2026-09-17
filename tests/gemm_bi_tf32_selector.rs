@@ -80,12 +80,12 @@ fn request_only_selector_fails_closed_without_operand_evidence() {
         };
         assert_eq!(
             resolve_f32_triad_auto(
-                F32TriadPolicy::AllowDeterministicTf32V1,
+                F32TriadPolicy::AllowDeterministicTf32,
                 request,
                 sm89_availability(),
             )
             .unwrap(),
-            F32TriadSelection::ScalarFmaV1,
+            F32TriadSelection::ScalarFma,
             "request-only selector promoted {op:?} {dims:?} without operand evidence",
         );
     }
