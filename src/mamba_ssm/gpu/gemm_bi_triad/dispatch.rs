@@ -2673,6 +2673,84 @@ const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84:
     ],
 };
 
+/// The CUDA 13.2 identity of the same module on the NVRTC 13.2.78 build, the
+/// build the rented RTX 5090 boxes carry; the 595.84 constant above was
+/// minted on the 13.2.51 build. Same source and headers, another compiler.
+const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm120,
+        module_target: "compute_120",
+        device_target: "sm_120",
+        compute_capability: (12, 0),
+        multiprocessor_count: 170,
+        nvrtc_version: (13, 2),
+        optin_shared_bytes: 101376,
+        tensor_map_access: true,
+        compile_key: [
+            83, 14, 55, 193, 108, 148, 105, 217, 72, 113, 63, 255, 96, 137, 255, 91, 224, 104, 191,
+            43, 26, 29, 117, 150, 99, 196, 14, 84, 146, 153, 181, 3,
+        ],
+        artifact_digest: [
+            7, 141, 64, 95, 152, 80, 167, 54, 4, 197, 229, 150, 80, 189, 106, 29, 34, 107, 147, 46,
+            178, 113, 1, 240, 37, 8, 81, 124, 178, 255, 60, 161,
+        ],
+        source_digest: [
+            36, 139, 183, 205, 251, 199, 80, 186, 15, 165, 225, 86, 237, 248, 80, 16, 137, 15, 170,
+            125, 244, 171, 145, 106, 235, 151, 216, 194, 43, 181, 208, 53,
+        ],
+        invocation_digest: [
+            83, 14, 55, 193, 108, 148, 105, 217, 72, 113, 63, 255, 96, 137, 255, 91, 224, 104, 191,
+            43, 26, 29, 117, 150, 99, 196, 14, 84, 146, 153, 181, 3,
+        ],
+        header_manifest_digest: [
+            83, 5, 9, 183, 38, 144, 254, 0, 97, 45, 96, 198, 191, 90, 169, 121, 167, 151, 73, 229,
+            199, 42, 148, 27, 144, 107, 218, 103, 117, 26, 249, 129,
+        ],
+        nvrtc_library_domain: [
+            220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24,
+            147, 98, 12, 178, 250, 224, 154, 245, 36, 3, 79, 180, 23, 212,
+        ],
+    };
+
+/// The CUDA 13.2 identity of the same module on the NVRTC 13.2.78 build, the
+/// build the rented RTX 5090 boxes carry; the 595.84 constant above was
+/// minted on the 13.2.51 build. Same source and headers, another compiler.
+const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78:
+    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
+    module_kind: ModuleKind::TriadSm80,
+    module_target: "compute_120",
+    device_target: "sm_120",
+    compute_capability: (12, 0),
+    multiprocessor_count: 170,
+    nvrtc_version: (13, 2),
+    optin_shared_bytes: 101376,
+    tensor_map_access: true,
+    compile_key: [
+        181, 176, 245, 62, 216, 202, 217, 20, 121, 165, 210, 34, 228, 163, 54, 0, 54, 223, 46, 243,
+        176, 29, 207, 45, 170, 255, 148, 250, 200, 31, 45, 93,
+    ],
+    artifact_digest: [
+        52, 15, 227, 135, 175, 180, 249, 167, 251, 98, 32, 132, 30, 113, 28, 255, 51, 228, 67, 213,
+        78, 99, 135, 191, 195, 61, 46, 119, 107, 72, 89, 151,
+    ],
+    source_digest: [
+        248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253, 51,
+        62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
+    ],
+    invocation_digest: [
+        181, 176, 245, 62, 216, 202, 217, 20, 121, 165, 210, 34, 228, 163, 54, 0, 54, 223, 46, 243,
+        176, 29, 207, 45, 170, 255, 148, 250, 200, 31, 45, 93,
+    ],
+    header_manifest_digest: [
+        165, 215, 84, 8, 228, 132, 48, 141, 150, 196, 78, 149, 7, 182, 197, 11, 248, 193, 166, 225,
+        180, 28, 187, 88, 5, 215, 224, 21, 237, 254, 181, 167,
+    ],
+    nvrtc_library_domain: [
+        220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24, 147,
+        98, 12, 178, 250, 224, 154, 245, 36, 3, 79, 180, 23, 212,
+    ],
+};
+
 /// Stable current-source route/key manifest independently requalified on CUDA
 /// 12.8, 13.0 and 13.2 under driver 595.84. All three packets admitted these
 /// same 23 keys; true G10 `Tn(128,128,8192)` lost and is intentionally absent.
@@ -2932,6 +3010,14 @@ const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     Tf32AutoEvidenceCohort {
         identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
         portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+    },
+    // The same cells, compiled by the NVRTC 13.2.78 build: a cohort binds
+    // one compiler build, and the rented boards carry this one.
+    Tf32AutoEvidenceCohort {
+        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78,
+        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78),
         tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
         cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
     },
@@ -3302,7 +3388,10 @@ fn tf32_evidence_cohorts(
     match module.module_kind {
         ModuleKind::TriadSm90a => ("SM90a", SM90A_TF32_EVIDENCE_COHORTS),
         ModuleKind::TriadSm100 => ("SM100", SM100_TF32_EVIDENCE_COHORTS),
-        _ => ("SM120", SM120_TF32_EVIDENCE_COHORTS),
+        ModuleKind::TriadSm120 => ("SM120", SM120_TF32_EVIDENCE_COHORTS),
+        // The specialized slot holds an architecture module alone; any
+        // other kind here is a wiring error, and no cohort admits it.
+        _ => ("unknown", &[]),
     }
 }
 
@@ -3549,8 +3638,8 @@ fn measured_tf32_route_with_operands(
                 .unwrap_or("no cohort is frozen for this family");
             format!(
                 "no {family} TF32 evidence cohort matches this stack (newest cohort differs at: \
-                 {newest}); the exact f32 family serves every TF32 request until a \
-                 requalification is frozen"
+                 {newest}); the common TF32 routes serve through the first-use proof and the \
+                 exact f32 family serves the rest until a requalification is frozen"
             )
         });
         return None;
@@ -3560,8 +3649,9 @@ fn measured_tf32_route_with_operands(
         crate::mamba_ssm::gpu::diagnostics::warn_once(&STALE_TUNING, || {
             format!(
                 "the {family} TF32 evidence cohort is authorized for dispatch epoch {} and this \
-                 build runs epoch {tuning_revision}; the exact f32 family serves every TF32 \
-                 request until the dispatch epoch is reviewed",
+                 build runs epoch {tuning_revision}; the common TF32 routes serve through the \
+                 first-use proof and the exact f32 family serves the rest until the dispatch \
+                 epoch is reviewed",
                 cohort.tuning_revision
             )
         });
@@ -3687,25 +3777,55 @@ fn portable_module_well_formed(module: Tf32QualifiedModule) -> bool {
         && module.device_caps.accepted_target == Some(module.target)
 }
 
+/// Whether the portable module this board bound composed the kernel a
+/// common route names. The portable module of a CC 12.x board leaves the
+/// extension kernels out (the wide TF32 tile and the split-K families),
+/// and a common cell measured on the Ada may still name one; such a route
+/// is declined here rather than failing at launch.
+fn portable_route_composed(
+    portable: Tf32QualifiedModule,
+    op: ResolvedGemmOp,
+    route: Tf32PhysicalRoute,
+) -> bool {
+    if route.module_kind() != ModuleKind::TriadSm80
+        || super::contract::sm80_target_composes_extensions(portable.target.as_str())
+    {
+        return true;
+    }
+    match super::contract::tf32_kernel_spec(op, route) {
+        Ok(spec) => super::contract::tf32_route_specs_for(ModuleKind::TriadSm80, false)
+            .any(|base| base.symbol == spec.symbol),
+        Err(_) => false,
+    }
+}
+
 fn proof_tf32_selection(
     request: F32TriadRequest,
     operands: F32TriadOperands,
     availability: F32TriadAvailability,
 ) -> Option<F32TriadSelection> {
-    availability
+    let portable = availability
         .portable
         .filter(|module| portable_module_well_formed(*module))?;
+    // A board's own measured cells were consulted before this point; a
+    // shape they do not name takes the common tier here, on every board:
+    // the measured common cell when one names the shape exactly, else the
+    // nearest cell's portable tile within the band, each proven at first
+    // use against the reference of the same numeric contract, and only
+    // when this board's portable module composed the kernel it names.
+    let composed =
+        |route: &Tf32PhysicalRoute| portable_route_composed(portable, request.op, *route);
     let reference = measured_tf32_cell(request, operands, SM89_TF32_EVIDENCE_CELLS)
         .filter(|route| route.module_kind() == ModuleKind::TriadSm80)
+        .filter(composed)
         .or_else(|| {
-            availability.specialized.is_none().then(|| {
-                nearest_tf32_portable_cell(
-                    request,
-                    operands,
-                    SM89_TF32_EVIDENCE_CELLS,
-                    availability.multiprocessors,
-                )
-            })?
+            nearest_tf32_portable_cell(
+                request,
+                operands,
+                SM89_TF32_EVIDENCE_CELLS,
+                availability.multiprocessors,
+            )
+            .filter(composed)
         })?;
     resolve_tf32_forced(request, availability, reference).ok()?;
     let specialized = [
@@ -6784,13 +6904,13 @@ impl FixedCopyPlanQualificationIdentity {
 }
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
-    119, 174, 146, 168, 93, 214, 187, 213, 91, 20, 177, 15, 170, 54, 235, 179, 63, 221, 51, 42, 47,
-    30, 230, 253, 253, 255, 173, 236, 253, 244, 187, 80,
+    85, 141, 232, 44, 19, 179, 69, 189, 16, 41, 123, 149, 102, 115, 34, 189, 187, 36, 187, 202,
+    247, 249, 247, 216, 120, 219, 247, 100, 87, 45, 35, 225,
 ];
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
-    221, 183, 245, 160, 109, 71, 88, 166, 191, 219, 218, 235, 215, 59, 97, 13, 108, 199, 87, 83,
-    111, 15, 240, 120, 102, 86, 81, 124, 50, 110, 224, 73,
+    7, 21, 237, 156, 160, 124, 11, 216, 108, 38, 38, 31, 141, 138, 254, 13, 164, 180, 62, 255, 134,
+    38, 156, 198, 115, 93, 193, 160, 142, 117, 161, 207,
 ];
 
 /// Exact Fixed identities from the six initial complete-module compilations,
@@ -6801,17 +6921,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            79, 39, 247, 26, 0, 116, 25, 168, 176, 188, 1, 234, 70, 71, 180, 107, 143, 238, 228,
-            154, 33, 48, 211, 208, 211, 238, 21, 49, 45, 40, 191, 131,
+            166, 47, 54, 58, 28, 157, 17, 104, 245, 216, 173, 230, 246, 205, 200, 93, 110, 47, 99,
+            141, 133, 109, 212, 229, 169, 65, 90, 100, 55, 147, 18, 111,
         ],
         artifact_digest: [
-            88, 181, 186, 180, 4, 236, 100, 178, 178, 204, 205, 249, 41, 59, 176, 254, 181, 11, 68,
-            68, 173, 119, 202, 7, 231, 26, 191, 170, 168, 176, 189, 97,
+            246, 50, 31, 65, 116, 41, 65, 48, 142, 233, 201, 224, 214, 188, 11, 242, 152, 178, 19,
+            70, 255, 45, 215, 199, 159, 1, 244, 138, 68, 152, 230, 113,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            70, 171, 196, 145, 117, 47, 221, 147, 226, 143, 113, 117, 103, 30, 220, 65, 254, 39,
-            105, 61, 189, 201, 147, 124, 194, 104, 166, 187, 73, 17, 67, 22,
+            156, 11, 63, 239, 63, 56, 85, 5, 121, 3, 20, 243, 33, 89, 144, 38, 113, 229, 86, 161,
+            9, 18, 51, 138, 125, 233, 196, 26, 217, 67, 57, 129,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6821,17 +6941,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            48, 25, 205, 128, 107, 149, 14, 81, 200, 20, 229, 213, 15, 87, 138, 187, 10, 175, 72,
-            105, 30, 28, 57, 11, 72, 90, 68, 74, 45, 34, 240, 94,
+            106, 147, 189, 39, 240, 97, 195, 233, 114, 233, 150, 255, 157, 229, 233, 185, 48, 117,
+            175, 113, 39, 54, 213, 74, 20, 229, 227, 176, 26, 143, 17, 228,
         ],
         artifact_digest: [
-            74, 9, 132, 71, 241, 61, 73, 149, 185, 44, 86, 214, 82, 83, 103, 74, 12, 3, 27, 209,
-            160, 36, 190, 55, 48, 72, 250, 177, 248, 216, 11, 57,
+            21, 195, 76, 153, 30, 245, 211, 144, 4, 203, 60, 79, 92, 4, 211, 149, 79, 227, 242, 25,
+            89, 24, 51, 111, 130, 222, 176, 9, 153, 85, 29, 70,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            141, 117, 99, 127, 164, 1, 176, 231, 124, 214, 141, 137, 68, 4, 190, 243, 84, 42, 148,
-            91, 189, 24, 175, 121, 57, 167, 174, 203, 138, 95, 182, 144,
+            62, 41, 42, 120, 186, 164, 8, 224, 221, 190, 250, 70, 90, 58, 135, 197, 230, 213, 150,
+            46, 204, 224, 39, 182, 201, 96, 31, 74, 107, 141, 25, 52,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6841,17 +6961,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            246, 116, 108, 219, 140, 135, 175, 80, 20, 99, 203, 133, 7, 152, 213, 7, 193, 205, 226,
-            101, 3, 10, 116, 212, 227, 159, 197, 243, 243, 241, 155, 85,
+            191, 159, 199, 215, 97, 69, 96, 59, 185, 15, 19, 151, 197, 153, 61, 57, 133, 228, 234,
+            244, 29, 233, 226, 179, 6, 48, 192, 200, 155, 72, 34, 144,
         ],
         artifact_digest: [
-            25, 92, 63, 75, 119, 208, 213, 27, 125, 83, 179, 184, 241, 148, 193, 43, 104, 184, 148,
-            234, 149, 133, 207, 18, 220, 218, 86, 101, 235, 227, 108, 161,
+            74, 195, 55, 215, 88, 86, 186, 189, 56, 80, 81, 173, 158, 245, 6, 138, 187, 19, 103,
+            94, 23, 4, 201, 77, 3, 154, 64, 130, 209, 226, 253, 168,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            59, 217, 6, 210, 198, 189, 210, 241, 157, 109, 186, 254, 194, 50, 223, 126, 120, 48,
-            205, 167, 24, 88, 149, 44, 65, 123, 32, 97, 156, 136, 70, 47,
+            61, 0, 75, 92, 39, 246, 144, 171, 11, 189, 148, 32, 172, 238, 92, 155, 226, 212, 106,
+            252, 10, 221, 253, 38, 9, 110, 92, 220, 52, 19, 143, 239,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6861,8 +6981,8 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            174, 241, 151, 250, 9, 162, 36, 146, 70, 18, 114, 132, 111, 217, 0, 91, 148, 196, 121,
-            86, 36, 141, 174, 123, 243, 10, 236, 146, 235, 24, 199, 111,
+            92, 210, 5, 249, 80, 191, 29, 0, 6, 240, 137, 29, 131, 95, 89, 30, 125, 7, 105, 227,
+            14, 199, 1, 219, 89, 174, 242, 171, 248, 204, 148, 234,
         ],
         artifact_digest: [
             158, 250, 100, 169, 63, 150, 216, 122, 162, 206, 190, 241, 203, 158, 124, 66, 11, 185,
@@ -6870,8 +6990,8 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            13, 100, 191, 48, 53, 172, 10, 12, 107, 103, 179, 48, 6, 171, 248, 232, 153, 205, 217,
-            13, 76, 103, 39, 188, 40, 162, 157, 147, 94, 146, 29, 105,
+            211, 118, 236, 166, 255, 30, 25, 79, 89, 65, 31, 8, 213, 85, 248, 95, 22, 112, 194, 21,
+            62, 183, 240, 190, 137, 173, 32, 247, 46, 224, 17, 49,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6881,17 +7001,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            149, 109, 67, 34, 128, 112, 84, 31, 139, 49, 194, 210, 113, 202, 160, 141, 107, 109, 8,
-            216, 159, 123, 154, 28, 136, 23, 204, 129, 131, 228, 17, 9,
+            242, 241, 65, 9, 80, 83, 234, 58, 192, 47, 68, 248, 178, 86, 170, 232, 52, 81, 149,
+            182, 85, 179, 178, 184, 79, 182, 206, 153, 91, 115, 136, 93,
         ],
         artifact_digest: [
-            175, 103, 94, 47, 76, 120, 178, 210, 65, 199, 149, 163, 15, 164, 65, 109, 101, 181,
-            137, 198, 40, 4, 254, 129, 26, 90, 138, 201, 155, 153, 174, 151,
+            123, 105, 105, 54, 46, 229, 138, 98, 95, 229, 73, 80, 102, 205, 44, 140, 32, 181, 51,
+            51, 30, 111, 88, 33, 186, 61, 69, 111, 205, 59, 93, 59,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            241, 166, 249, 53, 198, 64, 211, 30, 5, 146, 50, 239, 240, 86, 153, 136, 185, 67, 109,
-            156, 205, 147, 72, 187, 45, 151, 28, 176, 73, 241, 209, 135,
+            35, 69, 209, 52, 231, 166, 253, 157, 43, 184, 57, 192, 53, 72, 172, 25, 129, 229, 172,
+            78, 195, 93, 120, 238, 98, 65, 107, 170, 43, 197, 44, 224,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -6901,17 +7021,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            58, 19, 247, 157, 205, 43, 196, 38, 169, 234, 159, 57, 60, 115, 199, 54, 107, 104, 251,
-            195, 249, 152, 125, 62, 17, 215, 241, 83, 244, 5, 95, 205,
+            65, 188, 12, 126, 125, 44, 102, 16, 112, 37, 250, 41, 52, 83, 7, 102, 117, 231, 73,
+            205, 227, 252, 51, 98, 38, 112, 172, 135, 112, 0, 18, 56,
         ],
         artifact_digest: [
-            47, 56, 253, 103, 181, 242, 106, 103, 92, 71, 160, 188, 142, 39, 90, 17, 109, 132, 45,
-            4, 53, 189, 200, 210, 193, 46, 12, 140, 247, 245, 253, 89,
+            26, 124, 84, 89, 60, 250, 163, 109, 225, 179, 97, 147, 55, 75, 139, 33, 151, 254, 167,
+            238, 32, 190, 66, 173, 151, 117, 234, 242, 127, 20, 167, 31,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            58, 100, 121, 64, 117, 62, 25, 46, 9, 237, 236, 95, 247, 53, 29, 184, 71, 96, 217, 167,
-            121, 196, 217, 127, 79, 50, 95, 69, 26, 27, 92, 38,
+            86, 173, 15, 240, 15, 244, 220, 134, 253, 69, 160, 193, 87, 159, 82, 232, 25, 66, 52,
+            128, 137, 198, 183, 83, 15, 15, 43, 79, 53, 141, 4, 46,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -8371,10 +8491,10 @@ mod scalar_wave_policy_tests {
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
-                fixed_key: "4f27f71a007419a8b0bc01ea4647b46b8feee49a2130d3d0d3ee15312d28bf83",
-                fixed_artifact: "58b5bab404ec64b2b2cccdf9293bb0feb50b4444ad77ca07e71abfaaa8b0bd61",
-                fixed_header: "46abc491752fdd93e28f7175671edc41fe27693dbdc9937cc268a6bb49114316",
+                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                fixed_key: "a62f363a1c9d1168f5d8ade6f6cdc85d6e2f638d856dd4e5a9415a643793126f",
+                fixed_artifact: "f6321f41742941308ee9c9e0d6bc0bf298b21346ff2dd7c79f01f48a4498e671",
+                fixed_header: "9c0b3fef3f385505790314f32159902671e556a10912338a7de9c41ad9433981",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -8382,10 +8502,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
-                fixed_key: "3019cd806b950e51c814e5d50f578abb0aaf48691e1c390b485a444a2d22f05e",
-                fixed_artifact: "4a098447f13d4995b92c56d65253674a0c031bd1a024be373048fab1f8d80b39",
-                fixed_header: "8d75637fa401b0e77cd68d894404bef3542a945bbd18af7939a7aecb8a5fb690",
+                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                fixed_key: "6a93bd27f061c3e972e996ff9de5e9b93075af712736d54a14e5e3b01a8f11e4",
+                fixed_artifact: "15c34c991ef5d39004cb3c4f5c04d3954fe3f2195918336f82deb00999551d46",
+                fixed_header: "3e292a78baa408e0ddbefa465a3a87c5e6d5962ecce027b6c9601f4a6b8d1934",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -8393,10 +8513,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
-                fixed_key: "f6746cdb8c87af501463cb850798d507c1cde265030a74d4e39fc5f3f3f19b55",
-                fixed_artifact: "195c3f4b77d0d51b7d53b3b8f194c12b68b894ea9585cf12dcda5665ebe36ca1",
-                fixed_header: "3bd906d2c6bdd2f19d6dbafec232df7e7830cda71858952c417b20619c88462f",
+                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                fixed_key: "bf9fc7d76145603bb90f1397c5993d3985e4eaf41de9e2b30630c0c89b482290",
+                fixed_artifact: "4ac337d75856babd385051ad9ef5068abb13675e1704c94d039a4082d1e2fda8",
+                fixed_header: "3d004b5c27f690ab0bbd9420acee5c9be2d46afc0addfd26096e5cdc34138fef",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -8404,10 +8524,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
-                fixed_key: "aef197fa09a22492461272846fd9005b94c47956248dae7bf30aec92eb18c76f",
+                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                fixed_key: "5cd205f950bf1d0006f0891d835f591e7d0769e30ec701db59aef2abf8cc94ea",
                 fixed_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
-                fixed_header: "0d64bf3035ac0a0c6b67b33006abf8e899cdd90d4c6727bc28a29d935e921d69",
+                fixed_header: "d376eca6ff1e194f59411f08d555f85f1670c2153eb7f0be89ad20f72ee01131",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -8415,10 +8535,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
-                fixed_key: "956d43228070541f8b31c2d271caa08d6b6d08d89f7b9a1c8817cc8183e41109",
-                fixed_artifact: "af675e2f4c78b2d241c795a30fa4416d65b589c62804fe811a5a8ac99b99ae97",
-                fixed_header: "f1a6f935c640d31e059232eff0569988b9436d9ccd9348bb2d971cb049f1d187",
+                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                fixed_key: "f2f141095053ea3ac02f44f8b256aae8345195b655b3b2b84fb6ce995b73885d",
+                fixed_artifact: "7b6969362ee58a625fe5495066cd2c8c20b533331e6f5821ba3d456fcd3b5d3b",
+                fixed_header: "2345d134e7a6fd9d2bb839c03548ac1981e5ac4ec35d78ee62416baa2bc52ce0",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
@@ -8426,10 +8546,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
-                fixed_key: "3a13f79dcd2bc426a9ea9f393c73c7366b68fbc3f9987d3e11d7f153f4055fcd",
-                fixed_artifact: "2f38fd67b5f26a675c47a0bc8e275a116d842d0435bdc8d2c12e0c8cf7f5fd59",
-                fixed_header: "3a647940753e192e09edec5ff7351db84760d9a779c4d97f4f325f451a1b5c26",
+                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                fixed_key: "41bc0c7e7d2c66107025fa293453076675e749cde3fc33622670ac8770001238",
+                fixed_artifact: "1a7c54593cfaa36de1b36193374b8b2197fea7ee20be42ad9775eaf27f14a71f",
+                fixed_header: "56ad0ff00ff4dc86fd45a0c1579f52e81942348089c6b7530f0f2b4f358d042e",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
@@ -14768,7 +14888,10 @@ mod tf32_tests {
             F32TriadSelection::ScalarFma,
         );
 
-        for rejected in [
+        // A shape the SM120 cell does not name exactly never takes the
+        // SM120 kernel; it takes the common tier (a portable tile, or a
+        // proof against one) or the exact family, as on every board.
+        for drifted in [
             normalized_request(ResolvedGemmOp::Tn, 127, 512, 1024),
             normalized_request(ResolvedGemmOp::Tn, 129, 512, 1024),
             normalized_request(ResolvedGemmOp::Tn, 128, 511, 1024),
@@ -14778,15 +14901,12 @@ mod tf32_tests {
             normalized_request(ResolvedGemmOp::Nn, 128, 512, 1024),
             normalized_request(ResolvedGemmOp::Nt, 128, 512, 1024),
         ] {
-            assert_eq!(
-                resolve(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    rejected,
-                    operands,
-                    availability(),
-                ),
-                F32TriadSelection::ScalarFma,
-            );
+            assert_no_tf32_route(resolve(
+                F32TriadPolicy::AllowDeterministicTf32,
+                drifted,
+                operands,
+                availability(),
+            ));
         }
         for mutate in [
             |shape: &mut F32TriadShape| shape.lda += 1,
@@ -15250,13 +15370,20 @@ mod tf32_tests {
     #[test]
     fn sm120_tf32_live_cohort_manifest_is_exact_and_unique() {
         let cohorts = SM120_TF32_EVIDENCE_COHORTS.iter().collect::<Vec<_>>();
+        // CUDA 13.2 is frozen twice: once per NVRTC library build the
+        // boards carry (13.2.51 on the Ada box, 13.2.78 on the rented
+        // RTX 5090s). The library domain tells them apart.
         assert_eq!(
             cohorts
                 .iter()
                 .map(|cohort| cohort.identity.nvrtc_version)
                 .collect::<Vec<_>>(),
-            [(12, 8), (13, 0), (13, 2)]
+            [(12, 8), (13, 0), (13, 2), (13, 2)]
         );
+        let (first, second) = (cohorts[2].identity, cohorts[3].identity);
+        assert_ne!(first.nvrtc_library_domain, second.nvrtc_library_domain);
+        assert_eq!(first.source_digest, second.source_digest);
+        assert_eq!(first.header_manifest_digest, second.header_manifest_digest);
         for cohort in cohorts {
             assert_eq!(
                 cohort.cells,
@@ -15531,13 +15658,14 @@ mod tf32_tests {
                 .collect::<Vec<_>>(),
             vec![(12, 8), (13, 0), (13, 2)]
         );
-        // One cohort per toolkit: the driver build is not part of the identity.
+        // One cohort per NVRTC library build: the driver build is not part
+        // of the identity, the compiler build is. CUDA 13.2 carries two.
         assert_eq!(
             SM120_TF32_EVIDENCE_COHORTS
                 .iter()
                 .filter(|cohort| cohort.identity.nvrtc_version == (13, 2))
                 .count(),
-            1,
+            2,
         );
         assert!(
             SM120_TF32_EVIDENCE_COHORTS
@@ -15547,8 +15675,10 @@ mod tf32_tests {
         for (index, cohort) in SM120_TF32_EVIDENCE_COHORTS.iter().enumerate() {
             for other in SM120_TF32_EVIDENCE_COHORTS.iter().skip(index + 1) {
                 assert!(
-                    cohort.identity.nvrtc_version != other.identity.nvrtc_version,
-                    "cohort {index} shares a toolkit with a later cohort",
+                    cohort.identity.nvrtc_version != other.identity.nvrtc_version
+                        || cohort.identity.nvrtc_library_domain
+                            != other.identity.nvrtc_library_domain,
+                    "cohort {index} shares a toolkit and a compiler build with a later cohort",
                 );
             }
         }

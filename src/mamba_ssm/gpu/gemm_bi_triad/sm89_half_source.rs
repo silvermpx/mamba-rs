@@ -9,7 +9,7 @@ use crate::mamba_ssm::gpu::{
 
 use super::contract::{F32TriadOperands, F32TriadRequest, F32TriadShape};
 
-const BASE_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half.cu");
+const BASE_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/half.cu");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Sm89HalfRoute {

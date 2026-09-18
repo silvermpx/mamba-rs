@@ -8,7 +8,7 @@
 // values as one LDS.128 along n, so the shared-memory instruction count per
 // FMA is small; A rows are padded by four floats so the two row groups a
 // warp touches never share a bank line; a multi-stage cp.async ring keeps
-// STAGES-1 slabs in flight.
+// every slab but one in flight.
 //
 
 

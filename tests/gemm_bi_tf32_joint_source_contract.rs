@@ -19,7 +19,7 @@ mod tn_raw;
 
 const NT_A_LDMATRIX_N96_SECTION: &str = "NT_A_LDMATRIX_N96";
 
-const FIXED_N96: &str = include_str!("../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
+const FIXED_N96: &str = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
 const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_inference/tf32.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
 const SM80_TF32: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");

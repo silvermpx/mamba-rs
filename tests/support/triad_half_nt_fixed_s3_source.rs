@@ -1,4 +1,4 @@
-const LAYOUT: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh");
+const LAYOUT: &str = include_str!("../../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh");
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     const SUPPORT_END: &str =
@@ -333,8 +333,8 @@ fn require_count(source: &str, anchor: &str, expected: usize) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm80/half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm80/half_s3.cu");
 
     fn index(row: usize, k: usize) -> usize {
         row * 64 + (k ^ ((row & 7) * 8))

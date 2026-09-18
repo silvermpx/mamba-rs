@@ -5,7 +5,7 @@ const CONTRACT: &str = include_str!("../../../../kernels/gemm_bi_triad/contract.
 const COMMON: &str = include_str!("../../../../kernels/gemm_bi_triad/common.cuh");
 const EPILOGUE: &str = include_str!("../../../../kernels/gemm_bi_triad/epilogue.cuh");
 const MMA16: &str = include_str!("../../../../kernels/gemm_bi_triad/mma16.cuh");
-pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half_tn.cu");
+pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/half_tn.cu");
 
 pub const OWNER_SHA256: &str = "e01bc5d622c9fc3a71841217a69031580b5f4d94d590d2d8c90931aec2741dcb";
 pub const PRELUDE_SHA256: &str = "0c9b2345c643417406d75403df11f6fb96af7ce82f198ee551086f7c19020948";

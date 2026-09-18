@@ -14,11 +14,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const KNOWN_LANES: [&str; 6] = [
+const KNOWN_LANES: [&str; 7] = [
     "gate",
     "contract",
     "record",
     "host",
+    "toolkit",
     "bench",
     "qualification",
 ];
@@ -182,12 +183,12 @@ fn check(
             ));
         };
         match lane.as_str() {
-            "gate" => {
+            "gate" | "toolkit" => {
                 for line in text.lines() {
                     let line = line.trim();
                     if line.starts_with("#[ignore") && !line.contains("= \"invoked by") {
                         return Err(format!(
-                            "{} is in the gate lane but contains {line} - a test no lane would \
+                            "{} is in the {lane} lane but contains {line} - a test no lane would \
                              ever run; move the file to the contract lane, un-ignore the test, \
                              or mark a child a parent launches `#[ignore = \"invoked by ...\"]`",
                             target.path

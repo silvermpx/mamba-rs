@@ -20,7 +20,7 @@ const SCALAR_NN_M32N64_SPLITK32_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_n
 fn fixed_sm89_half_s3_production_source_contract() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/kernels/gemm_bi_inference/sm89/half_s3.cu"
+        "/kernels/gemm_bi_inference/sm80/half_s3.cu"
     ))
     .expect("production S3 source must be available to the Fixed composer");
     for token in [
@@ -55,7 +55,7 @@ fn fixed_sm89_half_s3_production_source_contract() {
 
 #[test]
 fn fixed_sm89_finalist_production_source_contract() {
-    let n96 = include_str!("../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
+    let n96 = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
     for required in [
         "nn_sm89_rna_tf32_m128n96_bk32_s3",
         "__launch_bounds__(256, 1)",
@@ -65,7 +65,7 @@ fn fixed_sm89_finalist_production_source_contract() {
     ] {
         assert!(n96.contains(required), "N96 source omitted {required}");
     }
-    let half = include_str!("../kernels/gemm_bi_inference/sm89/half_n64.cu");
+    let half = include_str!("../kernels/gemm_bi_inference/sm80/half_n64.cu");
     for required in [
         "nn_sm89_m64n64_bk64_s3_f16",
         "nn_sm89_m128n64_bk64_s2_f16",
@@ -104,15 +104,15 @@ fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
         std::fs::read_to_string(root.join("tests/cuda/gemm_bi_fixed_sm89_swizzle_layout.cpp"))
             .expect("production-bound Fixed SM89 half-swizzle host layout proof");
     assert!(
-        host_proof.contains("../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"),
+        host_proof.contains("../../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"),
         "host layout proof must include the production header directly"
     );
     let layout = std::fs::read_to_string(
-        root.join("kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"),
+        root.join("kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"),
     )
     .expect("production Fixed SM89 half-swizzle layout header");
     let source =
-        std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm89/half_swizzle.cu"))
+        std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm80/half_swizzle.cu"))
             .expect("production Fixed SM89 half-swizzle source");
 
     for required in [
@@ -286,33 +286,33 @@ fn fixed_blob_for(arch: &str) -> String {
     if arch == "sm_89" {
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/half_pipeline.cu"
+            "../kernels/gemm_bi_inference/sm80/half_pipeline.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"
+            "../kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"
+            "../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
+            "../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"
         ));
         source.push('\n');
         source.push_str(&compose(&[include_str!(
-            "../kernels/gemm_bi_inference/sm89/half_swizzle.cu"
+            "../kernels/gemm_bi_inference/sm80/half_swizzle.cu"
         )]));
         source.push('\n');
-        source.push_str(include_str!("../kernels/gemm_bi_inference/sm89/half_s3.cu"));
+        source.push_str(include_str!("../kernels/gemm_bi_inference/sm80/half_s3.cu"));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
+            "../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu"
         ));
         source.push('\n');
         source.push_str(include_str!(
-            "../kernels/gemm_bi_inference/sm89/half_n64.cu"
+            "../kernels/gemm_bi_inference/sm80/half_n64.cu"
         ));
     }
     if arch == "compute_120" {
@@ -2991,7 +2991,7 @@ fn assert_fixed_exact_n64_copyplan_ptx(
 
 #[test]
 fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
-    let candidate = include_str!("../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu");
+    let candidate = include_str!("../kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu");
     assert_eq!(
         candidate
             .matches(&format!("{FIXED_SM89_EXACT_N64_COPYPLAN}("))
@@ -3045,10 +3045,10 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
     let mut retained = base;
     retained.push('\n');
     retained.push_str(include_str!(
-        "../kernels/gemm_bi_inference/sm89/half_pipeline.cu"
+        "../kernels/gemm_bi_inference/sm80/half_pipeline.cu"
     ));
     let ada = fixed_blob_for("sm_89");
-    let rna_wide = include_str!("../kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu");
+    let rna_wide = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu");
     assert!(
         ada.strip_prefix(&retained)
             .unwrap()
@@ -3059,7 +3059,7 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
 
 #[test]
 fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
-    let candidate = include_str!("../kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu");
+    let candidate = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu");
     assert_eq!(
         candidate
             .matches(&format!("void {FIXED_SM89_RNA_WIDE}("))

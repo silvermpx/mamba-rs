@@ -1,7 +1,7 @@
 const HALF_F32OUT_S3_SOURCE: &str =
-    include_str!("../../../../kernels/gemm_bi_inference/sm89/half_f32out_s3.cu");
+    include_str!("../../../../kernels/gemm_bi_inference/sm80/half_f32out_s3.cu");
 const F32_M128N64_TAIL_COPYPLAN_SOURCE: &str =
-    include_str!("../../../../kernels/gemm_bi_inference/sm89/f32_m128n64_tail_copyplan.cu");
+    include_str!("../../../../kernels/gemm_bi_inference/sm80/f32_m128n64_tail_copyplan.cu");
 const RETAINED_EXPORT_DEFINITIONS: [&str; 3] = [
     "void nn_sm89_tc128_f32out_s3_bf16(",
     "void nn_sm89_tc128_f32out_s3_f16(",
@@ -45,12 +45,12 @@ pub(crate) fn compose_fixed_source(
 
     append_fragment(
         &mut composed,
-        "kernels/gemm_bi_inference/sm89/half_f32out_s3.cu",
+        "kernels/gemm_bi_inference/sm80/half_f32out_s3.cu",
         HALF_F32OUT_S3_SOURCE,
     );
     append_fragment(
         &mut composed,
-        "kernels/gemm_bi_inference/sm89/f32_m128n64_tail_copyplan.cu",
+        "kernels/gemm_bi_inference/sm80/f32_m128n64_tail_copyplan.cu",
         F32_M128N64_TAIL_COPYPLAN_SOURCE,
     );
     Ok(composed)

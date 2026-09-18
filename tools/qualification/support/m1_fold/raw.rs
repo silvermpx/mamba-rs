@@ -202,7 +202,7 @@ fn baseline_module(device: &GpuDevice) -> Arc<CudaModule> {
     let source = include_str!("legacy_fixed.cu");
     assert_eq!(
         sha(source.as_bytes()),
-        "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61"
+        "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7"
     );
     let mut major = 0;
     let mut minor = 0;

@@ -199,7 +199,7 @@ pub fn expected_nn_auto_grid(
 mod tests {
     use super::*;
 
-    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu");
+    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
 
     #[test]
     fn triad_nn_n96_transform_is_exact_and_reversible() {

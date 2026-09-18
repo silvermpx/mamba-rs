@@ -2960,6 +2960,7 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::TriadSm90a => "triad_sm90a",
         ModuleKind::TriadSm100 => "triad_sm100",
         ModuleKind::TriadSm120 => "triad_sm120",
+        ModuleKind::InferenceSm89Cells => "inference_sm89_cells",
         ModuleKind::Mamba3Combined => "mamba3_combined",
     }
 }

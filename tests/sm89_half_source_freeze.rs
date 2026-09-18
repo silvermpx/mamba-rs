@@ -3,11 +3,11 @@ mod m96;
 
 use m96::m64n192::m64n128::fixed_s3 as bxor;
 
-const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm89/half.cu");
+const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm80/half.cu");
 const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
-const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh");
-const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
-const S3: &str = include_str!("../kernels/gemm_bi_inference/sm89/half_s3.cu");
+const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh");
+const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_swizzle.cu");
+const S3: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_s3.cu");
 
 #[test]
 fn standalone_source_defines_each_fixed_common_half_helper_once() {

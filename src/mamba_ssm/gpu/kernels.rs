@@ -423,8 +423,10 @@ pub struct MambaKernels {
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
     pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
-    /// The Ada-measured inference cells of the Fixed overlay, by symbol.
+    /// The Ada-measured inference cells, by symbol, from their own module.
     pub(crate) fixed_sm89_cells: std::collections::HashMap<&'static str, CudaFunction>,
+    /// The compiler identity of the inference cells module, when composed.
+    pub(crate) sm89_cells_compiler_identity: Option<super::kernel_identity::CompilerIdentity>,
     pub(crate) inference_sm89_bundle: InferenceSm89Bundle,
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
     pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
@@ -543,6 +545,14 @@ pub fn state_capacity(d_state: usize) -> Result<usize, String> {
     // made them 4x oversized. Callers with larger states still get the
     // exact padded fit.
     Ok(d_state.div_ceil(16) * 16)
+}
+
+/// The optional Triad modules a board loads: the common tier and, when
+/// the toolkit qualifies it, the board's own architecture module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TriadModulePlan {
+    pub common: bool,
+    pub architecture: Option<super::kernel_identity::ModuleKind>,
 }
 
 impl MambaKernels {
@@ -762,6 +772,38 @@ impl MambaKernels {
         }
     }
 
+    /// Which optional Triad modules a board loads. The common
+    /// SM89-measured modules load on every SM80-tier board, beside the
+    /// board's own architecture module where the toolkit qualifies one;
+    /// the loader follows this plan and the host tests read it without a
+    /// device.
+    pub(crate) fn triad_module_plan(
+        arch: &str,
+        device_cc: Option<(i32, i32)>,
+        nvrtc: (i32, i32),
+    ) -> TriadModulePlan {
+        use super::kernel_identity::ModuleKind;
+        let common = super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc);
+        let architecture = match (arch, device_cc) {
+            // The WGMMA kernel waits with `wgmma.wait_group 1`; ptxas
+            // before CUDA 13.3 could copy-propagate across that wait and
+            // drop the register moves it protects (CUDA 13.3 release
+            // notes), so the older toolkits get the common tier alone.
+            ("sm_90a", Some((9, 0))) if nvrtc >= (13, 3) => Some(ModuleKind::TriadSm90a),
+            ("sm_90a", Some((9, 0))) => None,
+            ("sm_100a", Some((10, 0)))
+            | ("sm_103a", Some((10, 3)))
+            | ("sm_107a", Some((10, 7)))
+            | ("sm_110a", Some((11, 0))) => Some(ModuleKind::TriadSm100),
+            (_, Some((12, _))) => Some(ModuleKind::TriadSm120),
+            _ => None,
+        };
+        TriadModulePlan {
+            common,
+            architecture,
+        }
+    }
+
     /// Compile with the default state capacity of 64 — the common
     /// shapes' tightest register budget. Models with a larger `d_state`
     /// use [`Self::compile_with_state_cap`].
@@ -831,6 +873,7 @@ impl MambaKernels {
                 },
             )
         };
+        let plan = Self::triad_module_plan(arch, device_cc, nvrtc_version());
         let (
             fixed,
             scalar,
@@ -847,12 +890,30 @@ impl MambaKernels {
             sm89_tf32_joint_rejection,
             specialized,
         ) = if let Some(artifacts) = sm120_artifacts {
-            // The Ada-found modules are sm_80-tier PTX; the CC 12.x boards
-            // compile them beside their own specialized set and admit them
-            // through the first-use proof like every other board.
+            // The common SM89-measured modules are sm_80-tier PTX; a CC 12.x
+            // board compiles them beside its own set, for the target that set
+            // was compiled with (CC 12.1 may have fallen back to compute_120),
+            // and admits them through the first-use proof like every other
+            // board.
+            let set_target = artifacts.fixed.compiler_identity.target;
+            let tier_arch = device_cc
+                .and_then(|device_cc| {
+                    super::gemm_bi_triad::sm120_target_candidates(device_cc, nvrtc_version())
+                        .iter()
+                        .map(|candidate| candidate.nvrtc_arch)
+                        .find(|candidate| *candidate == set_target.as_str())
+                })
+                .unwrap_or(arch);
             let portable_tier = |module_kind| {
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(module_kind) {
+                if Self::triad_module_plan(tier_arch, device_cc, nvrtc_version()).common {
+                    match super::gemm_bi_triad::modules::compile_module(
+                        super::gemm_bi_triad::modules::CompileModuleRequest {
+                            ctx,
+                            arch: tier_arch,
+                            state_cap,
+                            module_kind,
+                        },
+                    ) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
                     }
@@ -890,57 +951,69 @@ impl MambaKernels {
             let fixed = compile(super::kernel_identity::ModuleKind::Fixed)?;
             let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
             let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
-            let (finalist, finalist_rejection) =
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
-                        Ok(module) => (Some(module), None),
-                        Err(error) => (None, Some(error)),
-                    }
-                } else {
-                    (None, None)
-                };
-            let (sm89_half, sm89_half_rejection) =
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(super::kernel_identity::ModuleKind::TriadSm89Half) {
-                        Ok(module) => (Some(module), None),
-                        Err(error) => (None, Some(error)),
-                    }
-                } else {
-                    (None, None)
-                };
-            let (sm89_exact_f32, sm89_exact_f32_rejection) =
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32) {
-                        Ok(module) => (Some(module), None),
-                        Err(error) => (None, Some(error)),
-                    }
-                } else {
-                    (None, None)
-                };
-            let (sm89_exact_f32_d128, sm89_exact_f32_d128_rejection) =
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32D128) {
-                        Ok(module) => (Some(module), None),
-                        Err(error) => (None, Some(error)),
-                    }
-                } else {
-                    (None, None)
-                };
-            let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
-                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
-                    match compile(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint) {
-                        Ok(module) => (Some(module), None),
-                        Err(error) => (None, Some(error)),
-                    }
-                } else {
-                    (None, None)
-                };
+            let (finalist, finalist_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
+            let (sm89_half, sm89_half_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadSm89Half) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
+            let (sm89_exact_f32, sm89_exact_f32_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
+            let (sm89_exact_f32_d128, sm89_exact_f32_d128_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32D128) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
+            let (sm89_tf32_joint, sm89_tf32_joint_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
             let specialized = match (arch, device_cc) {
-                ("sm_90a", Some((9, 0))) => compile(super::kernel_identity::ModuleKind::TriadSm90a)
-                    .ok()
-                    .and_then(|module| {
-                        super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
-                    }),
+                ("sm_90a", Some((9, 0)))
+                    if plan.architecture
+                        == Some(super::kernel_identity::ModuleKind::TriadSm90a) =>
+                {
+                    compile(super::kernel_identity::ModuleKind::TriadSm90a)
+                        .ok()
+                        .and_then(|module| {
+                            super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
+                        })
+                }
+                ("sm_90a", Some((9, 0))) => {
+                    static WGMMA_TOOLKIT: std::sync::Once = std::sync::Once::new();
+                    super::diagnostics::warn_once(&WGMMA_TOOLKIT, || {
+                        format!(
+                            "the SM90a WGMMA module needs CUDA 13.3 or newer (ptxas before 13.3 \
+                             could drop the register moves after wgmma.wait_group); NVRTC {:?} \
+                             serves this board with the common tier",
+                            nvrtc_version()
+                        )
+                    });
+                    None
+                }
                 ("sm_100a", Some(device_cc @ (10, 0)))
                 | ("sm_103a", Some(device_cc @ (10, 3)))
                 | ("sm_107a", Some(device_cc @ (10, 7))) => {
@@ -968,6 +1041,28 @@ impl MambaKernels {
                 specialized,
             )
         };
+        // The inference cells are their own module on every board the Fixed
+        // overlay serves; the CC 12.x family, whose Fixed module stays
+        // byte-identical to its cohorts, composes neither.
+        let (sm89_cells_module, sm89_cells_rejection) = if plan.common
+            && super::gemm_bi_triad::modules::fixed_portable_overlay_composed(arch)
+        {
+            match compile(super::kernel_identity::ModuleKind::InferenceSm89Cells) {
+                Ok(module) => (Some(module), None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
+        if let Some(error) = sm89_cells_rejection.as_ref() {
+            static CELLS: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&CELLS, || {
+                format!(
+                    "the SM89 inference cells module did not compile ({error}); the Fixed \
+                     overlay serves its shapes without the cells"
+                )
+            });
+        }
         let compiler_identity = fixed.compiler_identity;
         let fold_transport_admitted = super::fold_transport::compiler_admitted(
             device_cc,
@@ -991,8 +1086,10 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm89_half_m128n64_s2(ctx, &fixed);
         let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
-        let (fixed_sm89_cells, fixed_sm89_cell_rejections) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_cells(ctx, &fixed);
+        let (fixed_sm89_cells, fixed_sm89_cell_rejections) = match sm89_cells_module.as_ref() {
+            Some(module) => super::gemm_bi_triad::modules::load_fixed_sm89_cells(ctx, module),
+            None => (std::collections::HashMap::new(), Vec::new()),
+        };
         let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan_t256, fixed_sm120_f32_n64_copyplan_t256_rejection) =
@@ -1026,6 +1123,9 @@ impl MambaKernels {
                 sm89_tf32_joint,
                 sm89_tf32_joint_compile_rejection: sm89_tf32_joint_rejection,
                 specialized,
+                sm89_cells: sm89_cells_module
+                    .as_ref()
+                    .map(|module| module.artifact_identity),
             },
         )?;
         // A rejected TF32 module used to be recorded and never shown: the
@@ -1446,6 +1546,9 @@ impl MambaKernels {
             fixed_sm89_f32_n64_copyplan,
             fixed_sm89_f32_n64_copyplan_rejection,
             fixed_sm89_cells,
+            sm89_cells_compiler_identity: sm89_cells_module
+                .as_ref()
+                .map(|module| module.compiler_identity),
             inference_sm89_bundle,
             fixed_sm120_f32_n64_copyplan,
             fixed_sm120_f32_n64_copyplan_rejection,
@@ -1796,6 +1899,10 @@ impl MambaKernels {
         self.triad.sm89_tf32_joint_compiler_identity()
     }
 
+    pub fn sm89_cells_compiler_identity(&self) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.sm89_cells_compiler_identity
+    }
+
     pub fn triad_sm89_tf32_joint_artifact_identity(
         &self,
     ) -> Option<super::kernel_identity::ArtifactIdentity> {
@@ -1872,4 +1979,58 @@ pub fn cuda_include_paths() -> Vec<String> {
         .into_iter()
         .filter(|p| std::path::Path::new(p).join("cuda_fp16.h").exists())
         .collect()
+}
+
+#[cfg(test)]
+mod module_plan_tests {
+    use super::super::device::GpuDevice;
+    use super::super::kernel_identity::ModuleKind;
+    use super::MambaKernels;
+
+    /// Every board loads the common tier; a board with its own module
+    /// loads it beside the common tier, never instead of it. This is the
+    /// policy the loader follows, read here without a device.
+    #[test]
+    fn every_sm80_board_loads_the_common_tier_beside_its_own_module() {
+        let expected = [
+            ((8, 0), None),
+            ((8, 6), None),
+            ((8, 7), None),
+            ((8, 9), None),
+            ((9, 0), Some(ModuleKind::TriadSm90a)),
+            ((10, 0), Some(ModuleKind::TriadSm100)),
+            ((10, 3), Some(ModuleKind::TriadSm100)),
+            ((10, 7), Some(ModuleKind::TriadSm100)),
+            ((11, 0), Some(ModuleKind::TriadSm100)),
+            ((12, 0), Some(ModuleKind::TriadSm120)),
+            ((12, 1), Some(ModuleKind::TriadSm120)),
+        ];
+        for (cc, architecture) in expected {
+            let arch = GpuDevice::resolve_nvrtc_target(cc).unwrap();
+            let device_cc = Some((cc.0 as i32, cc.1 as i32));
+            let plan = MambaKernels::triad_module_plan(arch, device_cc, (13, 4));
+            assert!(plan.common, "CC {cc:?} ({arch}) must load the common tier");
+            assert_eq!(plan.architecture, architecture, "CC {cc:?} ({arch})");
+        }
+    }
+
+    #[test]
+    fn the_wgmma_module_waits_for_the_fixed_ptxas() {
+        for nvrtc in [(13, 0), (13, 1), (13, 2)] {
+            let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)), nvrtc);
+            assert!(plan.common);
+            assert_eq!(plan.architecture, None, "NVRTC {nvrtc:?}");
+        }
+        let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)), (13, 3));
+        assert_eq!(plan.architecture, Some(ModuleKind::TriadSm90a));
+    }
+
+    #[test]
+    fn an_unknown_capability_loads_neither_tier() {
+        let plan = MambaKernels::triad_module_plan("sm_75", Some((7, 5)), (13, 2));
+        assert!(!plan.common);
+        assert_eq!(plan.architecture, None);
+        let plan = MambaKernels::triad_module_plan("sm_80", None, (13, 2));
+        assert!(!plan.common);
+    }
 }

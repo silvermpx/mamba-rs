@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 pub const OWNER_TEMPLATE: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89/exact_f32_d128.cu");
+    include_str!("../../../../kernels/gemm_bi_triad/sm80/exact_f32_d128.cu");
 
 pub const OWNER_SHA256: &str = "3d5226abe9d28b17fd0c6d02718da57a2bd2fa5906fbe1305cac9f60d019e70f";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [

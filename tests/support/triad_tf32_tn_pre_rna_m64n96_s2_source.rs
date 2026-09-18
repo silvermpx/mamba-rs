@@ -502,8 +502,8 @@ mod tests {
     use super::*;
 
     const PRIMITIVES: &str =
-        include_str!("../../kernels/gemm_bi_triad/sm89/tf32_joint_primitives.cuh");
-    const JOINT_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm89/tf32_joint.cu");
+        include_str!("../../kernels/gemm_bi_triad/sm80/tf32_joint_primitives.cuh");
+    const JOINT_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/sm80/tf32_joint.cu");
 
     #[test]
     fn changed_parent_or_boundaries_fail_closed() {

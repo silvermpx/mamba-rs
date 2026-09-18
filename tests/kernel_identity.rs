@@ -333,6 +333,7 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
     let specialized = build_artifact_set(&[fixed, scalar, sm80, sm90a]).unwrap();
     assert_eq!(specialized.module_count, 4);
     assert_eq!(specialized.specialized, Some(sm90a));
+    assert_eq!(specialized.sm89_finalist, None);
     assert!(
         build_artifact_set(&[
             fixed,
@@ -343,6 +344,50 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn artifact_set_carries_the_common_finalist_beside_every_architecture_module() {
+    let fixed = artifact(ModuleKind::Fixed, 1);
+    let scalar = artifact(ModuleKind::TriadScalar, 3);
+    let sm80 = artifact(ModuleKind::TriadSm80, 5);
+    let finalist = artifact(ModuleKind::TriadSm89Finalist, 7);
+    let half = artifact(ModuleKind::TriadSm89Half, 9);
+    let exact = artifact(ModuleKind::TriadSm89ExactF32, 11);
+    let joint = artifact(ModuleKind::TriadSm89Tf32Joint, 13);
+    let d128 = artifact(ModuleKind::TriadSm89ExactF32D128, 15);
+    for (kind, seed) in [
+        (ModuleKind::TriadSm90a, 17),
+        (ModuleKind::TriadSm100, 19),
+        (ModuleKind::TriadSm120, 21),
+    ] {
+        let own = artifact(kind, seed);
+        let set =
+            build_artifact_set(&[fixed, scalar, sm80, finalist, own, half, exact, d128, joint])
+                .unwrap_or_else(|error| panic!("{kind:?} beside the common modules: {error}"));
+        assert_eq!(set.module_count, 9);
+        assert_eq!(set.sm89_finalist, Some(finalist));
+        assert_eq!(set.specialized, Some(own));
+        assert_eq!(set.sm89_half, Some(half));
+        assert_eq!(set.sm89_exact_f32, Some(exact));
+        assert_eq!(set.sm89_exact_f32_d128, Some(d128));
+        assert_eq!(set.sm89_tf32_joint, Some(joint));
+        let cells = artifact(ModuleKind::InferenceSm89Cells, 23);
+        let with_cells = build_artifact_set(&[
+            fixed, scalar, sm80, finalist, own, half, exact, d128, joint, cells,
+        ])
+        .unwrap();
+        assert_eq!(with_cells.module_count, 10);
+        assert_eq!(with_cells.sm89_cells, Some(cells));
+        assert_ne!(with_cells.ordered_digest, set.ordered_digest);
+        assert!(build_artifact_set(&[fixed, scalar, sm80, cells, joint]).is_err());
+        let without_finalist =
+            build_artifact_set(&[fixed, scalar, sm80, own, half, exact, d128, joint]).unwrap();
+        assert_eq!(without_finalist.sm89_finalist, None);
+        assert_eq!(without_finalist.specialized, Some(own));
+        assert_ne!(set.ordered_digest, without_finalist.ordered_digest);
+        assert!(build_artifact_set(&[fixed, scalar, sm80, own, finalist]).is_err());
+    }
 }
 
 #[test]
@@ -360,7 +405,8 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     let all =
         build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, d128, joint]).unwrap();
     assert_eq!(all.module_count, 8);
-    assert_eq!(all.specialized, Some(finalist));
+    assert_eq!(all.sm89_finalist, Some(finalist));
+    assert_eq!(all.specialized, None);
     assert_eq!(all.sm89_half, Some(half));
     assert_eq!(all.sm89_exact_f32, Some(exact));
     assert_eq!(all.sm89_exact_f32_d128, Some(d128));
@@ -377,6 +423,7 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
 
     let half_only = build_artifact_set(&[fixed, scalar, sm80, half]).unwrap();
     assert_eq!(half_only.module_count, 4);
+    assert_eq!(half_only.sm89_finalist, None);
     assert_eq!(half_only.specialized, None);
     assert_eq!(half_only.sm89_half, Some(half));
     assert_eq!(half_only.sm89_exact_f32, None);
@@ -436,16 +483,19 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     assert!(build_artifact_set(&[fixed, scalar, sm80, exact, joint, d128]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, d128, d128]).is_err());
     assert!(build_artifact_set(&[fixed, scalar, sm80, joint, joint]).is_err());
-    assert!(
-        build_artifact_set(&[
-            fixed,
-            scalar,
-            sm80,
-            artifact(ModuleKind::TriadSm90a, 13),
-            exact,
-        ])
-        .is_err()
+    let beside_own = build_artifact_set(&[
+        fixed,
+        scalar,
+        sm80,
+        artifact(ModuleKind::TriadSm90a, 13),
+        exact,
+    ])
+    .unwrap();
+    assert_eq!(
+        beside_own.specialized,
+        Some(artifact(ModuleKind::TriadSm90a, 13))
     );
+    assert_eq!(beside_own.sm89_exact_f32, Some(exact));
     assert!(build_artifact_set(&[fixed, scalar, sm80, finalist, finalist]).is_err());
 }
 
@@ -765,6 +815,9 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     changed.push(value);
     let mut value = captured;
     value.artifacts.specialized = Some(artifact(ModuleKind::TriadSm90a, 11));
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.sm89_finalist = Some(artifact(ModuleKind::TriadSm89Finalist, 11));
     changed.push(value);
     let mut value = captured;
     value.policy_revision += 1;

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 const PRELUDE: &str = include_str!("../../../../kernels/_typed_prelude.cuh");
 pub const OWNER_TEMPLATE: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89/exact_f32.cu");
+    include_str!("../../../../kernels/gemm_bi_triad/sm80/exact_f32.cu");
 
 pub const OWNER_SHA256: &str = "cdcb768216699f41553e73492a32d92717c62889a4a329ca1990360b361541c7";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [

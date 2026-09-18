@@ -65,9 +65,9 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
             // so its source is the qualified capacity-64 identity that the
             // dispatcher's cohorts bind, not the legacy base.
             let expected = if cap == 64 {
-                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049"
+                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf"
             } else {
-                "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61"
+                "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7"
             };
             assert_eq!(
                 mamba_rs::mamba_ssm::gpu::kernel_identity::digest_hex(

@@ -154,24 +154,23 @@ const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
     "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store",
 ];
 
-/// The Ada-qualified RNA TF32 tiles, composed only for the sm_89 target.
+/// The Ada-measured RNA TF32 tiles, composed with the inference overlay on
+/// every SM80-tier target except CC 12.x.
 const FIXED_TF32_ENTRIES_SM89: &[&str] = &[
     "nn_rna_wide_tf32_m128n128_bk32_s3",
     "nn_sm89_rna_tf32_m128n96_bk32_s3",
 ];
 
 /// The Fixed TF32 entries a PTX compiled for `target` carries: the portable
-/// set on every architecture, the RNA tiles on sm_89, plus the TMA set on
-/// the two SM120 targets the kernel source admits.
+/// set on every architecture, the RNA tiles wherever the overlay composes,
+/// plus the TMA set on the two SM120 targets the kernel source admits.
 #[cfg(target_os = "linux")]
 fn expected_fixed_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
     let sm120 = matches!(target, "compute_120" | "compute_121");
-    // Ada compiles to the real sm_89 target; the virtual name covers a
-    // caller that asks for the portable set by architecture.
-    let sm89 = matches!(target, "sm_89" | "compute_89");
+    let overlay = !matches!(target, "compute_120" | "compute_121" | "sm_120" | "sm_121");
     FIXED_TF32_ENTRIES_PORTABLE
         .iter()
-        .chain(FIXED_TF32_ENTRIES_SM89.iter().filter(|_| sm89))
+        .chain(FIXED_TF32_ENTRIES_SM89.iter().filter(|_| overlay))
         .chain(FIXED_TF32_ENTRIES_SM120.iter().filter(|_| sm120))
         .map(|name| (*name).to_string())
         .collect()
@@ -241,6 +240,10 @@ fn expected_cuda_module_fixtures_are_unique() {
     );
     assert_eq!(
         expected_fixed_tf32_entries("compute_80").len(),
+        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM89.len()
+    );
+    assert_eq!(
+        expected_fixed_tf32_entries("sm_120").len(),
         FIXED_TF32_ENTRIES_PORTABLE.len()
     );
     let specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
@@ -366,11 +369,13 @@ fn cache_entries(
 #[cfg(target_os = "linux")]
 fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     let expected_count = 3
+        + usize::from(artifacts.sm89_finalist.is_some())
         + usize::from(artifacts.specialized.is_some())
         + usize::from(artifacts.sm89_half.is_some())
         + usize::from(artifacts.sm89_exact_f32.is_some())
         + usize::from(artifacts.sm89_exact_f32_d128.is_some())
-        + usize::from(artifacts.sm89_tf32_joint.is_some());
+        + usize::from(artifacts.sm89_tf32_joint.is_some())
+        + usize::from(artifacts.sm89_cells.is_some());
     assert_eq!(
         usize::from(artifacts.module_count),
         expected_count,
@@ -381,6 +386,9 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
         artifacts.triad_scalar,
         artifacts.triad_sm80,
     ];
+    if let Some(sm89_finalist) = artifacts.sm89_finalist {
+        active.push(sm89_finalist);
+    }
     if let Some(specialized) = artifacts.specialized {
         active.push(specialized);
     }
@@ -395,6 +403,9 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     }
     if let Some(sm89_tf32_joint) = artifacts.sm89_tf32_joint {
         active.push(sm89_tf32_joint);
+    }
+    if let Some(sm89_cells) = artifacts.sm89_cells {
+        active.push(sm89_cells);
     }
     let kinds: std::collections::HashSet<_> =
         active.iter().map(|artifact| artifact.module_kind).collect();
@@ -759,18 +770,23 @@ fn assert_exact_n64_resources(function: &cudarc::driver::CudaFunction) {
 }
 
 fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u32, u32)) {
-    let ada_holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
-    let ada_reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
-    if ctx.kernels.compiler_identity().target.as_str() != "sm_89" {
+    // The inference overlay composes on every SM80-tier target except
+    // CC 12.x, whose Fixed module stays byte-identical to its cohorts.
+    let overlay_holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
+    let overlay_reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
+    if compute_capability.0 == 12 {
         assert!(
-            ada_holder.is_none(),
-            "Ada-only exact kernel loaded on another target"
+            overlay_holder.is_none(),
+            "overlay exact kernel loaded on a CC 12.x target"
         );
-        assert!(ada_reason.is_some(), "non-Ada rejection reason was lost");
+        assert!(
+            overlay_reason.is_some(),
+            "CC 12.x rejection reason was lost"
+        );
     } else {
-        let function =
-            ada_holder.unwrap_or_else(|| panic!("Ada exact N64 missing: {ada_reason:?}"));
-        assert!(ada_reason.is_none());
+        let function = overlay_holder
+            .unwrap_or_else(|| panic!("overlay exact N64 missing: {overlay_reason:?}"));
+        assert!(overlay_reason.is_none());
         assert_exact_n64_resources(function);
     }
 
@@ -924,7 +940,9 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             .filter(|name| name.starts_with("nn_sm89_f32_n64_copyplan"))
             .map(String::as_str)
             .collect();
-        let expected_exact_n64 = if first.kernels.compiler_identity().target.as_str() == "sm_89" {
+        // The overlay's exact N64 kernel is composed on every SM80-tier
+        // target except CC 12.x.
+        let expected_exact_n64 = if device.compute_capability.0 != 12 {
             std::collections::BTreeSet::from(["nn_sm89_f32_n64_copyplan"])
         } else {
             std::collections::BTreeSet::new()

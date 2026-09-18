@@ -928,7 +928,7 @@ mod inference_bundle_runtime_tests {
 
     #[test]
     fn inference_bundle_runtime_retains_bias_seed_before_first_mma() {
-        let source = include_str!("../../../../kernels/gemm_bi_inference/sm89/half_f32out_s3.cu");
+        let source = include_str!("../../../../kernels/gemm_bi_inference/sm80/half_f32out_s3.cu");
         let bias_seed = source.find("float first = bias != nullptr").unwrap();
         let first_mma = source
             .find("sm89_fixed_half_swizzle::consume_fragments<T>")

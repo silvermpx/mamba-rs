@@ -4,7 +4,7 @@
 
 use crate::mamba_ssm::gpu::kernel_identity::{FramedSha256, digest_hex};
 
-pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half_small.cu");
+pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/half_small.cu");
 pub const OWNER_SHA256: &str = "50ec6b32048412ab16e0500593a811268af3128be6e9a500e1d01a8e7dd2168f";
 
 pub const NT_BF16_SYMBOL: &str = "nt_sm89_m16n64_bk64_s4_bf16";

@@ -2,6 +2,22 @@
 // (C, A, B, bias, FixedSm89HalfParams) with alpha = 1 and beta = 0 on the
 // production route; alpha and beta are honored anyway so the epilogues
 // match the ladder kernels.
+// The launch parameters every cell takes, laid out as the half pipeline's
+// (the cells share that kernel's calling convention): alpha, beta, m, n, k
+// and the three leading dimensions, 32 bytes.
+struct FixedSm89HalfParams {
+    float alpha;
+    float beta;
+    int m;
+    int n;
+    int k;
+    int lda;
+    int ldb;
+    int ldc;
+};
+static_assert(sizeof(FixedSm89HalfParams) == 32, "Fixed SM89 half parameter size");
+static_assert(alignof(FixedSm89HalfParams) == 4, "Fixed SM89 half parameter alignment");
+
 __device__ __forceinline__ unsigned sm89_cell_smem_addr(const void* pointer) {
     return (unsigned)__cvta_generic_to_shared(pointer);
 }

@@ -9,6 +9,9 @@
 # record        - manual instruments under tests/ that need foreign hardware
 #                 or model assets. Never run automatically.
 # host          - no GPU and no cuda feature needed; CI runs these.
+# toolkit       - the CUDA toolkit (NVRTC) but no device: compile gates,
+#                 identity and source contracts. Once per toolkit build, on
+#                 the build box; a board's gate run leaves them out.
 # bench         - a `[[bench]]` target under benches/ with its own main
 #                 (`cargo bench --bench <name>`); timing only, no verdict.
 # qualification - a manual instrument under tools/qualification/, built only
@@ -21,7 +24,7 @@
 "a9_fused_softplus_repro" = "gate"
 "acceptance_evidence" = "host"
 "adamw_parity" = "gate"
-"arch_compile_gates" = "gate"
+"arch_compile_gates" = "toolkit"
 "backward_mixed_parity" = "gate"
 "backward_mixed_smoke" = "gate"
 "bench_bf16_vs_f32" = "qualification"
@@ -62,10 +65,10 @@
 "gemm_bi_scalar_nn_m64n64_qualification" = "qualification"
 "gemm_bi_scalar_nt_copyplan_siblings_receipts" = "host"
 "gemm_bi_scalar_nt_slim_qualification" = "qualification"
-"gemm_bi_sm100_contract" = "gate"
+"gemm_bi_sm100_contract" = "toolkit"
 "gemm_bi_sm100_triad_census" = "qualification"
 "gemm_bi_sm120_arena_subview" = "gate"
-"gemm_bi_sm120_contract" = "gate"
+"gemm_bi_sm120_contract" = "toolkit"
 "gemm_bi_sm120_tf32_selector_qualification" = "qualification"
 "gemm_bi_sm120_tf32_vendor" = "qualification"
 "gemm_bi_sm120_triad_census" = "qualification"
@@ -73,13 +76,13 @@
 "gemm_bi_sm89_exact_f32_d128_selector_qualification" = "qualification"
 "gemm_bi_sm89_exact_f32_d128_source_contract" = "host"
 "gemm_bi_sm89_exact_f32_module_qualification" = "qualification"
-"gemm_bi_sm89_exact_f32_source_contract" = "gate"
+"gemm_bi_sm89_exact_f32_source_contract" = "toolkit"
 "gemm_bi_sm89_exact_f32_tn_selector_qualification" = "qualification"
 "gemm_bi_sm89_half_selector_qualification" = "qualification"
-"gemm_bi_sm89_half_tn_source_contract" = "gate"
+"gemm_bi_sm89_half_tn_source_contract" = "toolkit"
 "gemm_bi_sm89_tf32_joint_module_qualification" = "qualification"
 "gemm_bi_sm89_tf32_joint_selector_qualification" = "qualification"
-"gemm_bi_sm90_contract" = "gate"
+"gemm_bi_sm90_contract" = "toolkit"
 "gemm_bi_sm90a_triad_census" = "qualification"
 "gemm_bi_tc" = "contract"
 "gemm_bi_tc_bench" = "bench"
@@ -90,7 +93,7 @@
 "gemm_bi_tf32_joint_source_contract" = "host"
 "gemm_bi_tf32_m16n16_qualification" = "qualification"
 "gemm_bi_tf32_nt_cublas" = "qualification"
-"gemm_bi_tf32_selector" = "gate"
+"gemm_bi_tf32_selector" = "toolkit"
 "gemm_bi_tf32_selector_qualification" = "qualification"
 "gemm_bi_tf32_splitk4_qualification" = "qualification"
 "gemm_bi_tn_splitm_cp_async_qualification" = "qualification"
@@ -125,7 +128,7 @@
 "hf_training_smoke" = "record"
 "inference_f16_smoke" = "gate"
 "inference_graph_route" = "gate"
-"kernel_identity" = "gate"
+"kernel_identity" = "toolkit"
 "kernel_identity_cuda" = "contract"
 "large_d_state" = "gate"
 "loss_scaler" = "gate"

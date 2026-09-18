@@ -136,6 +136,88 @@ high-water mark or an individual-step measurement.
 |---|---:|---:|
 | Mamba-1 | 7546 | 7626 |
 
+## Training step — 0.7.2 to 0.7.3 (RTX 5090, CUDA 13.2)
+
+Measured on September 18, 2026 on a rented RTX 5090 (170 SMs, driver
+610.43.02, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release build): the
+assembled `0.7.3` once per storage against the `0.7.2` numbers of the
+0.7.0 to 0.7.1 section for this board below (0.7.2 changed no kernel or
+route; those columns are its measurement of the same instrument). Same
+shape and instrument settings as the Ada section above; the 0.7.3
+process ran once, so no range is shown. `old/new` above 1 means 0.7.3 is
+faster.
+
+Per-cell GEMM timings of the final tree on this board, against cuBLAS on
+the same board and against the board's own tier, are on the
+[RTX 5090 GEMM page](gemm-benchmarks-0.7.3-rtx5090.md).
+
+The board keeps its own measured SM120 kernels on every shape they name;
+the gain comes from the shapes they do not name, which ran on the scalar
+or portable kernels in 0.7.2 and take the common cells, proven at first
+use on this board, in 0.7.3. The bit ledger against 0.7.2 on this board
+holds on all 263 keys.
+
+| storage | execution | 0.7.2 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 71.83 | 69.12 | 1.039× |
+| BF16 | graph | 72.01 | 68.53 | 1.051× |
+| F16 | eager | 73.19 | 69.79 | 1.049× |
+| F16 | graph | 73.79 | 69.62 | 1.060× |
+| F32 | eager | 120.80 | 109.89 | 1.099× |
+| F32 | graph | 120.90 | 109.25 | 1.107× |
+| TF32 | eager | 115.97 | 110.73 | 1.047× |
+| TF32 | graph | 116.15 | 111.17 | 1.045× |
+
+Sampled device memory, the maximum of 200 ms NVML samples across the
+process:
+
+| storage | 0.7.3 peak MiB |
+|---|---:|
+| BF16 | 4844 |
+| F16 | 4876 |
+| F32 | 7660 |
+| TF32 | 8339 |
+
+## Training step — 0.7.2 to 0.7.3 (A100 SXM4 40 GB, CUDA 13.2)
+
+Measured on September 18, 2026 on a rented A100 SXM4 40 GB (108 SMs,
+driver 595.58.03, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release
+build). This board had no saved numbers, so `0.7.2` and `0.7.3` each ran
+once, old then new, in separate trees with separate kernel caches. Same
+shape and instrument settings as the Ada section above; 0.7.2 spells the
+TF32 storage as `MAMBA_RS_BENCH_DTYPE=f32` with `MAMBA_RS_BI_F32_POLICY=tf32`.
+`old/new` above 1 means 0.7.3 is faster.
+
+Per-cell GEMM timings of the final tree on this board against cuBLAS on
+the same board are on the [A100 GEMM page](gemm-benchmarks-0.7.3-a100.md).
+
+0.7.2 served this board with the portable kernels and, for TF32, the
+exact f32 kernels (its TF32 rows equal its F32 rows). 0.7.3 serves it with
+the common cells measured on the Ada, each proven at first use on this
+board, and the TF32 tier through the neighbour band. The bit ledger
+between the two trees on this board holds on all 263 keys.
+
+| storage | execution | 0.7.2 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 154.02 | 150.39 | 1.024× |
+| BF16 | graph | 152.92 | 149.41 | 1.024× |
+| F16 | eager | 155.63 | 151.12 | 1.030× |
+| F16 | graph | 155.56 | 150.76 | 1.032× |
+| F32 | eager | 289.36 | 289.74 | 0.999× |
+| F32 | graph | 288.23 | 288.61 | 0.999× |
+| TF32 | eager | 289.37 | 230.17 | 1.257× |
+| TF32 | graph | 288.02 | 229.07 | 1.257× |
+
+Sampled device memory, the maximum of 200 ms NVML samples across each
+process:
+
+| storage | 0.7.2 peak MiB | 0.7.3 peak MiB |
+|---|---:|---:|
+| BF16 | 4677 | 4711 |
+| F16 | 4709 | 4743 |
+| F32 | 7527 | 7529 |
+| TF32 | 7527 | 7527 |
+
 ## Training step — 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
 
 Fresh measurements on September 14, 2026: released `v0.7.0`

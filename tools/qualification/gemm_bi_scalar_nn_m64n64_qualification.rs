@@ -705,7 +705,7 @@ mod cuda_qualification {
             let source = format!(
                 "{}\n#define gbf_aligned16 is_aligned_16\n{}\n#undef gbf_aligned16\n",
                 compose_cuda_source(),
-                include_str!("../../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"),
+                include_str!("../../kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu"),
             );
             compile_ptx_source(device.nvrtc_target(), source)?
         } else {

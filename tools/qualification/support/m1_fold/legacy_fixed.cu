@@ -10071,7 +10071,7 @@ DEFINE_GEMM_BI_NN_SM100(f16,  __half,        from_f_f16,  SM100_IDESC_F16)
 #undef DEFINE_GEMM_BI_NN_SM100
 
 #endif
-#line 1 "kernels/gemm_bi_inference/sm89/half_pipeline.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/half_pipeline.cu"
 // OWN Ada-only Fixed homogeneous-half inference pipeline.
 // Derived from the repository's measured pipe_vec experiment: same
 // 128x128/BK64/S2 geometry, ascending k16 MMA chain and bias-seeded F32
@@ -10463,7 +10463,7 @@ void nn_sm89_tc128_pipeline_f16(
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);
 }
-#line 1 "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu"
 // Ada-only exact F32 N64 copy-plan extension. The immutable standalone
 // 713a575 candidate supplies the body; only names and compact ABI unpacking differ.
 struct FixedSm89ExactF32Params {
@@ -10778,7 +10778,7 @@ nn_sm89_f32_n64_copyplan(
 #undef SM89_EXACT_N64_CP_BN
 #undef SM89_EXACT_N64_CP_BK
 #undef SM89_EXACT_N64_CP_GROUP_M
-#line 1 "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu"
 // Fixed-owned NN wide TF32 candidate. This is the production adaptation of
 // internal/experiments/sm89-nn-wide-rna-compatible.cu at SHA256
 // c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4.
@@ -11199,7 +11199,7 @@ using GbfRnaWideSignature = void (*)(
 static_assert(GbfRnaSameType<
     decltype(&nn_rna_wide_tf32_m128n128_bk32_s3),
     GbfRnaWideSignature>::value, "Fixed NN RNA-wide ABI");
-#line 1 "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
+#line 1 "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"
 // Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once
@@ -11242,7 +11242,7 @@ SM89_FHS_HD constexpr unsigned b_fragment_issue(unsigned base, int issue) {
 }
 } // namespace sm89_fixed_half_swizzle_layout
 #undef SM89_FHS_HD
-#line 1 "kernels/gemm_bi_inference/sm89/half_swizzle.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/half_swizzle.cu"
 // Production Fixed SM89 homogeneous-half packed/XOR staging twin.
 // Only staging addresses change; exact ascending k16 chain, copy issue
 // schedule, bias seed, alpha/beta, conversion and 136-float output stride stay.
@@ -11615,7 +11615,7 @@ void nn_sm89_tc128_swizzle_##SUFFIX(                      \
 SM89_FHS_EXPORT(__nv_bfloat16, bf16)
 SM89_FHS_EXPORT(__half, f16)
 #undef SM89_FHS_EXPORT
-#line 1 "kernels/gemm_bi_inference/sm89/half_s3.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/half_s3.cu"
 // Ada homogeneous-half CTA128x128/BK64/S3. The two-stage provider above
 // supplies unchanged layout, fragment, arithmetic and epilogue helpers.
 namespace sm89_fixed_half_s3 {
@@ -11772,7 +11772,7 @@ void nn_sm89_tc128_s3_f16(
     sm89_fixed_half_s3::kernel(C, A, B, bias, params.alpha, params.beta,
         params.m, params.n, params.k, params.lda, params.ldb, params.ldc);
 }
-#line 1 "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu"
 // Ada Fixed TF32 M128xN96/BK32/S3 finalist. Optional forced route until qualified.
 
 struct GbfTf32N96Params {
@@ -12148,7 +12148,7 @@ void nn_sm89_rna_tf32_m128n96_bk32_s3(
     tf32n96_kernel(output, a, b, bias, params);
 }
 
-#line 1 "kernels/gemm_bi_inference/sm89/half_n64.cu"
+#line 1 "kernels/gemm_bi_inference/sm80/half_n64.cu"
 // Ada Fixed F16 N64 finalists. Optional forced routes until qualified.
 
 namespace sm89_fixed_half_n64 {

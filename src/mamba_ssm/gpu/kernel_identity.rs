@@ -621,6 +621,11 @@ pub enum ModuleKind {
     /// Exact-F32 SM89 TN d128 retained winners. Kept separate from the
     /// large-TN exact-F32 owner so both artifact identities remain frozen.
     TriadSm89ExactF32D128 = 12,
+    /// The Ada-measured inference cells, in their own module so a cell
+    /// that compiles differently between two NVRTC runs moves only its
+    /// own artifact, never the Fixed module's frozen identities. Cells are
+    /// admitted by symbol, not by digest.
+    InferenceSm89Cells = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -638,16 +643,22 @@ pub struct ArtifactSetIdentity {
     pub fixed: ArtifactIdentity,
     pub triad_scalar: ArtifactIdentity,
     pub triad_sm80: ArtifactIdentity,
+    /// The common TF32 finalist module, measured on the Ada and compiled
+    /// for every SM80-tier board; it lives beside a board's own
+    /// architecture module, never instead of it.
+    pub sm89_finalist: Option<ArtifactIdentity>,
+    /// The board's own architecture module (SM90a, SM100 or SM120).
     pub specialized: Option<ArtifactIdentity>,
     pub sm89_half: Option<ArtifactIdentity>,
     pub sm89_exact_f32: Option<ArtifactIdentity>,
     pub sm89_exact_f32_d128: Option<ArtifactIdentity>,
     pub sm89_tf32_joint: Option<ArtifactIdentity>,
+    pub sm89_cells: Option<ArtifactIdentity>,
 }
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
-    if !(3..=8).contains(&artifacts.len()) {
-        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, and one optional SM89 TF32 joint module".into());
+    if !(3..=10).contains(&artifacts.len()) {
+        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional SM89 finalist module, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, one optional SM89 TF32 joint module, and one optional SM89 inference cells module".into());
     }
     if artifacts[0].module_kind != ModuleKind::Fixed
         || artifacts[1].module_kind != ModuleKind::TriadScalar
@@ -657,19 +668,24 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
             "artifact set must start with Fixed, TriadScalar, and TriadSm80 in order".into(),
         );
     }
+    let mut sm89_finalist = None;
     let mut specialized = None;
     let mut sm89_half = None;
     let mut sm89_exact_f32 = None;
     let mut sm89_exact_f32_d128 = None;
     let mut sm89_tf32_joint = None;
+    let mut sm89_cells = None;
     let mut cursor = 3;
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::TriadSm89Finalist
+    {
+        sm89_finalist = Some(artifact);
+        cursor += 1;
+    }
     if let Some(artifact) = artifacts.get(cursor).copied()
         && matches!(
             artifact.module_kind,
-            ModuleKind::TriadSm89Finalist
-                | ModuleKind::TriadSm90a
-                | ModuleKind::TriadSm100
-                | ModuleKind::TriadSm120
+            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120
         )
     {
         specialized = Some(artifact);
@@ -699,18 +715,14 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         sm89_tf32_joint = Some(artifact);
         cursor += 1;
     }
-    if cursor != artifacts.len() {
-        return Err("optional artifacts must be ordered as architecture-specialized, SM89 half, SM89 exact-F32, SM89 exact-F32 d128, then SM89 TF32 joint".into());
-    }
-    if specialized.is_some_and(|artifact| artifact.module_kind != ModuleKind::TriadSm89Finalist)
-        && (sm89_half.is_some()
-            || sm89_exact_f32.is_some()
-            || sm89_exact_f32_d128.is_some()
-            || sm89_tf32_joint.is_some())
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::InferenceSm89Cells
     {
-        return Err(
-            "SM89 half, exact-F32, exact-F32 d128, or TF32 joint artifacts cannot follow a non-SM89 specialized module".into(),
-        );
+        sm89_cells = Some(artifact);
+        cursor += 1;
+    }
+    if cursor != artifacts.len() {
+        return Err("optional artifacts must be ordered as SM89 finalist, architecture-specialized, SM89 half, SM89 exact-F32, SM89 exact-F32 d128, SM89 TF32 joint, then SM89 inference cells".into());
     }
     let module_count = u8::try_from(artifacts.len())
         .map_err(|_| "artifact set contains more than 255 modules".to_string())?;
@@ -736,11 +748,13 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         fixed: artifacts[0],
         triad_scalar: artifacts[1],
         triad_sm80: artifacts[2],
+        sm89_finalist,
         specialized,
         sm89_half,
         sm89_exact_f32,
         sm89_exact_f32_d128,
         sm89_tf32_joint,
+        sm89_cells,
     })
 }
 
@@ -5570,7 +5584,8 @@ mod physical_launch_tests {
             build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80, finalist])
                 .expect("Ada finalist fourth artifact");
         assert_eq!(with_finalist.module_count, 4);
-        assert_eq!(with_finalist.specialized, Some(finalist));
+        assert_eq!(with_finalist.sm89_finalist, Some(finalist));
+        assert_eq!(with_finalist.specialized, None);
         assert_ne!(with_finalist.ordered_digest, base.ordered_digest);
         assert_eq!(with_finalist.fixed, base.fixed);
         assert_eq!(with_finalist.triad_scalar, base.triad_scalar);

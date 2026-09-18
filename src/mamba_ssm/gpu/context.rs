@@ -1191,6 +1191,42 @@ impl GpuCtx {
         Ok(())
     }
 
+    /// Runs `body` with the GEMM route recorder set aside: the launches it
+    /// makes are not part of the step being recorded. The first-use proof
+    /// arms run this way, because an eager manifest that carried them would
+    /// never match the capture that follows, where the verdict is already
+    /// known and only the admitted route launches.
+    pub(crate) fn with_gemm_route_recording_suspended<T>(
+        &self,
+        body: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        struct Restore<'a> {
+            ctx: &'a GpuCtx,
+            suspended: Option<GemmRouteRecorder>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut active) = self.ctx.gemm_route_recorder.try_borrow_mut()
+                    && active.is_none()
+                {
+                    *active = self.suspended.take();
+                }
+            }
+        }
+        let suspended = self
+            .gemm_route_recorder
+            .try_borrow_mut()
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())?
+            .take();
+        let restore = Restore {
+            ctx: self,
+            suspended,
+        };
+        let result = body();
+        drop(restore);
+        Ok(result)
+    }
+
     fn take_gemm_route_recording(&self) -> Result<GemmRouteRecorder, String> {
         self.gemm_route_recorder
             .try_borrow_mut()
@@ -1220,11 +1256,8 @@ impl GpuCtx {
                 self.kernels.artifact_set_identity().triad_sm80,
                 self.kernels.triad_sm80_compiler_identity(),
             )),
-            ModuleKind::TriadSm89Finalist => self
-                .kernels
-                .artifact_set_identity()
-                .specialized
-                .filter(|artifact| artifact.module_kind == module_kind)
+            ModuleKind::TriadSm89Finalist => artifacts
+                .sm89_finalist
                 .zip(self.kernels.triad_sm89_finalist_compiler_identity()),
             ModuleKind::TriadSm89Half => artifacts
                 .sm89_half
@@ -1238,6 +1271,9 @@ impl GpuCtx {
             ModuleKind::TriadSm89Tf32Joint => artifacts
                 .sm89_tf32_joint
                 .zip(self.kernels.triad_sm89_tf32_joint_compiler_identity()),
+            ModuleKind::InferenceSm89Cells => artifacts
+                .sm89_cells
+                .zip(self.kernels.sm89_cells_compiler_identity()),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
                 .kernels
                 .artifact_set_identity()
@@ -2006,6 +2042,23 @@ mod tests {
         assert!(ctx.gemm_route_recording_active().is_err());
         drop(borrow);
         ctx.record_eager_gemm_trace(|| {
+            assert!(ctx.gemm_route_recording_active()?);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!ctx.gemm_route_recording_active().unwrap());
+    }
+
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn proof_arms_run_with_the_recorder_set_aside() {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).unwrap();
+        let ctx = super::GpuCtx::new(&device).unwrap();
+        ctx.record_eager_gemm_trace(|| {
+            assert!(ctx.gemm_route_recording_active()?);
+            let inside =
+                ctx.with_gemm_route_recording_suspended(|| ctx.gemm_route_recording_active())?;
+            assert!(!inside?);
             assert!(ctx.gemm_route_recording_active()?);
             Ok(())
         })

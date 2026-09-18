@@ -92,7 +92,12 @@ Admission follows the evidence, not the compilation:
   the reference serves that cell from then on. A proof never runs inside
   a graph capture: the reference serves there, and since an admitted
   candidate is bit-equal to it, the bits a process produces do not depend
-  on which call came first.
+  on which call came first. The arms of a proof are not part of the step:
+  the eager route recorder is set aside while they run, so the launch
+  manifest a trainer prepares from its first eager step is the step's own
+  and matches the capture that follows. The A100 gate lane found the
+  manifest carrying the arms (`tc_mixed_training_is_bit_identical_across_runs`,
+  one eager step then a capture); a board with cohorts never showed it.
 
 What a proof cannot say is speed. A candidate admitted on a board with no
 cohort carries the speed evidence of the board it was measured on, not of
@@ -135,6 +140,36 @@ production training shape that is the Mamba-3 input projection, 10400 x
 384 x 1716, whose forward, input gradient and weight gradient ran on the
 scalar kernels in 0.7.1 and run on the portable TF32 tiles now; the
 Mamba-1 projections all have measured cells and do not move.
+
+**A board with its own module keeps its own table first.** The RTX 5090
+(SM120) and, when they come, the SM90a and SM100 boards load the common
+modules beside their own architecture module - the loader used to refuse
+that pairing and the artifact set had one slot for either - and the
+dispatcher reads the board's own frozen cohort before anything else: a
+shape it names runs the board's own kernel, a shape it does not name
+takes the common tier the way every other board does, through the
+first-use proof. The common finalist has its own slot in
+`ArtifactSetIdentity` (`sm89_finalist`); the Ada set hashes exactly as
+before, and a board's cohorts compare per-module digests, so nothing is
+re-minted. The SM90a WGMMA module loads on CUDA 13.3 and newer only:
+ptxas before 13.3 could drop the register moves after
+`wgmma.wait_group 1` (CUDA 13.3 release notes), and the kernel waits
+that way. The policy of which modules a board loads is one function,
+`triad_module_plan`, with a host test over every compute capability.
+
+**The inference cells are their own module.** The measured inference
+cells - the exact f32 SIMT, half MMA and TF32 MMA tiles behind the Ada
+inference table - were composed into the Fixed inference module, whose
+cohorts pin the digest of the whole compiled artifact. NVRTC 13.2
+compiles one of them, `nn_sm89_m112n128_bk32_s3_f32`, two ways from the
+same source: the register allocation and one shared-memory load differ
+between cold compiles, the arithmetic does not. A process that drew the
+other allocation found every Fixed cohort declined, and with them the
+copy-plan kernels those cohorts admit. The cells now compile as a module
+of their own, `InferenceSm89Cells`, admitted by symbol on every board
+that composes the overlay, and the Fixed module carries exactly what its
+cohorts pin; its identities are re-minted on CUDA 12.8, 13.0 and 13.2.
+The cells slot is the last of `ArtifactSetIdentity`.
 
 ### The fastest measured route in every family
 
@@ -207,15 +242,23 @@ contract.
   and the device helpers follow (`cp_async_16_zfill`, `is_aligned_16`,
   `splitk_reduce`). The family is the module that composes a kernel;
   the two families never share a PTX module.
-- **Kernels by card.** Architecture-specific kernels moved into per-card
-  folders under each family: `kernels/gemm_bi_triad/{sm80,sm89,sm90a,sm100,sm120}/`
-  and `kernels/gemm_bi_inference/{sm89,sm90a,sm100,sm120}/`, with the
-  file names shortened to what the folder does not already say
-  (`sm89/half_tn.cu`, `sm120/tma.cu`, `sm80/mma.cu` for the portable
-  mma.sync tier). Portable kernels and shared headers stay in the family
-  root. The composed-source manifests name the real paths (the inference
-  family's fragments were still logged under the pre-0.7.0
-  `kernels/gemm_bi_fixed/` name).
+- **Kernels by instruction tier.** Every kernel lives in the folder of
+  the lowest instruction set it needs, under its family:
+  `kernels/gemm_bi_triad/{sm80,sm90a,sm100,sm120}/` and
+  `kernels/gemm_bi_inference/{sm80,sm90a,sm100,sm120}/`, with the file
+  names shortened to what the folder does not already say
+  (`sm80/half_tn.cu`, `sm120/tma.cu`, `sm80/mma.cu`). `sm80/` is the
+  tier every supported board runs - the portable reference kernels and
+  the tiles found on the RTX 6000 Ada alike, since those use `mma.sync`,
+  `cp.async`, `ldmatrix` and `cvt.rna.tf32` and nothing above them; which
+  board measured a tile is the dispatcher's business, recorded in its
+  per-board tables and cohorts, not the source tree's. `sm90a/`, `sm100/`
+  and `sm120/` hold only what needs that architecture (WGMMA, tcgen05,
+  the CC 12.x TMA kernels). There is no `sm89/` folder: nothing in the
+  tree needs an instruction the A100 lacks. Portable helpers and shared
+  headers stay in the family root. The composed-source manifests name
+  the real paths (the inference family's fragments were still logged
+  under the pre-0.7.0 `kernels/gemm_bi_fixed/` name).
 - **Frozen identities re-pinned in one pass.** A rename moves every
   composed-source, compile-key, artifact and header digest the
   dispatcher's cohorts are frozen against, and a cohort that no longer
@@ -231,14 +274,30 @@ contract.
   fold fixture `legacy_fixed.cu` is regenerated from the capacity-32
   composition it stands for.
 
-- **The contract lane runs to the end.** `qual/run.sh contract` used to
-  stop at its first red target, and on any one board the first red is a
-  target written for another board, which asserts that board's compute
+- **A toolkit lane.** Eight targets need the CUDA toolkit and no device:
+  the cross-architecture compile gates, the identity contract, the TF32
+  selector, the SM90/SM100/SM120 PTX contracts and two source contracts.
+  They were in the gate lane, so every board ran them - half an hour of
+  NVRTC on a rented A100 for a result the build box already had. They are
+  the `toolkit` lane now (`qual/run.sh toolkit`, once per toolkit build),
+  and `qual/run.sh board` is the gate lane without them, for a board that
+  only has to run.
+- **The contract lane runs to the end, and a target written for one
+  board skips on every other.** `qual/run.sh contract` used to stop at
+  its first red target, and on any one board the first red was a target
+  written for another board, which asserted that board's compute
   capability; every target after it went unrun, `gpu_bf16_parity` among
   them, which the lane could not even build because it needs the `hf`
   feature. The lane now builds with `cuda,hf`, runs every target and
-  names each red at its end. `docs/release-qualification.md` says which
-  reds a board is allowed.
+  names each red at its end. The board-pinned targets - the Ada gates in
+  `gemm_bi_inference_correctness`, `gemm_bi_inference_sm89_exact_n64`,
+  `gemm_bi_inference_sm89_pipeline`, `gemm_bi_tc` and
+  `gemm_bi_async_allocation`, the SM120 gates in
+  `gemm_bi_inference_sm120_exact_n64` and `gemm_bi_inference_sm120_sliced`
+  - print `skip:` with the board they pin and the board they found, the
+  way the relay-cell gate already did, so every red the lane names is a
+  broken contract. In 0.7.2 those seven targets were red on the RTX 5090
+  and on the A100 for that reason alone.
 
 ### Measurements and verification
 
@@ -307,6 +366,75 @@ with eager timings, peaks and fixture details are in
 instruments, the GEMM training-step bench, both full GPU benchmarks,
 the Mamba-3 default-shape step and the serve prefill, ran once each
 with their logs kept.
+
+Two more boards, both rented, both on CUDA 13.2.78, graph replay,
+`old/new` above 1 means faster. The RTX 5090 (CC 12.0) against the 0.7.2
+numbers of its own page section (0.7.2 measured the same instrument
+there), and the A100 SXM4 40 GB (CC 8.0), which had no saved numbers,
+against 0.7.2 run once on the same board. On both boards the bit ledger
+against 0.7.2 holds on all 263 keys and generation is byte-identical.
+
+| board | model | precision / policy | 0.7.2 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---|---:|---:|---:|
+| RTX 5090 | Mamba-1 | BF16 | 72.01 | 68.53 | 1.051× |
+| RTX 5090 | Mamba-1 | F16 | 73.79 | 69.62 | 1.060× |
+| RTX 5090 | Mamba-1 | exact F32 | 120.90 | 109.26 | 1.107× |
+| RTX 5090 | Mamba-1 | F32, TF32 permitted | 116.15 | 111.17 | 1.045× |
+| RTX 5090 | Mamba-3 | BF16 | 108.43 | 104.44 | 1.038× |
+| RTX 5090 | Mamba-3 | F16 | 108.81 | 104.73 | 1.039× |
+| RTX 5090 | Mamba-3 | exact F32 | 113.84 | 102.24 | 1.113× |
+| RTX 5090 | Mamba-3 | F32, TF32 permitted | 113.72 | 102.82 | 1.106× |
+| A100 | Mamba-1 | BF16 | 152.92 | 149.41 | 1.024× |
+| A100 | Mamba-1 | F16 | 155.56 | 150.76 | 1.032× |
+| A100 | Mamba-1 | exact F32 | 288.23 | 288.61 | 0.999× |
+| A100 | Mamba-1 | F32, TF32 permitted | 288.02 | 229.07 | 1.257× |
+| A100 | Mamba-3 | BF16 | 217.66 | 199.32 | 1.092× |
+| A100 | Mamba-3 | F16 | 218.76 | 199.54 | 1.096× |
+| A100 | Mamba-3 | exact F32 | 258.21 | 258.84 | 0.998× |
+| A100 | Mamba-3 | F32, TF32 permitted | 258.83 | 188.51 | 1.373× |
+
+The RTX 5090 keeps its own measured kernels on every shape they name;
+its gains are the shapes they do not name, which fell to the scalar or
+portable kernels before and take the common cells now. The A100 had no
+kernels of its own; in 0.7.2 its TF32 rows equal its F32 rows because the
+TF32 storage fell back to the exact kernels there, and 0.7.3 serves it
+with the common cells and the neighbour band. The first run of the
+release candidate on the RTX 5090 found that 0.7.3 could not create a GPU
+context on any board with an architecture module, and that the SM120 TF32
+cohort had been re-minted against the NVRTC 13.2.51 build of the Ada box
+while the rented boards carry 13.2.78; both are fixed in this release
+(the loader paragraph above, and a second CUDA 13.2 cohort minted on the
+13.2.78 build). The common tier declines a route whose kernel the board's
+portable module did not compose (the CC 12.x portable module leaves the
+extension kernels out) instead of failing at launch.
+
+The final tree of this release, with the cells module, the moved kernel
+folders and the recorder fix, was run again on the RTX 5090: the contract
+lane green on every target, the acceptance capture against 0.7.2 89 of
+89 identical, the bit ledger against 0.7.2 263 of 263, the identity trace
+and the graph-capture bit-identity gate green, and the two TF32 training
+rows at 109.85 ms/step (Mamba-1) and 102.62 ms/step (Mamba-3). Its
+per-cell GEMM timings against cuBLAS on the same board are on the
+[RTX 5090 page](docs/gemm-benchmarks-0.7.3-rtx5090.md). On the A100 the
+same final tree: contract lane green on every target, acceptance capture
+89 of 89 identical to 0.7.2, bit ledger 263 of 263, the graph-capture
+gate that first failed there and the identity trace green, and the TF32
+rows at 229.06 ms/step
+(Mamba-1) and 187.74 ms/step (Mamba-3); its per-cell page is
+[docs/gemm-benchmarks-0.7.3-a100.md](docs/gemm-benchmarks-0.7.3-a100.md).
+On the RTX 6000 Ada the final tree holds the bit ledger against 0.7.1 at
+263 of 263, the contract lane green with its capture 97 of 97 identical
+to the release candidate's, the identity trace green twice with the
+kernel cache off, and the whole-step rows within noise of the release
+run (Mamba-1 TF32 180.98 against 180.91 ms/step, BF16 111.95 against
+111.87, Mamba-3 TF32 149.11 against 149.73). The RTX 5090 was also run
+with its own tier left out, so its measured tiles could be judged
+against the common tier on the same board: eager, the common cells win
+on the small shapes by 2 to 6 times because every SM120 route there sits
+on a 15 us per-launch floor, while in the graph-replayed training step
+the board's own tier wins at d_model 128 (33.70 against 39.58 ms/step in
+BF16) as at 384; the tables keep the SM120 tier, and the eager floor is
+on the board's tuning list. Both per-cell pages carry the numbers.
 
 ## 0.7.2 (2026-09-16)
 

@@ -4981,14 +4981,13 @@ where
     if stream_is_capturing(ctx)? {
         return Ok(false);
     }
-    let verdict = match super::proof::prove_bits(
-        &ctx.stream,
-        output,
-        elements,
-        dtype,
-        candidate,
-        reference,
-    ) {
+    // The arms are the admission experiment, not the step: an eager route
+    // recording must not carry them, or the manifest a trainer prepares from
+    // its first step never matches the capture that follows.
+    let proof = ctx.with_gemm_route_recording_suspended(|| {
+        super::proof::prove_bits(&ctx.stream, output, elements, dtype, candidate, reference)
+    })?;
+    let verdict = match proof {
         Ok(verdict) => verdict,
         Err(reason) => {
             static FAILED: std::sync::Once = std::sync::Once::new();

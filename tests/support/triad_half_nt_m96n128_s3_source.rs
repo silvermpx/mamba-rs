@@ -348,8 +348,8 @@ void nt_test_fixed_s3_m64n192_f16(
 mod tests {
     use super::*;
 
-    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_swizzle.cu");
-    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm89/half_s3.cu");
+    const SWIZZLE: &str = include_str!("../../kernels/gemm_bi_inference/sm80/half_swizzle.cu");
+    const S3: &str = include_str!("../../kernels/gemm_bi_inference/sm80/half_s3.cu");
 
     #[test]
     fn transform_is_reversible_and_changes_physical_geometry() {

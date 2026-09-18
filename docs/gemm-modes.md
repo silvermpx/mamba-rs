@@ -224,10 +224,10 @@ measured on, which is a claim about that board and not about this one.
 | GPU | bf16 and f16 | exact f32 (`F32`) | deterministic TF32 (`Tf32`) |
 |---|---|---|---|
 | RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes; portable kernels for the rest | measured; scalar kernels elsewhere | measured joint kernels on their cells; the portable tier on the measured cells and their neighbourhood; scalar kernels elsewhere |
-| RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension | scalar kernels plus qualified TMA-fed FMA kernels | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 |
+| RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension; the common cells serve the shapes those entries do not, proven at first use | qualified TMA-fed FMA kernels; the common exact-f32 cells proven at first use, scalar elsewhere | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 on their cells; the portable tier on the common cells and their neighbourhood elsewhere |
 | SM80, SM86, SM87 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood; proven specialized cells where they match |
-| SM90 and SM90a | proven on the measured cells, portable elsewhere; a native WGMMA kernel is tried behind a first-use self-check | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
-| SM100 family (CC 10.0, 10.3, 10.7, 11.0) | proven on the measured cells, portable elsewhere; a native `tcgen05` kernel is tried behind the same self-check | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
+| SM90 and SM90a | proven on the measured cells, portable elsewhere; a native WGMMA kernel is tried behind a first-use self-check on CUDA 13.3 and newer | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
+| SM100 family (CC 10.0, 10.3, 10.7, 11.0) | proven on the measured cells, portable elsewhere; a native `tcgen05` kernel is tried behind the same self-check | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
 | CC 10.1 and CC 12.1 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
 
 "The measured cells and their neighbourhood" for the portable TF32 tier
@@ -239,13 +239,21 @@ nearest measured shape, a wide tile brought down to 64x64 when the shape
 would not fill the board with it; any other shape takes the exact f32
 kernel, as before. Held out one at a time, the measured cells reproduce their
 own tiles from their neighbours 33 times in 38 at that factor. A board
-with a specialized TF32 module never reads the neighbourhood; its own
-cohorts decide.
+with its own TF32 module reads its own cohort first; a shape that cohort
+does not name takes the common tier the same way every other board does.
+The board's own measured kernels are never displaced by a common one on
+a shape they name.
 
 The inference family's specialized overlay is the one exception to the
 rule above: it is composed on every SM80-tier target except CC 12.x, whose
 own kernels serve there and whose module must stay byte-identical to the
-artifact its frozen cohorts were minted against.
+artifact its frozen cohorts were minted against. The overlay's measured
+cells compile as a module of their own, `InferenceSm89Cells`, admitted by
+symbol; the Fixed module holds only the kernels its frozen cohorts pin.
+The `sm89` in a kernel's symbol names the board its tile was measured
+on; its source lives in the `sm80` folder of its family, the tier every
+supported board runs, beside the portable kernels it is proven against
+on any other board.
 
 The Hopper and Blackwell native kernels are guarded by a numeric
 self-check against the portable kernels at first use; if it fails, the

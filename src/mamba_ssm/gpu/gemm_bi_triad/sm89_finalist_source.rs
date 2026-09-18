@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 pub(super) const SM89_FINALIST_SYMBOL: &str = "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2";
 
 const SM80_SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/mma.cu");
-const COMPACT_HELPER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/nt_compact.cuh");
+const COMPACT_HELPER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/nt_compact.cuh");
 const PREAMBLES: [&str; 5] = [
     include_str!("../../../../kernels/_typed_prelude.cuh"),
     include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -399,7 +399,7 @@ fn install_stage_sliced_winners(source: &mut String) -> Result<(), String> {
 }
 
 fn finalist_body_from(helper: &str, source: &str) -> Result<String, String> {
-    reject_quoted_include("kernels/gemm_bi_triad/sm89/nt_compact.cuh", helper)?;
+    reject_quoted_include("kernels/gemm_bi_triad/sm80/nt_compact.cuh", helper)?;
     let transformed = transform_sm80_source(source)?;
     let exports = macro_names(&transformed, "GEMM_BI_TF32_DEFINE_KERNEL")?;
     let assertions = macro_names(&transformed, "TF32_ASSERT_KERNEL_SIGNATURE")?;
@@ -486,7 +486,7 @@ fn compose_from_parts(preambles: [&str; 5], helper: &str, source: &str) -> Resul
     ] {
         reject_quoted_include(logical_name, preamble)?;
     }
-    reject_quoted_include("kernels/gemm_bi_triad/sm89/nt_compact.cuh", helper)?;
+    reject_quoted_include("kernels/gemm_bi_triad/sm80/nt_compact.cuh", helper)?;
     reject_quoted_include("kernels/gemm_bi_triad/sm80/mma.cu", source)?;
 
     let body = finalist_body_from(helper, source)?;

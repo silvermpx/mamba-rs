@@ -2,6 +2,10 @@
 # Lane runner: executes or lists one lane of qual/lanes.toml on a GPU box.
 #
 #   qual/run.sh gate           every-run correctness (plain battery)
+#   qual/run.sh toolkit        compile gates and identity contracts: the
+#                              toolkit, no device; once per toolkit build
+#   qual/run.sh board          the gate lane on a board: every gate target,
+#                              the toolkit lane left out
 #   qual/run.sh contract       pre-release / post-edit / post-merge bit gates
 #   qual/run.sh record         lists the manual instruments under tests/
 #   qual/run.sh bench          lists the bench entry points
@@ -20,6 +24,22 @@ suites() {
 case "$lane" in
 gate)
     exec cargo test --release --features cuda
+    ;;
+toolkit | board)
+    # Each target on its own; the lane names each red at its end. The
+    # toolkit lane needs the toolkit on PATH and no device, so it runs on
+    # the build box once per toolkit build; a rented board runs `board`,
+    # which is the gate lane without that work.
+    red=""
+    for t in $(suites "$( [ "$lane" = board ] && echo gate || echo toolkit )"); do
+        echo "== $lane: $t"
+        cargo test --release --features cuda,hf --test "$t" || red="$red $t"
+    done
+    if [ -n "$red" ]; then
+        echo "$(echo "$lane" | tr a-z A-Z) RED:$red"
+        exit 1
+    fi
+    echo "$(echo "$lane" | tr a-z A-Z) GREEN"
     ;;
 contract)
     # diag_-prefixed tests are manual position printers (record-grade
@@ -52,7 +72,7 @@ qualification)
     suites qualification | sed 's/^/  cargo test --release --features "cuda hf qualification" --test /;s/$/ -- --ignored --nocapture/'
     ;;
 *)
-    echo "usage: qual/run.sh [gate|contract|record|bench|qualification]" >&2
+    echo "usage: qual/run.sh [gate|board|toolkit|contract|record|bench|qualification]" >&2
     exit 2
     ;;
 esac

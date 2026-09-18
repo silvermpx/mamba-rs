@@ -211,7 +211,13 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::TcTile;
 
     let device = GpuDevice::new(0).expect("gpu");
-    assert_eq!(device.compute_capability, (8, 9), "exact SM89 gate");
+    if device.compute_capability != (8, 9) {
+        eprintln!(
+            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            device.compute_capability
+        );
+        return;
+    }
     let t = Ctx::new();
     t.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
 

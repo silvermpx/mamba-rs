@@ -1,15 +1,15 @@
 use std::collections::BTreeSet;
 
-pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint.cu");
+pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_joint.cu");
 pub const PRIMITIVES: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint_primitives.cuh");
+    include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_joint_primitives.cuh");
 /// The wide-tile fragments: one file per operand layout, each exporting
 /// the tiles measured on the Ada board after the joint module was sealed.
-pub const WIDE_NT: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nt.cu");
+pub const WIDE_NT: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_nt.cu");
 pub const WIDE_NT_EPI: &str =
-    include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nt_epi.cu");
-pub const WIDE_TN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_tn.cu");
-pub const WIDE_NN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nn.cu");
+    include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_nt_epi.cu");
+pub const WIDE_TN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_tn.cu");
+pub const WIDE_NN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_nn.cu");
 
 pub const SOURCE_SHA256: &str = "00b56974628530ac57fb45df26404920655c6c0e21e12db4cb64d8fe9207134c";
 pub const PRIMITIVES_SHA256: &str =

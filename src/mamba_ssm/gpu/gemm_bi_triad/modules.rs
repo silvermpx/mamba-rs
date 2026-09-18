@@ -1756,6 +1756,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm90a requires exact target sm_90a, got {arch}"
         ));
     }
+    if kind == ModuleKind::InferenceSm89Cells && !fixed_portable_overlay_composed(arch) {
+        return Err(format!(
+            "InferenceSm89Cells requires an SM80-tier target outside the CC 12.x family, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm89Finalist && sm80_ptx_target(arch).is_none() {
         return Err(format!(
             "TriadSm89Finalist requires an admitted SM80+ portable target, got {arch}"
@@ -2402,7 +2407,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_fixed_sm89_half_swizzle_ptx(arch, ptx)?;
             validate_fixed_sm89_half_s3_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
-            validate_fixed_sm89_cells_ptx(arch, ptx)?;
+            validate_fixed_sm89_cells_ptx(ModuleKind::Fixed, arch, ptx)?;
             validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_sliced_ptx(arch, ptx)?;
             validate_fixed_sm120_postbias_ptx(arch, ptx)
@@ -2425,6 +2430,9 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
+        ModuleKind::InferenceSm89Cells => {
+            validate_fixed_sm89_cells_ptx(ModuleKind::InferenceSm89Cells, arch, ptx)
+        }
         ModuleKind::Mamba3Combined => Ok(()),
     }
 }
@@ -2606,15 +2614,16 @@ fn validate_fixed_sm89_cell_entry_abi(entry: &ParsedPtxEntry, symbol: &str) -> R
 /// The Ada inference cells travel with the portable overlay: every cell
 /// symbol is present exactly once where the overlay is composed and absent
 /// elsewhere, on its family's instruction contract.
-fn validate_fixed_sm89_cells_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+fn validate_fixed_sm89_cells_ptx(kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     use super::super::gemm_bi_inference::sm89_cells::{SM89_CELL_SPECS, Sm89CellFamily};
 
     let parsed = parse_ptx(ptx)?;
-    let expected: BTreeSet<_> = if fixed_portable_overlay_composed(arch) {
-        SM89_CELL_SPECS.iter().map(|spec| spec.symbol).collect()
-    } else {
-        BTreeSet::new()
-    };
+    let expected: BTreeSet<_> =
+        if kind == ModuleKind::InferenceSm89Cells && fixed_portable_overlay_composed(arch) {
+            SM89_CELL_SPECS.iter().map(|spec| spec.symbol).collect()
+        } else {
+            BTreeSet::new()
+        };
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -2628,7 +2637,7 @@ fn validate_fixed_sm89_cells_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let unique: BTreeSet<_> = actual.iter().copied().collect();
     if actual.len() != unique.len() || unique != expected {
         return Err(format!(
-            "Fixed SM89 cell PTX inventory is incomplete, duplicated, or foreign on {arch}"
+            "{kind:?} SM89 cell PTX inventory is incomplete, duplicated, or foreign on {arch}"
         ));
     }
     for spec in SM89_CELL_SPECS
@@ -3512,7 +3521,7 @@ fn census_fixed_sm89_cells_driver_abi(
     arch: &str,
     ptx: &str,
 ) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
-    if kind != ModuleKind::Fixed || !fixed_portable_overlay_composed(arch) {
+    if kind != ModuleKind::InferenceSm89Cells || !fixed_portable_overlay_composed(arch) {
         return Ok(BTreeMap::new());
     }
     type GetParamInfo = unsafe extern "C" fn(
@@ -3557,7 +3566,7 @@ pub(crate) fn load_fixed_sm89_cells(
 
     let mut functions = HashMap::new();
     let mut rejections = Vec::new();
-    let composed = module.artifact_identity.module_kind == ModuleKind::Fixed
+    let composed = module.artifact_identity.module_kind == ModuleKind::InferenceSm89Cells
         && fixed_portable_overlay_composed(module.compiler_identity.target.as_str())
         && ctx.compute_capability().is_ok_and(|cc| cc.0 >= 8);
     if !composed {
@@ -3584,7 +3593,7 @@ pub(crate) fn load_fixed_sm89_cells(
                 .get(symbol)
                 .ok_or_else(|| format!("{symbol} has no Driver ABI census entry"))?;
             validate_fixed_sm89_cell_driver_abi(symbol, abi)?;
-            let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+            let function = load_function(&module.module, ModuleKind::InferenceSm89Cells, symbol)?;
             set_dynamic_shared(&function, symbol, spec.dynamic_shared_bytes as i32)?;
             let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
             let local_bytes = u32::try_from(
@@ -7965,74 +7974,74 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
 ];
 
 const FIXED_SM89_HALF_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_pipeline.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/half_pipeline.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/half_pipeline.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"),
+    logical_name: "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_swizzle.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/half_swizzle.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/half_swizzle.cu"),
     allowed_quoted_includes: &["sm89_half_swizzle_layout.cuh"],
 };
 
 const FIXED_SM89_HALF_S3_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/half_s3.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_s3.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/half_s3.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/half_s3.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_RNA_N96_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_HALF_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/half_n64.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/half_n64.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/half_n64.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/half_n64.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_CELLS_COMMON_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/cells_common.cuh",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_common.cuh"),
+    logical_name: "kernels/gemm_bi_inference/sm80/cells_common.cuh",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/cells_common.cuh"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_CELLS_F32_SIMT_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_f32_simt.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/cells_f32_simt.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/cells_f32_simt.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_CELLS_HALF_MMA_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_half_mma.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/cells_half_mma.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/cells_half_mma.cu"),
     allowed_quoted_includes: &[],
 };
 
 const FIXED_SM89_CELLS_TF32_MMA_FRAGMENT: SourceFragment = SourceFragment {
-    logical_name: "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
-    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu"),
+    logical_name: "kernels/gemm_bi_inference/sm80/cells_tf32_mma.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm80/cells_tf32_mma.cu"),
     allowed_quoted_includes: &[],
 };
 
@@ -8319,9 +8328,20 @@ pub const SM90A_SYMBOLS: &[&str] = &[
     "nt_sm90a_wgmma_wg2_f16",
 ];
 
+/// The Ada-measured inference cells: their own module, composed for every
+/// board the Fixed overlay serves, so their artifact identity is their own.
+const INFERENCE_SM89_CELLS_FRAGMENTS: &[SourceFragment] = &[
+    TYPED_PRELUDE,
+    FIXED_SM89_CELLS_COMMON_FRAGMENT,
+    FIXED_SM89_CELLS_F32_SIMT_FRAGMENT,
+    FIXED_SM89_CELLS_HALF_MMA_FRAGMENT,
+    FIXED_SM89_CELLS_TF32_MMA_FRAGMENT,
+];
+
 fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], String> {
     match kind {
         ModuleKind::Fixed => Ok(FIXED_SOURCE_FRAGMENTS),
+        ModuleKind::InferenceSm89Cells => Ok(INFERENCE_SM89_CELLS_FRAGMENTS),
         ModuleKind::TriadScalar => Ok(SCALAR_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm80 => Ok(SM80_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm90a => Ok(SM90A_SOURCE_FRAGMENTS),
@@ -8405,10 +8425,6 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         fragments.push(FIXED_SM89_HALF_S3_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_RNA_N96_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_HALF_N64_SOURCE_FRAGMENT);
-        fragments.push(FIXED_SM89_CELLS_COMMON_FRAGMENT);
-        fragments.push(FIXED_SM89_CELLS_F32_SIMT_FRAGMENT);
-        fragments.push(FIXED_SM89_CELLS_HALF_MMA_FRAGMENT);
-        fragments.push(FIXED_SM89_CELLS_TF32_MMA_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::Fixed && arch == "compute_120" {
@@ -9523,6 +9539,8 @@ pub(crate) struct GemmBiModuleSet {
     pub sm89_tf32_joint: Option<CompiledModule>,
     pub sm89_tf32_joint_compile_rejection: Option<String>,
     pub specialized: Option<QualifiedSpecializedModule>,
+    /// The inference cells module's identity, when the board composed it.
+    pub sm89_cells: Option<ArtifactIdentity>,
 }
 
 impl GemmBiKernels {
@@ -9542,6 +9560,7 @@ impl GemmBiKernels {
             sm89_tf32_joint,
             sm89_tf32_joint_compile_rejection,
             specialized,
+            sm89_cells,
         } = modules;
         let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
         let (major, minor) = ctx
@@ -9566,51 +9585,30 @@ impl GemmBiKernels {
             scalar.artifact_identity,
             sm80.artifact_identity,
         ];
-        if finalist.is_some() && specialized.is_some() {
-            return Err(
-                "finalist and architecture-specialized triad modules are mutually exclusive".into(),
-            );
-        }
+        // The common SM89-measured modules and a board's own architecture
+        // module serve side by side: the board's table decides per shape.
+        // The push order is the identity's canonical order, and the Ada
+        // set (no architecture module) hashes exactly as before.
         if let Some(finalist) = finalist.as_ref() {
             artifacts.push(finalist.artifact_identity);
-        } else if let Some(specialized) = specialized.as_ref() {
-            artifacts.push(specialized.module.artifact_identity);
         }
-        if sm89_half.is_some() && specialized.is_some() {
-            return Err(
-                "SM89 half and architecture-specialized triad modules are mutually exclusive"
-                    .into(),
-            );
+        if let Some(specialized) = specialized.as_ref() {
+            artifacts.push(specialized.module.artifact_identity);
         }
         if let Some(sm89_half) = sm89_half.as_ref() {
             artifacts.push(sm89_half.artifact_identity);
         }
-        if sm89_exact_f32.is_some() && specialized.is_some() {
-            return Err(
-                "SM89 exact-F32 and architecture-specialized triad modules are mutually exclusive"
-                    .into(),
-            );
-        }
         if let Some(sm89_exact_f32) = sm89_exact_f32.as_ref() {
             artifacts.push(sm89_exact_f32.artifact_identity);
-        }
-        if sm89_exact_f32_d128.is_some() && specialized.is_some() {
-            return Err(
-                "SM89 exact-F32 d128 and architecture-specialized triad modules are mutually exclusive"
-                    .into(),
-            );
         }
         if let Some(sm89_exact_f32_d128) = sm89_exact_f32_d128.as_ref() {
             artifacts.push(sm89_exact_f32_d128.artifact_identity);
         }
-        if sm89_tf32_joint.is_some() && specialized.is_some() {
-            return Err(
-                "SM89 TF32 joint and architecture-specialized triad modules are mutually exclusive"
-                    .into(),
-            );
-        }
         if let Some(sm89_tf32_joint) = sm89_tf32_joint.as_ref() {
             artifacts.push(sm89_tf32_joint.artifact_identity);
+        }
+        if let Some(sm89_cells) = sm89_cells {
+            artifacts.push(sm89_cells);
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
@@ -10311,10 +10309,10 @@ impl GemmBiKernels {
         capturing: bool,
         binding: super::contract::Tf32MapBinding,
     ) -> Result<super::contract::F32PreparedTensorMaps, String> {
-        let expected = match route {
-            super::contract::Tf32PhysicalRoute::MmaTf32Rna(_) => {
-                self.f32_triad_availability.portable
-            }
+        let expected = match route.module_kind() {
+            ModuleKind::TriadSm80 => self.f32_triad_availability.portable,
+            ModuleKind::TriadSm89Finalist => self.f32_triad_availability.finalist,
+            ModuleKind::TriadSm89Tf32Joint => self.f32_triad_availability.joint,
             _ => self.f32_triad_availability.specialized,
         };
         if binding.allocation_domain != self.allocation_domain
@@ -11646,32 +11644,32 @@ mod tests {
             (
                 (12, 8),
                 16,
-                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
             ),
             (
                 (12, 8),
                 64,
-                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
             ),
             (
                 (13, 0),
                 16,
-                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
             ),
             (
                 (13, 0),
                 64,
-                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
             ),
             (
                 (13, 2),
                 16,
-                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
             ),
             (
                 (13, 2),
                 64,
-                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
             ),
         ] {
             let live = super::module_source_digest_for_compile(
@@ -15273,18 +15271,14 @@ mod tests {
         "kernels/gemm_bi_inference/tcw64.cu",
         "kernels/gemm_bi_inference/sm90a/wgmma.cu",
         "kernels/gemm_bi_inference/sm100/tcgen05.cu",
-        "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
-        "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
-        "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
-        "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
-        "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
-        "kernels/gemm_bi_inference/sm89/half_s3.cu",
-        "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
-        "kernels/gemm_bi_inference/sm89/half_n64.cu",
-        "kernels/gemm_bi_inference/sm89/cells_common.cuh",
-        "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
-        "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
-        "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
+        "kernels/gemm_bi_inference/sm80/half_pipeline.cu",
+        "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu",
+        "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu",
+        "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh",
+        "kernels/gemm_bi_inference/sm80/half_swizzle.cu",
+        "kernels/gemm_bi_inference/sm80/half_s3.cu",
+        "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu",
+        "kernels/gemm_bi_inference/sm80/half_n64.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -15443,18 +15437,14 @@ mod tests {
             .filter(|name| {
                 !matches!(
                     *name,
-                    "kernels/gemm_bi_inference/sm89/half_pipeline.cu"
-                        | "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu"
-                        | "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu"
-                        | "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh"
-                        | "kernels/gemm_bi_inference/sm89/half_swizzle.cu"
-                        | "kernels/gemm_bi_inference/sm89/half_s3.cu"
-                        | "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
-                        | "kernels/gemm_bi_inference/sm89/half_n64.cu"
-                        | "kernels/gemm_bi_inference/sm89/cells_common.cuh"
-                        | "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu"
-                        | "kernels/gemm_bi_inference/sm89/cells_half_mma.cu"
-                        | "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu"
+                    "kernels/gemm_bi_inference/sm80/half_pipeline.cu"
+                        | "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu"
+                        | "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu"
+                        | "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"
+                        | "kernels/gemm_bi_inference/sm80/half_swizzle.cu"
+                        | "kernels/gemm_bi_inference/sm80/half_s3.cu"
+                        | "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu"
+                        | "kernels/gemm_bi_inference/sm80/half_n64.cu"
                 )
             })
             .collect::<Vec<_>>();
@@ -15499,14 +15489,14 @@ mod tests {
             (
                 "sm_80",
                 compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
-                738_572,
-                "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61",
+                695_736,
+                "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7",
             ),
             (
                 "sm_89",
                 compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
-                738_572,
-                "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61",
+                695_736,
+                "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7",
             ),
             (
                 "compute_120",
@@ -16502,38 +16492,77 @@ mod tests {
             .collect()
     }
 
+    fn inference_sm89_cells_test_ptx() -> String {
+        fixed_sm89_half_test_base_ptx() + &fixed_sm89_cells_test_entries()
+    }
+
     #[test]
-    fn fixed_sm89_cells_travel_with_the_portable_overlay() {
-        let baseline = fixed_sm89_half_test_ptx();
-        super::validate_fixed_sm89_cells_ptx("sm_89", &baseline).unwrap();
+    fn inference_sm89_cells_ptx_inventory_is_pinned_to_its_own_module() {
+        use ModuleKind::{Fixed, InferenceSm89Cells};
+        let cells = inference_sm89_cells_test_ptx();
         let entries = fixed_sm89_cells_test_entries();
-        super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entries, "", 1))
+        let without = cells.replacen(&entries, "", 1);
+        super::validate_fixed_sm89_cells_ptx(InferenceSm89Cells, "sm_89", &cells).unwrap();
+        super::validate_fixed_sm89_cells_ptx(InferenceSm89Cells, "sm_89", &without)
             .expect_err("every cell is mandatory where the overlay is composed");
+        super::validate_fixed_sm89_cells_ptx(Fixed, "sm_89", &without).unwrap();
+        super::validate_fixed_sm89_cells_ptx(Fixed, "sm_89", &cells)
+            .expect_err("the Fixed module carries no cell");
         for spec in super::super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SPECS.iter() {
             let entry = fixed_sm89_cell_test_entry(spec);
-            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, "", 1))
-                .expect_err("a missing cell must reject");
-            super::validate_fixed_sm89_cells_ptx("sm_89", &format!("{baseline}{entry}"))
-                .expect_err("a duplicated cell must reject");
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                "sm_89",
+                &cells.replacen(&entry, "", 1),
+            )
+            .expect_err("a missing cell must reject");
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                "sm_89",
+                &format!("{cells}{entry}"),
+            )
+            .expect_err("a duplicated cell must reject");
             let narrow = entry.replacen("params[32]", "params[24]", 1);
-            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &narrow, 1))
-                .expect_err("the 32-byte bundle ABI is pinned");
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                "sm_89",
+                &cells.replacen(&entry, &narrow, 1),
+            )
+            .expect_err("the 32-byte bundle ABI is pinned");
             let unrolled = entry.replacen("cp.async.cg.shared.global", "not.the.copy", 1);
-            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &unrolled, 1))
-                .expect_err("the staging copy is pinned");
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                "sm_89",
+                &cells.replacen(&entry, &unrolled, 1),
+            )
+            .expect_err("the staging copy is pinned");
             let spilled = entry.replacen("ret;", "ld.local.u32 %r0, [%rd0]; ret;", 1);
-            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &spilled, 1))
-                .expect_err("local memory rejects");
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                "sm_89",
+                &cells.replacen(&entry, &spilled, 1),
+            )
+            .expect_err("local memory rejects");
         }
         for target in ["sm_80", "sm_90a"] {
-            super::validate_fixed_sm89_cells_ptx(target, &baseline).unwrap();
-            super::validate_fixed_sm89_cells_ptx(target, &baseline.replacen(&entries, "", 1))
-                .expect_err("the cells are mandatory on every portable target");
+            let retargeted = cells.replace(".target sm_89", &format!(".target {target}"));
+            super::validate_fixed_sm89_cells_ptx(InferenceSm89Cells, target, &retargeted).unwrap();
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                target,
+                &retargeted.replacen(&entries, "", 1),
+            )
+            .expect_err("the cells are mandatory on every portable target");
         }
         for target in ["compute_89", "sm_120", "compute_120"] {
-            super::validate_fixed_sm89_cells_ptx(target, &baseline.replacen(&entries, "", 1))
-                .unwrap();
-            super::validate_fixed_sm89_cells_ptx(target, &baseline)
+            let retargeted = cells.replace(".target sm_89", &format!(".target {target}"));
+            super::validate_fixed_sm89_cells_ptx(
+                InferenceSm89Cells,
+                target,
+                &retargeted.replacen(&entries, "", 1),
+            )
+            .unwrap();
+            super::validate_fixed_sm89_cells_ptx(InferenceSm89Cells, target, &retargeted)
                 .expect_err("the cells are foreign where the overlay is not composed");
         }
     }
@@ -16552,7 +16581,6 @@ mod tests {
             FIXED_SM89_EXACT_N64_TEST_SYMBOL,
         ));
         ptx.push_str(&fixed_sm89_rna_wide_test_entry());
-        ptx.push_str(&fixed_sm89_cells_test_entries());
         ptx.push_str(&fixed_sm89_half_test_entry(
             FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[0],
             "bf16",
@@ -16596,18 +16624,14 @@ mod tests {
         assert_eq!(
             boundaries,
             [
-                "kernels/gemm_bi_inference/sm89/half_pipeline.cu",
-                "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
-                "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
-                "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
-                "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
-                "kernels/gemm_bi_inference/sm89/half_s3.cu",
-                "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
-                "kernels/gemm_bi_inference/sm89/half_n64.cu",
-                "kernels/gemm_bi_inference/sm89/cells_common.cuh",
-                "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
-                "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
-                "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
+                "kernels/gemm_bi_inference/sm80/half_pipeline.cu",
+                "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu",
+                "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu",
+                "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh",
+                "kernels/gemm_bi_inference/sm80/half_swizzle.cu",
+                "kernels/gemm_bi_inference/sm80/half_s3.cu",
+                "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu",
+                "kernels/gemm_bi_inference/sm80/half_n64.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
         );
@@ -16675,7 +16699,7 @@ mod tests {
                     .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
                     .collect();
                 assert!(
-                    !boundaries.contains(&"kernels/gemm_bi_inference/sm89/half_pipeline.cu"),
+                    !boundaries.contains(&"kernels/gemm_bi_inference/sm80/half_pipeline.cu"),
                     "Fixed half extension leaked into {kind:?}/{target}"
                 );
             }
@@ -18075,17 +18099,13 @@ mod tests {
         assert_eq!(
             boundaries,
             [
-                "kernels/gemm_bi_inference/sm89/f32_n64_copyplan.cu",
-                "kernels/gemm_bi_inference/sm89/tf32_rna_wide.cu",
-                "kernels/gemm_bi_inference/sm89/half_swizzle_layout.cuh",
-                "kernels/gemm_bi_inference/sm89/half_swizzle.cu",
-                "kernels/gemm_bi_inference/sm89/half_s3.cu",
-                "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
-                "kernels/gemm_bi_inference/sm89/half_n64.cu",
-                "kernels/gemm_bi_inference/sm89/cells_common.cuh",
-                "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
-                "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
-                "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
+                "kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu",
+                "kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu",
+                "kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh",
+                "kernels/gemm_bi_inference/sm80/half_swizzle.cu",
+                "kernels/gemm_bi_inference/sm80/half_s3.cu",
+                "kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu",
+                "kernels/gemm_bi_inference/sm80/half_n64.cu",
             ]
         );
     }

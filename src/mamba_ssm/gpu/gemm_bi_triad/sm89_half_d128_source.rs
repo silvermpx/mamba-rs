@@ -3,7 +3,7 @@
 
 use crate::mamba_ssm::gpu::kernel_identity::{FramedSha256, digest_hex};
 
-pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/half_d128.cu");
+pub const OWNER: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/half_d128.cu");
 pub const OWNER_SHA256: &str = "feacd35ee8afe0008a6837dd3b356bcd97ba365366ee56b094406b04b3fa349a";
 
 pub const D128_IN_BF16_SYMBOL: &str = "tn_sm89_half_d128_in_m32n16_bk64_s4_cg_bf16";

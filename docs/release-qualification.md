@@ -20,7 +20,8 @@ test, bench and tool directories is reachable from the manifest.
 |---|---|---|
 | host | regressions that need no GPU and no CUDA feature | `cargo test --no-default-features` (CI, any machine) |
 | gate | CUDA regressions with no ignored arm | `qual/run.sh gate` (`cargo test --release --features cuda`) |
-| contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`; the first red stops) |
+| toolkit | compile gates, identity and source contracts: the CUDA toolkit (NVRTC), no device | `qual/run.sh toolkit`, once per toolkit build on the build box; `qual/run.sh board` is the gate lane without it, for a board that only has to run |
+| contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`; every target runs, the reds are named at the end) |
 | record | manual instruments that need model assets or foreign hardware, still under `tests/` | `qual/run.sh record` lists them; run one at a time |
 | bench | timing instruments under `benches/`, no verdict | `cargo bench --features cuda --bench <name> [-- <instrument>]` |
 | qualification | hardware, toolkit and inventory instruments under `tools/qualification/` | `cargo test --release --features "cuda hf qualification" --test <name> -- --ignored`, one per board and toolkit |
@@ -65,11 +66,15 @@ may not present the two as the same claim.
    `cargo check --workspace --all-targets` with `cuda`, `cuda,hf`,
    `cuda,hf,gemm-blas,nccl` and each plus `qualification`, all without a
    rustc warning.
-2. `qual/run.sh gate` green on each qualification board.
+2. `qual/run.sh gate` green on each qualification board, and a GPU context
+   created on at least one board of every module family the release
+   claims (a board without an architecture module, an SM120 board, and
+   an SM90a or SM100 board when one is available); a claim for a family
+   no board of which has booted the release is not made.
 3. `qual/run.sh contract` on each board, with the evidence capture on;
-   the lane runs every target and names each red at its end, and the only
-   reds allowed are the targets written for another board, which assert
-   that board's compute capability. `acceptance_diff` against the previous
+   the lane runs every target and names each red at its end; a target
+   written for another board skips there, so no red is allowed.
+   `acceptance_diff` against the previous
    release's capture clean, or every difference accounted for by an
    intentional, documented change.
 4. The qualification tools that back the published tables, one per board

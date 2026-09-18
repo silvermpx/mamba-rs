@@ -9,8 +9,8 @@
 // 284 two-per-SM slots, where 128 x 128 tiles need 2.03 waves.
 //
 // Shared memory rows are padded by eight halves so the eight rows of every
-// ldmatrix phase land in distinct bank groups; cp.async stages STAGES-1
-// slabs ahead; the epilogue stores straight from the fragments (float2 for
+// ldmatrix phase land in distinct bank groups; cp.async stages every slab
+// but one ahead; the epilogue stores straight from the fragments (float2 for
 // f32 output, packed pairs for half output), the same values the incumbent's
 // shared-memory transport writes.
 
