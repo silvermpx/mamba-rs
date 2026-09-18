@@ -4,7 +4,11 @@ The [0.7.1 Ada measurements](gemm-benchmarks-0.7.1-ada.md) compare the
 assembled Inference and Triad dispatchers with the released 0.7.0 source,
 including eager execution, CUDA Graph replay and cuBLAS controls. The
 [0.7.3 Ada measurements](gemm-benchmarks-0.7.3-ada.md) compare the 0.7.3
-routes with the 0.7.1 records of the same cells on the same board.
+routes with the 0.7.1 records of the same cells on the same board. The
+same cells timed by the final 0.7.3 tree on the other boards, against
+cuBLAS on each board, are on the [RTX 5090](gemm-benchmarks-0.7.3-rtx5090.md),
+[A100](gemm-benchmarks-0.7.3-a100.md) and [H100](gemm-benchmarks-0.7.3-h100.md)
+pages.
 
 The tables below retain the historical 0.7.0 measurements, including the
 RTX 5090 results. They have not been relabelled as 0.7.1 results or scaled
