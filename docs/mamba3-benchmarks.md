@@ -12,6 +12,132 @@ model. They measure the implementation at the stated shapes, not model
 quality. For inference measurements using trained Mamba-1 checkpoints,
 see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## Training step — 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
+
+Measurements on September 18, 2026: the assembled `0.7.3` (kernel sources
+at `e6d06d6c0c8739d17a1f3d4a08c103822fc266f7`) against the `0.7.1` numbers
+of the 0.7.0 to 0.7.1 section below, which were taken on this board and
+toolkit on September 14, 2026. RTX 6000 Ada, 142 SMs, driver 595.45.04,
+CUDA 13.2.51 / NVRTC 13.2, Rust 1.98.1, release build.
+
+Both versions run the public trainer in the default `Deterministic`
+GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
+separate storage precisions; the F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section; the separate
+[GEMM tables](gemm-benchmarks-0.7.3-ada.md) cover kernel timings.
+
+Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
+input width 384. The fixtures use synthetic weights and pre-generated
+inputs and output gradients. They exercise backbone training, without
+tokenization, a vocabulary head or its loss. Timing includes the complete
+public `step`: input handling, forward, backward, optimizer, metric
+handling and synchronization.
+Initialization, compilation and graph capture are outside the timers.
+
+The three storages ran once each, in one process on an otherwise idle
+board, with one kernel cache; the 0.7.1 column is that release's median of two
+processes, from that section. `old/new` above 1 means 0.7.3 is
+faster. A single process has no range to show; the 0.7.1 process ranges
+in that section are the run-to-run band of this instrument on this
+board, about 0.1 percent.
+
+No timed step skipped its optimizer update because of overflow.
+
+| storage | execution | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 133.64 | 133.82 | 0.999× |
+| BF16 | graph | 132.46 | 132.84 | 0.997× |
+| F16 | eager | 133.92 | 134.40 | 0.996× |
+| F16 | graph | 132.92 | 133.35 | 0.997× |
+| F32 | eager | 174.86 | 174.83 | 1.000× |
+| F32 | graph | 174.18 | 173.67 | 1.003× |
+
+Mamba-3 uses the chunked scan (`Auto` resolves to parallel here), head
+dimension 16, one group, RoPE fraction 0.5, a_floor 1e-4 and output
+projection normalization. The model state width is 16; the actual
+compiled context capacity is 64. BF16 and F32 keep the original three
+eager warmup steps and five graph warmup steps. Before each F16 timed
+arm, the fixture instead requires eight consecutive zero-skipped
+optimizer updates, failing if it cannot reach them within 128 attempts.
+Every dtype still averages exactly five eager and five graph timed steps.
+
+The F32 fixture has an explicit identity input-projection matrix;
+BF16/F16 use the mixed trainer's identity branch with that matrix
+omitted. Both releases use the same per-dtype measurement overlay,
+including the corrected F16 warmup. These rows should not be interpreted
+as throughput on a trained checkpoint or as a controlled comparison
+between storage modes.
+
+Reproduce with `m3_prefill_bench::m3_train_step_at_multichunk_shape`,
+setting `MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
+`MAMBA_RS_BENCH_ITERS=5`, and `MAMBA_RS_BENCH_DTYPE` to one of
+`bf16`, `f16`, `f32`, `tf32`, or `all` for the first three in one
+process. Leave scan-tape, IEEE-F32 and `MAMBA_RS_GEMM_MODE` unset; the
+remaining model configuration is fixed in the instrument.
+
+Run the instrument as an exact ignored test:
+
+```sh
+cargo test --release --locked --features cuda,qualification \
+  --test m3_prefill_bench m3_train_step_at_multichunk_shape \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+Sampled device memory includes setup and both execution modes. It is the
+maximum of 200 ms NVML samples across the one process that held all three storages, not an allocator
+high-water mark or a measurement for an individual step.
+
+| storages | 0.7.1 peak MiB (F32 process) | 0.7.3 peak MiB (one process, three storages) |
+|---|---:|---:|
+| BF16, F16, F32 | 9950 | 10032 |
+
+The assembled source passed the same-board 0.7.1 comparison for all
+263 ledger keys, the 161 original normalized Mamba keys and the 102
+decode keys, with no changed or missing key. These bit checks and the
+whole-step timings are separate evidence. The RTX 5090 was not
+measured for this release; its 0.7.2 tables remain its latest.
+
+## Mamba-3 supplemental F32 training with deterministic TF32
+
+Separate measurements with deterministic TF32 permitted compare the
+`0.7.1` numbers of the matching section below with the assembled
+`0.7.3`. The same F32 measurement fixture, compiled against 0.7.3, ran
+once with its own kernel cache on an RTX 6000 Ada in the same CUDA 13.2
+environment; the 0.7.1 column is that release's median of two processes.
+
+The tree ran in the deterministic mode with the weights stored as
+`Tf32`, the route `MAMBA_RS_BI_F32_POLICY=tf32` names. The route permits
+deterministic TF32 where a qualified kernel exists and stays exact
+everywhere else; it does not force every GEMM to use TF32.
+
+Shape: d_model 384, 24 layers, B=8, T=1300, Auto parallel scan,
+capacity-64 context; five eager and five graph timed steps. Every timed step
+performed its optimizer update.
+
+| execution | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
+|---|---:|---:|---:|
+| eager | 165.56 | 150.58 | 1.099× |
+| graph | 164.52 | 149.73 | 1.099× |
+
+The gain is the portable TF32 neighbour band of 0.7.3. The input
+projection of this model at this shape, 10400 x 384 x 1716, has no
+measured TF32 cell, so 0.7.1 ran its forward, input gradient and weight
+gradient on the exact scalar kernels; 0.7.3 serves them with the tile of
+the nearest measured cell. A kernel census of the step under the CUDA
+profiler, one process per tree, shows exactly those three kernels moving
+(1972 ms of the 0.7.2 process on the scalar kernels, 1215 ms on the
+portable TF32 tiles in 0.7.3) and every other kernel unchanged. The
+products that moved now round to TF32, as the storage precision
+documents; the exact F32 rows above are untouched.
+
+Peak device memory is the maximum 200 ms NVML sample across setup, eager,
+capture and graph execution in the process; it is not an allocator
+high-water mark or an individual-step measurement.
+
+| model | 0.7.1 peak MiB | 0.7.3 peak MiB |
+|---|---:|---:|
+| Mamba-3 | 9950 | 10032 |
+
 ## Training step — 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
 
 Fresh measurements on September 14, 2026: released `v0.7.0`

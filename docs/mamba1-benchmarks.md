@@ -13,6 +13,129 @@ current kernel comparisons against cuBLAS are in
 [determinism-benchmarks.md](determinism-benchmarks.md) and the modes in
 [gemm-modes.md](gemm-modes.md).
 
+## Training step — 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
+
+Measurements on September 18, 2026: the assembled `0.7.3` (kernel sources
+at `e6d06d6c0c8739d17a1f3d4a08c103822fc266f7`) against the `0.7.1` numbers
+of the 0.7.0 to 0.7.1 section below, which were taken on this board and
+toolkit on September 14, 2026. RTX 6000 Ada, 142 SMs, driver 595.45.04,
+CUDA 13.2.51 / NVRTC 13.2, Rust 1.98.1, release build.
+
+Both versions run the public trainer in the default `Deterministic`
+GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
+separate storage precisions; the F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section; the separate
+[GEMM tables](gemm-benchmarks-0.7.3-ada.md) cover kernel timings.
+
+Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
+input width 384. The fixtures use synthetic weights and pre-generated
+inputs and output gradients. They exercise backbone training, without
+tokenization, a vocabulary head or its loss. Timing includes the complete
+public `step`: input handling, forward, backward, optimizer, metric
+handling and synchronization.
+Initialization, compilation and graph capture are outside the timers.
+
+Each storage ran once, one process on an otherwise idle board, with its
+own kernel cache; the 0.7.1 column is that release's median of two
+processes, from that section. `old/new` above 1 means 0.7.3 is
+faster. A single process has no range to show; the 0.7.1 process ranges
+in that section are the run-to-run band of this instrument on this
+board, about 0.1 percent.
+
+No timed step skipped its optimizer update because of overflow.
+
+| storage | execution | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---:|---:|---:|
+| BF16 | eager | 111.79 | 112.93 | 0.990× |
+| BF16 | graph | 110.93 | 111.87 | 0.992× |
+| F16 | eager | 112.93 | 113.67 | 0.994× |
+| F16 | graph | 113.16 | 114.01 | 0.993× |
+| F32 | eager | 206.51 | 204.65 | 1.009× |
+| F32 | graph | 206.15 | 204.00 | 1.011× |
+
+The BF16 and F16 rows sit 0.8 percent behind the September 14 numbers
+and the F32 row 1.1 percent ahead, all on one process each. A same-day
+control separates the board's day from the release: the 0.7.2 tree,
+whose kernels are 0.7.1's, and the 0.7.3 tree each ran the BF16 and F16
+instrument once more under the CUDA profiler that afternoon, and gave
+112.41 against 112.43 ms/step for BF16 and 114.53 against 114.42 for F16
+in graph replay, with the same peak memory to the mebibyte and the same
+kernel census. The two releases run the same step on this board; the
+September 14 column is that day's board.
+
+Mamba-1 uses the parallel scan, d_conv 4 and a capacity-16 context.
+Each process warms up for three steps, averages ten eager steps, then
+captures and averages thirty graph steps. The retained Ada BF16/F16
+backward fold is selected through the normal model path; no candidate
+override is used. The F32 row keeps its existing fold implementation.
+The fixture retains its initialized input projection for F32 and uses
+the mixed trainer's identity branch for BF16/F16. Compare each dtype
+with the same dtype in the previous release; these are not controlled
+storage-precision comparisons.
+
+Reproduce with `trainer_benchmarks::bench_lm_train_production_shape`,
+setting `MAMBA_RS_BENCH_DM=384`, `MAMBA_RS_BENCH_LAYERS=24`,
+`MAMBA_RS_BENCH_B=8`, `MAMBA_RS_BENCH_T=1300`,
+`MAMBA_RS_BENCH_SCAN=par`, and `MAMBA_RS_BENCH_DTYPE` to one of
+`bf16`, `f16`, `f32`, `tf32`. Leave `MAMBA_RS_SCAN_TAPE`,
+`MAMBA_RS_BENCH_IEEE_F32` and `MAMBA_RS_GEMM_MODE` unset.
+The instrument's iteration counts are fixed, not read from
+`MAMBA_RS_BENCH_ITERS`.
+
+Run the instrument as an exact ignored test:
+
+```sh
+cargo test --release --locked --features cuda,qualification \
+  --test trainer_benchmarks bench_lm_train_production_shape \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+Sampled device memory includes setup and both execution modes. It is the
+maximum of 200 ms NVML samples across the process, not an allocator
+high-water mark or a measurement for an individual step.
+
+| storage | 0.7.1 peak MiB | 0.7.3 peak MiB |
+|---|---:|---:|
+| BF16 | 4728 | 4810 |
+| F16 | 4760 | 4842 |
+| F32 | 7546 | 7628 |
+
+The assembled source passed the same-board 0.7.1 comparison for all
+263 ledger keys, the 161 original normalized Mamba keys and the 102
+decode keys, with no changed or missing key. These bit checks and the
+whole-step timings are separate evidence. The RTX 5090 was not
+measured for this release; its 0.7.2 tables remain its latest.
+
+## Mamba-1 supplemental F32 training with deterministic TF32
+
+Separate measurements with deterministic TF32 permitted compare the
+`0.7.1` numbers of the matching section below with the assembled
+`0.7.3`. The same F32 measurement fixture, compiled against 0.7.3, ran
+once with its own kernel cache on an RTX 6000 Ada in the same CUDA 13.2
+environment; the 0.7.1 column is that release's median of two processes.
+
+The tree ran in the deterministic mode with the weights stored as
+`Tf32`, the route `MAMBA_RS_BI_F32_POLICY=tf32` names. The route permits
+deterministic TF32 where a qualified kernel exists and stays exact
+everywhere else; it does not force every GEMM to use TF32.
+
+Shape: d_model 384, 24 layers, B=8, T=1300, parallel scan,
+capacity-16 context; ten eager and thirty graph timed steps. Every timed step
+performed its optimizer update.
+
+| execution | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
+|---|---:|---:|---:|
+| eager | 181.57 | 181.82 | 0.999× |
+| graph | 180.58 | 180.91 | 0.998× |
+
+Peak device memory is the maximum 200 ms NVML sample across setup, eager,
+capture and graph execution in the process; it is not an allocator
+high-water mark or an individual-step measurement.
+
+| model | 0.7.1 peak MiB | 0.7.3 peak MiB |
+|---|---:|---:|
+| Mamba-1 | 7546 | 7626 |
+
 ## Training step — 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
 
 Fresh measurements on September 14, 2026: released `v0.7.0`

@@ -1,6 +1,6 @@
-# GEMM benchmarks — the all-cards wave, RTX 6000 Ada
+# GEMM benchmarks — 0.7.3, RTX 6000 Ada
 
-Measured on September 18, 2026 with the assembled tree: one run of the
+Measured on September 18, 2026 with the 0.7.3 tree: one run of the
 kernel-level adapter that timed 0.7.1 on this board, against two saved
 records of the same cells. These are GEMM timings on the board the routes
 were measured on; no other board is timed here, and the bits of every

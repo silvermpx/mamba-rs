@@ -14,7 +14,7 @@ use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    InferenceFwdOperands, InferenceShape, InferenceTile, Sm89CellRoute, inference_forward,
     inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
@@ -166,7 +166,48 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     assert_wide_graph(&graph, b"nn_rna_wide_tf32_m128n128_bk32_s3", shape);
 }
 
+/// The launch a wide graph node must carry, by kernel: the RNA tiles and
+/// the measured Ada cells differ in tile, block, dynamic shared memory
+/// and parameter order (the cells share the half pipeline's parameter
+/// struct, which takes m, n, k; the RNA kernels take m, k, n).
+struct WideLaunch {
+    tile: (u32, u32),
+    threads: u32,
+    shared_bytes: u32,
+    m_n_k_order: bool,
+}
+
+fn wide_launch(symbol: &[u8]) -> WideLaunch {
+    match symbol {
+        b"nn_sm89_rna_tf32_m128n96_bk32_s3" => WideLaunch {
+            tile: (128, 96),
+            threads: 256,
+            shared_bytes: 86_016,
+            m_n_k_order: false,
+        },
+        b"nn_sm89_m64n288_bk16_s2_tf32" => WideLaunch {
+            tile: (64, 288),
+            threads: 128,
+            shared_bytes: 48_128,
+            m_n_k_order: true,
+        },
+        b"nn_sm89_m64n96_bk32_s2_tf32" => WideLaunch {
+            tile: (64, 96),
+            threads: 128,
+            shared_bytes: 45_056,
+            m_n_k_order: true,
+        },
+        _ => WideLaunch {
+            tile: (128, 128),
+            threads: 256,
+            shared_bytes: 98_304,
+            m_n_k_order: false,
+        },
+    }
+}
+
 fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: InferenceShape) {
+    let launch = wide_launch(symbol);
     use cudarc::driver::sys;
     let mut count = 0;
     assert_eq!(
@@ -218,29 +259,28 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: In
     let bundle_pointer = unsafe { *params.kernelParams.add(4) };
     assert!(!bundle_pointer.is_null());
     let bundle = unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() };
+    let (second, third) = if launch.m_n_k_order {
+        (shape.n, shape.k)
+    } else {
+        (shape.k, shape.n)
+    };
     assert_eq!(
         bundle,
         [
             1.0f32.to_bits(),
             0.0f32.to_bits(),
             shape.m as u32,
-            shape.k as u32,
-            shape.n as u32,
+            second as u32,
+            third as u32,
             shape.k as u32,
             shape.n as u32,
             shape.n as u32,
         ],
         "wide graph captured the wrong 32-byte parameter bundle",
     );
-    let (tile_n, shared_bytes) =
-        if symbol == rna_qualification_symbol(InferenceTile::Tf32RnaM128N96S3) {
-            (96, 86_016)
-        } else {
-            (128, 98_304)
-        };
     let grid = (shape.m as u32)
-        .div_ceil(128)
-        .checked_mul((shape.n as u32).div_ceil(tile_n))
+        .div_ceil(launch.tile.0)
+        .checked_mul((shape.n as u32).div_ceil(launch.tile.1))
         .unwrap();
     assert_eq!(
         (params.gridDimX, params.gridDimY, params.gridDimZ),
@@ -248,9 +288,9 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: In
     );
     assert_eq!(
         (params.blockDimX, params.blockDimY, params.blockDimZ),
-        (256, 1, 1)
+        (launch.threads, 1, 1)
     );
-    assert_eq!(params.sharedMemBytes, shared_bytes);
+    assert_eq!(params.sharedMemBytes, launch.shared_bytes);
 }
 
 #[test]
@@ -525,6 +565,20 @@ fn rna_qualification_symbol(tile: InferenceTile) -> &'static [u8] {
         InferenceTile::Tf32RnaM128N128S3 => b"nn_rna_wide_tf32_m128n128_bk32_s3",
         InferenceTile::Tf32RnaM128N96S3 => b"nn_sm89_rna_tf32_m128n96_bk32_s3",
         _ => panic!("not an RNA qualification tile: {tile:?}"),
+    }
+}
+
+/// The kernel the automatic route captures for a qualified wide hot case:
+/// the measured Ada cell where one owns the case, else the RNA tile.
+fn auto_route_symbol(tile: InferenceTile) -> &'static [u8] {
+    match tile {
+        InferenceTile::Sm89Cell(Sm89CellRoute::Tf32M64N288Bk16S2) => {
+            b"nn_sm89_m64n288_bk16_s2_tf32"
+        }
+        InferenceTile::Sm89Cell(Sm89CellRoute::Tf32M64N96Bk32S2Bias) => {
+            b"nn_sm89_m64n96_bk32_s2_tf32"
+        }
+        _ => rna_qualification_symbol(tile),
     }
 }
 
@@ -868,15 +922,20 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                     }
                     if actual_auto {
                         let aligned_hot = case != "tail" && m == shape.m - 1 && output_offset == 4;
-                        // Literal AUTO45 oracle: E0 uses N96; every other
-                        // qualified wide hot case retains N128. This is
-                        // independent of the forced reference chosen above.
-                        let expected_wide =
-                            aligned_hot.then_some(if case == "hot_e_boundary" && !has_bias {
-                                InferenceTile::Tf32RnaM128N96S3
-                            } else {
-                                InferenceTile::Tf32RnaM128N128S3
-                            });
+                        // The automatic oracle of this epoch: the measured
+                        // Ada cells own hot_d and the bias-on hot_e, E0 keeps
+                        // N96, every other qualified wide hot case keeps N128.
+                        // This is independent of the forced reference above.
+                        let expected_wide = aligned_hot.then_some(match (case, has_bias) {
+                            ("hot_d_boundary", _) => {
+                                InferenceTile::Sm89Cell(Sm89CellRoute::Tf32M64N288Bk16S2)
+                            }
+                            ("hot_e_boundary", true) => {
+                                InferenceTile::Sm89Cell(Sm89CellRoute::Tf32M64N96Bk32S2Bias)
+                            }
+                            ("hot_e_boundary", false) => InferenceTile::Tf32RnaM128N96S3,
+                            _ => InferenceTile::Tf32RnaM128N128S3,
+                        });
                         let launch_auto = || {
                             let selected = inference_forward(
                                 &ctx,
@@ -919,7 +978,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                         if let Some(expected_tile) = expected_wide {
                             assert_wide_graph(
                                 &auto_graph,
-                                rna_qualification_symbol(expected_tile),
+                                auto_route_symbol(expected_tile),
                                 view_shape,
                             );
                         }

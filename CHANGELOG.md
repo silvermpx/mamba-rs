@@ -1,10 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.7.3 (2026-09-18)
 
-Two settings, and names. No kernel change: every bit-ledger key is the one
-0.7.1 and 0.7.2 printed, and a program that set none of the withdrawn
-controls runs the same route it ran before.
+Two settings, names, and every SM80-tier card. No bit change on the
+exact f32, BF16 and F16 routes: every bit-ledger key is the one 0.7.1
+and 0.7.2 printed, the routes this release adds reproduce the routes
+they replace word for word, and a program that set none of the withdrawn
+controls runs the same route it ran before. One numeric change, in the
+precision that asks for it: a `Tf32` context's products that had no
+measured TF32 kernel and ran exact now run on the portable TF32 tier
+through the neighbour band below, on the Ada as on every other SM80-tier
+board.
 
 ### The GEMM contract is two settings
 
@@ -121,8 +127,14 @@ factor of four, 12 in 12 at two and 37 in 54 at eight, which is why the
 band stops at four. Every route the band names still passes the first-use
 bit proof and the wave count above. The dispatch epoch `gemm_route()`
 reports moves to 46 for it; the frozen cohorts pin the TF32 tuning
-revision separately and none of them is orphaned, and no route moves on
-the Ada, whose specialized module reads its own cohorts alone.
+revision separately and none of them is orphaned. The band is the
+portable tier's, so it serves the Ada as well: a shape with a measured
+cell keeps its cell, and a shape without one that used to fall to the
+exact f32 kernel now takes its neighbour's tile. On the Ada at the
+production training shape that is the Mamba-3 input projection, 10400 x
+384 x 1716, whose forward, input gradient and weight gradient ran on the
+scalar kernels in 0.7.1 and run on the portable TF32 tiles now; the
+Mamba-1 projections all have measured cells and do not move.
 
 ### The fastest measured route in every family
 
@@ -219,6 +231,15 @@ contract.
   fold fixture `legacy_fixed.cu` is regenerated from the capacity-32
   composition it stands for.
 
+- **The contract lane runs to the end.** `qual/run.sh contract` used to
+  stop at its first red target, and on any one board the first red is a
+  target written for another board, which asserts that board's compute
+  capability; every target after it went unrun, `gpu_bf16_parity` among
+  them, which the lane could not even build because it needs the `hf`
+  feature. The lane now builds with `cuda,hf`, runs every target and
+  names each red at its end. `docs/release-qualification.md` says which
+  reds a board is allowed.
+
 ### Measurements and verification
 
 RTX 6000 Ada, CUDA 13.2, this tree against the v0.7.1 ledger recorded on
@@ -232,7 +253,7 @@ also run against the CUDA 13.4 toolkit, where the CC 10.7 target compiles.
 The kernel-level adapter that timed 0.7.1 on this board, run once on the
 assembled tree against its own 0.7.1 record (same harness, same operands,
 same windows) and against the 0.7.1 page, is in
-[docs/gemm-benchmarks-all-cards-ada.md](docs/gemm-benchmarks-all-cards-ada.md).
+[docs/gemm-benchmarks-0.7.3-ada.md](docs/gemm-benchmarks-0.7.3-ada.md).
 Over the 21 Triad cells of the adapter the geometric means of 0.7.1 time
 over new time are 1.16x for exact f32, 1.17x for bf16 and 1.16x for f16;
 over its five inference cells 1.04x for exact f32, 1.00x for bf16 and
@@ -245,6 +266,45 @@ asking the driver for its pipeline slabs alone while its epilogue stages
 the whole f32 tile; the launch now allocates the tile, a unit test pins
 every half cell to the larger of the two, and a GPU test launches every
 Ada cell on its measured shape with and without a bias.
+
+Whole training steps at the production shape (d_model 384, 24 layers,
+B=8, T=1300), one process per storage on 0.7.3 against the 0.7.1 medians
+of the benchmark pages, CUDA Graph replay; `old/new` above 1 means
+faster:
+
+| model | precision / policy | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
+|---|---|---:|---:|---:|
+| Mamba-1 | BF16 | 110.93 | 111.87 | 0.992× |
+| Mamba-1 | F16 | 113.16 | 114.01 | 0.993× |
+| Mamba-1 | exact F32 | 206.15 | 204.00 | 1.011× |
+| Mamba-1 | F32, TF32 permitted | 180.58 | 180.91 | 0.998× |
+| Mamba-3 | BF16 | 132.46 | 132.84 | 0.997× |
+| Mamba-3 | F16 | 132.92 | 133.35 | 0.997× |
+| Mamba-3 | exact F32 | 174.18 | 173.67 | 1.003× |
+| Mamba-3 | F32, TF32 permitted | 164.52 | 149.73 | 1.099× |
+
+The Mamba-3 TF32 row is the neighbour band: a kernel census of that
+step under the CUDA profiler, one process per tree, shows the input
+projection's three GEMMs moving from the scalar kernels (1972 ms of the
+0.7.2 process) to the portable TF32 tiles (1215 ms), every other kernel
+the same, the process 9.3 percent shorter. Every other row is within 1
+percent of 0.7.1 in either direction, and a same-day control shows the
+Mamba-1 BF16 and F16 rows are the board's day, not the release: the 0.7.2 tree, whose kernels are 0.7.1's, and
+this tree each ran those two instruments once more under the CUDA
+profiler that afternoon and gave the same graph step time within 0.1
+percent, the same peak memory to the mebibyte, and the same kernel
+census (the same kernels under their new names, the same launch counts,
+per-kernel time within 3 percent, the sum within 0.2 percent). The
+sampled peak memory of every process is 82 MiB above the September 14
+figures for the same reason. Text generation from
+`state-spaces/mamba-130m-hf` (64 tokens, seed 42) is byte-identical
+between 0.7.2 and 0.7.3 on CPU f32, GPU f32 and GPU bf16. The tables
+with eager timings, peaks and fixture details are in
+[Mamba-1](docs/mamba1-benchmarks.md) and
+[Mamba-3](docs/mamba3-benchmarks.md); the remaining published
+instruments, the GEMM training-step bench, both full GPU benchmarks,
+the Mamba-3 default-shape step and the serve prefill, ran once each
+with their logs kept.
 
 ## 0.7.2 (2026-09-16)
 

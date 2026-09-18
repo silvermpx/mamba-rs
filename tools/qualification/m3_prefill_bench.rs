@@ -32,6 +32,7 @@ fn training_dtypes(value: Option<&str>) -> Result<&'static [WeightDtype], String
         None => Ok(&[WeightDtype::F32, WeightDtype::Bf16]),
         Some("all") => Ok(&[WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16]),
         Some("f32") => Ok(&[WeightDtype::F32]),
+        Some("tf32") => Ok(&[WeightDtype::Tf32]),
         Some("bf16") => Ok(&[WeightDtype::Bf16]),
         Some("f16") => Ok(&[WeightDtype::F16]),
         Some(value) => Err(format!("unknown MAMBA_RS_BENCH_DTYPE={value:?}")),
@@ -210,7 +211,7 @@ fn m3_prefill_latency_at_serve_shape() {
 
 /// Training step latency at a multi-chunk shape (the chunked backward is
 /// the target). Run manually, release build.
-/// `MAMBA_RS_BENCH_DTYPE=f32|bf16|f16|all` selects lanes; unset retains F32/BF16.
+/// `MAMBA_RS_BENCH_DTYPE=f32|tf32|bf16|f16|all` selects lanes; unset retains F32/BF16.
 /// `MAMBA_RS_BENCH_B`, `MAMBA_RS_BENCH_T` and `MAMBA_RS_BENCH_ITERS` override
 /// batch, sequence length and timed steps; defaults are 1, 256 and 20.
 #[test]
@@ -257,7 +258,7 @@ fn m3_train_step_at_multichunk_shape() {
         // weights = identity semantics); the mixed pipeline wants the
         // identity branch (cleared weights).
         let mut w = Mamba3Weights::init(&cfg, cfg.d_model, 42);
-        if matches!(dtype, WeightDtype::F32) {
+        if matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
             let dm = cfg.d_model;
             w.input_proj_w = (0..dm * dm)
                 .map(|i| if i / dm == i % dm { 1.0 } else { 0.0 })

@@ -8,7 +8,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
-    InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
+    InferenceFwdOperands, InferenceShape, InferenceTile, Sm89CellRoute, inference_forward,
     inference_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
@@ -37,32 +37,39 @@ fn expected_ada_half_auto(
         Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
     };
 
+    // The measured Ada cells own their exact shapes on the three
+    // qualified toolkits: the packed-store bf16 tile at 2048 x 768 x 2304
+    // and the packed-store half tile at 2048 x 2304 x 768, with or
+    // without a bias. No half-output cell exists for f16 at
+    // 2048 x 768 x 2304, so that shape keeps its earlier routes.
     match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
+        ((12, 8) | (13, 0) | (13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(
+            InferenceTile::Sm89Cell(Sm89CellRoute::HalfM128N144Bk32S2VecBf16),
+        ),
+        (
+            (12, 8) | (13, 0) | (13, 2),
+            WeightDtype::Bf16 | WeightDtype::F16,
+            (2048, 2304, 768),
+            _,
+        ) => Some(InferenceTile::Sm89Cell(Sm89CellRoute::HalfM128N96Bk64S2Vec)),
         ((13, 2), WeightDtype::F16, (2048, 768, 2304), false) => Some(D_FINALIST),
-        ((13, 2), WeightDtype::F16, (2048, 2304, 768), false) => Some(E_FINALIST),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), true) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Swizzle),
-        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
-        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
         ((12, 8) | (13, 0), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::F16, (4621, 1928, 384), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
-        ((12, 8) | (13, 0), WeightDtype::F16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), _) => Some(Pipeline),
         ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false) => Some(S3),
         ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Pipeline),
-        ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
-        ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
         ((13, 2), WeightDtype::F16, (4621, 768, 2304), false) => Some(S3),
         ((13, 2), WeightDtype::F16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 1928, 384), _) => Some(Pipeline),
         ((13, 2), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
-        ((13, 2), WeightDtype::F16, (2048, 2304, 768), _) => Some(Pipeline),
         _ => None,
     }
 }

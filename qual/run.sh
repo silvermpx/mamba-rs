@@ -24,15 +24,19 @@ gate)
 contract)
     # diag_-prefixed tests are manual position printers (record-grade
     # instruments living inside contract files); the lane skips them.
-    rc=0
+    # Every target runs; the lane names each red at the end instead of
+    # stopping at the first, since a target written for another board is
+    # red here by design and would hide the rest. The hf feature is on
+    # because one contract target loads a checkpoint.
+    red=""
     for t in $(suites contract); do
         echo "== contract: $t"
-        cargo test --release --features cuda --test "$t" -- --ignored --skip diag_ --nocapture || rc=1
-        if [ "$rc" -ne 0 ]; then
-            echo "CONTRACT RED: $t"
-            exit 1
-        fi
+        cargo test --release --features cuda,hf --test "$t" -- --ignored --skip diag_ --nocapture || red="$red $t"
     done
+    if [ -n "$red" ]; then
+        echo "CONTRACT RED:$red"
+        exit 1
+    fi
     echo "CONTRACT GREEN"
     ;;
 record)

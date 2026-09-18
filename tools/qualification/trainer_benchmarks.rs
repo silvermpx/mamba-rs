@@ -114,7 +114,7 @@ fn run_lm_shape(
     let label = format!("{dtype:?}{suffix}");
 
     let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    if !matches!(dtype, WeightDtype::F32) {
+    if !matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
         cpu.input_proj_w.clear();
         cpu.input_proj_b.clear();
     }
@@ -291,7 +291,7 @@ fn bench_lm_train_bf16_parallel_scan() {
 ///   MAMBA_RS_BENCH_LAYERS (default 24)
 ///   MAMBA_RS_BENCH_B (batch, default 8)
 ///   MAMBA_RS_BENCH_T (seq_len, default 1300)
-///   MAMBA_RS_BENCH_DTYPE (f32|bf16|f16, default bf16)
+///   MAMBA_RS_BENCH_DTYPE (f32|tf32|bf16|f16, default bf16)
 ///   MAMBA_RS_BENCH_SCAN (auto|seq|par, default auto)
 /// MAMBA_RS_BENCH_TIER picks the GEMM tier (see the module head).
 #[test]
@@ -309,6 +309,7 @@ fn bench_lm_train_production_shape() {
     let t = get("MAMBA_RS_BENCH_T", 1300);
     let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
         Ok("f32") => WeightDtype::F32,
+        Ok("tf32") => WeightDtype::Tf32,
         Ok("f16") => WeightDtype::F16,
         _ => WeightDtype::Bf16,
     };
@@ -351,6 +352,7 @@ fn bench_production_split_fwd_bwd() {
     let t = get("MAMBA_RS_BENCH_T", 1300);
     let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
         Ok("f32") => WeightDtype::F32,
+        Ok("tf32") => WeightDtype::Tf32,
         Ok("f16") => WeightDtype::F16,
         _ => WeightDtype::Bf16,
     };
@@ -366,7 +368,7 @@ fn bench_production_split_fwd_bwd() {
     let input_dim = dm;
     let n = b * t * dm;
     let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    if !matches!(dtype, WeightDtype::F32) {
+    if !matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
         cpu.input_proj_w.clear();
         cpu.input_proj_b.clear();
     }
@@ -468,7 +470,7 @@ fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
     let label = format!("{dtype:?}");
 
     let mut cpu = Mamba3Weights::init(&cfg, input_dim, 0xDECADE);
-    if matches!(dtype, WeightDtype::F32) {
+    if matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
         // f32 M3 forward needs a real input_proj (no identity branch).
         cpu.input_proj_w = (0..input_dim * cfg.d_model)
             .map(|i| {
@@ -586,6 +588,7 @@ fn bench_scan_kernels_isolated() {
     let k = &ctx.kernels;
     let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
         Ok("f32") => WeightDtype::F32,
+        Ok("tf32") => WeightDtype::Tf32,
         Ok("f16") => WeightDtype::F16,
         _ => WeightDtype::Bf16,
     };

@@ -223,7 +223,7 @@ measured on, which is a claim about that board and not about this one.
 
 | GPU | bf16 and f16 | exact f32 (`F32`) | deterministic TF32 (`Tf32`) |
 |---|---|---|---|
-| RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes; portable kernels for the rest | measured; scalar kernels elsewhere | measured joint kernels; portable kernels elsewhere |
+| RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes; portable kernels for the rest | measured; scalar kernels elsewhere | measured joint kernels on their cells; the portable tier on the measured cells and their neighbourhood; scalar kernels elsewhere |
 | RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension | scalar kernels plus qualified TMA-fed FMA kernels | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 |
 | SM80, SM86, SM87 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood; proven specialized cells where they match |
 | SM90 and SM90a | proven on the measured cells, portable elsewhere; a native WGMMA kernel is tried behind a first-use self-check | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
@@ -236,8 +236,8 @@ shape within a factor of four of a measured shape on every dimension and
 staged the same way (an operand takes the 16-byte loads only when its
 leading dimension is a multiple of four floats) takes the tile of the
 nearest measured shape, a wide tile brought down to 64x64 when the shape
-would not fill the board with it; any other shape takes the tier's
-default tile. Held out one at a time, the measured cells reproduce their
+would not fill the board with it; any other shape takes the exact f32
+kernel, as before. Held out one at a time, the measured cells reproduce their
 own tiles from their neighbours 33 times in 38 at that factor. A board
 with a specialized TF32 module never reads the neighbourhood; its own
 cohorts decide.

@@ -66,9 +66,12 @@ may not present the two as the same claim.
    `cuda,hf,gemm-blas,nccl` and each plus `qualification`, all without a
    rustc warning.
 2. `qual/run.sh gate` green on each qualification board.
-3. `qual/run.sh contract` green on each board, with the evidence capture
-   on; `acceptance_diff` against the previous release's capture clean, or
-   every difference accounted for by an intentional, documented change.
+3. `qual/run.sh contract` on each board, with the evidence capture on;
+   the lane runs every target and names each red at its end, and the only
+   reds allowed are the targets written for another board, which assert
+   that board's compute capability. `acceptance_diff` against the previous
+   release's capture clean, or every difference accounted for by an
+   intentional, documented change.
 4. The qualification tools that back the published tables, one per board
    and toolkit (`qual/run.sh qualification` lists them), with raw logs kept.
 5. Package: `cargo package --allow-dirty --no-verify`, extract the `.crate`
