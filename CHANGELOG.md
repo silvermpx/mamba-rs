@@ -248,7 +248,9 @@ and the 102 decode keys), none moved, none missing. Every test target of
 the crate is green on that board (163 targets and the unit tests), the
 crate builds and lints clean with `-D warnings` without the `cuda`
 feature and with `cuda,hf,qualification`, and the host-only gates were
-also run against the CUDA 13.4 toolkit, where the CC 10.7 target compiles.
+also run against the CUDA 13.4 toolkit, where the CC 10.7 target compiles
+(cudarc 0.19.9 lists toolkits up to 13.3, so a 13.4 box builds with
+`CUDARC_CUDA_VERSION=13030`; the README says so).
 
 The kernel-level adapter that timed 0.7.1 on this board, run once on the
 assembled tree against its own 0.7.1 record (same harness, same operands,

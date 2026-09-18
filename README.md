@@ -101,6 +101,13 @@ the bit proof until they are timed on their own hardware.
 | `qualification` | the hardware and toolkit instruments under `tools/qualification/` | maintainers measuring kernels on a chosen board |
 | `cuda-cublaslt-qualification` | cuBLASLt in the vendor-comparison harness | maintainers only; production routing does not use cuBLASLt |
 
+The `cuda` feature binds the toolkit through cudarc, which reads the
+toolkit version from `nvcc` at build time and lists the versions it
+knows: cudarc 0.19.9 knows up to CUDA 13.3. On a CUDA 13.4 box build with
+`CUDARC_CUDA_VERSION=13030`: the 13.3 bindings, the 13.4 libraries loaded
+at run time. The kernels themselves are compiled by the installed NVRTC,
+so the targets that need 13.4 (CC 10.7) come with it.
+
 ## GEMM modes and storage precision
 
 A GPU context has two settings. `GemmMode` decides who multiplies;
