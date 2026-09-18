@@ -41,3 +41,7 @@ reference/
 
 # Working notes for a change in flight; never part of the package.
 scratchpad/
+
+# Local assistant and skill directories; never part of the repository.
+.claude/
+.superpowers/
