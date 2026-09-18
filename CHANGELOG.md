@@ -436,6 +436,16 @@ the board's own tier wins at d_model 128 (33.70 against 39.58 ms/step in
 BF16) as at 384; the tables keep the SM120 tier, and the eager floor is
 on the board's tuning list. Both per-cell pages carry the numbers.
 
+An H100 PCIe (CC 9.0, CUDA 13.2) ran the final tree last: the routing
+contracts, the graph-capture bit-identity gate, the invariance matrix
+and the adapter green on the first attempt, with the common tier alone,
+since the SM90a WGMMA module waits for CUDA 13.3. Its training rows
+(Mamba-1 BF16 128.07, TF32 181.56; Mamba-3 BF16 154.42, TF32 160.85
+ms/step) and per-cell timings are on the benchmark pages and on
+[docs/gemm-benchmarks-0.7.3-h100.md](docs/gemm-benchmarks-0.7.3-h100.md);
+this is the first release to boot on one board of every module family it
+claims except SM100.
+
 ## 0.7.2 (2026-09-16)
 
 Two verification instruments that ship with the crate were red on the

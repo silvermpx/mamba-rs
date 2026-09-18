@@ -337,6 +337,25 @@ high-water mark or an individual-step measurement.
 |---|---:|---:|
 | Mamba-1 | 7544.0 (7544–7544) | 7546.0 (7546–7546) |
 
+## Training step — 0.7.3 (H100 PCIe, CUDA 13.2)
+
+Measured on September 18, 2026 on a rented H100 PCIe (driver 610.57.04,
+CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release build): the final
+0.7.3 tree once per storage, the same shape and instrument settings as
+the Ada section above. This board has no earlier number to compare
+against, so the rows stand alone. On CUDA 13.2 the board runs the common
+tier alone: its SM90a WGMMA module loads on CUDA 13.3 and newer, so these
+are the SM80-tier kernels on Hopper, admitted by the first-use bit proof.
+The per-cell GEMM timings against cuBLAS on the same board are on the
+[H100 GEMM page](gemm-benchmarks-0.7.3-h100.md).
+
+| precision / policy | 0.7.3 ms/step |
+|---|---:|
+| BF16 | 128.07 |
+| F16 | 136.80 |
+| exact F32 | 201.33 |
+| F32, TF32 permitted | 181.56 |
+
 ## Training step — 0.7.0 to 0.7.1 (RTX 5090, CUDA 13.2)
 
 Measurements on September 16, 2026: released `v0.7.0`
