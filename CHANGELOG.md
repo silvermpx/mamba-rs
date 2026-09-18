@@ -299,6 +299,19 @@ contract.
   broken contract. In 0.7.2 those seven targets were red on the RTX 5090
   and on the A100 for that reason alone.
 
+### What each board gets in this release
+
+| board | in 0.7.3 |
+|---|---|
+| RTX 6000 Ada (SM89) | the measured cells under their frozen cohorts: the reference board |
+| RTX 5090 (SM120) | its own kernels on every shape they name, the common tier on the rest; measured, faster than 0.7.2 on every training row |
+| A100 (SM80) | the common tier under the first-use bit proof; measured |
+| H100 / H200 (SM90) | the common tier under the first-use bit proof; the H100 measured on CUDA 13.2; the board's own WGMMA module loads on CUDA 13.3 and newer and has not had its tuning pass |
+| B200 / B300 (SM100) | the tree compiles for them and the common tier serves; the board's own kernels sit behind their first-use self-check; not yet run on the hardware |
+
+The native Hopper and Blackwell paths are the work of the next releases,
+each measured on its own board.
+
 ### Measurements and verification
 
 RTX 6000 Ada, CUDA 13.2, this tree against the v0.7.1 ledger recorded on
