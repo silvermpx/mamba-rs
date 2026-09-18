@@ -2996,6 +2996,7 @@ fn hardware_artifact_expected_exports_cover_wide_without_changing_frozen_base() 
         ((9, 0), 25, true),
         ((10, 0), 55, true),
         ((10, 3), 55, true),
+        ((10, 7), 55, true),
         ((11, 0), 55, true),
         ((12, 0), 36, false),
         ((12, 1), 36, false),
@@ -3019,6 +3020,8 @@ const RELEASE_TARGET_MATRIX: &[(&str, &str, SpecializedTf32Family)] = &[
     ("compute_100a", "sm_100a", SpecializedTf32Family::Sm100),
     ("compute_103f", "sm_103f", SpecializedTf32Family::Sm100),
     ("compute_103a", "sm_103a", SpecializedTf32Family::Sm100),
+    ("compute_107f", "sm_107f", SpecializedTf32Family::Sm100),
+    ("compute_107a", "sm_107a", SpecializedTf32Family::Sm100),
     ("compute_110f", "sm_110f", SpecializedTf32Family::Sm100),
     ("compute_110a", "sm_110a", SpecializedTf32Family::Sm100),
     ("compute_120", "sm_120", SpecializedTf32Family::Sm120),
@@ -3035,9 +3038,16 @@ fn specialized_family_contract(
     }
 }
 
-fn release_entry_target_count() -> usize {
+/// Whether the loaded toolkit can name a release target: the CC 10.7 pair
+/// arrived with CUDA 13.4, every other entry with 13.2 or earlier.
+fn release_target_compiles(nvrtc_target: &str, nvrtc: (i32, i32)) -> bool {
+    !nvrtc_target.contains("107") || nvrtc >= (13, 4)
+}
+
+fn release_entry_target_count(nvrtc: (i32, i32)) -> usize {
     RELEASE_TARGET_MATRIX
         .iter()
+        .filter(|(nvrtc_target, _, _)| release_target_compiles(nvrtc_target, nvrtc))
         .map(|(_, _, family)| specialized_family_contract(*family).3.len())
         .sum()
 }
@@ -5663,6 +5673,16 @@ fn validate_physical_sensitive_call_site_ownership(
                     ][..],
                 ),
                 (
+                    // The first-use proof drives a scalar body through its
+                    // own controller, and submits once like the others.
+                    active_inlined_production_method_scope(
+                        source,
+                        "ProvenScalarLaunch",
+                        "enqueue",
+                    )?,
+                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                ),
+                (
                     audited_function_scope(source, "enqueue_scalar_zero_f32", "")?,
                     &[(PhysicalSensitiveCall::Submission, 1)][..],
                 ),
@@ -5888,6 +5908,7 @@ fn validate_physical_sensitive_call_site_ownership(
                 "launch_sm89_half_swizzle",
                 "launch_sm89_half_s3",
                 "launch_sm89_half_n64",
+                "launch_sm89_cell",
                 "launch_ladder",
                 "launch_f32out_ladder",
             ] {
@@ -10320,6 +10341,10 @@ fn release_target_entry_matrix_nvrtc_ptxas_pipeline() {
     }
     let mut checked_entries = 0;
     for (nvrtc_target, ptx_target, family) in RELEASE_TARGET_MATRIX {
+        if !release_target_compiles(nvrtc_target, nvrtc) {
+            eprintln!("skipping {nvrtc_target}: loaded NVRTC is {nvrtc:?}, needs 13.4");
+            continue;
+        }
         let (label, source, needs_mma16, expected) = specialized_family_contract(*family);
         let ptx = compile_tf32_ptx(tf32_cuda_blob(source, needs_mma16), nvrtc_target);
         assert!(
@@ -10357,8 +10382,12 @@ fn release_target_entry_matrix_nvrtc_ptxas_pipeline() {
         }
         checked_entries += expected.len();
     }
-    assert_eq!(checked_entries, 258);
-    assert_eq!(checked_entries, release_entry_target_count());
+    assert_eq!(release_entry_target_count((13, 2)), 258);
+    assert_eq!(
+        release_entry_target_count((13, 4)),
+        258 + 2 * expected_sm100_symbols().len()
+    );
+    assert_eq!(checked_entries, release_entry_target_count(nvrtc));
 }
 
 #[test]

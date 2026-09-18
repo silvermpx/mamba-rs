@@ -35,6 +35,19 @@ shapes ran 1.13 to 1.63 times faster than 0.6.9 on an RTX 6000 Ada.
   reductions by default.
 - **Explicit-mode constructors** beside every environment-reading one, and
   a recorded numeric route on every captured graph.
+- **The measured routes reach every card.** The specialized GEMM modules
+  were compiled for one target and one board; every kernel in them uses
+  the SM80 instruction tier and nothing above it, so each is now built
+  for the device's own target on any SM80-tier board. A board with frozen
+  evidence takes a route as a measured winner; any other board admits it
+  by a first-use bit proof against the reference route of the same
+  numeric contract, and declines it aloud if a single output word
+  differs. The bits are guaranteed everywhere; the speed is the speed of
+  the board the route was measured on. One behaviour changes off the Ada:
+  `WeightDtype::Tf32` now serves the portable deterministic TF32 tier
+  there instead of falling back to the exact f32 kernels, on the measured
+  cells and, within a factor of four on every dimension, on their
+  neighbourhood.
 
 The full list and patch-release changes are in [CHANGELOG.md](CHANGELOG.md);
 the mode guide is [docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
@@ -42,8 +55,9 @@ the mode guide is [docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
 
 The 0.7.x releases continue optimizing the scan, convolution and norm
 kernels around the GEMMs, and the GEMM kernels toward cuBLAS Fast.
-The architectures on the portable kernels today (SM80, SM86, Hopper,
-datacenter Blackwell, CC 12.1) get measured kernels in later releases.
+The architectures without their own measured cells today (SM80, SM86,
+Hopper, datacenter Blackwell, CC 12.1) run the Ada-measured routes under
+the bit proof until they are timed on their own hardware.
 
 ## Features
 

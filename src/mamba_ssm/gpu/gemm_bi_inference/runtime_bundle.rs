@@ -75,11 +75,11 @@ fn select_inference_bundle_route(
     stack: InferenceBundleStack<'_>,
     policy: F32TriadPolicy,
 ) -> Option<InferenceBundleRoute> {
+    let (major, minor) = stack.compute_capability;
     if !stack.nvrtc_library_known
-        || stack.compute_capability != (8, 9)
-        || stack.multiprocessors != 142
+        || stack.multiprocessors == 0
         || !source_bundle::compiler_supported(
-            Some((8, 9)),
+            i32::try_from(major).ok().zip(i32::try_from(minor).ok()),
             stack.target,
             stack.state_cap,
             stack.nvrtc,
@@ -106,7 +106,7 @@ fn select_inference_bundle_route(
         && mixed_available
         && matches!(
             (shape.m, shape.k, shape.n),
-            (4621, 768, 2304) | (4621, 1928, 384)
+            (4621, 768, 2304) | (4621, 1928, 384) | (2048, 2304, 768)
         )
     {
         return Some(InferenceBundleRoute::HalfF32S3);
@@ -118,7 +118,6 @@ fn select_inference_bundle_route(
     if exact_f32
         && stack.exact_available
         && policy == F32TriadPolicy::ExactScalarFma
-        && operands.bias_ptr.is_none()
         && (shape.m, shape.k, shape.n) == (4621, 1928, 384)
     {
         return Some(InferenceBundleRoute::ExactF32M128N64Tail);
@@ -231,10 +230,17 @@ fn prepare_inference_bundle_launch(
             if [operands.c.dtype, operands.x.dtype, operands.w.dtype]
                 .into_iter()
                 .any(|dtype| dtype != WeightDtype::F32)
-                || operands.bias_ptr.is_some()
             {
                 return Err(
-                    "retained Inference exact M128N64 requires unbiased homogeneous f32 operands"
+                    "retained Inference exact M128N64 requires homogeneous f32 operands".into(),
+                );
+            }
+            if operands
+                .bias_ptr
+                .is_some_and(|pointer| pointer == 0 || !pointer.is_multiple_of(4))
+            {
+                return Err(
+                    "retained Inference exact M128N64 requires a non-null f32-aligned optional bias"
                         .into(),
                 );
             }
@@ -259,6 +265,9 @@ fn prepare_inference_bundle_launch(
             validate_byte_end(args.c, args.m, args.n, 4, "exact C")?;
             validate_byte_end(args.a, args.m, args.k, 4, "exact A")?;
             validate_byte_end(args.b, args.k, args.n, 4, "exact B")?;
+            if args.bias != 0 {
+                validate_byte_end(args.bias, 1, args.n, 4, "exact bias")?;
+            }
             (
                 InferenceBundleParams::Exact(FixedSm89ExactF32Params::forward(&args)),
                 64,
@@ -304,6 +313,16 @@ fn validate_byte_end(
         .checked_add(bytes)
         .ok_or_else(|| format!("retained Inference {label} byte endpoint exceeds u64"))?;
     Ok(())
+}
+
+/// The retained member a route launches for `input`, the name the proof
+/// ledger keys on.
+pub(super) fn member_symbol(route: InferenceBundleRoute, input: WeightDtype) -> &'static str {
+    match (route, input) {
+        (InferenceBundleRoute::HalfF32S3, WeightDtype::F16) => "nn_sm89_tc128_f32out_s3_f16",
+        (InferenceBundleRoute::HalfF32S3, _) => "nn_sm89_tc128_f32out_s3_bf16",
+        (InferenceBundleRoute::ExactF32M128N64Tail, _) => "nn_sm89_f32_m128n64_tail_copyplan",
+    }
 }
 
 pub(super) fn family_label(route: InferenceBundleRoute) -> InferenceTile {
@@ -415,6 +434,11 @@ mod inference_bundle_runtime_tests {
         k: 1928,
         n: 384,
     };
+    const HOT_E: InferenceShape = InferenceShape {
+        m: 2048,
+        k: 2304,
+        n: 768,
+    };
 
     fn mixed(dtype: WeightDtype, bias: Option<u64>) -> InferenceFwdOperands {
         InferenceFwdOperands {
@@ -478,7 +502,7 @@ mod inference_bundle_runtime_tests {
         for (nvrtc, state_cap) in cohorts {
             let compiler = stack(nvrtc, state_cap);
             for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-                for shape in [HOT_B, HOT_C] {
+                for shape in [HOT_B, HOT_C, HOT_E] {
                     for bias in [None, Some(0x4004)] {
                         assert_eq!(
                             select(
@@ -493,11 +517,21 @@ mod inference_bundle_runtime_tests {
                     }
                 }
             }
-            assert_eq!(
-                select(exact(), HOT_C, compiler, F32TriadPolicy::ExactScalarFma,),
-                Some(InferenceBundleRoute::ExactF32M128N64Tail),
-                "exact winner missing for {nvrtc:?}/cap{state_cap}"
-            );
+            for bias in [None, Some(0x4004)] {
+                assert_eq!(
+                    select(
+                        InferenceFwdOperands {
+                            bias_ptr: bias,
+                            ..exact()
+                        },
+                        HOT_C,
+                        compiler,
+                        F32TriadPolicy::ExactScalarFma,
+                    ),
+                    Some(InferenceBundleRoute::ExactF32M128N64Tail),
+                    "exact winner missing for {nvrtc:?}/cap{state_cap} bias={bias:?}"
+                );
+            }
         }
     }
 
@@ -506,17 +540,51 @@ mod inference_bundle_runtime_tests {
         let good = stack((13, 2), 64);
         let mixed_ops = mixed(WeightDtype::Bf16, Some(0x4004));
         let exact_ops = exact();
-        let bad_stacks = [
-            InferenceBundleStack {
-                state_cap: 32,
-                ..good
-            },
+        for other_board in [
             InferenceBundleStack {
                 compute_capability: (8, 6),
                 ..good
             },
             InferenceBundleStack {
                 multiprocessors: 141,
+                ..good
+            },
+        ] {
+            assert!(
+                select(
+                    mixed_ops,
+                    HOT_B,
+                    other_board,
+                    F32TriadPolicy::ExactScalarFma
+                )
+                .is_some(),
+                "an sm_80-tier board outside the frozen evidence takes the proof path"
+            );
+            assert!(
+                select(
+                    exact_ops,
+                    HOT_C,
+                    other_board,
+                    F32TriadPolicy::ExactScalarFma
+                )
+                .is_some()
+            );
+        }
+        let bad_stacks = [
+            InferenceBundleStack {
+                state_cap: 32,
+                ..good
+            },
+            InferenceBundleStack {
+                compute_capability: (7, 5),
+                ..good
+            },
+            InferenceBundleStack {
+                compute_capability: (12, 0),
+                ..good
+            },
+            InferenceBundleStack {
+                multiprocessors: 0,
                 ..good
             },
             InferenceBundleStack {
@@ -558,18 +626,20 @@ mod inference_bundle_runtime_tests {
             select(exact_ops, HOT_B, good, F32TriadPolicy::ExactScalarFma,),
             None
         );
-        assert_eq!(
-            select(
-                InferenceFwdOperands {
-                    bias_ptr: Some(0x4000),
-                    ..exact_ops
-                },
-                HOT_C,
-                good,
-                F32TriadPolicy::ExactScalarFma,
-            ),
-            None
-        );
+        for bad_bias in [0, 0x4001, 0x4002, 0x4003] {
+            assert_eq!(
+                select(
+                    InferenceFwdOperands {
+                        bias_ptr: Some(bad_bias),
+                        ..exact_ops
+                    },
+                    HOT_C,
+                    good,
+                    F32TriadPolicy::ExactScalarFma,
+                ),
+                None
+            );
+        }
         assert_eq!(
             select(
                 exact_ops,

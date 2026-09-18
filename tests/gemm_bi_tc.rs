@@ -136,8 +136,7 @@ fn tc_forward_matches_f32_reference_loosely() {
             let w32 = t.f32_buf(&qw);
             let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
             gemm_bi_triad::gemm_bi_forward(
-                &t.ctx.stream,
-                &t.ctx.kernels,
+                &t.ctx,
                 &mut y32,
                 &x32,
                 w32.cached_ptr(),
@@ -326,15 +325,8 @@ fn tc_backward_matches_f32_reference_loosely() {
             let x32 = t.f32_buf(&qx);
             let dy32 = t.f32_buf(&qdy);
             let dw_ref = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-            gemm_bi_triad::gemm_bi_backward_dw(
-                &t.ctx.stream,
-                &t.ctx.kernels,
-                dw_ref.cached_ptr(),
-                &dy32,
-                &x32,
-                (m, k, n),
-            )
-            .unwrap();
+            gemm_bi_triad::gemm_bi_backward_dw(&t.ctx, dw_ref.cached_ptr(), &dy32, &x32, (m, k, n))
+                .unwrap();
             t.ctx.stream.synchronize().unwrap();
             let dw_want = dw_ref.to_cpu(&t.ctx.stream).unwrap();
 
@@ -366,8 +358,7 @@ fn tc_backward_matches_f32_reference_loosely() {
             let w32 = t.f32_buf(&qw);
             let mut dx_ref = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
             gemm_bi_triad::gemm_bi_backward_dx(
-                &t.ctx.stream,
-                &t.ctx.kernels,
+                &t.ctx,
                 &mut dx_ref,
                 &dy32,
                 w32.cached_ptr(),
@@ -1280,8 +1271,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             let w32 = t.f32_buf(&qw);
             let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
             gemm_bi_triad::gemm_bi_forward(
-                &t.ctx.stream,
-                &t.ctx.kernels,
+                &t.ctx,
                 &mut y32,
                 &x32,
                 w32.cached_ptr(),
@@ -1304,19 +1294,11 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             let qdy = quantize(&det(m * n, 55, 0.5), dt);
             let dy32 = t.f32_buf(&qdy);
             let dw_ref = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-            gemm_bi_triad::gemm_bi_backward_dw(
-                &t.ctx.stream,
-                &t.ctx.kernels,
-                dw_ref.cached_ptr(),
-                &dy32,
-                &x32,
-                (m, k, n),
-            )
-            .unwrap();
+            gemm_bi_triad::gemm_bi_backward_dw(&t.ctx, dw_ref.cached_ptr(), &dy32, &x32, (m, k, n))
+                .unwrap();
             let mut dx_ref = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
             gemm_bi_triad::gemm_bi_backward_dx(
-                &t.ctx.stream,
-                &t.ctx.kernels,
+                &t.ctx,
                 &mut dx_ref,
                 &dy32,
                 w32.cached_ptr(),
@@ -1768,6 +1750,130 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
         t.ctx.route_controls().half_policy(),
         mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrder
     );
+}
+
+/// The half TN relay takes the measured out_proj cell only under the
+/// permitting half policy, and its persistent hand-off reproduces the tiled
+/// route bit for bit: an unfinished tile's chain is continued in the next
+/// CTA, never folded, so only the grid changes. That is why the relay keeps
+/// the tiled numeric contract while carrying its own output ownership.
+#[test]
+fn sm89_automatic_dw_takes_the_half_relay_only_under_the_half_policy() {
+    use gemm_bi_triad::{
+        PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
+    };
+    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed;
+    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, HalfTriadPolicy};
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+        ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
+    };
+
+    let device = GpuDevice::new(0).expect("device 0");
+    if device.compute_capability != (8, 9) {
+        eprintln!(
+            "skip: the half relay cell is measured on CC 8.9, this board is {:?}",
+            device.compute_capability
+        );
+        return;
+    }
+    let t = Ctx::new();
+    t.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+    t.ctx.route_controls().set_family(BiGemmFamily::Triad);
+    t.ctx.route_controls().set_tensor_cores(true);
+    let dims = (2048usize, 1536usize, 768usize);
+    // 24 by 12 tiles is 288 CTAs against the 284 that stay resident: the
+    // tiled route pays a second wave for four tiles, the relay does not.
+    let units = 24 * 12 * (dims.0 as u32).div_ceil(64);
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        let x = t.typed_buf(&quantize(&det(dims.0 * dims.1, 0x71, 0.5), dt), dt);
+        let dy = t.typed_buf(&quantize(&det(dims.0 * dims.2, 0x72, 0.25), dt), dt);
+        let dyp = TypedPtr {
+            ptr: dy.cached_ptr(),
+            dtype: dt,
+        };
+        let xp = TypedPtr {
+            ptr: x.cached_ptr(),
+            dtype: dt,
+        };
+        let automatic = |policy: HalfTriadPolicy| {
+            t.ctx.route_controls().set_half_policy(policy);
+            let dw = GpuBuffer::zeros(&t.ctx.stream, dims.1 * dims.2).unwrap();
+            gemm_bi_backward_dw_typed(&t.ctx, dw.cached_ptr(), dyp, xp, dims)
+                .expect("automatic dW");
+            t.ctx.stream.synchronize().unwrap();
+            dw.to_cpu(&t.ctx.stream)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            automatic(HalfTriadPolicy::TiledParity),
+            automatic(HalfTriadPolicy::AllowStreamKFixedOrder),
+            "{dt:?}: the relay must reproduce the tiled route bit for bit"
+        );
+
+        let node_of = |policy: HalfTriadPolicy| {
+            t.ctx.route_controls().set_half_policy(policy);
+            let physical = qualify_physical_launch(
+                &t.ctx,
+                PhysicalQualificationRequest::contiguous(
+                    ResolvedGemmOp::Tn,
+                    dims,
+                    PhysicalQualificationRoute::HalfPolicy {
+                        dtype: dt,
+                        tensor_cores: true,
+                        half_policy: policy,
+                    },
+                ),
+            )
+            .expect("qualify the automatic dW route");
+            let evidence = physical.evidence();
+            let [node] = evidence.nodes() else {
+                panic!("{dt:?}: the automatic dW recorded more than one node");
+            };
+            *node
+        };
+        let tiled = node_of(HalfTriadPolicy::TiledParity);
+        assert!(
+            tiled.symbol.starts_with("tn_sm89_m64n64_bk64_s2_"),
+            "{dt:?}: tiled parity served {}",
+            tiled.symbol
+        );
+        assert_eq!(
+            tiled.ownership,
+            Some(ResolvedOutputOwnership::OneCtaPerOutputTile),
+            "{dt:?}"
+        );
+
+        let relayed = node_of(HalfTriadPolicy::AllowStreamKFixedOrder);
+        assert!(
+            relayed.symbol.starts_with("tn_sm89_relay_m64n64_bk64_s3"),
+            "{dt:?}: the permitting policy served {}",
+            relayed.symbol
+        );
+        assert_eq!(relayed.module_kind, ModuleKind::TriadSm89Half, "{dt:?}");
+        assert_eq!(
+            relayed.numeric_contract,
+            Some(ResolvedNumericContract::MmaSyncF32),
+            "{dt:?}: the hand-off keeps the tiled reduction order"
+        );
+        assert_eq!(
+            relayed.ownership,
+            Some(ResolvedOutputOwnership::RelayCtaChainPerOutputTile),
+            "{dt:?}"
+        );
+        assert!(
+            relayed.launch.grid_dim.0 > 1 && relayed.launch.grid_dim.0 < units,
+            "{dt:?}: relay grid {:?} against {units} units",
+            relayed.launch.grid_dim
+        );
+        assert_eq!(relayed.launch.block_dim, (128, 1, 1), "{dt:?}");
+        assert_eq!(relayed.launch.shared_mem_bytes, 49_152, "{dt:?}");
+    }
+    t.ctx
+        .route_controls()
+        .set_half_policy(HalfTriadPolicy::AllowStreamKFixedOrder);
 }
 
 /// On SM89 the automatic dW route takes the stream-K schedule for an

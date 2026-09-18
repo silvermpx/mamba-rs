@@ -89,30 +89,14 @@ fn bench_upcast_fallback_tax() {
         let iters = 50;
         // Bare f32 kernel (operands already f32).
         for _ in 0..3 {
-            gemm_bi_triad::gemm_bi_forward(
-                &t.ctx.stream,
-                &t.ctx.kernels,
-                &mut y32,
-                &x32,
-                w32.cached_ptr(),
-                0,
-                (m, k, n),
-            )
-            .unwrap();
+            gemm_bi_triad::gemm_bi_forward(&t.ctx, &mut y32, &x32, w32.cached_ptr(), 0, (m, k, n))
+                .unwrap();
         }
         t.ctx.stream.synchronize().unwrap();
         let t0 = Instant::now();
         for _ in 0..iters {
-            gemm_bi_triad::gemm_bi_forward(
-                &t.ctx.stream,
-                &t.ctx.kernels,
-                &mut y32,
-                &x32,
-                w32.cached_ptr(),
-                0,
-                (m, k, n),
-            )
-            .unwrap();
+            gemm_bi_triad::gemm_bi_forward(&t.ctx, &mut y32, &x32, w32.cached_ptr(), 0, (m, k, n))
+                .unwrap();
         }
         t.ctx.stream.synchronize().unwrap();
         let f32_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;

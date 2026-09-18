@@ -132,6 +132,12 @@ family refuses to replay with the other.
   reduction is deep enough for its persistent grid to pay (32 or more
   64-row slabs per multiprocessor); it folds per-block partial sums in a
   fixed order and is a separate bit family from the tiled kernels.
+- A half-precision weight gradient on a measured cell whose tile count
+  just exceeds the resident CTA count takes the relay kernel instead: it
+  walks the same persistent grid of (tile, slab) units, but when a tile's
+  chain crosses a block boundary the earlier block hands its accumulators
+  to the next one untouched. Nothing is folded, so the relay reproduces
+  the tiled kernel bit for bit; only the grid differs.
 - f32 products are exact unless the weights are stored as `Tf32`, which
   permits the deterministic TF32 kernels on the shapes and boards where
   they were measured and stays exact everywhere else.
@@ -200,30 +206,105 @@ pre-sized with the `presize_*` methods on `GpuCtx`.
 
 ## Architecture coverage
 
-The deterministic kernels compile for every architecture from SM80 up.
+The deterministic kernels compile for every architecture from SM80 up,
+and so do the specialized ones: every kernel the crate ships for a named
+board uses the SM80 instruction tier and nothing above it, so each
+specialized module is built for the device's own target on any SM80-tier
+board. The board decides which of them it will actually use.
+
 "Measured" below means the automatic kernel selection on that board was
-timed cell by cell and the winners were frozen with the board, the toolkit
-and the compiled artifact; the driver build is not part of that identity.
+timed cell by cell and the winners were frozen with the board, the
+toolkit and the compiled artifact; the driver build is not part of that
+identity. "Proven" means the board holds no such evidence and admits the
+route by the first-use bit proof described in the next section: the bits
+are guaranteed, the speed is the speed of the board the route was
+measured on, which is a claim about that board and not about this one.
 "Portable" means the generic kernels serve and no timing claim is made.
 
 | GPU | bf16 and f16 | exact f32 (`F32`) | deterministic TF32 (`Tf32`) |
 |---|---|---|---|
-| RTX 6000 Ada (SM89) | measured on CUDA 13.2 for the large shapes; portable kernels for the small ones | measured on CUDA 13.2; scalar kernels elsewhere | measured joint kernels on CUDA 13.2; portable kernels elsewhere |
+| RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes; portable kernels for the rest | measured; scalar kernels elsewhere | measured joint kernels; portable kernels elsewhere |
 | RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension | scalar kernels plus qualified TMA-fed FMA kernels | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 |
-| SM80, SM86, SM87 | portable | scalar | portable (Inference); exact f32 (Triad) |
-| SM90 and SM90a | portable; a native WGMMA kernel is tried behind a first-use self-check | scalar | exact f32 |
-| SM100 family (CC 10.0, 10.3, 11.0) | portable; a native `tcgen05` kernel is tried behind the same self-check | scalar | exact f32 |
-| CC 10.1 and CC 12.1 | portable | scalar | exact f32 |
+| SM80, SM86, SM87 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood; proven specialized cells where they match |
+| SM90 and SM90a | proven on the measured cells, portable elsewhere; a native WGMMA kernel is tried behind a first-use self-check | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
+| SM100 family (CC 10.0, 10.3, 10.7, 11.0) | proven on the measured cells, portable elsewhere; a native `tcgen05` kernel is tried behind the same self-check | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
+| CC 10.1 and CC 12.1 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
 
-The Hopper and Blackwell native kernels are guarded by a numeric self-check
-against the portable kernels at first use; if it fails, the portable
-kernels serve for the rest of the process. They are not measured winners
-on any board.
+"The measured cells and their neighbourhood" for the portable TF32 tier
+means: a shape the census measured takes its measured tile; a contiguous
+shape within a factor of four of a measured shape on every dimension and
+staged the same way (an operand takes the 16-byte loads only when its
+leading dimension is a multiple of four floats) takes the tile of the
+nearest measured shape, a wide tile brought down to 64x64 when the shape
+would not fill the board with it; any other shape takes the tier's
+default tile. Held out one at a time, the measured cells reproduce their
+own tiles from their neighbours 33 times in 38 at that factor. A board
+with a specialized TF32 module never reads the neighbourhood; its own
+cohorts decide.
+
+The inference family's specialized overlay is the one exception to the
+rule above: it is composed on every SM80-tier target except CC 12.x, whose
+own kernels serve there and whose module must stay byte-identical to the
+artifact its frozen cohorts were minted against.
+
+The Hopper and Blackwell native kernels are guarded by a numeric
+self-check against the portable kernels at first use; if it fails, the
+portable kernels serve for the rest of the process. They are not measured
+winners on any board.
 
 Toolkits outside CUDA 12.8, 13.0 and 13.2 are not rejected. A frozen kernel
 whose recorded toolkit does not match the running one is simply not
-selected, and the portable or scalar kernel serves instead, with a warning
-printed once.
+selected, and the route is then admitted by proof, or the portable or
+scalar kernel serves instead, with a warning printed once.
+
+## How a route is admitted on a board
+
+A route measured on one board is a candidate on every other board that
+runs its instruction tier, but its bits are not: the tensor-core
+accumulator rounds differently from one generation to the next, so a
+kernel that reproduces the incumbent bit for bit on one generation may
+not on the next. The board therefore decides for itself.
+
+At the first eager use of a candidate for an (operation, storage
+precision, shape) cell, the launcher runs the candidate and the reference
+route of the same numeric contract on the same operands, each into its
+own scratch output, and compares every output word:
+
+- equal words admit the candidate for the rest of the process;
+- any difference declines it, once, with the reason printed, and the
+  reference route serves that cell for the rest of the process.
+
+The reference is the route that served the cell before the candidate
+existed and under the same contract: the exact scalar or copy-plan kernel
+for an exact f32 candidate, the tiled tensor-core kernel for a half
+candidate, the portable TF32 kernel the cell was measured on for a TF32
+candidate.
+
+A TF32 candidate named by the neighbourhood rather than by an exact cell
+is proven the same way against the same reference, and counted by the
+same wave rule below.
+
+Before the proof runs, the board's own arithmetic has a say. A route
+measured on one board wins there partly by how its grid falls onto that
+board's multiprocessors, and on a board with a different count the same
+grid can spill into an extra wave. The launcher counts the waves the
+candidate's tile takes on this board - its CTA count over the CTAs the
+board keeps resident - and the waves the reference's tile takes, and
+declines the candidate when it takes strictly more waves while computing a
+tile no smaller, the one case no throughput advantage can recover. The
+decision is recorded like a failed proof, with the reason printed once. A
+persistent schedule sizes its own grid to the board and is never counted.
+
+A proof never runs inside a graph capture. The reference serves there,
+and because an admitted candidate is bit-equal to it, the bits a process
+produces never depend on which call came first. The consequence to know
+is that a process whose very first use of a cell happens inside a capture
+records the reference route in that graph and uses the candidate eagerly
+afterwards; the two agree bit for bit, but they are different kernels in
+the recorded route.
+
+`GpuCtx::gemm_route()` reports which kind of admission the route holds,
+so a report can distinguish a measured winner from a proven one.
 
 ## Errors
 

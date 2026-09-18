@@ -9,7 +9,7 @@ no fold admission applies; its fold kernels are the ones that shipped before
 fold admission, and the file is regenerated from the capacity-32 composition
 whenever the composed source moves (a kernel rename moves it without moving
 a bit). SHA-256, the capacity-32 source digest the test pins:
-`457e2e4076342df786917ac1b0aeb2ed60fc2279ddd6dc644109cbbddb0c8348`.
+`1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61`.
 The full source is intentional: compiling just the fold function would change
 its compiler context. It is a test fixture, not another production module.
 

@@ -22,6 +22,8 @@ pub(in crate::mamba_ssm::gpu) enum AbiKind {
     Sm120Tf32 = 6,
     Sm120Half = 7,
     Sm120PostBias = 8,
+    /// The Fixed sm89 32-byte parameter bundle under a TF32 kernel.
+    Tf32Sm89 = 9,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -775,6 +777,70 @@ const TERMINALS: &[TerminalSpec] = &[
         Sm120PostBias,
         Forbidden
     ),
+    terminal!(
+        "nn_sm89_m112n128_bk32_s3_f32",
+        (F32, F32),
+        InferenceScalarFma,
+        (112, 128, 32, 3, 256, 97536),
+        ExactF32,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m128n144_bk32_s2_f32out_bf16",
+        (Bf16, F32),
+        InferenceMma16,
+        (128, 144, 32, 2, 128, 39936),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m128n144_bk32_s2_f32out_f16",
+        (F16, F32),
+        InferenceMma16,
+        (128, 144, 32, 2, 128, 39936),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m128n96_bk64_s2_vec_bf16",
+        (Bf16, Bf16),
+        InferenceMma16,
+        (128, 96, 64, 2, 256, 63488),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m128n96_bk64_s2_vec_f16",
+        (F16, F16),
+        InferenceMma16,
+        (128, 96, 64, 2, 256, 63488),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m128n144_bk32_s2_vec_bf16",
+        (Bf16, Bf16),
+        InferenceMma16,
+        (128, 144, 32, 2, 256, 77824),
+        HalfSm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m64n288_bk16_s2_tf32",
+        (F32, F32),
+        InferenceMmaTf32Rna,
+        (64, 288, 16, 2, 128, 48128),
+        Tf32Sm89,
+        Optional
+    ),
+    terminal!(
+        "nn_sm89_m64n96_bk32_s2_tf32",
+        (F32, F32),
+        InferenceMmaTf32Rna,
+        (64, 96, 32, 2, 128, 45056),
+        Tf32Sm89,
+        Required
+    ),
 ];
 
 pub(in crate::mamba_ssm::gpu) fn terminal(symbol: &str) -> Option<&'static TerminalSpec> {
@@ -1065,7 +1131,7 @@ impl Arguments {
 
     fn dimensions(&self) -> Result<(usize, usize, usize), String> {
         let (m, k, n) = match self.abi {
-            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 => {
+            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 | AbiKind::Tf32Sm89 => {
                 (self.words[2], self.words[4], self.words[3])
             }
             AbiKind::Tf32 | AbiKind::Sm120Tf32 => (self.words[0], self.words[1], self.words[2]),
@@ -1107,7 +1173,7 @@ impl Arguments {
             return Err("Inference alpha/beta contract changed".into());
         }
         let expected = match self.abi {
-            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 => {
+            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 | AbiKind::Tf32Sm89 => {
                 [alpha, beta, m, n, k, k, n, n, 0, 0]
             }
             AbiKind::Tf32 => [m, k, n, k, n, n, 0, 0, 0, 0],
@@ -1369,7 +1435,7 @@ mod tests {
         route.tuning_table_revision = spec.tuning_revision();
         route.schedule_revision = SCHEDULE_REVISION;
         let words = match spec.abi {
-            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 => {
+            AbiKind::Legacy | AbiKind::ExactF32 | AbiKind::HalfSm89 | AbiKind::Tf32Sm89 => {
                 [1f32.to_bits(), 0, 3, 96, k, k, 96, 96, 0, 0]
             }
             AbiKind::Tf32 => [3, k, 96, k, 96, 96, 0, 0, 0, 0],
@@ -1885,8 +1951,56 @@ mod tests {
                 (128, 64, 16, 2, 256, 24592),
                 [1, 1, 1],
             ),
+            (
+                "nn_sm89_m112n128_bk32_s3_f32",
+                31,
+                (112, 128, 32, 3, 256, 97536),
+                [1, 1, 1],
+            ),
+            (
+                "nn_sm89_m128n144_bk32_s2_f32out_bf16",
+                33,
+                (128, 144, 32, 2, 128, 39936),
+                [PolicyDtype::Bf16 as u8, PolicyDtype::Bf16 as u8, 1],
+            ),
+            (
+                "nn_sm89_m128n144_bk32_s2_f32out_f16",
+                33,
+                (128, 144, 32, 2, 128, 39936),
+                [PolicyDtype::F16 as u8, PolicyDtype::F16 as u8, 1],
+            ),
+            (
+                "nn_sm89_m128n96_bk64_s2_vec_bf16",
+                33,
+                (128, 96, 64, 2, 256, 63488),
+                [PolicyDtype::Bf16 as u8; 3],
+            ),
+            (
+                "nn_sm89_m128n96_bk64_s2_vec_f16",
+                33,
+                (128, 96, 64, 2, 256, 63488),
+                [PolicyDtype::F16 as u8; 3],
+            ),
+            (
+                "nn_sm89_m128n144_bk32_s2_vec_bf16",
+                33,
+                (128, 144, 32, 2, 256, 77824),
+                [PolicyDtype::Bf16 as u8; 3],
+            ),
+            (
+                "nn_sm89_m64n288_bk16_s2_tf32",
+                36,
+                (64, 288, 16, 2, 128, 48128),
+                [1, 1, 1],
+            ),
+            (
+                "nn_sm89_m64n96_bk32_s2_tf32",
+                36,
+                (64, 96, 32, 2, 128, 45056),
+                [1, 1, 1],
+            ),
         ];
-        assert_eq!(TERMINALS.len(), 88);
+        assert_eq!(TERMINALS.len(), 96);
         assert_eq!(expected.len(), TERMINALS.len());
         let mut seen = std::collections::BTreeSet::new();
         for &(symbol, backend, geometry, storage) in expected {
@@ -1941,7 +2055,7 @@ mod tests {
             );
             assert_eq!(
                 route.tuning_table_revision,
-                if backend == 22 { 1 } else { 45 }
+                if backend == 22 { 1 } else { 46 }
             );
             assert_eq!(route.schedule_revision, 8);
             let observer = bounded_observer(args, route.shape);

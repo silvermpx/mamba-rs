@@ -147,8 +147,7 @@ fn check_forward(
     let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
     let bias_ptr = if with_bias { b32.cached_ptr() } else { 0 };
     gemm_bi_triad::gemm_bi_forward(
-        &t.ctx.stream,
-        &t.ctx.kernels,
+        &t.ctx,
         &mut y32,
         &x32,
         w32.cached_ptr(),
@@ -208,15 +207,7 @@ fn check_dw(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let x32 = t.f32_buf(&qx);
     let dy32 = t.f32_buf(&qdy);
     let dw32 = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-    gemm_bi_triad::gemm_bi_backward_dw(
-        &t.ctx.stream,
-        &t.ctx.kernels,
-        dw32.cached_ptr(),
-        &dy32,
-        &x32,
-        (m, k, n),
-    )
-    .unwrap();
+    gemm_bi_triad::gemm_bi_backward_dw(&t.ctx, dw32.cached_ptr(), &dy32, &x32, (m, k, n)).unwrap();
     t.ctx.stream.synchronize().unwrap();
     let ref_dw = dw32.to_cpu(&t.ctx.stream).unwrap();
 
@@ -262,15 +253,8 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let dy32 = t.f32_buf(&qdy);
     let w32 = t.f32_buf(&qw);
     let mut dx32 = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
-    gemm_bi_triad::gemm_bi_backward_dx(
-        &t.ctx.stream,
-        &t.ctx.kernels,
-        &mut dx32,
-        &dy32,
-        w32.cached_ptr(),
-        (m, k, n),
-    )
-    .unwrap();
+    gemm_bi_triad::gemm_bi_backward_dx(&t.ctx, &mut dx32, &dy32, w32.cached_ptr(), (m, k, n))
+        .unwrap();
     t.ctx.stream.synchronize().unwrap();
     let ref_dx = dx32.to_cpu(&t.ctx.stream).unwrap();
 

@@ -21,6 +21,8 @@ enum LiteralRoute {
     NnDirectN96,
     NnN96,
     NtALdmatrixN96,
+    TnM96N192S2,
+    TnM96N96S3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +53,7 @@ struct LiteralCase {
     transform_symbol: Option<&'static str>,
     transpose_grid: Option<(u32, u32, u32)>,
     gemm_grid: (u32, u32, u32),
+    gemm_block: u32,
     gemm_tile: (u32, u32),
     gemm_shared_bytes: u32,
 }
@@ -58,10 +61,12 @@ struct LiteralCase {
 const TRANSPOSE_SYMBOL: &str = "tn_sm89_tf32_pre_rna_transpose_32x32";
 const TN_N96_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m128n96_bk32_s3";
 const TN_M64N96_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n96_bk32_s2";
-const LOWER_TN_M64N64_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
 const NN_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
 const NN_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
 const NT_A_LDMATRIX_N96_SYMBOL: &str = "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3";
+const WIDE_TN_M96N192_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m96n192_w3x4_bk32_s2";
+const WIDE_TN_M96N96_S3_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m96n96_bk32_s3";
+const LOWER_TN_M64N64_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
 const OLD_TN_M64N64_SYMBOL: &str = "tn_sm80_mma_tf32_m64n64_bk32_s2";
 const OLD_TN_M128N64_SYMBOL: &str = "tn_sm80_mma_tf32_m128n64_bk32_s3";
 const OLD_NN_M128N128_SYMBOL: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
@@ -77,6 +82,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: Some(TRANSPOSE_SYMBOL),
         transpose_grid: Some((24, 64, 1)),
         gemm_grid: (192, 1, 1),
+        gemm_block: 256,
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
@@ -90,6 +96,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: Some(TRANSPOSE_SYMBOL),
         transpose_grid: Some((48, 64, 1)),
         gemm_grid: (96, 1, 1),
+        gemm_block: 256,
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
@@ -103,6 +110,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: Some(TRANSPOSE_SYMBOL),
         transpose_grid: Some((12, 145, 1)),
         gemm_grid: (126, 1, 1),
+        gemm_block: 256,
         gemm_tile: (64, 96),
         gemm_shared_bytes: 40_960,
     },
@@ -116,6 +124,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: None,
         transpose_grid: None,
         gemm_grid: (777, 1, 1),
+        gemm_block: 256,
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
@@ -129,6 +138,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: None,
         transpose_grid: None,
         gemm_grid: (128, 1, 1),
+        gemm_block: 256,
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
@@ -142,6 +152,7 @@ const CASES: [LiteralCase; 6] = [
         transform_symbol: None,
         transpose_grid: None,
         gemm_grid: (128, 1, 1),
+        gemm_block: 256,
         gemm_tile: (128, 96),
         gemm_shared_bytes: 86_016,
     },
@@ -151,15 +162,20 @@ fn post_admission_symbol_and_module(
     case: LiteralCase,
     nvrtc: (i32, i32),
 ) -> (&'static str, LiteralModule) {
-    if matches!(nvrtc, (12, 8) | (13, 0)) {
-        return match case.name {
-            "tn_prism" => (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
-            "nn_prism" => (case.old_auto_symbol, LiteralModule::Sm80),
-            "nt_d768_in" => (case.old_auto_symbol, LiteralModule::Sm89Finalist),
-            _ => (case.gemm_symbol, LiteralModule::Sm89Joint),
-        };
+    match case.name {
+        "tn_d768_in" => (WIDE_TN_M96N192_S2_SYMBOL, LiteralModule::Sm89Joint),
+        "tn_d768_out" => (WIDE_TN_M96N96_S3_SYMBOL, LiteralModule::Sm89Joint),
+        "tn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+            (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint)
+        }
+        "nn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+            (case.old_auto_symbol, LiteralModule::Sm80)
+        }
+        "nt_d768_in" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+            (case.old_auto_symbol, LiteralModule::Sm89Finalist)
+        }
+        _ => (case.gemm_symbol, LiteralModule::Sm89Joint),
     }
-    (case.gemm_symbol, LiteralModule::Sm89Joint)
 }
 
 #[test]
@@ -207,13 +223,13 @@ fn six_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
 }
 
 #[test]
-fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
+fn toolkit_literal_map_keeps_lower_winners_and_serves_the_wide_d768_tn_tiles() {
     for (nvrtc, expected) in [
         (
             (12, 8),
             [
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N192_S2_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N96_S3_SYMBOL, LiteralModule::Sm89Joint),
                 (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
                 (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
                 (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
@@ -226,8 +242,8 @@ fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
         (
             (13, 0),
             [
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N192_S2_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N96_S3_SYMBOL, LiteralModule::Sm89Joint),
                 (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint),
                 (OLD_NN_M128N128_SYMBOL, LiteralModule::Sm80),
                 (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
@@ -240,8 +256,8 @@ fn toolkit_literal_map_keeps_lower_winners_and_adds_nt_only_on_cuda_13_2() {
         (
             (13, 2),
             [
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
-                (TN_N96_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N192_S2_SYMBOL, LiteralModule::Sm89Joint),
+                (WIDE_TN_M96N96_S3_SYMBOL, LiteralModule::Sm89Joint),
                 (TN_M64N96_S2_SYMBOL, LiteralModule::Sm89Joint),
                 (NN_DIRECT_N96_SYMBOL, LiteralModule::Sm89Joint),
                 (NN_N96_SYMBOL, LiteralModule::Sm89Joint),
@@ -288,16 +304,36 @@ mod live {
             LiteralRoute::NnDirectN96 => Tf32PhysicalRoute::Sm89NnDirectN96,
             LiteralRoute::NnN96 => Tf32PhysicalRoute::Sm89NnN96,
             LiteralRoute::NtALdmatrixN96 => Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            LiteralRoute::TnM96N192S2 => Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
+            LiteralRoute::TnM96N96S3 => Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
         }
     }
 
     fn auto_expected_case(mut case: LiteralCase, nvrtc: (i32, i32)) -> LiteralCase {
-        if case.name == "tn_prism" && matches!(nvrtc, (12, 8) | (13, 0)) {
-            case.route = LiteralRoute::TnM64N64;
-            case.gemm_symbol = LOWER_TN_M64N64_SYMBOL;
-            case.gemm_grid = (186, 1, 1);
-            case.gemm_tile = (64, 64);
-            case.gemm_shared_bytes = 49_152;
+        match case.name {
+            "tn_d768_in" => {
+                case.route = LiteralRoute::TnM96N192S2;
+                case.gemm_symbol = WIDE_TN_M96N192_S2_SYMBOL;
+                case.gemm_grid = (128, 1, 1);
+                case.gemm_block = 384;
+                case.gemm_tile = (96, 192);
+                case.gemm_shared_bytes = 73_728;
+            }
+            "tn_d768_out" => {
+                case.route = LiteralRoute::TnM96N96S3;
+                case.gemm_symbol = WIDE_TN_M96N96_S3_SYMBOL;
+                case.gemm_grid = (128, 1, 1);
+                case.gemm_tile = (96, 96);
+                case.gemm_shared_bytes = 73_728;
+            }
+            "tn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+                case.route = LiteralRoute::TnM64N64;
+                case.gemm_symbol = LOWER_TN_M64N64_SYMBOL;
+                case.gemm_grid = (186, 1, 1);
+                case.gemm_tile = (64, 64);
+                case.gemm_shared_bytes = 49_152;
+            }
+            _ => {}
         }
         case
     }
@@ -399,7 +435,7 @@ mod live {
             || gemm.numeric_contract != Some(expected_numeric)
             || gemm.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTile)
             || gemm.launch.grid_dim != case.gemm_grid
-            || gemm.launch.block_dim != (256, 1, 1)
+            || gemm.launch.block_dim != (case.gemm_block, 1, 1)
             || gemm.launch.shared_mem_bytes != case.gemm_shared_bytes
         {
             return Err(format!("{} forced GEMM node drifted: {gemm:?}", case.name));

@@ -40,10 +40,14 @@ mod contract;
 mod dispatch;
 mod launch;
 pub(crate) mod modules;
+pub(in crate::mamba_ssm::gpu) mod proof;
 mod qualification;
 mod sm89_exact_f32_d128_source;
 mod sm89_exact_f32_source;
 mod sm89_finalist_source;
+mod sm89_half_d128_source;
+mod sm89_half_relay_source;
+mod sm89_half_small_source;
 mod sm89_half_source;
 mod sm89_half_tn_source;
 mod sm89_tf32_joint_source;
@@ -93,6 +97,7 @@ pub use dispatch::{
 pub(in crate::mamba_ssm::gpu) use dispatch::{
     Sm120AutoRequest, tc_half_policy_prefers_scalar_forward,
 };
+pub(in crate::mamba_ssm::gpu) use launch::proven_candidate;
 pub(in crate::mamba_ssm::gpu) use launch::record_physical_exact_scalar_f32_backward_dx_ptrs;
 pub(in crate::mamba_ssm::gpu) use launch::validate_f32_triad_pointer_request;
 pub use launch::*;
@@ -133,10 +138,11 @@ pub use sm89_tf32_joint_source::{
     GEMM_DRIVER_ABI as SM89_TF32_JOINT_GEMM_DRIVER_ABI,
     GEMM_TERMINAL_ARGUMENT as SM89_TF32_JOINT_GEMM_TERMINAL_ARGUMENT,
     NN_ADD_HALF_DIRECT_N96_SYMBOL, NN_ADD_HALF_N96_SYMBOL, NT_A_LDMATRIX_N96_SYMBOL,
-    SM89_TF32_JOINT_KERNEL_SPECS, SM89_TF32_JOINT_SYMBOLS, Sm89Tf32JointAbiParameter,
-    Sm89Tf32JointGemmParams, Sm89Tf32JointKernelKind, Sm89Tf32JointKernelSpec,
-    Sm89Tf32JointTransposeParams, TN_PRE_RNA_M64N64_SYMBOL, TN_PRE_RNA_M64N96_S2_SYMBOL,
-    TN_PRE_RNA_N96_SYMBOL, TN_PRE_RNA_TRANSPOSE_SYMBOL,
-    TRANSPOSE_DRIVER_ABI as SM89_TF32_JOINT_TRANSPOSE_DRIVER_ABI,
+    NT_RNA_M144N96_S2_SYMBOL, NT_ROWSTAGE_M128N192_S2_SYMBOL, SM89_TF32_JOINT_KERNEL_SPECS,
+    SM89_TF32_JOINT_SYMBOLS, Sm89Tf32JointAbiParameter, Sm89Tf32JointGemmParams,
+    Sm89Tf32JointKernelKind, Sm89Tf32JointKernelSpec, Sm89Tf32JointTransposeParams,
+    TN_DIRECT_M192N192_S2_SYMBOL, TN_PRE_RNA_M64N64_SYMBOL, TN_PRE_RNA_M64N96_S2_SYMBOL,
+    TN_PRE_RNA_M96N96_S3_SYMBOL, TN_PRE_RNA_M96N192_S2_SYMBOL, TN_PRE_RNA_N96_SYMBOL,
+    TN_PRE_RNA_TRANSPOSE_SYMBOL, TRANSPOSE_DRIVER_ABI as SM89_TF32_JOINT_TRANSPOSE_DRIVER_ABI,
     TRANSPOSE_TERMINAL_ARGUMENT as SM89_TF32_JOINT_TRANSPOSE_TERMINAL_ARGUMENT,
 };

@@ -1,4 +1,5 @@
 use crate::mamba_ssm::gpu::{
+    context::HalfTriadPolicy,
     dtype::WeightDtype,
     kernel_identity::{
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
@@ -182,11 +183,30 @@ pub const SM89_HALF_KERNEL_SPECS: [Sm89HalfKernelSpec; 10] = [
 pub(super) enum Sm89HalfRuntimeRoute {
     Legacy(Sm89HalfRoute),
     TnSmall16Bk64S2Ldb72,
+    TnD128InM32N16Bk64S4,
+    TnD128OutM32N16Bk64S4,
+    NtSmallM16N64Bk64S4,
+    NnSmallM16N64Bk64S4,
+    TnRelayM64N64Bk64S3,
+}
+
+/// How a retained half kernel covers its output: one CTA per output tile
+/// for the whole reduction, or a persistent grid whose CTAs walk a range of
+/// (tile, slab) units and hand an unfinished tile's accumulators to the next
+/// CTA. The relay keeps the tiled reduction order exactly - nothing is ever
+/// folded - but its grid is the board's resident CTA count rather than the
+/// tile count, so a request only reaches it when it permits a schedule other
+/// than one owner CTA per tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Sm89HalfSchedule {
+    Tiled,
+    Relay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Sm89HalfRuntimeSpec {
     pub(super) route: Sm89HalfRuntimeRoute,
+    pub(super) schedule: Sm89HalfSchedule,
     pub(super) op: ResolvedGemmOp,
     pub(super) dtype: WeightDtype,
     pub(super) symbol: &'static str,
@@ -203,6 +223,7 @@ pub(super) struct Sm89HalfRuntimeSpec {
 const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
     Sm89HalfRuntimeSpec {
         route: Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        schedule: Sm89HalfSchedule::Tiled,
         op: ResolvedGemmOp::Tn,
         dtype: WeightDtype::F16,
         symbol: super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
@@ -217,6 +238,7 @@ const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
     },
     Sm89HalfRuntimeSpec {
         route: Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        schedule: Sm89HalfSchedule::Tiled,
         op: ResolvedGemmOp::Tn,
         dtype: WeightDtype::Bf16,
         symbol: super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
@@ -231,10 +253,135 @@ const SM89_HALF_SMALL16_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
     },
 ];
 
+const fn d128_spec(
+    route: Sm89HalfRuntimeRoute,
+    dtype: WeightDtype,
+    symbol: &'static str,
+) -> Sm89HalfRuntimeSpec {
+    Sm89HalfRuntimeSpec {
+        route,
+        schedule: Sm89HalfSchedule::Tiled,
+        op: ResolvedGemmOp::Tn,
+        dtype,
+        symbol,
+        tile: (32, 16),
+        bk: 64,
+        stages: 4,
+        threads: 128,
+        dynamic_shared_bytes: 24_576,
+        static_shared_bytes: 0,
+        register_cap: 128,
+        occupancy_gate: 3,
+    }
+}
+
+const SM89_HALF_D128_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 4] = [
+    d128_spec(
+        Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4,
+        WeightDtype::Bf16,
+        super::sm89_half_d128_source::D128_IN_BF16_SYMBOL,
+    ),
+    d128_spec(
+        Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4,
+        WeightDtype::F16,
+        super::sm89_half_d128_source::D128_IN_F16_SYMBOL,
+    ),
+    d128_spec(
+        Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4,
+        WeightDtype::Bf16,
+        super::sm89_half_d128_source::D128_OUT_BF16_SYMBOL,
+    ),
+    d128_spec(
+        Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4,
+        WeightDtype::F16,
+        super::sm89_half_d128_source::D128_OUT_F16_SYMBOL,
+    ),
+];
+
+const fn small_spec(
+    route: Sm89HalfRuntimeRoute,
+    op: ResolvedGemmOp,
+    dtype: WeightDtype,
+    symbol: &'static str,
+) -> Sm89HalfRuntimeSpec {
+    Sm89HalfRuntimeSpec {
+        route,
+        schedule: Sm89HalfSchedule::Tiled,
+        op,
+        dtype,
+        symbol,
+        tile: (16, 64),
+        bk: 64,
+        stages: 4,
+        threads: 128,
+        dynamic_shared_bytes: 46_080,
+        static_shared_bytes: 0,
+        register_cap: 128,
+        occupancy_gate: 2,
+    }
+}
+
+const SM89_HALF_SMALL_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 4] = [
+    small_spec(
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+        ResolvedGemmOp::Nt,
+        WeightDtype::Bf16,
+        super::sm89_half_small_source::NT_BF16_SYMBOL,
+    ),
+    small_spec(
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+        ResolvedGemmOp::Nt,
+        WeightDtype::F16,
+        super::sm89_half_small_source::NT_F16_SYMBOL,
+    ),
+    small_spec(
+        Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4,
+        ResolvedGemmOp::Nn,
+        WeightDtype::Bf16,
+        super::sm89_half_small_source::NN_BF16_SYMBOL,
+    ),
+    small_spec(
+        Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4,
+        ResolvedGemmOp::Nn,
+        WeightDtype::F16,
+        super::sm89_half_small_source::NN_F16_SYMBOL,
+    ),
+];
+
+const fn relay_spec(dtype: WeightDtype, symbol: &'static str) -> Sm89HalfRuntimeSpec {
+    Sm89HalfRuntimeSpec {
+        route: Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3,
+        schedule: Sm89HalfSchedule::Relay,
+        op: ResolvedGemmOp::Tn,
+        dtype,
+        symbol,
+        tile: (64, 64),
+        bk: 64,
+        stages: 3,
+        threads: 128,
+        dynamic_shared_bytes: 49_152,
+        static_shared_bytes: 0,
+        register_cap: 128,
+        occupancy_gate: 2,
+    }
+}
+
+const SM89_HALF_RELAY_RUNTIME_SPECS: [Sm89HalfRuntimeSpec; 2] = [
+    relay_spec(
+        WeightDtype::Bf16,
+        super::sm89_half_relay_source::RELAY_BF16_SYMBOL,
+    ),
+    relay_spec(
+        WeightDtype::F16,
+        super::sm89_half_relay_source::RELAY_F16_SYMBOL,
+    ),
+];
+
 impl From<Sm89HalfKernelSpec> for Sm89HalfRuntimeSpec {
     fn from(spec: Sm89HalfKernelSpec) -> Self {
         Self {
             route: Sm89HalfRuntimeRoute::Legacy(spec.route),
+            schedule: Sm89HalfSchedule::Tiled,
             op: spec.op,
             dtype: spec.dtype,
             symbol: spec.symbol,
@@ -255,6 +402,9 @@ pub(super) fn runtime_kernel_specs() -> impl Iterator<Item = Sm89HalfRuntimeSpec
         .into_iter()
         .map(Into::into)
         .chain(SM89_HALF_SMALL16_RUNTIME_SPECS)
+        .chain(SM89_HALF_D128_RUNTIME_SPECS)
+        .chain(SM89_HALF_SMALL_RUNTIME_SPECS)
+        .chain(SM89_HALF_RELAY_RUNTIME_SPECS)
 }
 
 pub(super) fn runtime_kernel_spec(symbol: &str) -> Option<Sm89HalfRuntimeSpec> {
@@ -268,18 +418,88 @@ type Sm89HalfRuntimeAutoCell = (
     Sm89HalfRuntimeRoute,
 );
 
+/// The d_model-128 classifier cells: (m, k, n) of the forward product, so
+/// the weight gradient reduces over m = 1024 and the input gradient over n.
 const SM89_HALF_RUNTIME_AUTO_CELLS: &[Sm89HalfRuntimeAutoCell] = &[
     (
         ResolvedGemmOp::Tn,
         WeightDtype::F16,
+        (1024, 128, 512),
+        Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::Bf16,
+        (1024, 128, 512),
+        Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::F16,
         (1024, 256, 128),
-        Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4,
     ),
     (
         ResolvedGemmOp::Tn,
         WeightDtype::Bf16,
         (1024, 256, 128),
-        Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72,
+        Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nt,
+        WeightDtype::F16,
+        (1024, 128, 512),
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nt,
+        WeightDtype::Bf16,
+        (1024, 128, 512),
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nt,
+        WeightDtype::F16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nt,
+        WeightDtype::Bf16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nn,
+        WeightDtype::F16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4,
+    ),
+    (
+        ResolvedGemmOp::Nn,
+        WeightDtype::Bf16,
+        (1024, 256, 128),
+        Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4,
+    ),
+];
+
+/// The cells the relay's persistent grid was measured to win, served only
+/// where the request permits a schedule other than one owner CTA per output
+/// tile. Its 24-by-12 tile grid is 288 CTAs against the 284 that stay
+/// resident on the measured board, so the tiled route pays a whole second
+/// wave for four tiles while the relay deals the same units evenly.
+const SM89_HALF_RELAY_AUTO_CELLS: &[Sm89HalfRuntimeAutoCell] = &[
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::F16,
+        (2048, 1536, 768),
+        Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3,
+    ),
+    (
+        ResolvedGemmOp::Tn,
+        WeightDtype::Bf16,
+        (2048, 1536, 768),
+        Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3,
     ),
 ];
 
@@ -418,6 +638,7 @@ pub(crate) struct Sm89HalfAutoRequest {
     pub(crate) request: F32TriadRequest,
     pub(crate) operands: F32TriadOperands,
     pub(crate) dtype: WeightDtype,
+    pub(crate) half_policy: HalfTriadPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -449,20 +670,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            53, 88, 65, 230, 45, 14, 201, 183, 247, 226, 214, 102, 144, 121, 155, 158, 171, 74,
-            215, 231, 20, 233, 129, 192, 56, 63, 212, 253, 130, 161, 215, 223,
+            155, 140, 40, 5, 105, 72, 38, 36, 184, 235, 200, 73, 84, 208, 115, 65, 120, 204, 28,
+            19, 189, 105, 132, 198, 73, 53, 146, 12, 142, 219, 134, 40,
         ],
         artifact_digest: [
-            105, 101, 89, 217, 145, 231, 253, 49, 68, 241, 63, 238, 53, 183, 251, 140, 203, 212,
-            135, 137, 147, 113, 57, 50, 48, 6, 116, 137, 82, 190, 211, 123,
+            16, 150, 215, 9, 188, 160, 111, 157, 227, 13, 237, 88, 232, 170, 71, 184, 142, 216,
+            176, 238, 130, 247, 4, 225, 42, 226, 69, 229, 206, 61, 183, 134,
         ],
         source_digest: [
-            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
-            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
+            119, 14, 26, 233, 177, 24, 174, 10, 222, 189, 122, 59, 254, 121, 1, 113, 70, 69, 207,
+            210, 63, 182, 245, 97, 230, 50, 9, 23, 173, 137, 203, 174,
         ],
         header_manifest_digest: [
-            22, 87, 107, 243, 151, 28, 253, 49, 242, 12, 194, 42, 91, 0, 77, 36, 127, 52, 18, 137,
-            4, 139, 202, 102, 4, 163, 21, 132, 25, 25, 209, 30,
+            150, 20, 78, 185, 190, 198, 27, 43, 225, 134, 41, 17, 38, 157, 140, 65, 102, 129, 167,
+            213, 43, 34, 59, 77, 193, 230, 39, 235, 212, 192, 83, 229,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -472,20 +693,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            65, 65, 203, 117, 136, 145, 250, 24, 36, 71, 155, 185, 173, 182, 193, 13, 226, 32, 12,
-            56, 26, 29, 37, 231, 223, 124, 129, 142, 182, 183, 227, 116,
+            201, 140, 194, 202, 75, 142, 150, 113, 92, 73, 39, 133, 62, 74, 54, 210, 219, 94, 218,
+            106, 20, 224, 125, 185, 14, 169, 72, 209, 160, 108, 216, 67,
         ],
         artifact_digest: [
-            103, 139, 45, 1, 147, 23, 36, 71, 36, 139, 182, 27, 193, 230, 132, 93, 75, 43, 85, 5,
-            173, 112, 30, 188, 224, 87, 251, 56, 133, 10, 247, 127,
+            203, 75, 149, 197, 111, 217, 43, 252, 117, 56, 3, 6, 213, 240, 185, 212, 158, 194, 107,
+            178, 245, 215, 248, 78, 163, 243, 252, 89, 46, 172, 214, 175,
         ],
         source_digest: [
-            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
-            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
+            119, 14, 26, 233, 177, 24, 174, 10, 222, 189, 122, 59, 254, 121, 1, 113, 70, 69, 207,
+            210, 63, 182, 245, 97, 230, 50, 9, 23, 173, 137, 203, 174,
         ],
         header_manifest_digest: [
-            242, 235, 68, 21, 160, 216, 233, 162, 18, 142, 9, 52, 72, 241, 130, 135, 159, 123, 44,
-            26, 14, 135, 237, 109, 93, 33, 180, 4, 11, 182, 177, 226,
+            253, 110, 32, 47, 146, 28, 179, 45, 62, 159, 115, 214, 238, 53, 247, 142, 218, 92, 109,
+            33, 200, 171, 222, 56, 69, 63, 45, 218, 210, 71, 99, 154,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -495,20 +716,20 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     Sm89HalfAutoIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            206, 165, 241, 150, 102, 4, 108, 38, 147, 144, 42, 227, 187, 156, 10, 246, 252, 102,
-            71, 126, 117, 23, 202, 241, 78, 142, 200, 27, 199, 21, 109, 173,
+            149, 116, 8, 128, 91, 3, 246, 232, 53, 30, 7, 233, 198, 101, 160, 81, 152, 59, 85, 206,
+            101, 195, 189, 117, 10, 236, 123, 69, 48, 49, 58, 77,
         ],
         artifact_digest: [
-            46, 14, 19, 187, 72, 120, 118, 238, 197, 130, 145, 21, 142, 84, 215, 9, 116, 224, 25,
-            29, 152, 19, 97, 51, 65, 21, 9, 204, 206, 152, 222, 82,
+            132, 92, 12, 19, 116, 99, 4, 238, 78, 164, 151, 81, 104, 244, 109, 137, 193, 8, 59,
+            137, 89, 44, 184, 141, 39, 237, 182, 168, 243, 145, 165, 41,
         ],
         source_digest: [
-            67, 118, 205, 134, 184, 14, 106, 71, 66, 38, 133, 164, 196, 63, 122, 71, 94, 46, 103,
-            161, 25, 15, 186, 238, 157, 109, 231, 110, 68, 194, 89, 107,
+            119, 14, 26, 233, 177, 24, 174, 10, 222, 189, 122, 59, 254, 121, 1, 113, 70, 69, 207,
+            210, 63, 182, 245, 97, 230, 50, 9, 23, 173, 137, 203, 174,
         ],
         header_manifest_digest: [
-            102, 251, 184, 239, 126, 11, 177, 44, 8, 222, 75, 16, 227, 229, 86, 208, 35, 131, 183,
-            95, 193, 160, 100, 5, 18, 117, 67, 208, 14, 27, 201, 237,
+            148, 230, 235, 205, 131, 25, 233, 104, 51, 218, 97, 68, 247, 94, 181, 205, 197, 87, 78,
+            255, 19, 90, 87, 108, 56, 66, 12, 41, 212, 31, 115, 204,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -517,17 +738,39 @@ const SM89_HALF_AUTO_IDENTITIES: [Sm89HalfAutoIdentity; 3] = [
     },
 ];
 
+/// How an Ada half cell is admitted on this board: by the frozen identity
+/// of the module it was measured on, or by the first-use proof against the
+/// tiled route of the same contract (`gemm_bi_triad::proof`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sm89HalfAdmission {
+    Cohort,
+    Proof,
+}
+
+/// The cell selection the frozen Ada evidence alone admits.
+#[cfg(test)]
 pub(crate) fn select_sm89_half_auto_cell(
     context: Sm89HalfAutoContext,
     request: Sm89HalfAutoRequest,
 ) -> Option<Sm89HalfRuntimeSpec> {
+    select_sm89_half_auto_cell_with_admission(context, request)
+        .filter(|(_, admission)| *admission == Sm89HalfAdmission::Cohort)
+        .map(|(spec, _)| spec)
+}
+
+/// The cell selection every board can reach: the module bound for this
+/// board's own target, the cell listed by the Ada evidence, and the
+/// admission kind the launcher must honour before it launches.
+pub(crate) fn select_sm89_half_auto_cell_with_admission(
+    context: Sm89HalfAutoContext,
+    request: Sm89HalfAutoRequest,
+) -> Option<(Sm89HalfRuntimeSpec, Sm89HalfAdmission)> {
     let compiler = context.compiler?;
     let artifact = context.artifact?;
-    if context.compute_capability != (8, 9)
-        || context.multiprocessor_count != 142
+    if context.compute_capability.0 < 8
+        || context.multiprocessor_count == 0
         || artifact.module_kind != ModuleKind::TriadSm89Half
         || artifact.artifact_kind != ArtifactKind::Ptx
-        || compiler.target.as_str() != "sm_89"
         || !compiler.nvrtc_library_known
         || compiler.output_kind != ArtifactKind::Ptx
         || compiler.composer_revision != COMPOSER_REVISION
@@ -537,9 +780,20 @@ pub(crate) fn select_sm89_half_auto_cell(
     {
         return None;
     }
-    SM89_HALF_AUTO_IDENTITIES
-        .iter()
-        .find(|identity| identity.matches(compiler, artifact))?;
+    // The frozen identities were minted on the Ada board; only that board
+    // may take them as evidence. Every other board proves at first use.
+    let ada_board = context.compute_capability == (8, 9)
+        && context.multiprocessor_count == 142
+        && compiler.target.as_str() == "sm_89";
+    let admission = if ada_board
+        && SM89_HALF_AUTO_IDENTITIES
+            .iter()
+            .any(|identity| identity.matches(compiler, artifact))
+    {
+        Sm89HalfAdmission::Cohort
+    } else {
+        Sm89HalfAdmission::Proof
+    };
     let dims = (
         request.request.shape.m,
         request.request.shape.k,
@@ -582,8 +836,22 @@ pub(crate) fn select_sm89_half_auto_cell(
             op == request.request.op && dtype == request.dtype && shape == dims
         })
         .map(|&(_, _, _, route)| route);
-    let route = legacy_route.or(runtime_route)?;
-    runtime_kernel_specs().find(|spec| spec.route == route && spec.dtype == request.dtype)
+    // The relay is a schedule, not a tile: it takes the cell only where the
+    // request permits a grid other than one owner CTA per output tile, so a
+    // tiled-parity request keeps the measured tiled route.
+    let relay_route = SM89_HALF_RELAY_AUTO_CELLS
+        .iter()
+        .find(|&&(op, dtype, shape, _)| {
+            request.half_policy == HalfTriadPolicy::AllowStreamKFixedOrder
+                && op == request.request.op
+                && dtype == request.dtype
+                && shape == dims
+        })
+        .map(|&(_, _, _, route)| route);
+    let route = relay_route.or(legacy_route).or(runtime_route)?;
+    runtime_kernel_specs()
+        .find(|spec| spec.route == route && spec.dtype == request.dtype)
+        .map(|spec| (spec, admission))
 }
 
 pub(super) fn kernel_spec(
@@ -598,7 +866,17 @@ pub(super) fn kernel_spec(
 pub(super) fn compose_sm89_half_source() -> Result<String, String> {
     super::sm89_half_tn_source::validate_source()?;
     let tn_fragment = super::sm89_half_tn_source::compose_fragment_for_sm89_half()?;
-    let source = format!("{}\n{}", BASE_SOURCE.trim_end(), tn_fragment);
+    let d128_fragment = super::sm89_half_d128_source::fragment()?;
+    let small_fragment = super::sm89_half_small_source::fragment()?;
+    let relay_fragment = super::sm89_half_relay_source::fragment()?;
+    let source = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        BASE_SOURCE.trim_end(),
+        tn_fragment,
+        d128_fragment.trim_end(),
+        small_fragment.trim_end(),
+        relay_fragment.trim_end()
+    );
     for spec in runtime_kernel_specs() {
         let represented_once = match spec.route {
             Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::NtM128N128Bk64S3Bxor) => {
@@ -662,16 +940,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (12, 8),
                 compile_key: digest(
-                    "355841e62d0ec9b7f7e2d66690799b9eab4ad7e714e981c0383fd4fd82a1d7df",
+                    "9b8c280569482624b8ebc84954d0734178cc1c13bd6984c64935920c8edb8628",
                 ),
                 artifact_digest: digest(
-                    "696559d991e7fd3144f13fee35b7fb8ccbd48789937139323006748952bed37b",
+                    "1096d709bca06f9de30ded58e8aa47b88ed8b0ee82f704e12ae245e5ce3db786",
                 ),
                 source_digest: digest(
-                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
+                    "770e1ae9b118ae0adebd7a3bfe7901714645cfd23fb6f561e6320917ad89cbae",
                 ),
                 header_manifest_digest: digest(
-                    "16576bf3971cfd31f20cc22a5b004d247f341289048bca6604a315841919d11e",
+                    "96144eb9bec61b2be1862911269d8c416681a7d52b223b4dc1e627ebd4c053e5",
                 ),
                 nvrtc_library_domain: digest(
                     "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
@@ -680,16 +958,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (13, 0),
                 compile_key: digest(
-                    "4141cb758891fa1824479bb9adb6c10de2200c381a1d25e7df7c818eb6b7e374",
+                    "c98cc2ca4b8e96715c4927853e4a36d2db5eda6a14e07db90ea948d1a06cd843",
                 ),
                 artifact_digest: digest(
-                    "678b2d0193172447248bb61bc1e6845d4b2b5505ad701ebce057fb38850af77f",
+                    "cb4b95c56fd92bfc75380306d5f0b9d49ec26bb2f5d7f84ea3f3fc592eacd6af",
                 ),
                 source_digest: digest(
-                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
+                    "770e1ae9b118ae0adebd7a3bfe7901714645cfd23fb6f561e6320917ad89cbae",
                 ),
                 header_manifest_digest: digest(
-                    "f2eb4415a0d8e9a2128e093448f182879f7b2c1a0e87ed6d5d21b4040bb6b1e2",
+                    "fd6e202f921cb32d3e9f73d6ee35f78eda5c6d21c8abde38453f2ddad247639a",
                 ),
                 nvrtc_library_domain: digest(
                     "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
@@ -698,16 +976,16 @@ mod tests {
             Sm89HalfAutoIdentity {
                 nvrtc_version: (13, 2),
                 compile_key: digest(
-                    "cea5f19666046c2693902ae3bb9c0af6fc66477e7517caf14e8ec81bc7156dad",
+                    "957408805b03f6e8351e07e9c665a051983b55ce65c3bd750aec7b4530313a4d",
                 ),
                 artifact_digest: digest(
-                    "2e0e13bb487876eec58291158e54d70974e0191d98136133411509ccce98de52",
+                    "845c0c13746304ee4ea4975168f46d89c1083b89592cb88d27edb6a8f391a529",
                 ),
                 source_digest: digest(
-                    "4376cd86b80e6a47422685a4c43f7a475e2e67a1190fbaee9d6de76e44c2596b",
+                    "770e1ae9b118ae0adebd7a3bfe7901714645cfd23fb6f561e6320917ad89cbae",
                 ),
                 header_manifest_digest: digest(
-                    "66fbb8ef7e0bb12c08de4b10e3e556d02383b75fc1a06405127543d00e1bc9ed",
+                    "94e6ebcd8319e96833da6144f75eb5cdc5574eff135a576c38420c29d41f73cc",
                 ),
                 nvrtc_library_domain: digest(
                     "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
@@ -847,6 +1125,18 @@ mod tests {
                 beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
             },
             dtype,
+            half_policy: HalfTriadPolicy::TiledParity,
+        }
+    }
+
+    fn relay_request(
+        op: ResolvedGemmOp,
+        dtype: WeightDtype,
+        dims: (usize, usize, usize),
+    ) -> Sm89HalfAutoRequest {
+        Sm89HalfAutoRequest {
+            half_policy: HalfTriadPolicy::AllowStreamKFixedOrder,
+            ..auto_request(op, dtype, dims)
         }
     }
 
@@ -866,20 +1156,22 @@ mod tests {
     }
 
     #[test]
-    fn triad_retained_half_private_registry_has_twelve_specs_and_twenty_auto_cells() {
+    fn triad_retained_half_private_registry_has_every_spec_and_auto_cell() {
         let specs = runtime_kernel_specs().collect::<Vec<_>>();
-        assert_eq!(specs.len(), 12);
+        assert_eq!(specs.len(), 22);
         assert_eq!(
             specs
                 .iter()
                 .map(|spec| spec.route)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            6
+            11
         );
         assert_eq!(
-            SM89_HALF_AUTO_CELLS.len() + SM89_HALF_RUNTIME_AUTO_CELLS.len(),
-            20
+            SM89_HALF_AUTO_CELLS.len()
+                + SM89_HALF_RUNTIME_AUTO_CELLS.len()
+                + SM89_HALF_RELAY_AUTO_CELLS.len(),
+            30
         );
         for (symbol, dtype) in [
             (
@@ -907,24 +1199,139 @@ mod tests {
     }
 
     #[test]
-    fn triad_retained_half_selector_admits_only_the_exact_small16_cells() {
-        for (dtype, symbol) in [
+    fn triad_retained_half_selector_serves_the_classifier_cells_with_the_lane_winners() {
+        use super::super::{sm89_half_d128_source as d128, sm89_half_small_source as small};
+        for (op, dims, dtype, symbol) in [
             (
+                ResolvedGemmOp::Tn,
+                (1024, 128, 512),
                 WeightDtype::Bf16,
-                super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+                d128::D128_IN_BF16_SYMBOL,
             ),
             (
+                ResolvedGemmOp::Tn,
+                (1024, 128, 512),
                 WeightDtype::F16,
-                super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+                d128::D128_IN_F16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (1024, 256, 128),
+                WeightDtype::Bf16,
+                d128::D128_OUT_BF16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (1024, 256, 128),
+                WeightDtype::F16,
+                d128::D128_OUT_F16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (1024, 128, 512),
+                WeightDtype::Bf16,
+                small::NT_BF16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (1024, 128, 512),
+                WeightDtype::F16,
+                small::NT_F16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (1024, 256, 128),
+                WeightDtype::Bf16,
+                small::NT_BF16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (1024, 256, 128),
+                WeightDtype::F16,
+                small::NT_F16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (1024, 256, 128),
+                WeightDtype::Bf16,
+                small::NN_BF16_SYMBOL,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (1024, 256, 128),
+                WeightDtype::F16,
+                small::NN_F16_SYMBOL,
             ),
         ] {
-            let selected = select_sm89_half_auto_cell(
-                auto_context((13, 2)),
-                auto_request(ResolvedGemmOp::Tn, dtype, (1024, 256, 128)),
-            )
-            .expect("exact retained small16 AUTO cell");
+            let selected =
+                select_sm89_half_auto_cell(auto_context((13, 2)), auto_request(op, dtype, dims))
+                    .unwrap_or_else(|| panic!("{op:?}/{dtype:?}/{dims:?} declined"));
             assert_eq!(selected.symbol, symbol);
+            assert_eq!(selected.op, op);
+            assert_eq!(selected.dtype, dtype);
+            assert_eq!(selected.stages, 4);
         }
+        for symbol in [
+            super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+            super::super::sm89_half_tn_source::SMALL16_F16_SYMBOL,
+        ] {
+            let spec = runtime_kernel_spec(symbol).expect("small16 stays a compiled runtime spec");
+            assert!(
+                !SM89_HALF_RUNTIME_AUTO_CELLS
+                    .iter()
+                    .any(|&(_, _, _, route)| route == spec.route),
+                "the d128 out tile superseded the small16 cell"
+            );
+        }
+        assert!(
+            select_sm89_half_auto_cell(
+                auto_context((13, 2)),
+                auto_request(ResolvedGemmOp::Nn, WeightDtype::Bf16, (1024, 128, 512)),
+            )
+            .is_none(),
+            "the in_proj forward has no measured small tile"
+        );
+    }
+
+    #[test]
+    fn triad_retained_half_relay_takes_the_out_proj_cell_only_where_it_is_permitted() {
+        let context = auto_context((13, 2));
+        let dims = (2048, 1536, 768);
+        for (dtype, tiled) in [
+            (WeightDtype::F16, Sm89HalfRoute::TnM64N64Bk64S2CompactBxor),
+            (WeightDtype::Bf16, Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2),
+        ] {
+            let (relay, _) = select_sm89_half_auto_cell_with_admission(
+                context,
+                relay_request(ResolvedGemmOp::Tn, dtype, dims),
+            )
+            .expect("the relay cell is measured for both dtypes");
+            assert_eq!(relay.route, Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3);
+            assert_eq!(relay.schedule, Sm89HalfSchedule::Relay);
+            assert_eq!(relay.dtype, dtype);
+            assert_eq!(relay.tile, (64, 64));
+            assert_eq!(relay.threads, 128);
+            assert_eq!(relay.dynamic_shared_bytes, 49_152);
+
+            let (parity, _) = select_sm89_half_auto_cell_with_admission(
+                context,
+                auto_request(ResolvedGemmOp::Tn, dtype, dims),
+            )
+            .expect("tiled parity keeps the measured tiled cell");
+            assert_eq!(parity.route, Sm89HalfRuntimeRoute::Legacy(tiled));
+            assert_eq!(parity.schedule, Sm89HalfSchedule::Tiled);
+        }
+        // Permission is not a forced schedule: a cell the relay was never
+        // measured on keeps its tiled route under either policy.
+        let (elsewhere, _) = select_sm89_half_auto_cell_with_admission(
+            context,
+            relay_request(ResolvedGemmOp::Tn, WeightDtype::Bf16, (2048, 768, 3072)),
+        )
+        .expect("the d768 in_proj cell stays served");
+        assert_eq!(
+            elsewhere.route,
+            Sm89HalfRuntimeRoute::Legacy(Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2)
+        );
     }
 
     #[test]

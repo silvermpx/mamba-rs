@@ -10,7 +10,7 @@
 
 use cudarc::cublas::sys as cublas_sys;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Hash)]
 pub enum WeightDtype {
     /// IEEE 754 single precision. Default. Largest memory footprint and
     /// the safe choice for math sensitive to precision (full pre-training,

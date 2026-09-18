@@ -262,6 +262,57 @@ struct CacheEnvGuard(Option<std::ffi::OsString>);
 struct CudaCacheEnvGuard(Option<std::ffi::OsString>);
 
 #[cfg(target_os = "linux")]
+struct CacheTraceEnvGuard {
+    trace: Option<std::ffi::OsString>,
+    directory: Option<std::ffi::OsString>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CacheTraceEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            for (name, value) in [
+                ("MAMBA_RS_CACHE_TRACE", self.trace.take()),
+                ("MAMBA_RS_CACHE_TRACE_DIR", self.directory.take()),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+/// The test's cache root: removed with the test on success, kept with every
+/// envelope and every compiled PTX when the test panics, so a compile whose
+/// text differs from its siblings can be read after the fact.
+#[cfg(target_os = "linux")]
+struct KeptOnFailure(Option<tempfile::TempDir>);
+
+#[cfg(target_os = "linux")]
+impl KeptOnFailure {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_ref().expect("cache root").path()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for KeptOnFailure {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(root) = self.0.take()
+        {
+            let kept = root.keep();
+            eprintln!(
+                "cache envelopes and compiled PTX kept at {}",
+                kept.display()
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Drop for CacheEnvGuard {
     fn drop(&mut self) {
         unsafe {
@@ -771,18 +822,31 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
     #[cfg(target_os = "linux")]
     let home = std::fs::canonicalize(home).expect("canonical HOME");
     #[cfg(target_os = "linux")]
-    let root = tempfile::Builder::new()
-        .prefix("mamba-cache-test-")
-        .tempdir_in(home)
-        .expect("trusted cache root");
+    let root = KeptOnFailure(Some(
+        tempfile::Builder::new()
+            .prefix("mamba-cache-test-")
+            .tempdir_in(home)
+            .expect("trusted cache root"),
+    ));
     #[cfg(target_os = "linux")]
     let _env_guard = CacheEnvGuard(std::env::var_os("MAMBA_RS_KERNEL_CACHE"));
     #[cfg(target_os = "linux")]
     let _cuda_cache_guard = CudaCacheEnvGuard(std::env::var_os("CUDA_CACHE_DISABLE"));
     #[cfg(target_os = "linux")]
+    let _trace_guard = CacheTraceEnvGuard {
+        trace: std::env::var_os("MAMBA_RS_CACHE_TRACE"),
+        directory: std::env::var_os("MAMBA_RS_CACHE_TRACE_DIR"),
+    };
+    #[cfg(target_os = "linux")]
+    std::fs::create_dir_all(root.path().join("ptx")).expect("PTX trace directory");
+    #[cfg(target_os = "linux")]
     unsafe {
         std::env::set_var("MAMBA_RS_KERNEL_CACHE", root.path().join("cache"));
         std::env::set_var("CUDA_CACHE_DISABLE", "1");
+        // Every cache decision is printed and every compiled PTX is written
+        // by its digest: a failure leaves the texts it compares.
+        std::env::set_var("MAMBA_RS_CACHE_TRACE", "1");
+        std::env::set_var("MAMBA_RS_CACHE_TRACE_DIR", root.path().join("ptx"));
     }
 
     let device = GpuDevice::new(0).expect("CUDA device");

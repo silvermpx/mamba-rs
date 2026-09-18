@@ -331,7 +331,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
-        assert_eq!(TUNING_TABLE_REVISION, 45);
+        assert_eq!(TUNING_TABLE_REVISION, 46);
         assert!(compiler.nvrtc_library_known);
         assert!(matches!(
             compiler.nvrtc_version,
@@ -1522,6 +1522,261 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Every Ada inference cell launched on the shape it was measured for, with
+/// and without a bias where the cell admits both. The values are held
+/// against the exact f32 Triad product of the same rounded operands, a
+/// second launch must repeat the first bit for bit, and on the board and
+/// toolkits the cells are frozen for the resolved symbol must be the cell.
+/// The cells are reached only through the automatic selection, so a cell
+/// whose launch faults or whose epilogue drifts is caught here.
+#[test]
+fn fixed_sm89_cells_launch_on_their_measured_shapes() {
+    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
+    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+
+    struct CellCase {
+        symbol: &'static str,
+        input: WeightDtype,
+        output: WeightDtype,
+        dims: (usize, usize, usize),
+        bias: &'static [bool],
+        tf32: bool,
+        tolerance: f64,
+    }
+    const CASES: [CellCase; 8] = [
+        CellCase {
+            symbol: "nn_sm89_m112n128_bk32_s3_f32",
+            input: WeightDtype::F32,
+            output: WeightDtype::F32,
+            dims: (4621, 1928, 384),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 1e-6,
+        },
+        CellCase {
+            symbol: "nn_sm89_m128n144_bk32_s2_f32out_bf16",
+            input: WeightDtype::Bf16,
+            output: WeightDtype::F32,
+            dims: (2048, 768, 2304),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 1e-5,
+        },
+        CellCase {
+            symbol: "nn_sm89_m128n144_bk32_s2_f32out_f16",
+            input: WeightDtype::F16,
+            output: WeightDtype::F32,
+            dims: (2048, 768, 2304),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 1e-5,
+        },
+        CellCase {
+            symbol: "nn_sm89_m128n144_bk32_s2_vec_bf16",
+            input: WeightDtype::Bf16,
+            output: WeightDtype::Bf16,
+            dims: (2048, 768, 2304),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 5e-3,
+        },
+        CellCase {
+            symbol: "nn_sm89_m64n288_bk16_s2_tf32",
+            input: WeightDtype::F32,
+            output: WeightDtype::F32,
+            dims: (2048, 768, 2304),
+            bias: &[false, true],
+            tf32: true,
+            tolerance: 3e-3,
+        },
+        CellCase {
+            symbol: "nn_sm89_m128n96_bk64_s2_vec_bf16",
+            input: WeightDtype::Bf16,
+            output: WeightDtype::Bf16,
+            dims: (2048, 2304, 768),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 5e-3,
+        },
+        CellCase {
+            symbol: "nn_sm89_m128n96_bk64_s2_vec_f16",
+            input: WeightDtype::F16,
+            output: WeightDtype::F16,
+            dims: (2048, 2304, 768),
+            bias: &[false, true],
+            tf32: false,
+            tolerance: 1e-3,
+        },
+        CellCase {
+            symbol: "nn_sm89_m64n96_bk32_s2_tf32",
+            input: WeightDtype::F32,
+            output: WeightDtype::F32,
+            dims: (2048, 2304, 768),
+            bias: &[true],
+            tf32: true,
+            tolerance: 3e-3,
+        },
+    ];
+
+    fn pseudo_random(count: usize, seed: u32, scale: f32) -> Vec<f32> {
+        let mut state = seed;
+        (0..count)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                ((state & 0xFFFF) as f32 / 65536.0 - 0.5) * scale
+            })
+            .collect()
+    }
+    fn rounded(values: &[f32], dtype: WeightDtype) -> Vec<f32> {
+        values
+            .iter()
+            .map(|&value| match dtype {
+                WeightDtype::Bf16 => half::bf16::from_f32(value).to_f32(),
+                WeightDtype::F16 => half::f16::from_f32(value).to_f32(),
+                WeightDtype::F32 | WeightDtype::Tf32 => value,
+            })
+            .collect()
+    }
+    fn rel_l2(actual: &[f32], expected: &[f32]) -> f64 {
+        let (mut numerator, mut denominator) = (0.0f64, 0.0f64);
+        for (a, e) in actual.iter().zip(expected) {
+            numerator += (f64::from(*a) - f64::from(*e)).powi(2);
+            denominator += f64::from(*e).powi(2);
+        }
+        (numerator / denominator.max(1e-30)).sqrt()
+    }
+
+    let device = GpuDevice::new(0).expect("CUDA device");
+    let reference = GpuCtx::new(&device).expect("reference context");
+    let ctx = GpuCtx::new(&device).expect("inference context");
+    ctx.route_controls().set_family(BiGemmFamily::Inference);
+    let identity = ctx.kernels.compiler_identity();
+    let frozen = device.compute_capability == (8, 9)
+        && identity.nvrtc_library_known
+        && matches!(identity.nvrtc_version, (12, 8) | (13, 0) | (13, 2));
+    for case in &CASES {
+        let (m, k, n) = case.dims;
+        ctx.route_controls().set_f32_policy(if case.tf32 {
+            F32TriadPolicy::AllowDeterministicTf32
+        } else {
+            F32TriadPolicy::ExactScalarFma
+        });
+        let x = rounded(&pseudo_random(m * k, 11, 1.0), case.input);
+        let w = rounded(&pseudo_random(k * n, 13, 0.05), case.input);
+        let bias_values = pseudo_random(n, 17, 0.1);
+        let x_f32 = GpuBuffer::from_cpu(&reference.stream, &x).expect("x");
+        let w_f32 = GpuBuffer::from_cpu(&reference.stream, &w).expect("w");
+        let bias_f32 = GpuBuffer::from_cpu(&reference.stream, &bias_values).expect("bias");
+        // The half operands carry the same rounded values as the f32 ones.
+        let half_of = |values: &[f32]| -> Vec<u16> {
+            values
+                .iter()
+                .map(|&value| half_bits(value, case.input))
+                .collect()
+        };
+        let (x_half, w_half) = if matches!(case.input, WeightDtype::Bf16 | WeightDtype::F16) {
+            (
+                Some(upload_half(&ctx, &half_of(&x))),
+                Some(upload_half(&ctx, &half_of(&w))),
+            )
+        } else {
+            (None, None)
+        };
+        let x_ptr = x_half
+            .as_ref()
+            .map_or(x_f32.cached_ptr(), |b| b.cached_ptr());
+        let w_ptr = w_half
+            .as_ref()
+            .map_or(w_f32.cached_ptr(), |b| b.cached_ptr());
+        for &with_bias in case.bias {
+            let bias_ptr = with_bias.then(|| bias_f32.cached_ptr());
+            let mut expected = GpuBuffer::zeros(&reference.stream, m * n).expect("expected");
+            gpu_gemm_bi_forward_raw(
+                &reference,
+                &mut expected,
+                &x_f32,
+                w_f32.cached_ptr(),
+                bias_ptr,
+                (m, k, n),
+            )
+            .expect("exact f32 reference");
+            let expected = expected
+                .to_cpu(&reference.stream)
+                .expect("download expected");
+
+            let mut out_f32 = GpuBuffer::zeros(&ctx.stream, m * n).expect("f32 output");
+            let mut out_half = GpuByteBuffer::zeros(&ctx.stream, m * n * 2).expect("half output");
+            let c_ptr = match case.output {
+                WeightDtype::F32 | WeightDtype::Tf32 => out_f32.cached_ptr(),
+                WeightDtype::Bf16 | WeightDtype::F16 => out_half.cached_ptr(),
+            };
+            let launch = || {
+                inference_forward(
+                    &ctx,
+                    typed(c_ptr, case.output),
+                    typed(x_ptr, case.input),
+                    typed(w_ptr, case.input),
+                    bias_ptr,
+                    (m, k, n),
+                )
+                .map(drop)
+            };
+            let trace = ctx
+                .record_eager_gemm_trace(launch)
+                .unwrap_or_else(|error| panic!("{} bias={with_bias}: {error}", case.symbol));
+            ctx.stream.synchronize().expect("first launch");
+            let symbols: Vec<&str> = trace.routes().iter().map(|route| route.symbol).collect();
+            if frozen {
+                assert!(
+                    symbols.contains(&case.symbol),
+                    "{} bias={with_bias} resolved {symbols:?}",
+                    case.symbol
+                );
+            }
+            let read = |out_f32: &GpuBuffer, out_half: &GpuByteBuffer| -> (Vec<u32>, Vec<f32>) {
+                match case.output {
+                    WeightDtype::F32 | WeightDtype::Tf32 => {
+                        let values = out_f32.to_cpu(&ctx.stream).expect("download f32");
+                        (values.iter().map(|v| v.to_bits()).collect(), values)
+                    }
+                    WeightDtype::Bf16 | WeightDtype::F16 => {
+                        let bits = raw_half(&ctx, out_half);
+                        let values = bits
+                            .iter()
+                            .map(|&h| match case.output {
+                                WeightDtype::Bf16 => half::bf16::from_bits(h).to_f32(),
+                                _ => half::f16::from_bits(h).to_f32(),
+                            })
+                            .collect();
+                        (bits.iter().map(|&h| u32::from(h)).collect(), values)
+                    }
+                }
+            };
+            let (first_bits, values) = read(&out_f32, &out_half);
+            let error = rel_l2(&values, &expected);
+            assert!(
+                error <= case.tolerance,
+                "{} bias={with_bias}: relative L2 {error:.3e} exceeds {:.1e} ({symbols:?})",
+                case.symbol,
+                case.tolerance
+            );
+            out_f32.zero(&ctx.stream).expect("zero f32 output");
+            out_half.zero(&ctx.stream).expect("zero half output");
+            launch()
+                .unwrap_or_else(|error| panic!("{} bias={with_bias} repeat: {error}", case.symbol));
+            ctx.stream.synchronize().expect("second launch");
+            let (second_bits, _) = read(&out_f32, &out_half);
+            assert_eq!(
+                first_bits, second_bits,
+                "{} bias={with_bias} repeat bits",
+                case.symbol
+            );
         }
     }
 }

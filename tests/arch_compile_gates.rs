@@ -684,11 +684,14 @@ const SM80_EXTENSION_SYMBOLS: [&str; 7] = [
 ];
 
 /// The existing extension target set, limited by the active toolkit's
-/// explicit SM110 support floor. Compilation errors remain fatal.
+/// explicit SM110 and SM107 support floors. Compilation errors remain fatal.
 fn sm80_extension_targets(version: (i32, i32)) -> Vec<&'static str> {
     let mut targets = vec!["sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a"];
     if version >= (13, 2) {
         targets.push("sm_110a");
+    }
+    if version >= (13, 4) {
+        targets.push("sm_107a");
     }
     targets
 }
@@ -702,11 +705,20 @@ fn sm80_extension_targets_respect_nvrtc_version() {
             "unsupported sm_110a must not be requested with NVRTC {version:?}"
         );
     }
-    for version in [(13, 2), (13, 3), (14, 0)] {
+    for version in [(13, 2), (13, 3)] {
         assert_eq!(
             sm80_extension_targets(version),
             [
                 "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a"
+            ],
+            "supported extension target disappeared with NVRTC {version:?}"
+        );
+    }
+    for version in [(13, 4), (14, 0)] {
+        assert_eq!(
+            sm80_extension_targets(version),
+            [
+                "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a", "sm_107a"
             ],
             "supported extension target disappeared with NVRTC {version:?}"
         );
@@ -2826,6 +2838,12 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
         architectures.push("sm_110");
         architectures.push("sm_110a");
     }
+    if version >= (13, 4) {
+        architectures.push("sm_107a");
+    }
+    if version >= (13, 4) {
+        architectures.push("sm_107a");
+    }
     for arch in architectures {
         let ptx = compile_fixed_for(arch);
         let parsed = parse_compile_gate_ptx(&ptx).expect("parse Fixed PTX");
@@ -3016,6 +3034,7 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
         "sm_90a",
         "sm_100a",
         "sm_103a",
+        "sm_107a",
         "sm_110a",
         "sm_120",
         "sm_121",
@@ -3075,6 +3094,7 @@ fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
         "sm_90a",
         "sm_100a",
         "sm_103a",
+        "sm_107a",
         "sm_110a",
         "sm_120",
         "sm_121",
@@ -4681,6 +4701,14 @@ fn compiles_for_sm103a() {
 }
 
 #[test]
+fn compiles_for_sm107a_when_the_active_nvrtc_supports_it() {
+    if nvrtc_version() < (13, 4) {
+        return;
+    }
+    compile_for("sm_107a");
+}
+
+#[test]
 fn family_targets_assemble_under_ptxas() {
     let Some(ptxas) = ptxas_path() else {
         println!("no ptxas on this box; assembly gate skipped (NVRTC gates still ran)");
@@ -4697,6 +4725,9 @@ fn family_targets_assemble_under_ptxas() {
     if version >= (13, 2) {
         architectures.push("sm_110");
         architectures.push("sm_110a");
+    }
+    if version >= (13, 4) {
+        architectures.push("sm_107a");
     }
     for arch in architectures {
         for (kind, source) in module_sources(arch) {

@@ -225,6 +225,10 @@ fn digest_hex(digest: &[u8; 32]) -> String {
 }
 
 #[cfg(feature = "cuda")]
+/// The retained tiled families are this tool's subject: it asks for the
+/// tiled contract explicitly, so the persistent relay schedule the
+/// production policy permits on the out_proj cell does not displace them
+/// here. That schedule is qualified by the tensor-core suite instead.
 fn qualify_and_print_auto_evidence(
     t: &Ctx,
     cell: &str,
@@ -238,7 +242,7 @@ fn qualify_and_print_auto_evidence(
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores: true,
-            half_policy: t.ctx.route_controls().half_policy(),
+            half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
         },
     );
     let qualified = gemm_bi_triad::qualify_physical_launch(&t.ctx, request)?;
@@ -1165,7 +1169,7 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
                 gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
                     dtype: weight_dtype(case.dtype),
                     tensor_cores: true,
-                    half_policy: t.ctx.route_controls().half_policy(),
+                    half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
                 },
             )
         })
@@ -1177,7 +1181,7 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype: weight_dtype(nn.dtype),
             tensor_cores: true,
-            half_policy: t.ctx.route_controls().half_policy(),
+            half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
         },
     ));
     gemm_bi_triad::presize_physical_qualification_suite(&t.ctx, &actual_auto_requests)?;

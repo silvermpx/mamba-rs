@@ -52,6 +52,12 @@ served, comparator (Fast TF32, Fast f32 compute or Pedantic f32), output
 dtype, eager or graph path, and
 the window count and aggregation. Boards are reported separately.
 
+It also records how the route was admitted on the board it was timed on.
+A route the board holds a frozen cohort for is a measured winner there; a
+route the board admitted by the first-use bit proof carries the speed
+evidence of the board it was measured on and none of its own, and a table
+may not present the two as the same claim.
+
 ## Order
 
 1. Host: `cargo fmt --all -- --check`, `cargo clippy --workspace

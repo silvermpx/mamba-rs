@@ -405,8 +405,7 @@ pub fn gpu_gemm_bi_backward_dw_grad(
                 )
             }
             super::context::BiGemmFamily::Inference => super::gemm_bi_triad::gemm_bi_backward_dw(
-                &ctx.stream,
-                &ctx.kernels,
+                ctx,
                 dw.ptr(),
                 dy,
                 x_saved,
@@ -1767,6 +1766,10 @@ fn prepare_native_half_graph_launch(
             } else {
                 arguments.push(checked.n_i32)?;
             }
+            // A persistent schedule carries its hand-off workspaces after
+            // the tiled list. The count check below refuses a launch whose
+            // schedule this builder does not bind, so a missing arm is an
+            // error and never a short argument array handed to the Driver.
             if base == "tn_tc64_streamk" {
                 let (partial, flags) = super::gemm_bi_triad::sm80_streamk_workspace(
                     &ctx.stream,
@@ -1775,6 +1778,22 @@ fn prepare_native_half_graph_launch(
                 )?;
                 arguments.push(partial)?;
                 arguments.push(flags)?;
+            } else if base == super::gemm_bi_triad::SM89_HALF_RELAY_BASE {
+                let (partial, flags) = super::gemm_bi_triad::sm89_half_relay_workspace(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    config.grid_dim.0,
+                )?;
+                arguments.push(partial)?;
+                arguments.push(flags)?;
+            }
+            let expected = super::gemm_bi_triad::half_tn_graph_parameter_count(base);
+            if arguments.values().len() != expected {
+                return Err(format!(
+                    "the prepared graph builder bound {} arguments for {base}, whose kernel \
+                     takes {expected}",
+                    arguments.values().len()
+                ));
             }
         }
         ResolvedGemmOp::Nt => {

@@ -3943,7 +3943,7 @@ pub fn tf32_qualification_route_specs(
     let specialized = match cc {
         (8, 0 | 6 | 7 | 9) => &[][..],
         (9, 0) => &SM90A_TF32_ROUTE_SPECS,
-        (10, 0 | 3) | (11, 0) => &SM100_TF32_ROUTE_SPECS,
+        (10, 0 | 3 | 7) | (11, 0) => &SM100_TF32_ROUTE_SPECS,
         (12, 0 | 1) => &SM120_TF32_ROUTE_SPECS,
         _ => {
             return Err(format!(
@@ -5966,6 +5966,7 @@ mod tests {
             ((9, 0), 25),
             ((10, 0), 55),
             ((10, 3), 55),
+            ((10, 7), 55),
             ((11, 0), 55),
             ((12, 0), 36),
             ((12, 1), 36),
@@ -5990,6 +5991,7 @@ mod tests {
             ((9, 0), 1),
             ((10, 0), 1),
             ((10, 3), 1),
+            ((10, 7), 1),
             ((11, 0), 1),
             ((12, 0), 0),
             ((12, 1), 0),
@@ -6860,7 +6862,7 @@ mod tests {
             portable.tuning_table_revision,
             super::super::contract::F32_TF32_TUNING_REVISION
         );
-        ctx.validate_resolved_gemm_route(&portable, "live portable revision 45")
+        ctx.validate_resolved_gemm_route(&portable, "live portable revision 46")
             .unwrap();
         let mut wrong_family_revision = portable;
         wrong_family_revision.tuning_table_revision = 2;

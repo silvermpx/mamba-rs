@@ -3,14 +3,14 @@ use std::collections::BTreeSet;
 pub const OWNER_TEMPLATE: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89/exact_f32_d128.cu");
 
-pub const OWNER_SHA256: &str = "c684cfcc1165af0ad5cdc2e9e0e1c5c4d7d2986d48fb37b6c192a2dd40718310";
+pub const OWNER_SHA256: &str = "3d5226abe9d28b17fd0c6d02718da57a2bd2fa5906fbe1305cac9f60d019e70f";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [
-    0xc6, 0x84, 0xcf, 0xcc, 0x11, 0x65, 0xaf, 0x0a, 0xd5, 0xcd, 0xc2, 0xe9, 0xe0, 0xe1, 0xc5, 0xc4,
-    0xd7, 0xd2, 0x98, 0x6d, 0x48, 0xfb, 0x37, 0xb6, 0xc1, 0x92, 0xa2, 0xdd, 0x40, 0x71, 0x83, 0x10,
+    0x3d, 0x52, 0x26, 0xab, 0xe9, 0xd2, 0x8b, 0x17, 0xfd, 0x0c, 0x6d, 0x02, 0x71, 0x8d, 0xa5, 0x7a,
+    0x2b, 0xd2, 0xfa, 0x59, 0x06, 0xfb, 0xe1, 0x30, 0x5c, 0xac, 0x9f, 0x60, 0xd0, 0x19, 0xe7, 0x0f,
 ];
 
-pub const D128_IN_SYMBOL: &str = "tn_sm89_f32_d128_in_m16n16_f64fold";
-pub const D128_OUT_SYMBOL: &str = "tn_sm89_f32_d128_out_m8n16_f64fold";
+pub const D128_IN_SYMBOL: &str = "tn_sm89_f32_d128_in_m16n16_g8_s2_cg";
+pub const D128_OUT_SYMBOL: &str = "tn_sm89_f32_d128_out_m16n16_g8_s2_cg";
 
 /// Separate CUDA Driver arguments: output, A, B, alpha, M, K, N.
 /// Each pair is the byte offset and size in the kernel parameter buffer.
@@ -38,8 +38,9 @@ impl Sm89ExactF32D128Route {
     }
 }
 
-/// Frozen launch and resource limits for the two retained SplitM64-equivalent
-/// direct folds. These bounds are qualification requirements, not live receipts.
+/// Frozen launch and resource limits for the two direct folds that stand in
+/// for the 64-chunk split-M reduction. These bounds are qualification
+/// requirements, not live receipts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm89ExactF32D128KernelSpec {
     pub symbol: &'static str,
@@ -66,12 +67,12 @@ pub const SM89_EXACT_F32_D128_KERNEL_SPECS: [Sm89ExactF32D128KernelSpec; 2] = [
         shape: (1_024, 128, 512),
         tile: (16, 16),
         grid: (256, 1, 1),
-        block: (64, 1, 1),
-        dynamic_shared_bytes: 4_096,
+        block: (256, 1, 1),
+        dynamic_shared_bytes: 49_152,
         static_shared_bytes: 0,
         local_bytes: 0,
-        register_cap: 112,
-        occupancy_gate: 8,
+        register_cap: 128,
+        occupancy_gate: 2,
         chunks: 64,
         m_chunk: 16,
         abi_parameter_count: 7,
@@ -81,14 +82,14 @@ pub const SM89_EXACT_F32_D128_KERNEL_SPECS: [Sm89ExactF32D128KernelSpec; 2] = [
         symbol: D128_OUT_SYMBOL,
         kind: Sm89ExactF32D128KernelKind::DirectF64FoldFinal,
         shape: (1_024, 256, 128),
-        tile: (8, 16),
-        grid: (256, 1, 1),
-        block: (64, 1, 1),
-        dynamic_shared_bytes: 3_072,
+        tile: (16, 16),
+        grid: (128, 1, 1),
+        block: (256, 1, 1),
+        dynamic_shared_bytes: 49_152,
         static_shared_bytes: 0,
         local_bytes: 0,
-        register_cap: 96,
-        occupancy_gate: 8,
+        register_cap: 128,
+        occupancy_gate: 2,
         chunks: 64,
         m_chunk: 16,
         abi_parameter_count: 7,
@@ -107,10 +108,8 @@ const ROUTE_END: &str = "// SM89_EXACT_F32_D128_ROUTE_END";
 const NAMESPACE_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_NAMESPACE__";
 const K_OUT_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_K_OUT__";
 const N_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_N__";
-const TILE_M_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_TILE_M__";
-const OUTPUTS_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_OUTPUTS_PER_THREAD__";
 const SHARED_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_SHARED_BYTES__";
-const STAGE_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_STAGE__";
+const GRID_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_GRID__";
 const SYMBOL_PLACEHOLDER: &str = "__SM89_EXACT_F32_D128_SYMBOL__";
 
 const D128_IN_NAMESPACE: &str = "GemmBiTnSm89ExactF32D128In";
@@ -122,10 +121,8 @@ struct RouteConfig {
     symbol: &'static str,
     k_out: &'static str,
     n: &'static str,
-    tile_m: &'static str,
-    outputs_per_thread: &'static str,
     shared_bytes: &'static str,
-    stage: &'static str,
+    grid: &'static str,
 }
 
 const ROUTES: [RouteConfig; 2] = [
@@ -134,20 +131,16 @@ const ROUTES: [RouteConfig; 2] = [
         symbol: D128_IN_SYMBOL,
         k_out: "128",
         n: "512",
-        tile_m: "16",
-        outputs_per_thread: "4",
-        shared_bytes: "4096",
-        stage: "512",
+        shared_bytes: "49152",
+        grid: "256",
     },
     RouteConfig {
         namespace: D128_OUT_NAMESPACE,
         symbol: D128_OUT_SYMBOL,
         k_out: "256",
         n: "128",
-        tile_m: "8",
-        outputs_per_thread: "2",
-        shared_bytes: "3072",
-        stage: "384",
+        shared_bytes: "49152",
+        grid: "128",
     },
 ];
 
@@ -171,10 +164,8 @@ fn instantiate(template: &str, route: RouteConfig) -> String {
         .replace(NAMESPACE_PLACEHOLDER, route.namespace)
         .replace(K_OUT_PLACEHOLDER, route.k_out)
         .replace(N_PLACEHOLDER, route.n)
-        .replace(TILE_M_PLACEHOLDER, route.tile_m)
-        .replace(OUTPUTS_PLACEHOLDER, route.outputs_per_thread)
         .replace(SHARED_PLACEHOLDER, route.shared_bytes)
-        .replace(STAGE_PLACEHOLDER, route.stage)
+        .replace(GRID_PLACEHOLDER, route.grid)
         .replace(SYMBOL_PLACEHOLDER, route.symbol)
 }
 
@@ -243,10 +234,8 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
         NAMESPACE_PLACEHOLDER,
         K_OUT_PLACEHOLDER,
         N_PLACEHOLDER,
-        TILE_M_PLACEHOLDER,
-        OUTPUTS_PLACEHOLDER,
         SHARED_PLACEHOLDER,
-        STAGE_PLACEHOLDER,
+        GRID_PLACEHOLDER,
         SYMBOL_PLACEHOLDER,
     ] {
         if source.contains(marker) {

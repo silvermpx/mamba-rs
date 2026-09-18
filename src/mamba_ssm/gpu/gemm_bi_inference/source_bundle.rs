@@ -14,8 +14,13 @@ pub(crate) fn compiler_supported(
     state_cap: usize,
     nvrtc: (i32, i32),
 ) -> bool {
-    device_cc == Some((8, 9))
-        && target == "sm_89"
+    // The retained members are sm_80-tier PTX: every board that composes
+    // the portable overlay carries them, the Ada board by its frozen
+    // evidence and every other board by the first-use proof. The CC 12
+    // family composes no overlay: its Fixed module stays byte-identical to
+    // the one its copy-plan cohorts were minted on.
+    device_cc.is_some_and(|(major, _)| major >= 8 && major != 12)
+        && super::super::gemm_bi_triad::modules::fixed_portable_overlay_composed(target)
         && matches!(state_cap, 16 | 64)
         && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
 }

@@ -28,10 +28,13 @@ use super::dtype::WeightDtype;
 
 pub(in crate::mamba_ssm::gpu) mod identity;
 mod runtime_bundle;
+pub(crate) mod sm89_cells;
 pub(crate) mod source_bundle;
+
 use super::kernel_identity::{
     NoPhysicalObserver, PhysicalLaunchObserver, PolicyDtype, enqueue_with_physical_observation,
 };
+pub use sm89_cells::Sm89CellRoute;
 
 type CUptr = cudarc::driver::sys::CUdeviceptr;
 
@@ -75,6 +78,9 @@ pub enum InferenceTile {
     Tf32Sm120M64S2PairStore,
     /// SM120 TMA BF16/F16 route selected from the qualified tile matrix.
     Sm120Half(InferenceSm120HalfTile),
+    /// Ada-measured inference cell of the Fixed sm89 overlay: one kernel per
+    /// (shape, operand dtypes, policy), proven at first use off the Ada board.
+    Sm89Cell(Sm89CellRoute),
     /// 128x128 CTA, 256 threads, 2-stage cp.async, dynamic smem 71 680 B.
     Tc128,
     /// Ada-only pipelined/vector-store Tc128, AUTO in qualified hot cells.
@@ -330,6 +336,22 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
         let args = FixedArgs::try_new(operands, shape)?;
         return launch_tf32(ctx, tile, &args, false, observer);
     }
+    if let InferenceTile::Sm89Cell(route) = tile {
+        let spec = sm89_cells::spec_for_route(route, operands.x.dtype).ok_or_else(|| {
+            format!(
+                "forced Fixed Ada cell {route:?} has no {:?} member",
+                operands.x.dtype
+            )
+        })?;
+        if !sm89_cells::operands_match(spec, operands) {
+            return Err("forced Fixed Ada cell launch requires the cell's operand dtypes".into());
+        }
+        if shape.m == 0 || shape.n == 0 {
+            return Ok(());
+        }
+        let args = FixedArgs::try_new(operands, shape)?;
+        return launch_sm89_cell(ctx, spec, &args, observer);
+    }
     if let InferenceTile::Sm120Half(sm120_tile) = tile {
         let half_inputs =
             operands.x.dtype != WeightDtype::F32 && operands.x.dtype == operands.w.dtype;
@@ -556,8 +578,8 @@ fn fixed_select_sm89_half_auto_tile(
     };
 
     if !nvrtc_library_known
-        || device.compute_capability != (8, 9)
-        || device.multiprocessors != 142
+        || !fixed_portable_overlay_board(device.compute_capability)
+        || device.multiprocessors == 0
         || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         || operands.c.dtype == WeightDtype::F32
         || operands.c.dtype != operands.x.dtype
@@ -627,8 +649,8 @@ fn fixed_select_sm89_half_finalist_auto_tile(
     e_available: bool,
 ) -> Option<InferenceTile> {
     if !nvrtc_library_known
-        || device.compute_capability != (8, 9)
-        || device.multiprocessors != 142
+        || !fixed_portable_overlay_board(device.compute_capability)
+        || device.multiprocessors == 0
         || nvrtc != (13, 2)
         || operands.c.dtype != WeightDtype::F16
         || operands.x.dtype != WeightDtype::F16
@@ -796,13 +818,32 @@ mod sm89_pipeline_auto_tests {
                     "unmeasured toolkit {nvrtc:?} must retain the old selector"
                 );
             }
-            for bad_device in [
+            for other_board in [
                 FixedTileDevice {
                     compute_capability: (8, 6),
                     ..device
                 },
                 FixedTileDevice {
                     multiprocessors: 141,
+                    ..device
+                },
+            ] {
+                assert!(
+                    select_finalist(f16, shape, other_board, (13, 2), true, true, true).is_some(),
+                    "an sm_80-tier board outside the frozen evidence takes the proof path"
+                );
+            }
+            for bad_device in [
+                FixedTileDevice {
+                    compute_capability: (7, 5),
+                    ..device
+                },
+                FixedTileDevice {
+                    compute_capability: (12, 0),
+                    ..device
+                },
+                FixedTileDevice {
+                    multiprocessors: 0,
                     ..device
                 },
             ] {
@@ -1023,7 +1064,17 @@ mod sm89_pipeline_auto_tests {
         for version in [(12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
             assert_eq!(choose(ops, shape, device, version, true, true, true), None);
         }
-        for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0), (12, 1)] {
+        for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0)] {
+            let board = FixedTileDevice {
+                compute_capability: cc,
+                ..device
+            };
+            assert!(
+                choose(ops, shape, board, (13, 2), true, true, true).is_some(),
+                "sm_80-tier board {cc:?} takes the proof path"
+            );
+        }
+        for cc in [(7, 5), (12, 0), (12, 1)] {
             assert_eq!(
                 choose(
                     ops,
@@ -1040,7 +1091,18 @@ mod sm89_pipeline_auto_tests {
                 None
             );
         }
-        for multiprocessors in [0, 141, 143, 170] {
+        for multiprocessors in [141, 143, 170] {
+            let board = FixedTileDevice {
+                multiprocessors,
+                ..device
+            };
+            assert!(
+                choose(ops, shape, board, (13, 2), true, true, true).is_some(),
+                "a board of {multiprocessors} SMs takes the proof path"
+            );
+        }
+        {
+            let multiprocessors = 0;
             assert_eq!(
                 choose(
                     ops,
@@ -1300,6 +1362,7 @@ fn ladder_cfg(tile: InferenceTile, rows: usize, cols: usize) -> cudarc::driver::
         | InferenceTile::Tf32Sm120M64S2
         | InferenceTile::Tf32Sm120M64S2PairStore
         | InferenceTile::Sm120Half(_)
+        | InferenceTile::Sm89Cell(_)
         | InferenceTile::Tc128Sm89Pipeline
         | InferenceTile::Tc128Sm89Swizzle
         | InferenceTile::Tc128Sm89S3
@@ -1315,6 +1378,7 @@ fn ladder_cfg(tile: InferenceTile, rows: usize, cols: usize) -> cudarc::driver::
 }
 
 /// Arguments shared by every fixed-family kernel (row-major NN).
+#[derive(Clone, Copy)]
 struct FixedArgs {
     c: CUptr,
     a: CUptr,
@@ -1339,13 +1403,21 @@ impl FixedArgs {
     }
 }
 
+/// The boards that carry the Ada inference kernels: the sm_80 tier with
+/// the CC 12 family left out, because that family keeps its Fixed module
+/// byte-identical to the one its copy-plan cohorts were minted on and so
+/// composes no portable overlay.
+fn fixed_portable_overlay_board(compute_capability: (u32, u32)) -> bool {
+    compute_capability.0 >= 8 && !super::device::is_sm120_family(compute_capability)
+}
+
 fn prepare_sm89_exact_n64_launch(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     compute_capability: (u32, u32),
 ) -> Result<Option<(FixedArgs, u32)>, String> {
-    if compute_capability != (8, 9) {
-        return Err("Fixed Ada exact N64 requires CC8.9".into());
+    if !fixed_portable_overlay_board(compute_capability) {
+        return Err("Fixed Ada exact N64 requires an SM80+ board outside the CC 12 family".into());
     }
     if [operands.c.dtype, operands.x.dtype, operands.w.dtype]
         .into_iter()
@@ -2877,8 +2949,8 @@ fn launch_tf32_rna_n96<O: PhysicalLaunchObserver>(
     args: &FixedArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if ctx.compute_capability() != (8, 9) {
-        return Err("Fixed Ada TF32 RNA N96 requires CC8.9".into());
+    if !fixed_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Fixed Ada TF32 RNA N96 requires an SM80+ board".into());
     }
     if args.k % 4 != 0 || args.n % 4 != 0 {
         return Err("Fixed Ada TF32 RNA N96 requires K and N divisible by four".into());
@@ -3484,8 +3556,8 @@ fn launch_sm89_half_pipeline<O: PhysicalLaunchObserver>(
     args: &FixedArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if ctx.compute_capability() != (8, 9) {
-        return Err("Fixed Ada half pipeline requires CC8.9".into());
+    if !fixed_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Fixed Ada half pipeline requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
@@ -3586,8 +3658,8 @@ fn launch_sm89_half_swizzle<O: PhysicalLaunchObserver>(
     args: &FixedArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if ctx.compute_capability() != (8, 9) {
-        return Err("Fixed Ada half swizzle requires CC8.9".into());
+    if !fixed_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Fixed Ada half swizzle requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
@@ -3704,8 +3776,8 @@ fn launch_sm89_half_s3<O: PhysicalLaunchObserver>(
     args: &FixedArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if ctx.compute_capability() != (8, 9) {
-        return Err("Fixed Ada half s3 requires CC8.9".into());
+    if !fixed_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Fixed Ada half s3 requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
@@ -3796,8 +3868,8 @@ fn launch_sm89_half_n64<O: PhysicalLaunchObserver>(
     args: &FixedArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if ctx.compute_capability() != (8, 9) {
-        return Err("Fixed Ada half N64 finalist requires CC8.9".into());
+    if !fixed_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Fixed Ada half N64 finalist requires an SM80+ board".into());
     }
     if args.bias != 0 {
         return Err("Fixed Ada half N64 finalist does not admit bias".into());
@@ -3955,6 +4027,7 @@ fn launch_ladder<O: PhysicalLaunchObserver>(
         | InferenceTile::Tf32Sm120M64S2
         | InferenceTile::Tf32Sm120M64S2PairStore
         | InferenceTile::Sm120Half(_)
+        | InferenceTile::Sm89Cell(_)
         | InferenceTile::Tc128Sm89Pipeline
         | InferenceTile::Tc128Sm89Swizzle
         | InferenceTile::Tc128Sm89S3
@@ -4357,8 +4430,8 @@ fn fixed_sm89_rna_wide_auto_eligible(
 ) -> bool {
     admitted
         && policy == super::context::F32TriadPolicy::AllowDeterministicTf32
-        && device.compute_capability == (8, 9)
-        && device.multiprocessors == 142
+        && fixed_portable_overlay_board(device.compute_capability)
+        && device.multiprocessors > 0
         && matches!(nvrtc_version, (12, 8) | (13, 0) | (13, 2))
         && nvrtc_library_known
         && [operands.c.dtype, operands.x.dtype, operands.w.dtype]
@@ -4457,7 +4530,17 @@ mod sm89_rna_auto_tests {
                     true,
                     F32TriadPolicy::ExactScalarFma
                 ));
-                for cc in [(8, 0), (8, 6), (9, 0), (10, 0), (12, 0), (12, 1)] {
+                for cc in [(8, 0), (8, 6), (9, 0), (10, 0)] {
+                    let board = FixedTileDevice {
+                        compute_capability: cc,
+                        ..device
+                    };
+                    assert!(
+                        eligible(operands, shape, board, (13, 2), true, true, policy),
+                        "sm_80-tier board {cc:?} takes the proof path"
+                    );
+                }
+                for cc in [(7, 5), (12, 0), (12, 1)] {
                     assert!(!eligible(
                         operands,
                         shape,
@@ -4472,6 +4555,17 @@ mod sm89_rna_auto_tests {
                     ));
                 }
                 for sms in [141, 143] {
+                    let board = FixedTileDevice {
+                        multiprocessors: sms,
+                        ..device
+                    };
+                    assert!(
+                        eligible(operands, shape, board, (13, 2), true, true, policy),
+                        "a board of {sms} SMs takes the proof path"
+                    );
+                }
+                {
+                    let sms = 0;
                     assert!(!eligible(
                         operands,
                         shape,
@@ -4642,6 +4736,234 @@ pub fn inference_forward(
     inference_forward_observed(ctx, operands, shape, &mut NoPhysicalObserver)
 }
 
+/// Whether this context runs on the board the Fixed sm89 evidence was
+/// minted on; every other board proves an Ada-found route at first use.
+/// The Ada inference cell this context serves for a forward request, if the
+/// shape, operand dtypes, policy and the bound kernels name one.
+fn select_sm89_cell_for_context(
+    ctx: &GpuCtx,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+) -> Option<&'static sm89_cells::Sm89CellSpec> {
+    let compiler = ctx.kernels.compiler_identity();
+    sm89_cells::select_sm89_cell(
+        operands,
+        shape,
+        sm89_cells::Sm89CellStack {
+            device: FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            nvrtc: compiler.nvrtc_version,
+            nvrtc_library_known: compiler.nvrtc_library_known,
+            policy: ctx.f32_triad_policy(),
+        },
+        |symbol| ctx.kernels.fixed_sm89_cell_function(symbol).is_some(),
+    )
+}
+
+/// Launches one Ada inference cell: the grid covers the output with the
+/// cell's tile, the parameter bundle is the Fixed sm89 layout with the
+/// unit epilogue every inference launch submits.
+fn launch_sm89_cell<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    spec: &sm89_cells::Sm89CellSpec,
+    args: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
+    let function = ctx
+        .kernels
+        .fixed_sm89_cell_function(spec.symbol)
+        .ok_or_else(|| format!("Fixed Ada cell {} is not bound", spec.symbol))?;
+    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada cell M is negative")?;
+    let columns = u32::try_from(args.n).map_err(|_| "Fixed Ada cell N is negative")?;
+    let grid = rows
+        .div_ceil(spec.tile.0)
+        .checked_mul(columns.div_ceil(spec.tile.1))
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada cell launch grid exceeds i32")?;
+    let params = FixedSm89HalfParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        n: args.n,
+        k: args.k,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    let (storage, abi) = match spec.family {
+        sm89_cells::Sm89CellFamily::ExactFma => {
+            ([PolicyDtype::F32; 3], identity::AbiKind::ExactF32)
+        }
+        sm89_cells::Sm89CellFamily::Tf32Mma => ([PolicyDtype::F32; 3], identity::AbiKind::Tf32Sm89),
+        sm89_cells::Sm89CellFamily::HalfMma => {
+            let input = identity::policy_dtype(spec.input);
+            let output = match spec.output {
+                sm89_cells::Sm89CellOutput::F32 => PolicyDtype::F32,
+                sm89_cells::Sm89CellOutput::Input => input,
+            };
+            ([input, input, output], identity::AbiKind::HalfSm89)
+        }
+    };
+    let observation =
+        identity::observation(ctx, observer, function, config, || identity::Arguments {
+            pointers: [args.c, args.a, args.b, args.bias],
+            storage,
+            abi,
+            words: [
+                params.alpha.to_bits(),
+                params.beta.to_bits(),
+                params.m as u32,
+                params.n as u32,
+                params.k as u32,
+                params.lda as u32,
+                params.ldb as u32,
+                params.ldc as u32,
+                0,
+                0,
+            ],
+            maps: None,
+            auxiliary: [0; 2],
+        })?;
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
+        .map(|_| ())
+        .map_err(|error| error.with_driver_context(format_args!("Inference cell {}", spec.symbol)))
+}
+
+/// The ladder route of the same numeric contract a cell must reproduce on a
+/// board without frozen evidence: the legacy exact kernel, the f32-output or
+/// the half ladder tile, or the portable TF32 tile the shape would take.
+fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    spec: &sm89_cells::Sm89CellSpec,
+    operands: InferenceFwdOperands,
+    shape: InferenceShape,
+    scratch: &FixedArgs,
+    observer: &mut O,
+) -> Result<(), String> {
+    let device = FixedTileDevice {
+        multiprocessors: ctx.kernels.multiprocessor_count(),
+        compute_capability: ctx.compute_capability(),
+    };
+    let (batch, n_in, n_out) = (shape.m, shape.k, shape.n);
+    match spec.family {
+        sm89_cells::Sm89CellFamily::ExactFma => {
+            let scratch_operands = InferenceFwdOperands {
+                c: TypedPtr {
+                    ptr: scratch.c,
+                    dtype: operands.c.dtype,
+                },
+                ..operands
+            };
+            super::blas::fixed_legacy_forward(ctx, scratch_operands, shape, observer)
+        }
+        sm89_cells::Sm89CellFamily::HalfMma if spec.output == sm89_cells::Sm89CellOutput::F32 => {
+            let tile = fixed_pick_f32out_tile(batch, n_in, n_out, device);
+            launch_f32out_ladder(ctx, tile, operands.x.dtype, scratch, observer)
+        }
+        sm89_cells::Sm89CellFamily::HalfMma => {
+            let tile = fixed_pick_tile(batch, n_out, n_in, device)
+                .ok_or_else(|| "no portable ladder tile for this shape".to_string())?;
+            launch_ladder(ctx, tile, operands.c.dtype, scratch, observer)
+        }
+        sm89_cells::Sm89CellFamily::Tf32Mma => {
+            let compiler = ctx.kernels.compiler_identity();
+            let sm120_tma = ctx.kernels.gemm_bi_nn_tf32_sm120.is_some()
+                && super::device::is_sm120_family(ctx.compute_capability())
+                && n_in > 0
+                && operands.x.ptr.is_multiple_of(16)
+                && operands.w.ptr.is_multiple_of(16)
+                && n_in.is_multiple_of(4)
+                && n_out.is_multiple_of(4);
+            let tile = fixed_pick_tf32(
+                (batch, n_in, n_out),
+                FixedTf32Stack {
+                    multiprocessors: device.multiprocessors,
+                    compute_capability: device.compute_capability,
+                    nvrtc_version: compiler.nvrtc_version,
+                    nvrtc_library_known: compiler.nvrtc_library_known,
+                    sm120_tma,
+                },
+                operands.bias_ptr.is_some(),
+                operands.c.ptr.is_multiple_of(8),
+            );
+            launch_tf32(ctx, tile, scratch, true, observer)
+        }
+    }
+}
+
+fn ada_evidence_board(ctx: &GpuCtx) -> bool {
+    ctx.compute_capability() == (8, 9) && ctx.kernels.multiprocessor_count() == 142
+}
+
+/// The candidate arm of an Ada-found inference route on another board:
+/// admitted when it reproduces the portable ladder's words for this shape.
+fn proven_inference_candidate<Candidate, Reference>(
+    ctx: &GpuCtx,
+    symbol: &'static str,
+    args: &FixedArgs,
+    dtype: WeightDtype,
+    candidate: Candidate,
+    reference: Reference,
+) -> Result<bool, String>
+where
+    Candidate: FnOnce(&FixedArgs) -> Result<(), String>,
+    Reference: FnOnce(&FixedArgs) -> Result<(), String>,
+{
+    if ada_evidence_board(ctx) {
+        return Ok(true);
+    }
+    let m = usize::try_from(args.m).map_err(|_| "negative inference rows".to_string())?;
+    let n = usize::try_from(args.n).map_err(|_| "negative inference columns".to_string())?;
+    let (k, dims) = (
+        usize::try_from(args.k).map_err(|_| "negative inference reduction".to_string())?,
+        (m, 0usize, n),
+    );
+    let key = super::gemm_bi_triad::proof::RouteProofKey {
+        candidate: symbol,
+        op: super::kernel_identity::ResolvedGemmOp::Nn,
+        dtype,
+        dims: (dims.0, k, dims.2),
+    };
+    let elements = m
+        .checked_mul(n)
+        .ok_or_else(|| "inference output span overflows usize".to_string())?;
+    super::gemm_bi_triad::proven_candidate(
+        ctx,
+        key,
+        args.c,
+        elements,
+        dtype,
+        |scratch| {
+            candidate(&FixedArgs {
+                c: scratch,
+                ..*args
+            })
+        },
+        |scratch| {
+            reference(&FixedArgs {
+                c: scratch,
+                ..*args
+            })
+        },
+    )
+}
+
 pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: InferenceFwdOperands,
@@ -4655,9 +4977,85 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
     let args = FixedArgs::try_new(operands, shape)?;
     let homogeneous_f32 =
         c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32;
+    if let Some(spec) = select_sm89_cell_for_context(ctx, operands, shape) {
+        let admitted = proven_inference_candidate(
+            ctx,
+            spec.symbol,
+            &args,
+            c.dtype,
+            |scratch| launch_sm89_cell(ctx, spec, scratch, &mut NoPhysicalObserver),
+            |scratch| {
+                launch_sm89_cell_reference(
+                    ctx,
+                    spec,
+                    operands,
+                    shape,
+                    scratch,
+                    &mut NoPhysicalObserver,
+                )
+            },
+        )?;
+        if admitted {
+            launch_sm89_cell(ctx, spec, &args, observer)?;
+            return Ok(InferenceTile::Sm89Cell(spec.route));
+        }
+    }
     if let Some(route) = runtime_bundle::select_for_context(ctx, operands, shape) {
-        runtime_bundle::launch_inference_bundle(ctx, route, operands, shape, observer)?;
-        return Ok(runtime_bundle::family_label(route));
+        let admitted = proven_inference_candidate(
+            ctx,
+            runtime_bundle::member_symbol(route, x.dtype),
+            &args,
+            c.dtype,
+            |scratch| {
+                let scratch_operands = InferenceFwdOperands {
+                    c: TypedPtr {
+                        ptr: scratch.c,
+                        dtype: c.dtype,
+                    },
+                    ..operands
+                };
+                runtime_bundle::launch_inference_bundle(
+                    ctx,
+                    route,
+                    scratch_operands,
+                    shape,
+                    &mut NoPhysicalObserver,
+                )
+            },
+            |scratch| match route {
+                runtime_bundle::InferenceBundleRoute::HalfF32S3 => {
+                    let tile = fixed_pick_f32out_tile(
+                        batch,
+                        n_in,
+                        n_out,
+                        FixedTileDevice {
+                            multiprocessors: ctx.kernels.multiprocessor_count(),
+                            compute_capability: ctx.compute_capability(),
+                        },
+                    );
+                    launch_f32out_ladder(ctx, tile, x.dtype, scratch, &mut NoPhysicalObserver)
+                }
+                runtime_bundle::InferenceBundleRoute::ExactF32M128N64Tail => {
+                    let scratch_operands = InferenceFwdOperands {
+                        c: TypedPtr {
+                            ptr: scratch.c,
+                            dtype: c.dtype,
+                        },
+                        ..operands
+                    };
+                    super::blas::fixed_legacy_forward(
+                        ctx,
+                        scratch_operands,
+                        shape,
+                        &mut NoPhysicalObserver,
+                    )
+                }
+            },
+        )?;
+        if admitted {
+            runtime_bundle::launch_inference_bundle(ctx, route, operands, shape, observer)?;
+            return Ok(runtime_bundle::family_label(route));
+        }
     }
     if homogeneous_f32
         && ctx.f32_triad_policy() == super::context::F32TriadPolicy::AllowDeterministicTf32
@@ -4709,6 +5107,40 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                 operands.bias_ptr.is_some(),
                 operands.c.ptr.is_multiple_of(8),
             )
+        };
+        let tile = match tile {
+            InferenceTile::Tf32RnaM128N96S3 | InferenceTile::Tf32RnaM128N128S3 => {
+                let portable = fixed_pick_tf32(
+                    (batch, n_in, n_out),
+                    FixedTf32Stack {
+                        multiprocessors: ctx.kernels.multiprocessor_count(),
+                        compute_capability: ctx.compute_capability(),
+                        nvrtc_version: compiler.nvrtc_version,
+                        nvrtc_library_known: compiler.nvrtc_library_known,
+                        sm120_tma,
+                    },
+                    operands.bias_ptr.is_some(),
+                    operands.c.ptr.is_multiple_of(8),
+                );
+                let symbol = if tile == InferenceTile::Tf32RnaM128N96S3 {
+                    "nn_sm89_rna_tf32_m128n96_bk32_s3"
+                } else {
+                    "nn_rna_wide_tf32_m128n128_bk32_s3"
+                };
+                if proven_inference_candidate(
+                    ctx,
+                    symbol,
+                    &args,
+                    WeightDtype::F32,
+                    |scratch| launch_tf32(ctx, tile, scratch, true, &mut NoPhysicalObserver),
+                    |scratch| launch_tf32(ctx, portable, scratch, true, &mut NoPhysicalObserver),
+                )? {
+                    tile
+                } else {
+                    portable
+                }
+            }
+            other => other,
         };
         launch_tf32(ctx, tile, &args, true, observer)?;
         return Ok(tile);
@@ -4846,7 +5278,37 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             compiler.nvrtc_library_known,
             ctx.kernels.fixed_sm89_f32_n64_copyplan.is_some(),
             ctx.f32_triad_policy(),
-        ) {
+        ) && proven_inference_candidate(
+            ctx,
+            "nn_sm89_f32_n64_copyplan",
+            &args,
+            WeightDtype::F32,
+            |scratch| {
+                let scratch_operands = InferenceFwdOperands {
+                    c: TypedPtr {
+                        ptr: scratch.c,
+                        dtype: c.dtype,
+                    },
+                    ..operands
+                };
+                launch_sm89_exact_n64(ctx, scratch_operands, shape, &mut NoPhysicalObserver)
+            },
+            |scratch| {
+                let scratch_operands = InferenceFwdOperands {
+                    c: TypedPtr {
+                        ptr: scratch.c,
+                        dtype: c.dtype,
+                    },
+                    ..operands
+                };
+                super::blas::fixed_legacy_forward(
+                    ctx,
+                    scratch_operands,
+                    shape,
+                    &mut NoPhysicalObserver,
+                )
+            },
+        )? {
             launch_sm89_exact_n64(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm89N64CopyPlan);
         }
@@ -4898,29 +5360,62 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                 },
             )
         });
-        match selected {
-            Some(InferenceTile::Tc128Sm89Pipeline) => {
-                launch_sm89_half_pipeline(ctx, c.dtype, &args, observer)?;
-                return Ok(InferenceTile::Tc128Sm89Pipeline);
+        if let Some(tile) = selected {
+            let run = |tile: InferenceTile, args: &FixedArgs| -> Result<(), String> {
+                match tile {
+                    InferenceTile::Tc128Sm89Pipeline => {
+                        launch_sm89_half_pipeline(ctx, c.dtype, args, &mut NoPhysicalObserver)
+                    }
+                    InferenceTile::Tc128Sm89Swizzle => {
+                        launch_sm89_half_swizzle(ctx, c.dtype, args, &mut NoPhysicalObserver)
+                    }
+                    InferenceTile::Tc128Sm89S3 => {
+                        launch_sm89_half_s3(ctx, c.dtype, args, &mut NoPhysicalObserver)
+                    }
+                    InferenceTile::TcM64N64Sm89S3 | InferenceTile::TcM128N64Sm89S2 => {
+                        launch_sm89_half_n64(ctx, tile, args, &mut NoPhysicalObserver)
+                    }
+                    _ => unreachable!("Ada half AUTO selector returned a foreign tile"),
+                }
+            };
+            let symbol = match tile {
+                InferenceTile::Tc128Sm89Pipeline => "nn_sm89_tc128_pipeline",
+                InferenceTile::Tc128Sm89Swizzle => "nn_sm89_tc128_swizzle",
+                InferenceTile::Tc128Sm89S3 => "nn_sm89_tc128_s3",
+                InferenceTile::TcM64N64Sm89S3 => "nn_sm89_m64n64_s3",
+                InferenceTile::TcM128N64Sm89S2 => "nn_sm89_m128n64_s2",
+                _ => unreachable!("Ada half AUTO selector returned a foreign tile"),
+            };
+            let admitted = proven_inference_candidate(
+                ctx,
+                symbol,
+                &args,
+                c.dtype,
+                |scratch| run(tile, scratch),
+                |scratch| {
+                    let portable = fixed_pick_tile(batch, n_out, n_in, device)
+                        .ok_or_else(|| "no portable ladder tile for this shape".to_string())?;
+                    launch_ladder(ctx, portable, c.dtype, scratch, &mut NoPhysicalObserver)
+                },
+            )?;
+            if admitted {
+                match tile {
+                    InferenceTile::Tc128Sm89Pipeline => {
+                        launch_sm89_half_pipeline(ctx, c.dtype, &args, observer)?;
+                    }
+                    InferenceTile::Tc128Sm89Swizzle => {
+                        launch_sm89_half_swizzle(ctx, c.dtype, &args, observer)?;
+                    }
+                    InferenceTile::Tc128Sm89S3 => {
+                        launch_sm89_half_s3(ctx, c.dtype, &args, observer)?;
+                    }
+                    InferenceTile::TcM64N64Sm89S3 | InferenceTile::TcM128N64Sm89S2 => {
+                        launch_sm89_half_n64(ctx, tile, &args, observer)?;
+                    }
+                    _ => unreachable!("Ada half AUTO selector returned a foreign tile"),
+                }
+                return Ok(tile);
             }
-            Some(InferenceTile::Tc128Sm89Swizzle) => {
-                launch_sm89_half_swizzle(ctx, c.dtype, &args, observer)?;
-                return Ok(InferenceTile::Tc128Sm89Swizzle);
-            }
-            Some(InferenceTile::Tc128Sm89S3) => {
-                launch_sm89_half_s3(ctx, c.dtype, &args, observer)?;
-                return Ok(InferenceTile::Tc128Sm89S3);
-            }
-            Some(InferenceTile::TcM64N64Sm89S3) => {
-                launch_sm89_half_n64(ctx, InferenceTile::TcM64N64Sm89S3, &args, observer)?;
-                return Ok(InferenceTile::TcM64N64Sm89S3);
-            }
-            Some(InferenceTile::TcM128N64Sm89S2) => {
-                launch_sm89_half_n64(ctx, InferenceTile::TcM128N64Sm89S2, &args, observer)?;
-                return Ok(InferenceTile::TcM128N64Sm89S2);
-            }
-            Some(_) => unreachable!("Ada half AUTO selector returned a foreign tile"),
-            None => {}
         }
     }
     // Architecture rungs: on Hopper and datacenter Blackwell the arch's
@@ -6453,8 +6948,8 @@ fn fixed_sm89_exact_n64_auto_eligible(
     loaded
         && nvrtc_library_known
         && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
-        && device.compute_capability == (8, 9)
-        && device.multiprocessors == 142
+        && fixed_portable_overlay_board(device.compute_capability)
+        && device.multiprocessors > 0
         && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
             .into_iter()
@@ -6624,17 +7119,17 @@ mod sm89_exact_n64_auto_tests {
                 fixed_sm89_exact_n64_auto_eligible(ops, shape, device, nvrtc, known, loaded, policy)
             };
             for nvrtc in QUALIFIED_NVRTC {
-                for cc in [
-                    (8, 0),
-                    (8, 6),
-                    (8, 7),
-                    (9, 0),
-                    (10, 0),
-                    (10, 3),
-                    (11, 0),
-                    (12, 0),
-                    (12, 1),
-                ] {
+                for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (10, 3), (11, 0)] {
+                    let board = FixedTileDevice {
+                        compute_capability: cc,
+                        ..DEVICE
+                    };
+                    assert!(
+                        check(board, nvrtc, true, true, F32TriadPolicy::ExactScalarFma),
+                        "sm_80-tier board {cc:?} takes the proof path"
+                    );
+                }
+                for cc in [(7, 5), (12, 0), (12, 1)] {
                     assert!(!check(
                         FixedTileDevice {
                             compute_capability: cc,
@@ -6646,7 +7141,18 @@ mod sm89_exact_n64_auto_tests {
                         F32TriadPolicy::ExactScalarFma
                     ));
                 }
-                for multiprocessors in [0, 1, 141, 143, 170] {
+                for multiprocessors in [1, 141, 143, 170] {
+                    let board = FixedTileDevice {
+                        multiprocessors,
+                        ..DEVICE
+                    };
+                    assert!(
+                        check(board, nvrtc, true, true, F32TriadPolicy::ExactScalarFma),
+                        "a board of {multiprocessors} SMs takes the proof path"
+                    );
+                }
+                {
+                    let multiprocessors = 0;
                     assert!(!check(
                         FixedTileDevice {
                             multiprocessors,
@@ -6833,7 +7339,14 @@ mod sm89_exact_n64_request_tests {
     #[test]
     fn fixed_sm89_exact_n64_operand_and_arch_guards_are_fail_closed() {
         assert!(prepare(operands(), shape()).unwrap().is_some());
-        for cc in [(8, 0), (8, 6), (9, 0), (12, 0), (12, 1)] {
+        for cc in [(8, 0), (8, 6), (9, 0), (10, 0), (11, 0)] {
+            assert!(
+                prepare_sm89_exact_n64_launch(operands(), shape(), cc)
+                    .is_ok_and(|launch| launch.is_some()),
+                "sm_80-tier board {cc:?} prepares the launch"
+            );
+        }
+        for cc in [(7, 5), (12, 0), (12, 1)] {
             assert!(prepare_sm89_exact_n64_launch(operands(), shape(), cc).is_err());
         }
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -7574,7 +8087,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 45, 8),
+            (5, 46, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

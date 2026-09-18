@@ -12492,6 +12492,7 @@ macro_rules! define_fixed_force_plain_tile_registry {
             match tile {
                 $(InferenceTile::$variant => {}),+,
                 InferenceTile::Sm120Half(half) => fixed_force_half_tile_registry_exhaustive(half),
+                InferenceTile::Sm89Cell(_) => {}
             }
         }
     };
@@ -12694,6 +12695,7 @@ fn fixed_force_spec(
     let (input_dtype, output_dtype) = fixed_force_row_dtypes(row)?;
     let invalid = || format!("{tile:?} is not a physical Fixed force candidate for {row}/CC{cc:?}");
     let expected_symbol = match tile {
+        InferenceTile::Sm89Cell(_) => return Err(invalid()),
         InferenceTile::F32N128S2 if matches!(row, "f32_exact" | "f32_exact_fast") => {
             "f32_f32_n128_s2"
         }
@@ -14263,7 +14265,7 @@ fn fixed_production_auto_cuda_uuid_and_tuning_revision_are_pinned() {
     );
     assert_eq!(
         fixed_production_auto_tuning_metadata(),
-        "\"tuning_table_revision\":45"
+        "\"tuning_table_revision\":46"
     );
 }
 

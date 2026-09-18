@@ -544,6 +544,7 @@ pub(crate) struct CompiledModule {
     fixed_sm89_rna_wide_driver_abi: Result<Tf32DriverAbi, String>,
     fixed_sm89_finalist_driver_abi: FixedSm89FinalistDriverAbi,
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm89_cells_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_postbias_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -566,14 +567,22 @@ pub(crate) struct Tf32SymbolExclusion {
 pub(super) fn tf32_symbol_admission(
     symbol: &str,
     local_bytes: u32,
+    local_bytes_pin: u32,
     registers: u32,
     register_cap: u32,
     max_threads: i32,
     threads: i32,
 ) -> Result<(), String> {
-    if local_bytes != 0 {
+    // A spill is normally a mistuned kernel, so the pin is zero for all but
+    // the one tile whose measurement recorded one: a 192x192 tile over 384
+    // threads holds 96 accumulators per thread, and the register file leaves
+    // 168 registers each, so the rest goes to local memory. That tile was
+    // measured with the spill and still takes its cell by a quarter, so the
+    // spill is pinned rather than forbidden and a larger one still fails.
+    if local_bytes > local_bytes_pin {
         return Err(format!(
-            "{symbol} uses {local_bytes} bytes of Driver JIT local memory on this toolkit"
+            "{symbol} uses {local_bytes} bytes of Driver JIT local memory on this toolkit, \
+             above the {local_bytes_pin} bytes its measurement recorded"
         ));
     }
     if registers > register_cap {
@@ -880,6 +889,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let fixed_cells_abi = census_fixed_sm89_cells_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let fixed_sm120_exact_n64_abi = census_fixed_sm120_exact_n64_driver_abi(
             request.ctx,
             request.module_kind,
@@ -929,6 +944,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             fixed_rna_wide_abi,
             fixed_finalist_abi,
             fixed_exact_n64_abi,
+            fixed_cells_abi,
             fixed_sm120_exact_n64_abi,
             fixed_sm120_sliced_abi,
             fixed_sm120_postbias_abi,
@@ -951,6 +967,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_finalist_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
+        fixed_sm89_cells_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
         fixed_sm120_postbias_driver_abi,
@@ -1033,6 +1050,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_cells_abi = census_fixed_sm89_cells_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -1135,6 +1158,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 fixed_rna_wide_abi,
                 fixed_finalist_abi,
                 fixed_exact_n64_abi,
+                fixed_cells_abi,
                 fixed_sm120_exact_n64_abi,
                 fixed_sm120_sliced_abi,
                 fixed_sm120_postbias_abi,
@@ -1183,6 +1207,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_finalist_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
+        fixed_sm89_cells_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
         fixed_sm120_postbias_driver_abi,
@@ -1731,34 +1756,34 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm90a requires exact target sm_90a, got {arch}"
         ));
     }
-    if kind == ModuleKind::TriadSm89Finalist && arch != "sm_89" {
+    if kind == ModuleKind::TriadSm89Finalist && sm80_ptx_target(arch).is_none() {
         return Err(format!(
-            "TriadSm89Finalist requires exact target sm_89, got {arch}"
+            "TriadSm89Finalist requires an admitted SM80+ portable target, got {arch}"
         ));
     }
-    if kind == ModuleKind::TriadSm89Half && arch != "sm_89" {
+    if kind == ModuleKind::TriadSm89Half && sm80_ptx_target(arch).is_none() {
         return Err(format!(
-            "TriadSm89Half requires exact target sm_89, got {arch}"
+            "TriadSm89Half requires an admitted SM80+ portable target, got {arch}"
         ));
     }
-    if kind == ModuleKind::TriadSm89ExactF32 && arch != "sm_89" {
+    if kind == ModuleKind::TriadSm89ExactF32 && sm80_ptx_target(arch).is_none() {
         return Err(format!(
-            "TriadSm89ExactF32 requires exact target sm_89, got {arch}"
+            "TriadSm89ExactF32 requires an admitted SM80+ portable target, got {arch}"
         ));
     }
-    if kind == ModuleKind::TriadSm89ExactF32D128 && arch != "sm_89" {
+    if kind == ModuleKind::TriadSm89ExactF32D128 && sm80_ptx_target(arch).is_none() {
         return Err(format!(
-            "TriadSm89ExactF32D128 requires exact target sm_89, got {arch}"
+            "TriadSm89ExactF32D128 requires an admitted SM80+ portable target, got {arch}"
         ));
     }
-    if kind == ModuleKind::TriadSm89Tf32Joint && arch != "sm_89" {
+    if kind == ModuleKind::TriadSm89Tf32Joint && sm80_ptx_target(arch).is_none() {
         return Err(format!(
-            "TriadSm89Tf32Joint requires exact target sm_89, got {arch}"
+            "TriadSm89Tf32Joint requires an admitted SM80+ portable target, got {arch}"
         ));
     }
     if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
         return Err(format!(
-            "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, or compute_110f/a target, got {arch}"
+            "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, compute_107f/a, or compute_110f/a target, got {arch}"
         ));
     }
     if kind == ModuleKind::TriadSm120 && !matches!(arch, "compute_120" | "compute_121") {
@@ -1789,15 +1814,24 @@ fn validate_tf32_ptx_inventory(
         ));
     }
     let symbols = ptx_entry_symbols(ptx)?;
+    // The split-K kernels are compiled into the same module but are named by
+    // `Tf32SplitKSpec`, never by a route spec, so they are not part of this
+    // inventory and must not read as foreign entries.
     let actual: Vec<_> = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.contains("_tf32_") || symbol.contains("_tma_fma_"))
+        .filter(|symbol| {
+            (symbol.contains("_tf32_") || symbol.contains("_tma_fma_"))
+                && !symbol.contains("_splitk")
+        })
         .collect();
     let unique: BTreeSet<_> = actual.iter().copied().collect();
     if actual.len() != unique.len() || unique != expected {
+        let missing = expected.difference(&unique).copied().collect::<Vec<_>>();
+        let foreign = unique.difference(&expected).copied().collect::<Vec<_>>();
         return Err(format!(
-            "{module_kind:?} TF32 PTX inventory is incomplete, duplicated, or contains foreign entries"
+            "{module_kind:?} TF32 PTX inventory is incomplete, duplicated, or contains foreign \
+             entries: missing {missing:?}, foreign {foreign:?}"
         ));
     }
     Ok(())
@@ -1834,8 +1868,10 @@ fn validate_sm89_finalist_ptx_inventory(ptx: &str) -> Result<(), String> {
 }
 
 fn validate_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
-    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
-        return Err("TriadSm89Finalist requires exact sm_89 source and PTX targets".into());
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err(
+            "TriadSm89Finalist requires matching SM80+ portable source and PTX targets".into(),
+        );
     }
     validate_sm89_finalist_ptx_inventory(ptx)?;
     let parsed = parse_ptx(ptx)?;
@@ -1860,8 +1896,8 @@ fn validate_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
 }
 
 fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
-    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
-        return Err("TriadSm89Half requires exact sm_89 source and PTX targets".into());
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err("TriadSm89Half requires matching SM80+ portable source and PTX targets".into());
     }
     let expected = super::sm89_half_source::runtime_kernel_specs()
         .map(|spec| spec.symbol)
@@ -1898,13 +1934,42 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2CompactBxor
                 | super::sm89_half_source::Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
             )
-            | super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => (
+            | super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72
+            | super::sm89_half_source::Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3 => (
                 "cp.async.ca.shared.global",
                 [
                     "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
                     "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
                 ],
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ),
+            super::sm89_half_source::Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4
+            | super::sm89_half_source::Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4 => (
+                "cp.async.cg.shared.global",
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                ],
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ),
+            super::sm89_half_source::Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4 => (
+                "cp.async.ca.shared.global",
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+                ],
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ),
+            super::sm89_half_source::Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => (
+                "cp.async.ca.shared.global",
+                [
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                ],
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
             ),
             super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
@@ -1954,8 +2019,10 @@ fn validate_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
 fn validate_sm89_exact_f32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     use super::sm89_exact_f32_source::Sm89ExactF32KernelKind;
 
-    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
-        return Err("TriadSm89ExactF32 requires exact sm_89 source and PTX targets".into());
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err(
+            "TriadSm89ExactF32 requires matching SM80+ portable source and PTX targets".into(),
+        );
     }
     let expected = super::sm89_exact_f32_source::SM89_EXACT_F32_KERNEL_SPECS
         .iter()
@@ -2053,8 +2120,10 @@ fn validate_sm89_exact_f32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
 }
 
 fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String> {
-    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
-        return Err("TriadSm89ExactF32D128 requires exact sm_89 source and PTX targets".into());
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err(
+            "TriadSm89ExactF32D128 requires matching SM80+ portable source and PTX targets".into(),
+        );
     }
     let expected = super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS
         .iter()
@@ -2104,7 +2173,7 @@ fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String>
                 "add.rn.f64",
                 "mul.rn.f64",
                 "cvt.rn.f32.f64",
-                "cp.async.ca.shared.global",
+                "cp.async.cg.shared.global",
             ],
         )?;
         if ptx_has_unquoted_token(&entry.body, |token| {
@@ -2136,8 +2205,10 @@ fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String>
 fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     use super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
 
-    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
-        return Err("TriadSm89Tf32Joint requires exact sm_89 source and PTX targets".into());
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err(
+            "TriadSm89Tf32Joint requires matching SM80+ portable source and PTX targets".into(),
+        );
     }
     let expected = super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS
         .iter()
@@ -2206,9 +2277,51 @@ fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                     ));
                 }
             }
+            Sm89Tf32JointKernelKind::NtRnaM144N96Bk32S2 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint NT RNA wide GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global.L2::128B",
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+            }
+            Sm89Tf32JointKernelKind::NtRowstageM128N192Bk32S2 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint NT row-staged wide GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global.L2::128B",
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+                if ptx_has_unquoted_token(&entry.body, |token| token == "cvt.rna.tf32.f32") {
+                    return Err(format!(
+                        "{} add-half NT route unexpectedly uses pre-RNA conversion",
+                        spec.symbol
+                    ));
+                }
+            }
+            Sm89Tf32JointKernelKind::TnDirectM192N192Bk32S2 => {
+                require_ptx_entry_tokens(
+                    "TriadSm89Tf32Joint TN direct wide GEMM",
+                    entry,
+                    &[
+                        "cp.async.cg.shared.global.L2::128B",
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                )?;
+            }
             Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
             | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3
-            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2 => {
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2
+            | Sm89Tf32JointKernelKind::TnPreRnaM96N192Bk32S2
+            | Sm89Tf32JointKernelKind::TnPreRnaM96N96Bk32S3 => {
                 require_ptx_entry_tokens(
                     "TriadSm89Tf32Joint pre-RNA GEMM",
                     entry,
@@ -2289,6 +2402,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_fixed_sm89_half_swizzle_ptx(arch, ptx)?;
             validate_fixed_sm89_half_s3_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
+            validate_fixed_sm89_cells_ptx(arch, ptx)?;
             validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_sliced_ptx(arch, ptx)?;
             validate_fixed_sm120_postbias_ptx(arch, ptx)
@@ -2340,8 +2454,17 @@ const FIXED_SM89_HALF_N64_THREADS: u32 = 128;
 const FIXED_SM89_HALF_M64N64_S3_REGISTER_CAP: u32 = 110;
 const FIXED_SM89_HALF_M128N64_S2_REGISTER_CAP: u32 = 132;
 
+/// Whether the Fixed module composed for `arch` carries the Ada-found
+/// inference overlay: every sm_80-tier target except the CC 12.x family,
+/// whose Fixed module stays byte-identical to the one its own frozen
+/// cohorts were minted against.
+pub(crate) fn fixed_portable_overlay_composed(arch: &str) -> bool {
+    sm80_ptx_target(arch).is_some()
+        && !matches!(arch, "sm_120" | "compute_120" | "sm_121" | "compute_121")
+}
+
 fn fixed_sm89_rna_wide_composed(arch: &str) -> bool {
-    arch == "sm_89"
+    fixed_portable_overlay_composed(arch)
 }
 
 fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String> {
@@ -2447,9 +2570,118 @@ fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String>
     Ok(())
 }
 
+const FIXED_SM89_CELL_PREFIXES: [&str; 5] = [
+    "nn_sm89_m112n128_",
+    "nn_sm89_m128n144_",
+    "nn_sm89_m128n96_",
+    "nn_sm89_m64n288_",
+    "nn_sm89_m64n96_",
+];
+
+fn validate_fixed_sm89_cell_entry_abi(entry: &ParsedPtxEntry, symbol: &str) -> Result<(), String> {
+    let parameters = entry
+        .text
+        .split_once('(')
+        .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+        .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+    let declarations = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect::<Vec<_>>();
+    if declarations.len() != 5
+        || !declarations[..4]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+        || !declarations[4].starts_with(".param .align 4 .b8 ")
+        || !declarations[4].contains("[32]")
+    {
+        return Err(format!(
+            "{symbol} has the wrong four-pointer/32-byte bundle PTX ABI"
+        ));
+    }
+    Ok(())
+}
+
+/// The Ada inference cells travel with the portable overlay: every cell
+/// symbol is present exactly once where the overlay is composed and absent
+/// elsewhere, on its family's instruction contract.
+fn validate_fixed_sm89_cells_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    use super::super::gemm_bi_inference::sm89_cells::{SM89_CELL_SPECS, Sm89CellFamily};
+
+    let parsed = parse_ptx(ptx)?;
+    let expected: BTreeSet<_> = if fixed_portable_overlay_composed(arch) {
+        SM89_CELL_SPECS.iter().map(|spec| spec.symbol).collect()
+    } else {
+        BTreeSet::new()
+    };
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.symbol.as_str())
+        .filter(|symbol| {
+            FIXED_SM89_CELL_PREFIXES
+                .iter()
+                .any(|prefix| symbol.starts_with(prefix))
+        })
+        .collect();
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(format!(
+            "Fixed SM89 cell PTX inventory is incomplete, duplicated, or foreign on {arch}"
+        ));
+    }
+    for spec in SM89_CELL_SPECS
+        .iter()
+        .filter(|spec| expected.contains(spec.symbol))
+    {
+        let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
+        validate_fixed_sm89_cell_entry_abi(entry, spec.symbol)?;
+        let half_mma = if spec.input == crate::mamba_ssm::gpu::dtype::WeightDtype::Bf16 {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        let required: &[&str] = match spec.family {
+            Sm89CellFamily::ExactFma => &["fma.rn.f32", "cp.async.cg.shared.global"],
+            Sm89CellFamily::HalfMma => &[
+                half_mma,
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                "cp.async.cg.shared.global",
+            ],
+            Sm89CellFamily::Tf32Mma => &[
+                "cvt.rna.tf32.f32",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                "cp.async.cg.shared.global",
+            ],
+        };
+        require_ptx_entry_tokens("Fixed SM89 cell", entry, required)?;
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token.starts_with("wgmma.")
+                || token.starts_with("tcgen05.")
+                || token.starts_with("cp.async.bulk")
+        }) {
+            return Err(format!(
+                "Fixed SM89 cell {} contains a forbidden instruction family",
+                spec.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let parsed = parse_ptx(ptx)?;
-    let expected: BTreeSet<_> = if arch == "sm_89" {
+    let expected: BTreeSet<_> = if fixed_portable_overlay_composed(arch) {
         [
             FIXED_SM89_RNA_N96_SYMBOL,
             FIXED_SM89_HALF_M64N64_S3_SYMBOL,
@@ -2600,7 +2832,7 @@ const FIXED_SM89_HALF_S3_THREADS: u32 = 256;
 const FIXED_SM89_HALF_S3_REGISTER_CAP: u32 = 188;
 
 fn fixed_sm89_half_composed(arch: &str) -> bool {
-    arch == "sm_89"
+    fixed_portable_overlay_composed(arch)
 }
 
 fn validate_fixed_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
@@ -2861,13 +3093,30 @@ fn validate_sm89_half_driver_abi(
 ) -> Result<(), String> {
     const NN: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
     const NT: [(usize, usize); 7] = [(0, 8), (8, 8), (16, 8), (24, 4), (28, 4), (32, 4), (36, 4)];
+    // The relay adds the hand-off slab and the flag word to the TN list.
+    const RELAY: [(usize, usize); 9] = [
+        (0, 8),
+        (8, 8),
+        (16, 8),
+        (24, 4),
+        (28, 4),
+        (32, 4),
+        (36, 4),
+        (40, 8),
+        (48, 8),
+    ];
     let tn = super::sm89_half_tn_source::HALF_TN_DRIVER_ABI
         .map(|(offset, size)| (offset as usize, size as usize));
-    let expected: &[(usize, usize)] = match spec.op {
-        ResolvedGemmOp::Nn => &NN,
-        ResolvedGemmOp::Tn => &tn,
-        ResolvedGemmOp::Nt => &NT,
-    };
+    let expected: &[(usize, usize)] =
+        if spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay {
+            &RELAY
+        } else {
+            match spec.op {
+                ResolvedGemmOp::Nn => &NN,
+                ResolvedGemmOp::Tn => &tn,
+                ResolvedGemmOp::Nt => &NT,
+            }
+        };
     if abi.parameter_count() != expected.len()
         || !abi
             .parameters()
@@ -2892,8 +3141,8 @@ fn census_sm89_half_driver_abi(
     if kind != ModuleKind::TriadSm89Half {
         return Ok(BTreeMap::new());
     }
-    if arch != "sm_89" {
-        return Err("TriadSm89Half Driver ABI census requires exact sm_89".into());
+    if sm80_ptx_target(arch).is_none() {
+        return Err("TriadSm89Half Driver ABI census requires an sm_80-tier target".into());
     }
     type GetParamInfo = unsafe extern "C" fn(
         cudarc::driver::sys::CUfunction,
@@ -2919,12 +3168,16 @@ fn census_sm89_half_driver_abi(
                     spec.symbol
                 )
             })?;
-            let count = match spec.op {
-                ResolvedGemmOp::Nn => 5,
-                ResolvedGemmOp::Tn => {
-                    super::sm89_half_tn_source::HALF_TN_TERMINAL_ARGUMENT as usize
+            let count = if spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay {
+                9
+            } else {
+                match spec.op {
+                    ResolvedGemmOp::Nn => 5,
+                    ResolvedGemmOp::Tn => {
+                        super::sm89_half_tn_source::HALF_TN_TERMINAL_ARGUMENT as usize
+                    }
+                    ResolvedGemmOp::Nt => 7,
                 }
-                ResolvedGemmOp::Nt => 7,
             };
             let abi =
                 query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
@@ -2985,8 +3238,8 @@ fn census_sm89_exact_f32_driver_abi(
     if kind != ModuleKind::TriadSm89ExactF32 {
         return Ok(BTreeMap::new());
     }
-    if arch != "sm_89" {
-        return Err("TriadSm89ExactF32 Driver ABI census requires exact sm_89".into());
+    if sm80_ptx_target(arch).is_none() {
+        return Err("TriadSm89ExactF32 Driver ABI census requires an sm_80-tier target".into());
     }
     type GetParamInfo = unsafe extern "C" fn(
         cudarc::driver::sys::CUfunction,
@@ -3067,8 +3320,8 @@ fn census_sm89_exact_f32_d128_driver_abi(
     if kind != ModuleKind::TriadSm89ExactF32D128 {
         return Ok(BTreeMap::new());
     }
-    if arch != "sm_89" {
-        return Err("TriadSm89ExactF32D128 Driver ABI census requires exact sm_89".into());
+    if sm80_ptx_target(arch).is_none() {
+        return Err("TriadSm89ExactF32D128 Driver ABI census requires an sm_80-tier target".into());
     }
     type GetParamInfo = unsafe extern "C" fn(
         cudarc::driver::sys::CUfunction,
@@ -3151,8 +3404,8 @@ fn census_sm89_tf32_joint_driver_abi(
     if kind != ModuleKind::TriadSm89Tf32Joint {
         return Ok(BTreeMap::new());
     }
-    if arch != "sm_89" {
-        return Err("TriadSm89Tf32Joint Driver ABI census requires exact sm_89".into());
+    if sm80_ptx_target(arch).is_none() {
+        return Err("TriadSm89Tf32Joint Driver ABI census requires an sm_80-tier target".into());
     }
     type GetParamInfo = unsafe extern "C" fn(
         cudarc::driver::sys::CUfunction,
@@ -3232,6 +3485,166 @@ fn census_fixed_sm89_half_driver_abi(
     }
     module.unload()?;
     Ok(census)
+}
+
+fn validate_fixed_sm89_cell_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    if super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
+        return Err("Fixed SM89 cell host parameter ABI drifted".into());
+    }
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn census_fixed_sm89_cells_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_portable_overlay_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for symbol in super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SYMBOLS {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm89_cell_driver_abi(symbol, &abi)?;
+        census.insert(symbol, abi);
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+/// Binds every Ada inference cell the module compiled; a cell that misses
+/// its resource or ABI contract is left out with its reason, the others
+/// stay bound.
+pub(crate) fn load_fixed_sm89_cells(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (
+    HashMap<&'static str, CudaFunction>,
+    Vec<(&'static str, String)>,
+) {
+    use super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SPECS;
+
+    let mut functions = HashMap::new();
+    let mut rejections = Vec::new();
+    let composed = module.artifact_identity.module_kind == ModuleKind::Fixed
+        && fixed_portable_overlay_composed(module.compiler_identity.target.as_str())
+        && ctx.compute_capability().is_ok_and(|cc| cc.0 >= 8);
+    if !composed {
+        return (functions, rejections);
+    }
+    for spec in SM89_CELL_SPECS.iter() {
+        let symbol = spec.symbol;
+        let loaded = (|| -> Result<CudaFunction, String> {
+            let shared_cap = ctx
+                .attribute(
+                    cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                )
+                .map_err(|error| format!("query {symbol} opt-in shared capacity: {error:?}"))?;
+            if shared_cap < spec.dynamic_shared_bytes as i32 {
+                return Err(format!(
+                    "{symbol} requires {} shared bytes, device permits {shared_cap}",
+                    spec.dynamic_shared_bytes
+                ));
+            }
+            let abi = module
+                .fixed_sm89_cells_driver_abi
+                .as_ref()
+                .map_err(Clone::clone)?
+                .get(symbol)
+                .ok_or_else(|| format!("{symbol} has no Driver ABI census entry"))?;
+            validate_fixed_sm89_cell_driver_abi(symbol, abi)?;
+            let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+            set_dynamic_shared(&function, symbol, spec.dynamic_shared_bytes as i32)?;
+            let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|e| query_error("local bytes", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative local memory"))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|e| query_error("registers", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative registers"))?;
+            let static_shared_bytes = u32::try_from(
+                function
+                    .shared_size_bytes()
+                    .map_err(|e| query_error("static shared bytes", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative static shared memory"))?;
+            if static_shared_bytes != 0 {
+                return Err(format!(
+                    "{symbol} uses {static_shared_bytes} static shared bytes, expected zero"
+                ));
+            }
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|e| query_error("max threads", e))?;
+            tf32_symbol_admission(
+                symbol,
+                local_bytes,
+                0,
+                registers,
+                spec.register_cap,
+                max_threads,
+                spec.threads as i32,
+            )?;
+            let active_blocks = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    spec.threads,
+                    spec.dynamic_shared_bytes as usize,
+                    None,
+                )
+                .map_err(|e| query_error("occupancy", e))?;
+            if active_blocks < spec.occupancy_gate {
+                return Err(format!(
+                    "{symbol} occupancy {active_blocks} misses its {}-CTA gate",
+                    spec.occupancy_gate
+                ));
+            }
+            Ok(function)
+        })();
+        match loaded {
+            Ok(function) => {
+                functions.insert(symbol, function);
+            }
+            Err(reason) => rejections.push((symbol, reason)),
+        }
+    }
+    (functions, rejections)
 }
 
 fn validate_fixed_sm89_half_swizzle_driver_abi(
@@ -3411,7 +3824,7 @@ fn census_fixed_sm89_finalist_driver_abi(
     arch: &str,
     ptx: &str,
 ) -> FixedSm89FinalistDriverAbi {
-    if kind != ModuleKind::Fixed || arch != "sm_89" {
+    if kind != ModuleKind::Fixed || !fixed_portable_overlay_composed(arch) {
         return FixedSm89FinalistDriverAbi::rejected(
             "Fixed SM89 finalists are not composed for this module/target".into(),
         );
@@ -3534,6 +3947,7 @@ fn validate_fixed_sm89_finalist_resources(
     tf32_symbol_admission(
         symbol,
         resources.local_bytes,
+        0,
         resources.registers,
         register_cap,
         resources.max_threads,
@@ -3561,14 +3975,15 @@ fn load_fixed_sm89_finalist(
 ) -> (Option<CudaFunction>, Option<String>) {
     let admitted = (|| -> Result<CudaFunction, String> {
         if module.artifact_identity.module_kind != ModuleKind::Fixed
-            || module.compiler_identity.target.as_str() != "sm_89"
+            || !fixed_portable_overlay_composed(module.compiler_identity.target.as_str())
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query {symbol} CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
             return Err(format!(
-                "Fixed SM89 finalist {symbol} is only composed and admitted on sm_89/CC8.9"
+                "Fixed SM89 finalist {symbol} is composed only with the portable overlay"
             ));
         }
         let (abi, shared_bytes, threads) = match symbol {
@@ -3678,6 +4093,7 @@ fn validate_fixed_sm89_rna_wide_resources(
     tf32_symbol_admission(
         FIXED_SM89_RNA_WIDE_SYMBOL,
         resources.local_bytes,
+        0,
         resources.registers,
         FIXED_SM89_RNA_WIDE_REGISTER_CAP,
         resources.max_threads,
@@ -3708,9 +4124,10 @@ pub(crate) fn load_fixed_sm89_rna_wide(
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query Fixed RNA-wide CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
-            return Err("Fixed SM89 RNA-wide is only composed and admitted on sm_89/CC8.9".into());
+            return Err("Fixed SM89 RNA-wide is composed only with the portable overlay".into());
         }
         let shared_cap = ctx.attribute(
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
@@ -3793,10 +4210,11 @@ pub(crate) fn load_fixed_sm89_half_pipeline(
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query Fixed half CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
             return Err(
-                "Fixed SM89 half pipeline is only composed and admitted on sm_89/CC8.9".into(),
+                "Fixed SM89 half pipeline is composed only with the portable overlay".into(),
             );
         }
         let shared_cap = ctx.attribute(
@@ -3837,6 +4255,7 @@ pub(crate) fn load_fixed_sm89_half_pipeline(
             tf32_symbol_admission(
                 symbol,
                 local,
+                0,
                 registers,
                 FIXED_SM89_HALF_REGISTER_CAP,
                 threads,
@@ -3884,6 +4303,7 @@ fn validate_fixed_sm89_half_swizzle_resources(
     tf32_symbol_admission(
         symbol,
         resources.local_bytes,
+        0,
         resources.registers,
         FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP,
         resources.max_threads,
@@ -3926,10 +4346,11 @@ pub(crate) fn load_fixed_sm89_half_swizzle(
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query Fixed half swizzle CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
             return Err(
-                "Fixed SM89 half swizzle is only composed and admitted on sm_89/CC8.9".into(),
+                "Fixed SM89 half swizzle is composed only with the portable overlay".into(),
             );
         }
         let shared_cap = ctx.attribute(
@@ -4021,6 +4442,7 @@ fn validate_fixed_sm89_half_s3_resources(
     tf32_symbol_admission(
         symbol,
         resources.local_bytes,
+        0,
         resources.registers,
         FIXED_SM89_HALF_S3_REGISTER_CAP,
         resources.max_threads,
@@ -4063,9 +4485,10 @@ pub(crate) fn load_fixed_sm89_half_s3(
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query Fixed half s3 CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
-            return Err("Fixed SM89 half s3 is only composed and admitted on sm_89/CC8.9".into());
+            return Err("Fixed SM89 half s3 is composed only with the portable overlay".into());
         }
         let shared_cap = ctx.attribute(
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
@@ -4141,7 +4564,7 @@ const FIXED_SM89_EXACT_N64_THREADS: u32 = 128;
 const FIXED_SM89_EXACT_N64_STATIC_SHARED: i32 = 32_768;
 
 fn fixed_sm89_exact_n64_composed(arch: &str) -> bool {
-    arch == "sm_89"
+    fixed_portable_overlay_composed(arch)
 }
 
 const FIXED_SM120_EXACT_N64_SYMBOL: &str = "nn_sm120_f32_n64_copyplan";
@@ -5118,10 +5541,11 @@ pub(crate) fn load_fixed_sm89_f32_n64_copyplan(
             || ctx
                 .compute_capability()
                 .map_err(|error| format!("query Fixed exact N64 CC: {error:?}"))?
-                != (8, 9)
+                .0
+                < 8
         {
             return Err(
-                "Fixed exact N64 copy-plan is only composed and admitted on sm_89/CC8.9".into(),
+                "Fixed exact N64 copy-plan is composed only with the portable overlay".into(),
             );
         }
         let symbol = FIXED_SM89_EXACT_N64_SYMBOL;
@@ -5805,7 +6229,14 @@ fn validate_tf32_host_abi(
     validate_tf32_parameter_abi(module_kind, extensions, ptx, host_cuda_major)
 }
 
-fn sm80_ptx_target(arch: &str) -> Option<&'static str> {
+/// Whether a module of the sm_80 instruction tier (the Ada-found triad
+/// modules among them) compiles for `arch` on a board of `device_cc`: any
+/// admitted portable target on an SM80-or-newer board.
+pub(crate) fn sm80_tier_module_compiles(arch: &str, device_cc: Option<(i32, i32)>) -> bool {
+    sm80_ptx_target(arch).is_some() && device_cc.is_some_and(|(major, _)| major >= 8)
+}
+
+pub(super) fn sm80_ptx_target(arch: &str) -> Option<&'static str> {
     match arch {
         "sm_80" => Some("sm_80"),
         "sm_86" => Some("sm_86"),
@@ -5817,6 +6248,7 @@ fn sm80_ptx_target(arch: &str) -> Option<&'static str> {
         "sm_100a" => Some("sm_100a"),
         "sm_101a" => Some("sm_101a"),
         "sm_103a" => Some("sm_103a"),
+        "sm_107a" => Some("sm_107a"),
         "sm_110" => Some("sm_110"),
         "sm_110a" => Some("sm_110a"),
         "sm_120" | "compute_120" => Some("sm_120"),
@@ -6956,7 +7388,7 @@ fn validate_sm90a_ptx(ptx: &str) -> Result<(), String> {
 }
 
 fn sm100_target_for_arch(arch: &str) -> Option<super::contract::Sm100TargetCandidate> {
-    [(10, 0), (10, 3), (11, 0)]
+    [(10, 0), (10, 3), (10, 7), (11, 0)]
         .into_iter()
         .flat_map(sm100_target_candidates)
         .copied()
@@ -7580,6 +8012,30 @@ const FIXED_SM89_HALF_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM89_CELLS_COMMON_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_inference/sm89/cells_common.cuh",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_common.cuh"),
+    allowed_quoted_includes: &[],
+};
+
+const FIXED_SM89_CELLS_F32_SIMT_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_f32_simt.cu"),
+    allowed_quoted_includes: &[],
+};
+
+const FIXED_SM89_CELLS_HALF_MMA_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_half_mma.cu"),
+    allowed_quoted_includes: &[],
+};
+
+const FIXED_SM89_CELLS_TF32_MMA_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
+    source: include_str!("../../../../kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu",
     source: include_str!("../../../../kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu"),
@@ -7897,9 +8353,9 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         return super::sm89_exact_f32_source::compose_source();
     }
     if kind == ModuleKind::TriadSm89ExactF32D128 {
-        if arch != "sm_89" {
+        if sm80_ptx_target(arch).is_none() {
             return Err(format!(
-                "TriadSm89ExactF32D128 requires exact target sm_89, got {arch}"
+                "TriadSm89ExactF32D128 requires an admitted SM80+ portable target, got {arch}"
             ));
         }
         if FramedSha256::bytes(super::sm89_exact_f32_d128_source::OWNER_TEMPLATE.as_bytes())
@@ -7925,6 +8381,16 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         {
             return Err("TriadSm89Tf32Joint primitive SHA-256 changed".into());
         }
+        for (name, source, digest) in super::sm89_tf32_joint_source::WIDE_FRAGMENTS {
+            let observed = crate::mamba_ssm::gpu::kernel_identity::digest_hex(
+                &FramedSha256::bytes(source.as_bytes()),
+            );
+            if observed != digest {
+                return Err(format!(
+                    "TriadSm89Tf32Joint {name} fragment SHA-256 changed: {observed}"
+                ));
+            }
+        }
         super::sm89_tf32_joint_source::validate_source()?;
         return super::sm89_tf32_joint_source::compose_source();
     }
@@ -7939,6 +8405,10 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         fragments.push(FIXED_SM89_HALF_S3_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_RNA_N96_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_HALF_N64_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_CELLS_COMMON_FRAGMENT);
+        fragments.push(FIXED_SM89_CELLS_F32_SIMT_FRAGMENT);
+        fragments.push(FIXED_SM89_CELLS_HALF_MMA_FRAGMENT);
+        fragments.push(FIXED_SM89_CELLS_TF32_MMA_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::Fixed && arch == "compute_120" {
@@ -8348,13 +8818,14 @@ fn load_sm89_half_functions(
     String,
 > {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm89Half
-        || module.compiler_identity.target.as_str() != "sm_89"
+        || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
         || ctx
             .compute_capability()
             .map_err(|error| format!("query TriadSm89Half CC: {error:?}"))?
-            != (8, 9)
+            .0
+            < 8
     {
-        return Err("TriadSm89Half requires an exact sm_89/CC8.9 binding".into());
+        return Err("TriadSm89Half requires an SM80+ portable binding".into());
     }
     let optin_shared = ctx
         .attribute(
@@ -8415,6 +8886,7 @@ fn load_sm89_half_functions(
             tf32_symbol_admission(
                 spec.symbol,
                 local_bytes,
+                0,
                 registers,
                 spec.register_cap,
                 max_threads,
@@ -8495,6 +8967,7 @@ fn validate_sm89_exact_f32_resources(
     tf32_symbol_admission(
         spec.symbol,
         facts.local_bytes,
+        0,
         facts.registers,
         spec.register_cap,
         facts.max_threads,
@@ -8521,13 +8994,14 @@ fn load_sm89_exact_f32_functions(
     String,
 > {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm89ExactF32
-        || module.compiler_identity.target.as_str() != "sm_89"
+        || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
         || ctx
             .compute_capability()
             .map_err(|error| format!("query TriadSm89ExactF32 CC: {error:?}"))?
-            != (8, 9)
+            .0
+            < 8
     {
-        return Err("TriadSm89ExactF32 requires an exact sm_89/CC8.9 binding".into());
+        return Err("TriadSm89ExactF32 requires an SM80+ portable binding".into());
     }
     let abi = module
         .sm89_exact_f32_driver_abi
@@ -8642,6 +9116,7 @@ fn validate_sm89_exact_f32_d128_resources(
     tf32_symbol_admission(
         spec.symbol,
         facts.local_bytes,
+        0,
         facts.registers,
         spec.register_cap,
         facts.max_threads,
@@ -8668,13 +9143,14 @@ fn load_sm89_exact_f32_d128_functions(
     String,
 > {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm89ExactF32D128
-        || module.compiler_identity.target.as_str() != "sm_89"
+        || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
         || ctx
             .compute_capability()
             .map_err(|error| format!("query TriadSm89ExactF32D128 CC: {error:?}"))?
-            != (8, 9)
+            .0
+            < 8
     {
-        return Err("TriadSm89ExactF32D128 requires an exact sm_89/CC8.9 binding".into());
+        return Err("TriadSm89ExactF32D128 requires an SM80+ portable binding".into());
     }
     let abi = module
         .sm89_exact_f32_d128_driver_abi
@@ -8792,6 +9268,7 @@ fn validate_sm89_tf32_joint_resources(
     tf32_symbol_admission(
         spec.symbol,
         facts.local_bytes,
+        spec.local_bytes,
         facts.registers,
         spec.register_cap,
         facts.max_threads,
@@ -8820,13 +9297,14 @@ fn load_sm89_tf32_joint_functions(
     String,
 > {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm89Tf32Joint
-        || module.compiler_identity.target.as_str() != "sm_89"
+        || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
         || ctx
             .compute_capability()
             .map_err(|error| format!("query TriadSm89Tf32Joint CC: {error:?}"))?
-            != (8, 9)
+            .0
+            < 8
     {
-        return Err("TriadSm89Tf32Joint requires an exact sm_89/CC8.9 binding".into());
+        return Err("TriadSm89Tf32Joint requires an SM80+ portable binding".into());
     }
     let optin_shared = ctx
         .attribute(
@@ -8933,6 +9411,7 @@ pub struct GemmBiKernels {
     finalist_tf32_functions: HashMap<&'static str, CudaFunction>,
     sm89_half_functions: HashMap<&'static str, CudaFunction>,
     sm89_half_exclusions: Vec<Tf32SymbolExclusion>,
+    sm89_half_relay_resident_ctas: u32,
     sm89_exact_f32_functions: HashMap<&'static str, CudaFunction>,
     sm89_exact_f32_exclusions: Vec<Tf32SymbolExclusion>,
     sm89_exact_f32_d128_functions: HashMap<&'static str, CudaFunction>,
@@ -9263,6 +9742,7 @@ impl GemmBiKernels {
             },
             None => (HashMap::new(), Vec::new()),
         };
+        let sm89_half_relay_resident_ctas = sm89_half_relay_resident(&sm89_half_functions)?;
         let mut sm89_exact_f32_rejection = sm89_exact_f32_compile_rejection;
         let (sm89_exact_f32_functions, sm89_exact_f32_exclusions) = match sm89_exact_f32.as_ref() {
             Some(module) => match load_sm89_exact_f32_functions(ctx, module) {
@@ -9316,6 +9796,7 @@ impl GemmBiKernels {
             specialized: specialized_binding,
             finalist: finalist_binding,
             joint: joint_binding,
+            multiprocessors: multiprocessor_count,
         };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
@@ -9450,6 +9931,7 @@ impl GemmBiKernels {
             finalist_tf32_functions,
             sm89_half_functions,
             sm89_half_exclusions,
+            sm89_half_relay_resident_ctas,
             sm89_exact_f32_functions,
             sm89_exact_f32_exclusions,
             sm89_exact_f32_d128_functions,
@@ -9546,6 +10028,10 @@ impl GemmBiKernels {
 
     pub(crate) fn tc64_streamk_resident_ctas(&self) -> u32 {
         self.tc64_streamk_resident_ctas
+    }
+
+    pub(crate) fn sm89_half_relay_resident_ctas(&self) -> u32 {
+        self.sm89_half_relay_resident_ctas
     }
 
     /// Whether the board the kernels were bound on belongs to the SM120
@@ -10141,6 +10627,7 @@ fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, S
         if let Err(reason) = tf32_symbol_admission(
             kernel_spec.symbol,
             local_bytes,
+            0,
             registers,
             register_cap,
             max_threads,
@@ -10265,6 +10752,7 @@ fn load_tf32_splitk_functions(module: &CompiledModule) -> Result<Tf32LoadedFunct
         if let Err(reason) = tf32_symbol_admission(
             symbol,
             local_bytes,
+            0,
             registers,
             register_cap,
             max_threads,
@@ -10701,11 +11189,18 @@ fn qualified_ptx_target(
                     format!("TriadSm80 target {compiler_target} does not own CC {device_cc:?}")
                 })
         }
-        ModuleKind::TriadSm89Finalist if device_cc == (8, 9) && compiler_target == "sm_89" => {
-            Ok("sm_89")
-        }
-        ModuleKind::TriadSm89Tf32Joint if device_cc == (8, 9) && compiler_target == "sm_89" => {
-            Ok("sm_89")
+        ModuleKind::TriadSm89Finalist | ModuleKind::TriadSm89Tf32Joint => {
+            let expected = portable_target_for_device(device_cc)?;
+            let actual = sm80_ptx_target(compiler_target).ok_or_else(|| {
+                format!("{module_kind:?} target {compiler_target} is not admitted")
+            })?;
+            (actual == expected || (device_cc == (12, 1) && actual == "sm_120"))
+                .then_some(actual)
+                .ok_or_else(|| {
+                    format!(
+                        "{module_kind:?} target {compiler_target} does not own CC {device_cc:?}"
+                    )
+                })
         }
         ModuleKind::TriadSm90a if device_cc == (9, 0) && compiler_target == "sm_90a" => {
             Ok("sm_90a")
@@ -10739,6 +11234,7 @@ fn portable_target_for_device(device_cc: (i32, i32)) -> Result<&'static str, Str
         (10, 0) => Ok("sm_100a"),
         (10, 1) => Ok("sm_101a"),
         (10, 3) => Ok("sm_103a"),
+        (10, 7) => Ok("sm_107a"),
         (11, 0) => Ok("sm_110a"),
         (12, 0) => Ok("sm_120"),
         (12, 1) => Ok("sm_121"),
@@ -11066,6 +11562,33 @@ fn set_half_dynamic_shared(kernel: &HalfKernel, name: &str, bytes: i32) -> Resul
 }
 
 /// The CTAs of the stream-K kernel one multiprocessor holds at once, the
+/// Resident CTAs per multiprocessor of the half relay, the smaller of its
+/// two dtypes. The relay's grid may never exceed what stays resident: a CTA
+/// waits on the flag of the CTA below it, and a grid larger than the board
+/// holds could leave that lower CTA unscheduled. Zero when the relay is not
+/// loaded, which is also when no request can reach it.
+fn sm89_half_relay_resident(
+    functions: &HashMap<&'static str, CudaFunction>,
+) -> Result<u32, String> {
+    let mut resident = u32::MAX;
+    for spec in super::sm89_half_source::runtime_kernel_specs()
+        .filter(|spec| spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay)
+    {
+        let Some(function) = functions.get(spec.symbol) else {
+            return Ok(0);
+        };
+        let blocks = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                spec.threads,
+                spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+        resident = resident.min(blocks);
+    }
+    Ok(if resident == u32::MAX { 0 } else { resident })
+}
+
 /// smaller of its two half variants; the kernel's shared tiles are static,
 /// so the query carries no dynamic bytes.
 fn streamk_resident_ctas(kernel: &HalfKernel) -> Result<u32, String> {
@@ -11118,51 +11641,59 @@ mod tests {
 
     #[test]
     fn triad_retained_identity_fixed_source_digest_uses_complete_compile_composition() {
+        let mut moved = Vec::new();
         for (nvrtc, state_cap, expected) in [
             (
                 (12, 8),
                 16,
-                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
+                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
             ),
             (
                 (12, 8),
                 64,
-                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
+                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
             ),
             (
                 (13, 0),
                 16,
-                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
+                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
             ),
             (
                 (13, 0),
                 64,
-                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
+                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
             ),
             (
                 (13, 2),
                 16,
-                "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
+                "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
             ),
             (
                 (13, 2),
                 64,
-                "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
+                "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
             ),
         ] {
-            assert_eq!(
-                super::module_source_digest_for_compile(
-                    ModuleKind::Fixed,
-                    Some((8, 9)),
-                    "sm_89",
-                    state_cap,
-                    nvrtc,
-                )
-                .unwrap(),
-                digest(expected),
-                "CUDA {nvrtc:?} cap{state_cap} must hash the exact source passed to NVRTC"
-            );
+            let live = super::module_source_digest_for_compile(
+                ModuleKind::Fixed,
+                Some((8, 9)),
+                "sm_89",
+                state_cap,
+                nvrtc,
+            )
+            .unwrap();
+            if live != digest(expected) {
+                moved.push(format!(
+                    "CUDA {nvrtc:?} cap{state_cap}: {}",
+                    crate::mamba_ssm::gpu::kernel_identity::digest_hex(&live)
+                ));
+            }
         }
+        assert!(
+            moved.is_empty(),
+            "the Fixed compile composition moved; refreeze every cohort from the live values:\n{}",
+            moved.join("\n")
+        );
     }
 
     #[test]
@@ -11196,7 +11727,7 @@ mod tests {
     fn inference_source_bundle_preserves_the_complete_input_outside_its_envelope() {
         let cases = [
             ("missing CC", None, "sm_89", 16, (12, 8), false),
-            ("CC 8.0", Some((8, 0)), "sm_89", 16, (12, 8), false),
+            ("CC 7.5", Some((7, 5)), "sm_89", 16, (12, 8), false),
             ("CC 12.0", Some((12, 0)), "sm_89", 16, (12, 8), false),
             (
                 "compute_89 target",
@@ -11214,7 +11745,6 @@ mod tests {
                 (12, 8),
                 false,
             ),
-            ("sm_80 target", Some((8, 9)), "sm_80", 16, (12, 8), false),
             ("capacity 0", Some((8, 9)), "sm_89", 0, (12, 8), false),
             ("capacity 8", Some((8, 9)), "sm_89", 8, (12, 8), false),
             ("capacity 32", Some((8, 9)), "sm_89", 32, (12, 8), false),
@@ -11245,6 +11775,35 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(result, input, "composer changed bytes for {name}");
+        }
+        for (name, device_cc, target) in [
+            ("CC 8.0", Some((8, 0)), "sm_89"),
+            ("sm_80 target", Some((8, 9)), "sm_80"),
+            ("CC 9.0 on sm_90", Some((9, 0)), "sm_90"),
+        ] {
+            assert!(
+                crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compiler_supported(
+                    device_cc,
+                    target,
+                    16,
+                    (12, 8),
+                ),
+                "wrong compiler support for {name}"
+            );
+            let input = compose_module_source_for(ModuleKind::Fixed, target).unwrap();
+            let result =
+                crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compose_fixed_source(
+                    input.clone(),
+                    device_cc,
+                    target,
+                    16,
+                    (12, 8),
+                )
+                .unwrap();
+            assert!(
+                result.len() > input.len() && result.starts_with(&input),
+                "the retained members must follow the complete input for {name}"
+            );
         }
     }
 
@@ -11424,8 +11983,19 @@ mod tests {
             Sm89HalfRuntimeRoute::Legacy(
                 Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
             )
-            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => [
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72
+            | Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3 => [
                 "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ],
+            Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
                 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
             ],
             Sm89HalfRuntimeRoute::Legacy(
@@ -11449,12 +12019,19 @@ mod tests {
             Sm89HalfRuntimeRoute::Legacy(
                 Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
             )
-            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72
+            | Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3
+            | Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => {
                 "ldmatrix.sync.aligned.m8n8.x2.shared.b16"
             }
             Sm89HalfRuntimeRoute::Legacy(
                 Sm89HalfRoute::NtM128N128Bk64S3Bxor | Sm89HalfRoute::NtM96N128Bk64S3,
-            ) => "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            )
+            | Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4 => {
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"
+            }
         }
     }
 
@@ -11467,14 +12044,21 @@ mod tests {
             Sm89HalfRuntimeRoute::Legacy(
                 Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
             )
-            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72
+            | Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3 => {
                 "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
             }
             Sm89HalfRuntimeRoute::Legacy(
                 Sm89HalfRoute::NnM128N128Bk64S3
                 | Sm89HalfRoute::NtM128N128Bk64S3Bxor
                 | Sm89HalfRoute::NtM96N128Bk64S3,
-            ) => "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+            )
+            | Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4
+            | Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => {
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+            }
         }
     }
 
@@ -11501,12 +12085,31 @@ mod tests {
              {mma} {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
              ret;\n}}\n",
             spec.symbol,
-            if spec.op == ResolvedGemmOp::Tn {
-                "cp.async.ca.shared.global"
-            } else {
-                "cp.async.cg.shared.global"
-            },
+            sm89_half_validator_test_copy(spec.route),
         )
+    }
+
+    fn sm89_half_validator_test_copy(
+        route: super::super::sm89_half_source::Sm89HalfRuntimeRoute,
+    ) -> &'static str {
+        use super::super::sm89_half_source::{Sm89HalfRoute, Sm89HalfRuntimeRoute};
+
+        match route {
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::TnM64N64Bk64S2CompactBxor | Sm89HalfRoute::TnM64N64Bk64S2RegpipeVec2,
+            )
+            | Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72
+            | Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3
+            | Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4
+            | Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => "cp.async.ca.shared.global",
+            Sm89HalfRuntimeRoute::Legacy(
+                Sm89HalfRoute::NnM128N128Bk64S3
+                | Sm89HalfRoute::NtM128N128Bk64S3Bxor
+                | Sm89HalfRoute::NtM96N128Bk64S3,
+            )
+            | Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4
+            | Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4 => "cp.async.cg.shared.global",
+        }
     }
 
     fn sm89_half_validator_test_ptx() -> String {
@@ -11831,7 +12434,7 @@ mod tests {
 
     fn sm89_exact_f32_d128_test_entry(symbol: &str) -> String {
         format!(
-            ".visible .entry {symbol}(\n.param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .f32 p3,\n.param .u32 p4,\n.param .u32 p5,\n.param .u32 p6\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n.reg .f64 %fd<3>;\ncp.async.ca.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\nadd.rn.f64 %fd0, %fd1, %fd2;\nmul.rn.f64 %fd0, %fd0, %fd1;\ncvt.rn.f32.f64 %f0, %fd0;\nret;\n}}\n"
+            ".visible .entry {symbol}(\n.param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .f32 p3,\n.param .u32 p4,\n.param .u32 p5,\n.param .u32 p6\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n.reg .f64 %fd<3>;\ncp.async.cg.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\nadd.rn.f64 %fd0, %fd1, %fd2;\nmul.rn.f64 %fd0, %fd0, %fd1;\ncvt.rn.f32.f64 %f0, %fd0;\nret;\n}}\n"
         )
     }
 
@@ -11934,7 +12537,7 @@ mod tests {
                 "add.rn.f64",
                 "mul.rn.f64",
                 "cvt.rn.f32.f64",
-                "cp.async.ca.shared.global",
+                "cp.async.cg.shared.global",
             ] {
                 let wrong = entry.replacen(required, "missing.instruction", 1);
                 assert!(
@@ -12009,8 +12612,8 @@ mod tests {
                 local_bytes: 0,
                 registers: spec.register_cap,
                 static_shared_bytes: 0,
-                max_threads: 64,
-                occupancy: 8,
+                max_threads: 256,
+                occupancy: 2,
             };
             super::validate_sm89_exact_f32_d128_resources(&spec, valid).unwrap();
             for malformed in [
@@ -12027,11 +12630,11 @@ mod tests {
                     ..valid
                 },
                 super::Sm89ExactF32D128ResourceFacts {
-                    max_threads: 63,
+                    max_threads: 255,
                     ..valid
                 },
                 super::Sm89ExactF32D128ResourceFacts {
-                    occupancy: 7,
+                    occupancy: 1,
                     ..valid
                 },
             ] {
@@ -12118,9 +12721,20 @@ mod tests {
         };
         let body = match spec.kind {
             Sm89Tf32JointKernelKind::TnPreRnaTranspose32x32 => "cvt.rna.tf32.f32 %r0, %f0;\n",
+            Sm89Tf32JointKernelKind::NtRnaM144N96Bk32S2 => {
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
+            Sm89Tf32JointKernelKind::NtRowstageM128N192Bk32S2 => {
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
+            Sm89Tf32JointKernelKind::TnDirectM192N192Bk32S2 => {
+                "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
+            }
             Sm89Tf32JointKernelKind::TnPreRnaM128N96Bk32S3
             | Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3
-            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2 => {
+            | Sm89Tf32JointKernelKind::TnPreRnaM64N96Bk32S2
+            | Sm89Tf32JointKernelKind::TnPreRnaM96N192Bk32S2
+            | Sm89Tf32JointKernelKind::TnPreRnaM96N96Bk32S3 => {
                 "cp.async.cg.shared.global.L2::128B [%r0], [%rd0], 16;\nldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];\ncvt.rna.tf32.f32 %r0, %f0;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n"
             }
             Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3 => {
@@ -12154,7 +12768,7 @@ mod tests {
         assert_eq!(
             super::super::contract::tf32_route_specs(ModuleKind::TriadSm89Tf32Joint),
             &super::super::contract::SM89_TF32_JOINT_ROUTE_SPECS,
-            "the joint artifact must expose exactly its six GEMM routes; the seventh export is the TN input transform"
+            "the joint artifact must expose exactly its twelve GEMM routes; the thirteenth export is the TN input transform"
         );
         let source = compose_module_source_for(ModuleKind::TriadSm89Tf32Joint, "sm_89").unwrap();
         assert_eq!(
@@ -12275,7 +12889,7 @@ mod tests {
             assert!(super::validate_sm89_tf32_joint_driver_abi(spec, &wrong).is_err());
 
             let valid = super::Sm89Tf32JointResourceFacts {
-                local_bytes: 0,
+                local_bytes: spec.local_bytes,
                 registers: spec.register_cap,
                 static_shared_bytes: spec.static_shared_bytes,
                 max_threads: spec.minimum_max_threads as i32,
@@ -12284,7 +12898,7 @@ mod tests {
             super::validate_sm89_tf32_joint_resources(spec, valid).unwrap();
             for invalid in [
                 super::Sm89Tf32JointResourceFacts {
-                    local_bytes: 4,
+                    local_bytes: spec.local_bytes + 4,
                     ..valid
                 },
                 super::Sm89Tf32JointResourceFacts {
@@ -12329,7 +12943,10 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(functions.len(), 6);
+        assert_eq!(
+            functions.len(),
+            super::super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS.len() - 1
+        );
         assert_eq!(exclusions.len(), 1);
         assert_eq!(
             exclusions[0].symbol,
@@ -12467,15 +13084,20 @@ mod tests {
     #[test]
     fn a_symbol_failing_a_resource_gate_is_excluded_with_its_reason() {
         use super::tf32_symbol_admission;
-        assert!(tf32_symbol_admission("k", 0, 120, 128, 1024, 256).is_ok());
-        let spill = tf32_symbol_admission("k", 8, 120, 128, 1024, 256).unwrap_err();
+        assert!(tf32_symbol_admission("k", 0, 0, 120, 128, 1024, 256).is_ok());
+        let spill = tf32_symbol_admission("k", 8, 0, 120, 128, 1024, 256).unwrap_err();
         assert!(
             spill.contains("8 bytes of Driver JIT local memory"),
             "{spill}"
         );
-        let registers = tf32_symbol_admission("k", 0, 129, 128, 1024, 256).unwrap_err();
+        // A symbol whose measurement recorded a spill keeps that much and
+        // no more.
+        assert!(tf32_symbol_admission("k", 88, 88, 120, 128, 1024, 256).is_ok());
+        let over = tf32_symbol_admission("k", 92, 88, 120, 128, 1024, 256).unwrap_err();
+        assert!(over.contains("above the 88 bytes"), "{over}");
+        let registers = tf32_symbol_admission("k", 0, 0, 129, 128, 1024, 256).unwrap_err();
         assert!(registers.contains("129 registers"), "{registers}");
-        let threads = tf32_symbol_admission("k", 0, 120, 128, 128, 256).unwrap_err();
+        let threads = tf32_symbol_admission("k", 0, 0, 120, 128, 128, 256).unwrap_err();
         assert!(threads.contains("cannot launch 256 threads"), "{threads}");
     }
 
@@ -14370,6 +14992,20 @@ mod tests {
     }
 
     #[test]
+    fn tf32_compiled_inventory_admits_the_split_k_kernels_beside_the_routes() {
+        // The split-K kernels ride in the portable module and carry the same
+        // TF32 token as a route symbol; counting them as foreign entries
+        // unbinds every portable TF32 route and sends TF32 work to the exact
+        // scalar kernels without failing anything.
+        let module_kind = ModuleKind::TriadSm80;
+        let mut ptx = synthetic_tf32_ptx(module_kind);
+        for spec in super::super::contract::tf32_splitk_specs_for(true) {
+            ptx.push_str(&format!("\n.entry {}(\n) {{}}\n", spec.symbol));
+        }
+        validate_tf32_ptx_inventory(module_kind, false, &ptx).unwrap();
+    }
+
+    #[test]
     fn sm110_feature_candidates_exclude_ordinary_sm110() {
         let candidates = sm100_target_candidates((11, 0));
         let expected = [("compute_110f", "sm_110f"), ("compute_110a", "sm_110a")];
@@ -14392,6 +15028,23 @@ mod tests {
         );
         assert!(validate_module_target(ModuleKind::TriadSm100, "compute_110").is_err());
         assert!(validate_module_target(ModuleKind::TriadSm100, "sm_110").is_err());
+    }
+
+    #[test]
+    fn sm107_feature_candidates_exclude_ordinary_sm107() {
+        let candidates = sm100_target_candidates((10, 7));
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.nvrtc_arch, candidate.ptx_target))
+                .collect::<Vec<_>>(),
+            [("compute_107f", "sm_107f"), ("compute_107a", "sm_107a")]
+        );
+        assert!(validate_module_target(ModuleKind::TriadSm100, "compute_107f").is_ok());
+        assert!(validate_module_target(ModuleKind::TriadSm100, "compute_107").is_err());
+        assert!(validate_module_target(ModuleKind::TriadSm100, "sm_107").is_err());
+        assert_eq!(super::sm80_ptx_target("sm_107a"), Some("sm_107a"));
+        assert_eq!(portable_target_for_device((10, 7)), Ok("sm_107a"));
     }
 
     #[test]
@@ -14628,6 +15281,10 @@ mod tests {
         "kernels/gemm_bi_inference/sm89/half_s3.cu",
         "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
         "kernels/gemm_bi_inference/sm89/half_n64.cu",
+        "kernels/gemm_bi_inference/sm89/cells_common.cuh",
+        "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
+        "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
+        "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -14794,6 +15451,10 @@ mod tests {
                         | "kernels/gemm_bi_inference/sm89/half_s3.cu"
                         | "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu"
                         | "kernels/gemm_bi_inference/sm89/half_n64.cu"
+                        | "kernels/gemm_bi_inference/sm89/cells_common.cuh"
+                        | "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu"
+                        | "kernels/gemm_bi_inference/sm89/cells_half_mma.cu"
+                        | "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu"
                 )
             })
             .collect::<Vec<_>>();
@@ -14831,15 +15492,21 @@ mod tests {
         let cases = [
             (
                 "base",
-                compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
+                compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap(),
                 588_316,
                 "0069db587259bae91bb80ced886022c67155e3571c6fdb3bc7b16038940e93f2",
             ),
             (
+                "sm_80",
+                compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
+                738_572,
+                "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61",
+            ),
+            (
                 "sm_89",
                 compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
-                695_736,
-                "457e2e4076342df786917ac1b0aeb2ed60fc2279ddd6dc644109cbbddb0c8348",
+                738_572,
+                "1e6c83d81ee034fd0fdee498cfcb12b4d9bd52c3070238332b38b6820f043d61",
             ),
             (
                 "compute_120",
@@ -15139,7 +15806,8 @@ mod tests {
             );
         }
         for arch in [
-            "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a",
+            "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_103a", "sm_107a",
+            "sm_110a",
         ] {
             assert!(super::sm80_target_composes_streamk(arch), "{arch}");
         }
@@ -15418,13 +16086,17 @@ mod tests {
             ("compute_100a", "sm_100a"),
             ("compute_103f", "sm_103f"),
             ("compute_103a", "sm_103a"),
+            ("compute_107f", "sm_107f"),
+            ("compute_107a", "sm_107a"),
             ("compute_110f", "sm_110f"),
             ("compute_110a", "sm_110a"),
         ] {
             // Family-specific targets and CC 10.3 need CUDA 12.9; CC 11.0
-            // needs CUDA 13.2. An older toolkit cannot name them at all.
+            // needs CUDA 13.2 and CC 10.7 CUDA 13.4. An older toolkit cannot
+            // name them at all.
             let nvrtc = super::nvrtc_version();
             if (requested.contains("110") && nvrtc < (13, 2))
+                || (requested.contains("107") && nvrtc < (13, 4))
                 || ((requested.ends_with('f') || requested.contains("103")) && nvrtc < (12, 9))
             {
                 continue;
@@ -15797,6 +16469,75 @@ mod tests {
         entry.replacen(") {\n", ")\n.maxntid 128, 1, 1\n.minnctapersm 2\n{\n", 1)
     }
 
+    fn fixed_sm89_cell_test_entry(
+        spec: &super::super::super::gemm_bi_inference::sm89_cells::Sm89CellSpec,
+    ) -> String {
+        use super::super::super::gemm_bi_inference::sm89_cells::Sm89CellFamily;
+        let body = match spec.family {
+            Sm89CellFamily::ExactFma => {
+                "cp.async.cg.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;".to_string()
+            }
+            Sm89CellFamily::HalfMma => format!(
+                "cp.async.cg.shared.global [%r0], [%rd0], 16;\n\
+                 ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [%r4];\n\
+                 ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {{%r4,%r5}}, [%r6];\n\
+                 mma.sync.aligned.m16n8k16.row.col.f32.{dt}.{dt}.f32 {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};",
+                dt = if spec.input == crate::mamba_ssm::gpu::dtype::WeightDtype::Bf16 { "bf16" } else { "f16" }
+            ),
+            Sm89CellFamily::Tf32Mma => "cp.async.cg.shared.global [%r0], [%rd0], 16;\n\
+                 cvt.rna.tf32.f32 %r0, %f0;\n\
+                 mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};"
+                .to_string(),
+        };
+        format!(
+            ".visible .entry {}(\n.param .u64 c,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n.param .align 4 .b8 params[32]\n)\n{{\n.reg .b32 %r<8>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<8>;\n{body}\nret;\n}}\n",
+            spec.symbol
+        )
+    }
+
+    fn fixed_sm89_cells_test_entries() -> String {
+        super::super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SPECS
+            .iter()
+            .map(fixed_sm89_cell_test_entry)
+            .collect()
+    }
+
+    #[test]
+    fn fixed_sm89_cells_travel_with_the_portable_overlay() {
+        let baseline = fixed_sm89_half_test_ptx();
+        super::validate_fixed_sm89_cells_ptx("sm_89", &baseline).unwrap();
+        let entries = fixed_sm89_cells_test_entries();
+        super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entries, "", 1))
+            .expect_err("every cell is mandatory where the overlay is composed");
+        for spec in super::super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SPECS.iter() {
+            let entry = fixed_sm89_cell_test_entry(spec);
+            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, "", 1))
+                .expect_err("a missing cell must reject");
+            super::validate_fixed_sm89_cells_ptx("sm_89", &format!("{baseline}{entry}"))
+                .expect_err("a duplicated cell must reject");
+            let narrow = entry.replacen("params[32]", "params[24]", 1);
+            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &narrow, 1))
+                .expect_err("the 32-byte bundle ABI is pinned");
+            let unrolled = entry.replacen("cp.async.cg.shared.global", "not.the.copy", 1);
+            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &unrolled, 1))
+                .expect_err("the staging copy is pinned");
+            let spilled = entry.replacen("ret;", "ld.local.u32 %r0, [%rd0]; ret;", 1);
+            super::validate_fixed_sm89_cells_ptx("sm_89", &baseline.replacen(&entry, &spilled, 1))
+                .expect_err("local memory rejects");
+        }
+        for target in ["sm_80", "sm_90a"] {
+            super::validate_fixed_sm89_cells_ptx(target, &baseline).unwrap();
+            super::validate_fixed_sm89_cells_ptx(target, &baseline.replacen(&entries, "", 1))
+                .expect_err("the cells are mandatory on every portable target");
+        }
+        for target in ["compute_89", "sm_120", "compute_120"] {
+            super::validate_fixed_sm89_cells_ptx(target, &baseline.replacen(&entries, "", 1))
+                .unwrap();
+            super::validate_fixed_sm89_cells_ptx(target, &baseline)
+                .expect_err("the cells are foreign where the overlay is not composed");
+        }
+    }
+
     fn fixed_sm89_half_test_ptx() -> String {
         let mut ptx = fixed_sm89_half_test_base_ptx();
         ptx.push_str(&fixed_sm89_half_test_entry(
@@ -15811,6 +16552,7 @@ mod tests {
             FIXED_SM89_EXACT_N64_TEST_SYMBOL,
         ));
         ptx.push_str(&fixed_sm89_rna_wide_test_entry());
+        ptx.push_str(&fixed_sm89_cells_test_entries());
         ptx.push_str(&fixed_sm89_half_test_entry(
             FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[0],
             "bf16",
@@ -15862,6 +16604,10 @@ mod tests {
                 "kernels/gemm_bi_inference/sm89/half_s3.cu",
                 "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
                 "kernels/gemm_bi_inference/sm89/half_n64.cu",
+                "kernels/gemm_bi_inference/sm89/cells_common.cuh",
+                "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
+                "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
+                "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
         );
@@ -15888,27 +16634,29 @@ mod tests {
     }
 
     #[test]
-    fn fixed_sm89_half_pipeline_preserves_non_ada_fixed_composed_bytes() {
+    fn fixed_sm89_half_pipeline_travels_with_the_portable_tier_and_skips_the_cc12_family() {
         let base = compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap();
+        let ada = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+        assert!(ada.len() > base.len() && ada.starts_with(&base));
         for target in [
-            "sm_80",
-            "sm_86",
-            "sm_87",
-            "sm_90",
-            "sm_90a",
-            "sm_100a",
-            "sm_103a",
+            "sm_80", "sm_86", "sm_87", "sm_90", "sm_90a", "sm_100a", "sm_103a", "sm_107a",
             "sm_110a",
-            "sm_120",
-            "sm_121",
-            "compute_121",
         ] {
             assert_eq!(
                 compose_module_source_for(ModuleKind::Fixed, target)
                     .unwrap()
                     .as_bytes(),
+                ada.as_bytes(),
+                "Fixed composition differs from the Ada bytes on portable target {target}"
+            );
+        }
+        for target in ["sm_120", "sm_121", "compute_121"] {
+            assert_eq!(
+                compose_module_source_for(ModuleKind::Fixed, target)
+                    .unwrap()
+                    .as_bytes(),
                 base.as_bytes(),
-                "Fixed composition changed on non-admitted target {target}"
+                "Fixed composition changed on CC 12 target {target}"
             );
         }
     }
@@ -15980,18 +16728,19 @@ mod tests {
     }
 
     #[test]
-    fn fixed_sm89_half_pipeline_ptx_rejects_exports_on_non_ada_targets() {
+    fn fixed_sm89_half_pipeline_ptx_is_required_on_every_portable_tier_target() {
         for target in [
-            "sm_80", "sm_86", "sm_87", "sm_90a", "sm_100a", "sm_103a", "sm_110a",
+            "sm_80", "sm_86", "sm_87", "sm_90a", "sm_100a", "sm_103a", "sm_107a", "sm_110a",
         ] {
             let base = fixed_sm89_half_test_base_ptx()
                 .replace(".target sm_89", &format!(".target {target}"));
-            validate_module_ptx(ModuleKind::Fixed, target, &base)
-                .expect("the unchanged portable Fixed inventory must remain admitted");
+            validate_module_ptx(ModuleKind::Fixed, target, &base).expect_err(
+                "the portable overlay makes the Ada exports mandatory on every portable target",
+            );
             let ptx =
                 fixed_sm89_half_test_ptx().replace(".target sm_89", &format!(".target {target}"));
             validate_module_ptx(ModuleKind::Fixed, target, &ptx)
-                .expect_err("the Ada-only half export must be rejected on other targets");
+                .expect("the complete overlay inventory must be admitted on every portable target");
         }
     }
 
@@ -16233,10 +16982,15 @@ mod tests {
             + &fixed_sm89_half_test_entry("nn_sm89_tc128_swizzle_decoy_bf16", "bf16");
         super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &foreign)
             .expect_err("foreign swizzle export must reject");
-        for target in ["sm_80", "compute_120", "sm_120"] {
+        for target in ["sm_80", "sm_90a"] {
+            super::validate_fixed_sm89_half_swizzle_ptx(target, "")
+                .expect_err("swizzle exports are mandatory on every portable target");
+            super::validate_fixed_sm89_half_swizzle_ptx(target, &baseline).unwrap();
+        }
+        for target in ["compute_120", "sm_120"] {
             super::validate_fixed_sm89_half_swizzle_ptx(target, "").unwrap();
             super::validate_fixed_sm89_half_swizzle_ptx(target, &baseline)
-                .expect_err("swizzle exports must reject on foreign targets");
+                .expect_err("swizzle exports must reject on the CC 12 family");
         }
     }
 
@@ -16348,10 +17102,15 @@ mod tests {
             + &fixed_sm89_half_s3_test_entry("nn_sm89_tc128_s3_decoy_bf16", "bf16");
         super::validate_fixed_sm89_half_s3_ptx("sm_89", &foreign)
             .expect_err("foreign s3 export must reject");
-        for target in ["sm_80", "compute_120", "sm_120"] {
+        for target in ["sm_80", "sm_90a"] {
+            super::validate_fixed_sm89_half_s3_ptx(target, "")
+                .expect_err("s3 exports are mandatory on every portable target");
+            super::validate_fixed_sm89_half_s3_ptx(target, &baseline).unwrap();
+        }
+        for target in ["compute_120", "sm_120"] {
             super::validate_fixed_sm89_half_s3_ptx(target, "").unwrap();
             super::validate_fixed_sm89_half_s3_ptx(target, &baseline)
-                .expect_err("s3 exports must reject on foreign targets");
+                .expect_err("s3 exports must reject on the CC 12 family");
         }
     }
 
@@ -16379,7 +17138,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment() {
+    fn fixed_sm89_rna_wide_composer_follows_the_portable_overlay() {
         let source = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
         assert!(
             source.contains(FIXED_SM89_RNA_WIDE_TEST_SYMBOL),
@@ -16406,14 +17165,18 @@ mod tests {
             "RNA-wide and the later swizzle twin must follow the prior Ada Fixed bytes"
         );
         for target in [
-            "sm_80",
-            "sm_86",
-            "sm_87",
-            "compute_89",
-            "sm_90a",
-            "sm_100a",
-            "sm_103a",
+            "sm_80", "sm_86", "sm_87", "sm_90", "sm_90a", "sm_100a", "sm_103a", "sm_107a",
             "sm_110a",
+        ] {
+            assert!(
+                compose_module_source_for(ModuleKind::Fixed, target)
+                    .unwrap()
+                    .contains(FIXED_SM89_RNA_WIDE_TEST_SYMBOL),
+                "RNA-wide is missing from the portable overlay on Fixed/{target}"
+            );
+        }
+        for target in [
+            "compute_89",
             "sm_120",
             "sm_121",
             "compute_120",
@@ -16496,9 +17259,13 @@ mod tests {
             validate_module_ptx(ModuleKind::Fixed, "sm_89", &malformed)
                 .expect_err("RNA-wide inventory, ABI, pipeline, and reduction drift must reject");
         }
-        for target in ["sm_80", "compute_89", "sm_90a", "sm_120", "compute_120"] {
+        for target in ["sm_80", "sm_90a"] {
             super::validate_fixed_sm89_rna_wide_ptx(target, &entry)
-                .expect_err("RNA-wide entry is foreign outside exact sm_89");
+                .expect("the RNA-wide entry travels with the portable overlay");
+        }
+        for target in ["compute_89", "sm_120", "compute_120"] {
+            super::validate_fixed_sm89_rna_wide_ptx(target, &entry)
+                .expect_err("RNA-wide entry is foreign outside the portable overlay");
         }
     }
 
@@ -17315,6 +18082,10 @@ mod tests {
                 "kernels/gemm_bi_inference/sm89/half_s3.cu",
                 "kernels/gemm_bi_inference/sm89/tf32_rna_n96.cu",
                 "kernels/gemm_bi_inference/sm89/half_n64.cu",
+                "kernels/gemm_bi_inference/sm89/cells_common.cuh",
+                "kernels/gemm_bi_inference/sm89/cells_f32_simt.cu",
+                "kernels/gemm_bi_inference/sm89/cells_half_mma.cu",
+                "kernels/gemm_bi_inference/sm89/cells_tf32_mma.cu",
             ]
         );
     }
@@ -17379,20 +18150,18 @@ mod tests {
     #[test]
     fn fixed_sm89_exact_n64_retains_all_other_fixed_composed_bytes() {
         let before = compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap();
+        let ada = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
         for arch in [
-            "sm_80",
-            "sm_86",
-            "sm_87",
-            "compute_89",
-            "sm_90",
-            "sm_90a",
-            "sm_100a",
-            "sm_103a",
+            "sm_80", "sm_86", "sm_87", "sm_90", "sm_90a", "sm_100a", "sm_103a", "sm_107a",
             "sm_110a",
-            "sm_120",
-            "sm_121",
-            "compute_121",
         ] {
+            assert_eq!(
+                compose_module_source_for(ModuleKind::Fixed, arch).unwrap(),
+                ada,
+                "{arch}"
+            );
+        }
+        for arch in ["compute_89", "sm_120", "sm_121", "compute_121"] {
             assert_eq!(
                 compose_module_source_for(ModuleKind::Fixed, arch).unwrap(),
                 before,
@@ -17518,23 +18287,22 @@ mod tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_ptx_rejects_export_on_other_portable_targets() {
+    fn fixed_sm89_exact_n64_ptx_travels_with_the_portable_overlay() {
         for arch in [
-            "sm_80",
-            "sm_86",
-            "sm_87",
-            "compute_89",
-            "sm_90a",
-            "sm_100a",
-            "sm_103a",
-            "sm_110a",
+            "sm_80", "sm_86", "sm_87", "sm_90a", "sm_100a", "sm_103a", "sm_107a", "sm_110a",
         ] {
-            let before = fixed_sm89_half_test_base_ptx();
-            validate_module_ptx(ModuleKind::Fixed, arch, &before).unwrap();
-            let ptx = before + &fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
-            validate_module_ptx(ModuleKind::Fixed, arch, &ptx)
-                .expect_err("exact N64 must not appear outside Fixed/sm_89");
+            let complete =
+                fixed_sm89_half_test_ptx().replace(".target sm_89", &format!(".target {arch}"));
+            validate_module_ptx(ModuleKind::Fixed, arch, &complete).unwrap();
+            let entry = fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+            validate_module_ptx(ModuleKind::Fixed, arch, &complete.replacen(&entry, "", 1))
+                .expect_err("exact N64 is mandatory wherever the portable overlay is composed");
         }
+        let before = fixed_sm89_half_test_base_ptx();
+        validate_module_ptx(ModuleKind::Fixed, "compute_89", &before).unwrap();
+        let ptx = before + &fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+        validate_module_ptx(ModuleKind::Fixed, "compute_89", &ptx)
+            .expect_err("exact N64 must not appear where the overlay is not composed");
     }
 
     #[test]

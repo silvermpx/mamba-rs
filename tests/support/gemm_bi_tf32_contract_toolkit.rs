@@ -757,7 +757,7 @@ pub(crate) fn expected_sm120_symbols() -> BTreeSet<String> {
 }
 pub(crate) fn expected_hardware_symbols(cc: (u32, u32)) -> BTreeSet<String> {
     let mut symbols = expected_sm80_symbols();
-    if matches!(cc, (8, 0 | 6 | 7 | 9) | (9, 0) | (10, 0 | 3) | (11, 0)) {
+    if matches!(cc, (8, 0 | 6 | 7 | 9) | (9, 0) | (10, 0 | 3 | 7) | (11, 0)) {
         symbols.insert("nn_sm80_mma_tf32_m128n128_bk32_s3".to_string());
     }
     let specialized = match cc.0 {

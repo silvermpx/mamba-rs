@@ -81,7 +81,13 @@ impl InferenceSm89PtxAdmission {
 }
 
 fn validate_inference_sm89_ptx(ptx: &str) -> InferenceSm89PtxAdmission {
-    const PREFIX: &str = "nn_";
+    // The retained members are named outright. They used to carry a family
+    // token that told them from the rest of the module, and a name prefix is
+    // no longer able to draw that line: the module exports every kernel of
+    // the family. Each member is addressed by its exact name, so a kernel
+    // that is not one of them is served by the route that owns it and is not
+    // this bundle's business; only a duplicated member is a real hazard.
+    const MEMBERS: [&str; 3] = [HALF_BF16_SYMBOL, HALF_F16_SYMBOL, EXACT_SYMBOL];
     let parsed = match super::parse_ptx(ptx) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -94,22 +100,13 @@ fn validate_inference_sm89_ptx(ptx: &str) -> InferenceSm89PtxAdmission {
     for entry in parsed
         .entries
         .iter()
-        .filter(|entry| entry.symbol.starts_with(PREFIX))
+        .filter(|entry| MEMBERS.contains(&entry.symbol.as_str()))
     {
         *counts.entry(entry.symbol.as_str()).or_insert(0_usize) += 1;
     }
-    let foreign = counts
-        .keys()
-        .copied()
-        .find(|symbol| !matches!(*symbol, HALF_BF16_SYMBOL | HALF_F16_SYMBOL | EXACT_SYMBOL));
     let duplicate = counts
         .iter()
         .find_map(|(&symbol, &count)| (count != 1).then_some(symbol));
-    if let Some(symbol) = foreign {
-        return InferenceSm89PtxAdmission::rejected(format!(
-            "retained Inference PTX carries foreign export {symbol}"
-        ));
-    }
     if let Some(symbol) = duplicate {
         return InferenceSm89PtxAdmission::rejected(format!(
             "retained Inference PTX carries duplicate export {symbol}"
@@ -387,9 +384,10 @@ pub(super) fn census_inference_sm89_driver_abi(
     arch: &str,
     ptx: &str,
 ) -> InferenceSm89DriverAbiCensus {
-    if kind != ModuleKind::Fixed || arch != "sm_89" {
+    if kind != ModuleKind::Fixed || !super::fixed_portable_overlay_composed(arch) {
         return InferenceSm89DriverAbiCensus::rejected(
-            "retained Inference ABI census requires Fixed/sm_89".into(),
+            "retained Inference ABI census requires a Fixed module with the portable overlay"
+                .into(),
         );
     }
     let admission = validate_inference_sm89_ptx(ptx);
@@ -644,7 +642,7 @@ mod tests {
     fn valid_ptx() -> String {
         format!(
             ".version 8.4\n.target sm_89\n.address_size 64\n\
-             .visible .entry unrelated_fixed_export() .maxntid 32 {{ ret; }}\n{}{}{}",
+             .visible .entry nn_sm89_tc128_pipeline_bf16() .maxntid 32 {{ ret; }}\n{}{}{}",
             half_entry(
                 HALF_BF16_SYMBOL,
                 "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
@@ -697,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn inference_bundle_admission_rejects_duplicate_foreign_and_malformed_inventory_globally() {
+    fn inference_bundle_admission_rejects_duplicate_and_malformed_inventory_globally() {
         let duplicate = format!(
             "{}{}",
             valid_ptx(),
@@ -708,8 +706,14 @@ mod tests {
         );
         assert_all_rejected(validate_inference_sm89_ptx(&duplicate));
 
-        let foreign = valid_ptx().replace(HALF_BF16_SYMBOL, "nn_sm89_unreviewed_decoy_bf16");
-        assert_all_rejected(validate_inference_sm89_ptx(&foreign));
+        // A member exported under another name is a member that is missing:
+        // the bundle addresses each one by its exact name, so the renamed
+        // kernel is never launched and its siblings stay admissible.
+        let renamed = valid_ptx().replace(HALF_BF16_SYMBOL, "nn_sm89_unreviewed_decoy_bf16");
+        let admission = validate_inference_sm89_ptx(&renamed);
+        assert!(admission.half_f32out_s3_bf16.is_err());
+        assert!(admission.half_f32out_s3_f16.is_ok());
+        assert!(admission.exact_m128n64_tail.is_ok());
 
         let malformed = format!("{}\n.visible .entry {HALF_BF16_SYMBOL}", valid_ptx());
         assert_all_rejected(validate_inference_sm89_ptx(&malformed));
@@ -973,6 +977,14 @@ mod tests {
             device_cc: Some((8, 9)),
         };
         assert!(validate_inference_sm89_envelope(valid).is_ok());
+        assert!(
+            validate_inference_sm89_envelope(InferenceSm89EnvelopeFacts {
+                device_cc: Some((8, 6)),
+                ..valid
+            })
+            .is_ok(),
+            "an sm_80-tier board outside the frozen evidence takes the proof path"
+        );
         for invalid in [
             InferenceSm89EnvelopeFacts {
                 module_kind: ModuleKind::TriadSm80,
@@ -1008,6 +1020,10 @@ mod tests {
             },
             InferenceSm89EnvelopeFacts {
                 nvrtc_library_current: false,
+                ..valid
+            },
+            InferenceSm89EnvelopeFacts {
+                device_cc: Some((7, 5)),
                 ..valid
             },
             InferenceSm89EnvelopeFacts {

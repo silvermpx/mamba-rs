@@ -30,9 +30,11 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 3;
 pub const NUMERIC_ABI_REVISION: u16 = 5;
-// Host dispatch epoch: qualified Ada Fixed finalists enter literal toolkit/cell
-// AUTO rows; unchanged modules and retained cohorts keep their original evidence.
-pub const TUNING_TABLE_REVISION: u16 = 45;
+// Host dispatch epoch: the measured routes reach every SM80-tier board by
+// evidence or by first-use proof, and the portable TF32 tier serves the
+// nearest measured cell within its neighbour band; the frozen cohorts keep
+// their evidence.
+pub const TUNING_TABLE_REVISION: u16 = 46;
 pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
@@ -2973,6 +2975,9 @@ pub enum PhysicalGemmBackend {
     InferenceSm120TmaMma16 = 38,
     InferenceSm120TmaMmaTf32Rna = 39,
     FixedMatvecEightWarp = 40,
+    Sm89Mma16HalfS4 = 41,
+    Sm89MmaTf32NtRna = 42,
+    Sm89MmaTf32TnDirectRna = 43,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
@@ -3071,6 +3076,7 @@ pub enum ResolvedOutputOwnership {
     OwnerCtaPerOutputTileStreamKFixedOrder = 11,
     OwnerCtaPerOutputTileFixedSplitFold = 12,
     OneCtaPerOutputTilePerSplitMPartition = 13,
+    RelayCtaChainPerOutputTile = 14,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -5377,11 +5383,14 @@ mod physical_launch_tests {
                 PhysicalGemmBackend::InferenceSm120TmaFma as u8,
                 PhysicalGemmBackend::InferenceSm120TmaMma16 as u8,
                 PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna as u8,
-                PhysicalGemmBackend::FixedMatvecEightWarp as u8
+                PhysicalGemmBackend::FixedMatvecEightWarp as u8,
+                PhysicalGemmBackend::Sm89Mma16HalfS4 as u8,
+                PhysicalGemmBackend::Sm89MmaTf32NtRna as u8,
+                PhysicalGemmBackend::Sm89MmaTf32TnDirectRna as u8
             ],
             [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-                26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40
+                26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43
             ]
         );
         assert_eq!(
@@ -5526,7 +5535,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_rna_auto_epoch_rejects_revision39_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 39;
         assert_eq!(captured.compiler, current.compiler);
@@ -5600,6 +5609,9 @@ mod physical_launch_tests {
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32PreRna as u8, 26);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32AddHalf as u8, 27);
         assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2 as u8, 28);
+        assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS4 as u8, 41);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtRna as u8, 42);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32TnDirectRna as u8, 43);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix as u8, 29);
         assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8, 30);
         assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8, 21);
@@ -5611,12 +5623,16 @@ mod physical_launch_tests {
             ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition as u8,
             13
         );
+        assert_eq!(
+            ResolvedOutputOwnership::RelayCtaChainPerOutputTile as u8,
+            14
+        );
     }
 
     #[test]
     fn ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 40;
         assert_eq!(captured.compiler, current.compiler);
@@ -5656,7 +5672,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_half_auto_epoch_rejects_revision41_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 41;
         assert_eq!(captured.compiler, current.compiler);
@@ -5678,7 +5694,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_half_s3_auto_epoch_rejects_revision42_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 42;
         assert_eq!(captured.compiler, current.compiler);
@@ -5700,7 +5716,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_exact_toolkit_auto_epoch_rejects_revision43_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 43;
         assert_eq!(captured.compiler, current.compiler);
@@ -5722,7 +5738,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_finalist_auto_epoch_rejects_revision44_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 45);
+        assert_eq!(current.tuning_table_revision, 46);
         let mut captured = current;
         captured.tuning_table_revision = 44;
         assert_eq!(captured.compiler, current.compiler);
@@ -5753,7 +5769,7 @@ mod physical_launch_tests {
             captured.artifacts.triad_sm80,
         ])
         .unwrap();
-        assert_eq!(captured.tuning_table_revision, 45);
+        assert_eq!(captured.tuning_table_revision, 46);
         assert_eq!(
             current.tuning_table_revision,
             captured.tuning_table_revision
@@ -6513,7 +6529,7 @@ mod cache_and_header_tests {
     #[test]
     fn only_the_tuning_table_revision_moved() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
-        assert_eq!(TUNING_TABLE_REVISION, 45);
+        assert_eq!(TUNING_TABLE_REVISION, 46);
     }
 
     #[test]

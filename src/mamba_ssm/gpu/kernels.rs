@@ -423,6 +423,8 @@ pub struct MambaKernels {
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
     pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
+    /// The Ada-measured inference cells of the Fixed overlay, by symbol.
+    pub(crate) fixed_sm89_cells: std::collections::HashMap<&'static str, CudaFunction>,
     pub(crate) inference_sm89_bundle: InferenceSm89Bundle,
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
     pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
@@ -756,7 +758,7 @@ impl MambaKernels {
                 .as_ref()?
                 .nobias_m128n64_t256
                 .as_ref(),
-            _ => None,
+            other => self.fixed_sm89_cells.get(other),
         }
     }
 
@@ -845,20 +847,43 @@ impl MambaKernels {
             sm89_tf32_joint_rejection,
             specialized,
         ) = if let Some(artifacts) = sm120_artifacts {
+            // The Ada-found modules are sm_80-tier PTX; the CC 12.x boards
+            // compile them beside their own specialized set and admit them
+            // through the first-use proof like every other board.
+            let portable_tier = |module_kind| {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
+                    match compile(module_kind) {
+                        Ok(module) => (Some(module), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
+                }
+            };
+            let (finalist, finalist_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadSm89Finalist);
+            let (sm89_half, sm89_half_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadSm89Half);
+            let (sm89_exact_f32, sm89_exact_f32_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadSm89ExactF32);
+            let (sm89_exact_f32_d128, sm89_exact_f32_d128_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadSm89ExactF32D128);
+            let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint);
             (
                 artifacts.fixed,
                 artifacts.scalar,
                 artifacts.sm80,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                finalist,
+                finalist_rejection,
+                sm89_half,
+                sm89_half_rejection,
+                sm89_exact_f32,
+                sm89_exact_f32_rejection,
+                sm89_exact_f32_d128,
+                sm89_exact_f32_d128_rejection,
+                sm89_tf32_joint,
+                sm89_tf32_joint_rejection,
                 artifacts.specialized,
             )
         } else {
@@ -866,7 +891,7 @@ impl MambaKernels {
             let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
             let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
             let (finalist, finalist_rejection) =
-                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
                     match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
@@ -875,7 +900,7 @@ impl MambaKernels {
                     (None, None)
                 };
             let (sm89_half, sm89_half_rejection) =
-                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
                     match compile(super::kernel_identity::ModuleKind::TriadSm89Half) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
@@ -884,7 +909,7 @@ impl MambaKernels {
                     (None, None)
                 };
             let (sm89_exact_f32, sm89_exact_f32_rejection) =
-                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
                     match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
@@ -893,7 +918,7 @@ impl MambaKernels {
                     (None, None)
                 };
             let (sm89_exact_f32_d128, sm89_exact_f32_d128_rejection) =
-                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
                     match compile(super::kernel_identity::ModuleKind::TriadSm89ExactF32D128) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
@@ -902,7 +927,7 @@ impl MambaKernels {
                     (None, None)
                 };
             let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
-                if matches!((arch, device_cc), ("sm_89", Some((8, 9)))) {
+                if super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc) {
                     match compile(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint) {
                         Ok(module) => (Some(module), None),
                         Err(error) => (None, Some(error)),
@@ -916,7 +941,9 @@ impl MambaKernels {
                     .and_then(|module| {
                         super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
                     }),
-                ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103a", Some(device_cc @ (10, 3))) => {
+                ("sm_100a", Some(device_cc @ (10, 0)))
+                | ("sm_103a", Some(device_cc @ (10, 3)))
+                | ("sm_107a", Some(device_cc @ (10, 7))) => {
                     super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
                 }
                 ("sm_110a", Some(device_cc @ (11, 0))) => {
@@ -964,6 +991,8 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm89_half_m128n64_s2(ctx, &fixed);
         let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
+        let (fixed_sm89_cells, fixed_sm89_cell_rejections) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_cells(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan_t256, fixed_sm120_f32_n64_copyplan_t256_rejection) =
@@ -1007,6 +1036,51 @@ impl MambaKernels {
                 format!(
                     "the portable TF32 routes are not bound on this board ({reason}); the \
                      exact f32 kernels serve every TF32 request"
+                )
+            });
+        }
+        // The same disease on the retained Inference members: a rejected
+        // bundle used to leave the slower legacy kernels serving every
+        // retained shape with nothing said.
+        for (member, slot) in [
+            (
+                "nn_sm89_tc128_f32out_s3_bf16",
+                &inference_sm89_bundle.half_f32out_s3_bf16,
+            ),
+            (
+                "nn_sm89_tc128_f32out_s3_f16",
+                &inference_sm89_bundle.half_f32out_s3_f16,
+            ),
+            (
+                "nn_sm89_f32_m128n64_tail_copyplan",
+                &inference_sm89_bundle.exact_m128n64_tail,
+            ),
+        ] {
+            if let Err(reason) = slot {
+                static RETAINED: std::sync::Once = std::sync::Once::new();
+                let reason = reason.clone();
+                super::diagnostics::warn_once(&RETAINED, || {
+                    format!(
+                        "the retained Inference member {member} is not bound on this board                          ({reason}); its shapes fall back to the legacy kernels"
+                    )
+                });
+            }
+        }
+        // The Ada inference cells are optional on every board, but a cell the
+        // overlay composed and the loader still declined should be said aloud.
+        if super::gemm_bi_triad::modules::fixed_portable_overlay_composed(arch)
+            && !fixed_sm89_cell_rejections.is_empty()
+        {
+            static CELLS: std::sync::Once = std::sync::Once::new();
+            let listed = fixed_sm89_cell_rejections
+                .iter()
+                .map(|(symbol, reason)| format!("{symbol} ({reason})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            super::diagnostics::warn_once(&CELLS, || {
+                format!(
+                    "the Ada inference cells {listed} are not bound on this board; the ladder \
+                     serves their shapes"
                 )
             });
         }
@@ -1130,6 +1204,11 @@ impl MambaKernels {
             static NN_N96: std::sync::Once = std::sync::Once::new();
             static NN_N96_BASELINE: std::sync::Once = std::sync::Once::new();
             static NT_A_LDMATRIX_N96: std::sync::Once = std::sync::Once::new();
+            static NT_RNA_M144N96_S2: std::sync::Once = std::sync::Once::new();
+            static NT_ROWSTAGE_M128N192_S2: std::sync::Once = std::sync::Once::new();
+            static TN_DIRECT_M192N192_S2: std::sync::Once = std::sync::Once::new();
+            static TN_M96N192_S2: std::sync::Once = std::sync::Once::new();
+            static TN_M96N96_S3: std::sync::Once = std::sync::Once::new();
             let once = match exclusion.symbol {
                 super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL => &TRANSPOSE,
                 super::gemm_bi_triad::TN_PRE_RNA_N96_SYMBOL => &TN_N96,
@@ -1138,6 +1217,11 @@ impl MambaKernels {
                 super::gemm_bi_triad::NN_ADD_HALF_DIRECT_N96_SYMBOL => &NN_N96,
                 super::gemm_bi_triad::NN_ADD_HALF_N96_SYMBOL => &NN_N96_BASELINE,
                 super::gemm_bi_triad::NT_A_LDMATRIX_N96_SYMBOL => &NT_A_LDMATRIX_N96,
+                super::gemm_bi_triad::NT_RNA_M144N96_S2_SYMBOL => &NT_RNA_M144N96_S2,
+                super::gemm_bi_triad::NT_ROWSTAGE_M128N192_S2_SYMBOL => &NT_ROWSTAGE_M128N192_S2,
+                super::gemm_bi_triad::TN_DIRECT_M192N192_S2_SYMBOL => &TN_DIRECT_M192N192_S2,
+                super::gemm_bi_triad::TN_PRE_RNA_M96N192_S2_SYMBOL => &TN_M96N192_S2,
+                super::gemm_bi_triad::TN_PRE_RNA_M96N96_S3_SYMBOL => &TN_M96N96_S3,
                 _ => continue,
             };
             super::diagnostics::warn_once(once, || {
@@ -1361,6 +1445,7 @@ impl MambaKernels {
             fixed_sm89_half_m128n64_s2_f16_rejection,
             fixed_sm89_f32_n64_copyplan,
             fixed_sm89_f32_n64_copyplan_rejection,
+            fixed_sm89_cells,
             inference_sm89_bundle,
             fixed_sm120_f32_n64_copyplan,
             fixed_sm120_f32_n64_copyplan_rejection,
@@ -1510,7 +1595,8 @@ impl MambaKernels {
             } else {
                 None
             },
-            gemm_bi_nn_sm100_typed: if matches!(arch, "sm_100a" | "sm_103a" | "sm_110a") {
+            gemm_bi_nn_sm100_typed: if matches!(arch, "sm_100a" | "sm_103a" | "sm_107a" | "sm_110a")
+            {
                 Some(load_half_dynsmem("nn_sm100_tcgen_c4", 65_536)?)
             } else {
                 None
@@ -1588,6 +1674,10 @@ impl MambaKernels {
         self.triad.tc64_streamk_resident_ctas()
     }
 
+    pub(crate) fn sm89_half_relay_resident_ctas(&self) -> u32 {
+        self.triad.sm89_half_relay_resident_ctas()
+    }
+
     pub(crate) fn triad_sm80_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.triad.sm80_compiler_identity()
     }
@@ -1629,6 +1719,10 @@ impl MambaKernels {
         dtype: super::dtype::WeightDtype,
     ) -> Option<&CudaFunction> {
         self.triad.sm89_half_function(route, dtype)
+    }
+
+    pub(crate) fn fixed_sm89_cell_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.fixed_sm89_cells.get(symbol)
     }
 
     pub(in crate::mamba_ssm::gpu) fn triad_sm89_half_runtime_function(

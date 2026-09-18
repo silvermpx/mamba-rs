@@ -321,6 +321,7 @@ pub struct GpuCtx {
     resources: Rc<GpuCtxResources>,
     gemm_route_recorder: RefCell<Option<GemmRouteRecorder>>,
     f32_prepared_launches: RefCell<F32PreparedLaunchCache>,
+    route_proofs: RefCell<super::gemm_bi_triad::proof::RouteProofLedger>,
     sm120_prepared_launches: RefCell<Sm120PreparedLaunchCache>,
     sm100_prepared_launches: RefCell<Sm100PreparedLaunchCache>,
     sm90a_prepared_launches: RefCell<Sm90aPreparedLaunchCache>,
@@ -615,6 +616,7 @@ impl GpuCtx {
             }),
             gemm_route_recorder: RefCell::new(None),
             f32_prepared_launches: RefCell::new(F32PreparedLaunchCache::default()),
+            route_proofs: RefCell::new(super::gemm_bi_triad::proof::RouteProofLedger::default()),
             sm120_prepared_launches: RefCell::new(Sm120PreparedLaunchCache::default()),
             sm100_prepared_launches: RefCell::new(Sm100PreparedLaunchCache::default()),
             sm90a_prepared_launches: RefCell::new(Sm90aPreparedLaunchCache::default()),
@@ -1108,6 +1110,19 @@ impl GpuCtx {
             .try_borrow_mut()
             .map_err(|_| "prepared f32 Triad cache is already borrowed".to_string())?;
         access(&mut launches)
+    }
+
+    /// The first-use route proofs this context has reached; see
+    /// `gemm_bi_triad::proof`.
+    pub(crate) fn with_route_proofs<T>(
+        &self,
+        access: impl FnOnce(&mut super::gemm_bi_triad::proof::RouteProofLedger) -> T,
+    ) -> Result<T, String> {
+        let mut proofs = self
+            .route_proofs
+            .try_borrow_mut()
+            .map_err(|_| "route proof ledger is already borrowed".to_string())?;
+        Ok(access(&mut proofs))
     }
 
     pub(crate) fn with_sm120_prepared_launches<T>(
@@ -1858,10 +1873,12 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         PhysicalGemmBackend::Sm89MmaTf32Compact8 => ModuleKind::TriadSm89Finalist,
         PhysicalGemmBackend::Sm89MmaTf32PreRna
         | PhysicalGemmBackend::Sm89MmaTf32AddHalf
-        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix => ModuleKind::TriadSm89Tf32Joint,
-        PhysicalGemmBackend::Sm89Mma16HalfS3 | PhysicalGemmBackend::Sm89Mma16HalfS2 => {
-            ModuleKind::TriadSm89Half
-        }
+        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix
+        | PhysicalGemmBackend::Sm89MmaTf32NtRna
+        | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => ModuleKind::TriadSm89Tf32Joint,
+        PhysicalGemmBackend::Sm89Mma16HalfS3
+        | PhysicalGemmBackend::Sm89Mma16HalfS2
+        | PhysicalGemmBackend::Sm89Mma16HalfS4 => ModuleKind::TriadSm89Half,
         PhysicalGemmBackend::Sm90aWgmma | PhysicalGemmBackend::Sm90aWgmmaTf32Tma => {
             ModuleKind::TriadSm90a
         }
@@ -1882,15 +1899,17 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         }
         PhysicalGemmBackend::Sm89MmaTf32PreRna
         | PhysicalGemmBackend::Sm89MmaTf32AddHalf
-        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix => {
+        | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix
+        | PhysicalGemmBackend::Sm89MmaTf32NtRna
+        | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
         PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan => {
             super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
         }
-        PhysicalGemmBackend::Sm89Mma16HalfS3 | PhysicalGemmBackend::Sm89Mma16HalfS2 => {
-            super::kernel_identity::SM89_HALF_ROUTE_REVISION
-        }
+        PhysicalGemmBackend::Sm89Mma16HalfS3
+        | PhysicalGemmBackend::Sm89Mma16HalfS2
+        | PhysicalGemmBackend::Sm89Mma16HalfS4 => super::kernel_identity::SM89_HALF_ROUTE_REVISION,
         PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
         | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial => {
             super::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
@@ -2064,7 +2083,7 @@ mod tests {
         assert_ne!(finalist, 1);
 
         let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32Rna, generic);
-        assert_eq!(portable, 45);
+        assert_eq!(portable, 46);
         assert_ne!(portable, finalist);
     }
 
@@ -2075,6 +2094,8 @@ mod tests {
             PhysicalGemmBackend::Sm89MmaTf32PreRna,
             PhysicalGemmBackend::Sm89MmaTf32AddHalf,
             PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix,
+            PhysicalGemmBackend::Sm89MmaTf32NtRna,
+            PhysicalGemmBackend::Sm89MmaTf32TnDirectRna,
         ] {
             assert_eq!(
                 expected_route_module(backend),
@@ -2085,11 +2106,11 @@ mod tests {
                 super::super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
             );
         }
-        assert_eq!(generic, 45);
+        assert_eq!(generic, 46);
     }
 
     #[test]
-    fn sm89_fixed_copyplan_routes_use_a_private_revision_without_moving_global_45() {
+    fn sm89_fixed_copyplan_routes_use_a_private_revision_without_moving_global_46() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         let copyplan = expected_route_tuning_revision(
             PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
@@ -2103,7 +2124,7 @@ mod tests {
         assert_ne!(copyplan, 2);
         assert_eq!(
             expected_route_tuning_revision(PhysicalGemmBackend::ScalarFma, generic),
-            45
+            46
         );
         assert_eq!(
             expected_route_module(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan),
@@ -2121,6 +2142,7 @@ mod tests {
         for backend in [
             PhysicalGemmBackend::Sm89Mma16HalfS3,
             PhysicalGemmBackend::Sm89Mma16HalfS2,
+            PhysicalGemmBackend::Sm89Mma16HalfS4,
         ] {
             assert_eq!(
                 expected_route_tuning_revision(backend, generic),
@@ -2128,7 +2150,7 @@ mod tests {
             );
             assert_eq!(expected_route_module(backend), ModuleKind::TriadSm89Half);
         }
-        assert_eq!(generic, 45);
+        assert_eq!(generic, 46);
     }
 
     #[test]
@@ -2142,7 +2164,7 @@ mod tests {
                 ModuleKind::TriadSm89ExactF32
             );
             assert_eq!(
-                expected_route_tuning_revision(backend, 45),
+                expected_route_tuning_revision(backend, 46),
                 crate::mamba_ssm::gpu::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
             );
             assert!(scalar_backend_supports_logical_f32(backend));
@@ -2157,7 +2179,7 @@ mod tests {
             ModuleKind::TriadSm89ExactF32D128
         );
         assert_eq!(
-            expected_route_tuning_revision(backend, 45),
+            expected_route_tuning_revision(backend, 46),
             crate::mamba_ssm::gpu::kernel_identity::SM89_EXACT_F32_D128_ROUTE_REVISION
         );
         assert!(scalar_backend_supports_logical_f32(backend));

@@ -154,7 +154,10 @@ the full qualification once for the promoted domains:
    incumbent. A confirmed improvement over the crate's own route is kept
    whether or not cuBLAS remains faster.
 7. Qualify each domain independently. A win on CUDA 13.2 does not admit
-   CUDA 13.0 or 12.8; a win on SM89 does not admit SM80 or SM120. Appending
+   CUDA 13.0 or 12.8; a win on SM89 does not admit SM80 or SM120. The
+   first-use bit proof carries a route's BITS to a board that holds no
+   cohort for it, never its timing: a proven route is admitted, not
+   measured, and no table may quote one board's microseconds for another. Appending
    a source fragment changes the module's artifact identity, so retained
    routes of that module are requalified on the final build even when their
    own files are byte-identical. The same holds for any byte of any fragment

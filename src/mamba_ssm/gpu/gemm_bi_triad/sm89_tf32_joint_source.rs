@@ -3,10 +3,22 @@ use std::collections::BTreeSet;
 pub const SOURCE: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint.cu");
 pub const PRIMITIVES: &str =
     include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_joint_primitives.cuh");
+/// The wide-tile fragments: one file per operand layout, each exporting
+/// the tiles measured on the Ada board after the joint module was sealed.
+pub const WIDE_NT: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nt.cu");
+pub const WIDE_NT_EPI: &str =
+    include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nt_epi.cu");
+pub const WIDE_TN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_tn.cu");
+pub const WIDE_NN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm89/tf32_wide_nn.cu");
 
 pub const SOURCE_SHA256: &str = "00b56974628530ac57fb45df26404920655c6c0e21e12db4cb64d8fe9207134c";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
+pub const WIDE_NT_SHA256: &str = "8c6a1a4f735435d8501f534cd13d93fbdea723fad70ff09f085a750ccbee1bcb";
+pub const WIDE_NT_EPI_SHA256: &str =
+    "26681b02c5b668b97347d4ac48cdc7bbdf613d0ced8d4b7141daa608f927a349";
+pub const WIDE_TN_SHA256: &str = "06d1f793a3cc7390d8dab3e7f69cea1c80b992be13e0d03f415e578d6e105ffe";
+pub const WIDE_NN_SHA256: &str = "34296785c5cf89b78eb6f964ba5fab960dee421bdf454b3d74262471867ec96a";
 
 pub const COPY_CG_PRIMITIVE: &str = "gbf_tf32_copy_cg";
 pub const MMA_M16N8K8_PRIMITIVE: &str = "gbf_tf32_mma_m16n8k8";
@@ -19,16 +31,38 @@ pub const TN_PRE_RNA_M64N96_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n96_bk32_
 pub const NN_ADD_HALF_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
 pub const NN_ADD_HALF_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
 pub const NT_A_LDMATRIX_N96_SYMBOL: &str = "nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3";
+pub const NT_RNA_M144N96_S2_SYMBOL: &str = "nt_sm89_tf32_rna_m144n96_w3x4_bk32_s2";
+pub const NT_ROWSTAGE_M128N192_S2_SYMBOL: &str = "nt_sm89_tf32_rowstage_m128n192_w2x4_bk32_s2";
+pub const TN_DIRECT_M192N192_S2_SYMBOL: &str = "tn_sm89_tf32_m192n192_w3x4_bk32_s2";
+pub const TN_PRE_RNA_M96N192_S2_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m96n192_w3x4_bk32_s2";
+pub const TN_PRE_RNA_M96N96_S3_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m96n96_bk32_s3";
 
-/// The seven exports in lexicographic order, the order the inventory
-/// scan reports them in.
-pub const SM89_TF32_JOINT_SYMBOLS: [&str; 7] = [
+/// The seven exports of the sealed owner file in lexicographic order, the
+/// order the inventory scan reports them in.
+pub const SM89_TF32_JOINT_SEALED_SYMBOLS: [&str; 7] = [
     NN_ADD_HALF_N96_SYMBOL,
     NN_ADD_HALF_DIRECT_N96_SYMBOL,
     NT_A_LDMATRIX_N96_SYMBOL,
     TN_PRE_RNA_N96_SYMBOL,
     TN_PRE_RNA_M64N64_SYMBOL,
     TN_PRE_RNA_M64N96_S2_SYMBOL,
+    TN_PRE_RNA_TRANSPOSE_SYMBOL,
+];
+
+/// Every export of the composed module, the sealed seven and the five wide
+/// tiles, in lexicographic order.
+pub const SM89_TF32_JOINT_SYMBOLS: [&str; 12] = [
+    NN_ADD_HALF_N96_SYMBOL,
+    NN_ADD_HALF_DIRECT_N96_SYMBOL,
+    NT_A_LDMATRIX_N96_SYMBOL,
+    NT_RNA_M144N96_S2_SYMBOL,
+    NT_ROWSTAGE_M128N192_S2_SYMBOL,
+    TN_DIRECT_M192N192_S2_SYMBOL,
+    TN_PRE_RNA_N96_SYMBOL,
+    TN_PRE_RNA_M64N64_SYMBOL,
+    TN_PRE_RNA_M64N96_S2_SYMBOL,
+    TN_PRE_RNA_M96N192_S2_SYMBOL,
+    TN_PRE_RNA_M96N96_S3_SYMBOL,
     TN_PRE_RNA_TRANSPOSE_SYMBOL,
 ];
 
@@ -102,6 +136,11 @@ pub enum Sm89Tf32JointKernelKind {
     TnPreRnaM64N64Bk32S3,
     TnPreRnaM64N96Bk32S2,
     TnPreRnaTranspose32x32,
+    NtRnaM144N96Bk32S2,
+    NtRowstageM128N192Bk32S2,
+    TnDirectM192N192Bk32S2,
+    TnPreRnaM96N192Bk32S2,
+    TnPreRnaM96N96Bk32S3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,14 +168,36 @@ const fn gemm_spec(
     register_cap: u32,
     minimum_active_blocks: u32,
 ) -> Sm89Tf32JointKernelSpec {
+    wide_spec(
+        symbol,
+        kind,
+        256,
+        dynamic_shared_bytes,
+        register_cap,
+        0,
+        minimum_active_blocks,
+    )
+}
+
+/// A GEMM export at its own CTA width: the wide tiles run eight or twelve
+/// warps.
+const fn wide_spec(
+    symbol: &'static str,
+    kind: Sm89Tf32JointKernelKind,
+    threads: u32,
+    dynamic_shared_bytes: u32,
+    register_cap: u32,
+    local_bytes: u32,
+    minimum_active_blocks: u32,
+) -> Sm89Tf32JointKernelSpec {
     Sm89Tf32JointKernelSpec {
         symbol,
         kind,
-        block: (256, 1, 1),
+        block: (threads, 1, 1),
         dynamic_shared_bytes,
         static_shared_bytes: 0,
         register_cap,
-        local_bytes: 0,
+        local_bytes,
         minimum_max_threads: 256,
         minimum_active_blocks: Some(minimum_active_blocks),
         abi_parameters: &GEMM_DRIVER_ABI,
@@ -153,7 +214,7 @@ const fn gemm_spec(
 // 131/131/135. The NT route with both operands through ldmatrix and the
 // half-ulp add allocates 113 on CUDA 13.2.
 // Occupancy remains sealed independently below.
-pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
+pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 12] = [
     gemm_spec(
         NN_ADD_HALF_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
@@ -173,6 +234,33 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
         Sm89Tf32JointKernelKind::NtALdmatrixM128N96Bk32S3,
         86_016,
         128,
+        1,
+    ),
+    wide_spec(
+        NT_RNA_M144N96_S2_SYMBOL,
+        Sm89Tf32JointKernelKind::NtRnaM144N96Bk32S2,
+        384,
+        61_440,
+        168,
+        0,
+        1,
+    ),
+    wide_spec(
+        NT_ROWSTAGE_M128N192_S2_SYMBOL,
+        Sm89Tf32JointKernelKind::NtRowstageM128N192Bk32S2,
+        256,
+        81_920,
+        255,
+        0,
+        1,
+    ),
+    wide_spec(
+        TN_DIRECT_M192N192_S2_SYMBOL,
+        Sm89Tf32JointKernelKind::TnDirectM192N192Bk32S2,
+        384,
+        98_304,
+        168,
+        88,
         1,
     ),
     gemm_spec(
@@ -195,6 +283,24 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 7] = [
         40_960,
         128,
         2,
+    ),
+    wide_spec(
+        TN_PRE_RNA_M96N192_S2_SYMBOL,
+        Sm89Tf32JointKernelKind::TnPreRnaM96N192Bk32S2,
+        384,
+        73_728,
+        168,
+        0,
+        1,
+    ),
+    wide_spec(
+        TN_PRE_RNA_M96N96_S3_SYMBOL,
+        Sm89Tf32JointKernelKind::TnPreRnaM96N96Bk32S3,
+        256,
+        73_728,
+        255,
+        0,
+        1,
     ),
     Sm89Tf32JointKernelSpec {
         symbol: TN_PRE_RNA_TRANSPOSE_SYMBOL,
@@ -222,8 +328,16 @@ pub fn kernel_spec(symbol: &str) -> Option<&'static Sm89Tf32JointKernelSpec> {
 
 pub fn compose_source() -> Result<String, String> {
     validate_primitives_text(PRIMITIVES)?;
-    validate_source_text(SOURCE)?;
-    Ok(format!("{PRIMITIVES}\n{SOURCE}"))
+    validate_sealed_source_text(SOURCE)?;
+    let composed = format!(
+        "{PRIMITIVES}\n{SOURCE}\n{}\n{}\n{}\n{}",
+        WIDE_NT.trim_end(),
+        WIDE_NT_EPI.trim_end(),
+        WIDE_TN.trim_end(),
+        WIDE_NN.trim_end()
+    );
+    validate_source_text(&composed)?;
+    Ok(composed)
 }
 
 pub fn validate_primitives_text(source: &str) -> Result<(), String> {
@@ -318,7 +432,7 @@ pub fn export_inventory(source: &str) -> Result<Vec<&str>, String> {
     Ok(exports)
 }
 
-pub fn validate_source_text(source: &str) -> Result<(), String> {
+fn validate_inventory(source: &str, symbols: &[&str]) -> Result<(), String> {
     for marker in ["_test_", "_exp_"] {
         if source.contains(marker) {
             return Err(format!(
@@ -327,7 +441,7 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
         }
     }
     let exports = export_inventory(source)?;
-    let expected = SM89_TF32_JOINT_SYMBOLS.into_iter().collect::<BTreeSet<_>>();
+    let expected = symbols.iter().copied().collect::<BTreeSet<_>>();
     let observed = exports.iter().copied().collect::<BTreeSet<_>>();
     if exports.len() != expected.len() || observed != expected {
         return Err(format!(
@@ -337,8 +451,35 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The sealed owner file alone: its seven exports.
+pub fn validate_sealed_source_text(source: &str) -> Result<(), String> {
+    validate_inventory(source, &SM89_TF32_JOINT_SEALED_SYMBOLS)
+}
+
+/// The composed module: the sealed seven and the five wide tiles.
+pub fn validate_source_text(source: &str) -> Result<(), String> {
+    validate_inventory(source, &SM89_TF32_JOINT_SYMBOLS)
+}
+
+/// The four wide-tile fragments with their frozen digests: name, text,
+/// expected SHA-256. The digest comparison lives with the callers because
+/// this file is also compiled standalone by the source contract test.
+pub const WIDE_FRAGMENTS: [(&str, &str, &str); 4] = [
+    ("wide NT", WIDE_NT, WIDE_NT_SHA256),
+    ("wide NT epilogue", WIDE_NT_EPI, WIDE_NT_EPI_SHA256),
+    ("wide TN", WIDE_TN, WIDE_TN_SHA256),
+    ("wide NN", WIDE_NN, WIDE_NN_SHA256),
+];
+
 pub fn validate_source() -> Result<(), String> {
-    for (name, digest) in [("source", SOURCE_SHA256), ("primitives", PRIMITIVES_SHA256)] {
+    for (name, digest) in [
+        ("source", SOURCE_SHA256),
+        ("primitives", PRIMITIVES_SHA256),
+        ("wide NT", WIDE_NT_SHA256),
+        ("wide NT epilogue", WIDE_NT_EPI_SHA256),
+        ("wide TN", WIDE_TN_SHA256),
+        ("wide NN", WIDE_NN_SHA256),
+    ] {
         if digest.len() != 64
             || !digest
                 .bytes()

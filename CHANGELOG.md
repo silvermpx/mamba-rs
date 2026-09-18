@@ -53,6 +53,120 @@ kernels like every other deterministic context.
 | `MAMBA_RS_ARCH_RUNG=off` | no replacement; the rung's self-check decides |
 | `gemm_flags()`, `batch_invariant()`, `fast_gemm()`, `tf32()`, `bi_gemm_family()`, `gemm_policy()` | `gemm_mode()`, the model's or trainer's `dtype()`, and `gemm_route()` for the complete identity |
 
+### The measured routes serve every card
+
+Until now the six specialized GEMM modules were compiled for one target
+and one board: the loader built them only for `("sm_89", (8, 9))`, and
+their selectors additionally required 142 multiprocessors. Every kernel
+in them uses the SM80 instruction tier and nothing above it - `mma.sync`
+m16n8k8 and m16n8k16, `cp.async`, `ldmatrix`, `cvt.rna.tf32`, scalar FMA -
+so the restriction was a rule, not a hardware limit. It is gone. Each of
+those modules now compiles for the device's own target on any SM80-tier
+board, and the inference family's specialized overlay composes on every
+SM80-tier target except CC 12.x, whose own kernels serve there and whose
+module must stay byte-identical to the artifact its cohorts were frozen
+against.
+
+The board table follows the CUDA 13.4 documentation: CC 10.7 (Rubin,
+`sm_107a`, a PTX ISA 9.4 target) joins the SM100 family beside CC 10.0,
+10.3 and 11.0, with the toolkit floor the target needs, where the tree
+used to refuse the board outright.
+
+Admission follows the evidence, not the compilation:
+
+- A board that holds a **frozen cohort** for a route - today the RTX 6000
+  Ada the cells were measured on, at CUDA 12.8, 13.0 and 13.2 - takes it
+  as before. The cohort pins the toolkit, the composed source, the
+  compiled artifact and the board together.
+- Any other board **proves the route at first use**. The launcher runs
+  the candidate and the reference route of the same numeric contract on
+  the same operands, each into its own scratch output, and compares every
+  output word. Equal words admit the candidate for the rest of the
+  process; a difference declines it once, with the reason said aloud, and
+  the reference serves that cell from then on. A proof never runs inside
+  a graph capture: the reference serves there, and since an admitted
+  candidate is bit-equal to it, the bits a process produces do not depend
+  on which call came first.
+
+What a proof cannot say is speed. A candidate admitted on a board with no
+cohort carries the speed evidence of the board it was measured on, not of
+this one. The route identity records which kind of admission it holds, so
+a report can say so. One thing the board can say for itself is counted
+before the proof: the waves a candidate's tile takes on this board against
+the waves the reference's tile takes, from the CTA counts the board keeps
+resident. A candidate that takes strictly more waves while computing a
+tile no smaller is declined without a proof - that is the one case no
+throughput advantage recovers, and it is exactly how a tile tuned to one
+multiprocessor count spills on another. The half tiles are held against
+the tiled 64x64 kernel, the specialized TF32 tiles against the portable
+tile they replace.
+
+**One behaviour changes for programs on a board that is not the Ada.**
+`WeightDtype::Tf32` used to fall back to the exact f32 kernels on every
+SM80-tier board but the Ada, because the TF32 policy had no measured
+route there. It now serves the portable deterministic TF32 tier, which is
+what the precision asks for; the exact f32 kernel still serves any shape
+the tier does not cover. The bits of that tier are its own, as the
+storage precision has always documented.
+
+On such a board the portable tier reads the census by neighbourhood as
+well as by exact shape. A contiguous shape within a factor of four of a
+measured shape on every dimension, staged the same way - an operand takes
+the 16-byte loads only when its leading dimension is a multiple of four
+floats, scalar loads otherwise - takes the tile of the nearest measured
+shape, and a wide tile is brought down to 64x64 when the shape would not
+fill the board with it. Held out one at a time, the measured cells
+reproduce their own tiles from their neighbours 33 times in 38 at a
+factor of four, 12 in 12 at two and 37 in 54 at eight, which is why the
+band stops at four. Every route the band names still passes the first-use
+bit proof and the wave count above. The dispatch epoch `gemm_route()`
+reports moves to 46 for it; the frozen cohorts pin the TF32 tuning
+revision separately and none of them is orphaned, and no route moves on
+the Ada, whose specialized module reads its own cohorts alone.
+
+### The fastest measured route in every family
+
+Every route below reproduces the route it replaces bit for bit: the
+kernels were searched under that constraint and each candidate was
+compared word for word against the incumbent on three corpora - uniform
+full-mantissa values, log-uniform mixed exponents, and an exceptional
+corpus with Inf, NaN, -0 and denormals - eager and through a captured
+graph, before and after timing. Numbers are graph-replay medians on an
+RTX 6000 Ada at CUDA 13.2, candidate over incumbent.
+
+| family | cell (m, k, n) | route | before | after | ratio |
+|---|---|---|---:|---:|---:|
+| triad exact f32 | d128 in_proj dW | `tn_sm89_f32_d128_in_m16n16_g8_s2_cg` | 35.15 us | 19.29 us | 0.549 |
+| triad exact f32 | d128 out_proj dW | `tn_sm89_f32_d128_out_m16n16_g8_s2_cg` | 27.59 us | 13.01 us | 0.471 |
+| triad half | d128 in_proj dW, bf16 | `tn_sm89_half_d128_in_m32n16_bk64_s4_cg` | 18.23 us | 6.83 us | 0.375 |
+| triad half | d128 out_proj dW, bf16 | `tn_sm89_half_d128_out_m32n16_bk64_s4_cg` | 12.08 us | 5.82 us | 0.482 |
+| triad half | d128 out_proj forward, bf16 | `nn_sm89_m16n64_bk64_s4` | 6.50 us | 4.42 us | 0.685 |
+| triad half | d768 out_proj dW, bf16 | `tn_sm89_relay_m64n64_bk64_s3` | 55.05 us | 48.71 us | 0.885 |
+| triad TF32 | prism in_proj dX (4621, 384, 1928) | `nt_sm89_tf32_rna_m144n96_w3x4_bk32_s2` | 150.46 us | 100.66 us | 0.669 |
+| triad TF32 | 4096 x 3072 x 1536 dX | `nt_sm89_tf32_rowstage_m128n192_w2x4_bk32_s2` | 632.90 us | 507.95 us | 0.803 |
+| triad TF32 | 3072 x 1536 x 4096 dW | `tn_sm89_tf32_m192n192_w3x4_bk32_s2` | 637.64 us | 486.32 us | 0.763 |
+| triad TF32 | d768 in_proj dW | `tn_sm89_tf32_pre_rna_m96n192_w3x4_bk32_s2` | 158.71 us | 142.70 us | 0.899 |
+| triad TF32 | d768 out_proj dW | `tn_sm89_tf32_pre_rna_m96n96_bk32_s3` | 93.18 us | 81.84 us | 0.878 |
+| inference | 4621 x 1928 x 384 exact f32 | `nn_sm89_m112n128_bk32_s3_f32` | 299.75 us | 271.23 us | 0.905 |
+| inference | 2048 x 768 x 2304 half to f32 | `nn_sm89_m128n144_bk32_s2_f32out_f16` | 99.38 us | 52.65 us | 0.530 |
+| inference | 2048 x 768 x 2304 TF32 | `nn_sm89_m64n288_bk16_s2_tf32` | 130.58 us | 97.16 us | 0.744 |
+| inference | 2048 x 2304 x 768 TF32, bias on | `nn_sm89_m64n96_bk32_s2_tf32` | 141.05 us | 125.13 us | 0.887 |
+| inference | 2048 x 2304 x 768 half | `nn_sm89_m128n96_bk64_s2_vec_bf16` | 60.60 us | 57.51 us | 0.949 |
+| inference | 2048 x 768 x 2304 half | `nn_sm89_m128n144_bk32_s2_vec_bf16` | 65.04 us | 62.50 us | 0.961 |
+
+Two of them are schedules rather than tiles. The **relay** weight
+gradient walks a persistent grid of (tile, slab) units: when a tile's
+chain crosses a CTA boundary the earlier CTA hands its f32 accumulators
+to the next one untouched, so nothing is ever folded and the result is
+the tiled result bit for bit, while a tile count that is not a multiple
+of the resident CTA count no longer pays a whole second wave. Like the
+stream-K weight gradient it is a persistent grid, so it serves only where
+the request permits a schedule other than one owner CTA per output tile,
+which is what every deterministic context permits by default. The
+**pre-RNA** TF32 tiles round the transposed operand once in their own
+pass, as the routes they replace do, and keep that operand's conversion
+contract.
+
 ### Changed
 
 - **No version stamps in names.** Every identifier that carried a `V1`,
@@ -109,10 +223,28 @@ kernels like every other deterministic context.
 
 RTX 6000 Ada, CUDA 13.2, this tree against the v0.7.1 ledger recorded on
 the same board: all 263 ledger keys identical (the 161 original Mamba keys
-and the 102 decode keys), none moved, none missing. The crate builds and
-lints clean with `-D warnings` without the `cuda` feature and with
-`cuda,hf,qualification`; every host-side test target is green
-(280 tests).
+and the 102 decode keys), none moved, none missing. Every test target of
+the crate is green on that board (163 targets and the unit tests), the
+crate builds and lints clean with `-D warnings` without the `cuda`
+feature and with `cuda,hf,qualification`, and the host-only gates were
+also run against the CUDA 13.4 toolkit, where the CC 10.7 target compiles.
+
+The kernel-level adapter that timed 0.7.1 on this board, run once on the
+assembled tree against its own 0.7.1 record (same harness, same operands,
+same windows) and against the 0.7.1 page, is in
+[docs/gemm-benchmarks-all-cards-ada.md](docs/gemm-benchmarks-all-cards-ada.md).
+Over the 21 Triad cells of the adapter the geometric means of 0.7.1 time
+over new time are 1.16x for exact f32, 1.17x for bf16 and 1.16x for f16;
+over its five inference cells 1.04x for exact f32, 1.00x for bf16 and
+0.98x for f16, the last within the run-to-run band of its one changed
+shape. The TF32 cells have no adapter record; against the page, whose
+cuBLAS arm ran 6-12 percent faster than this run's, the TF32 means are
+0.99x for Triad and 0.94x for inference before that drift and 1.05x and
+1.06x after it. That run also caught the bf16 packed-store tile of hot_d
+asking the driver for its pipeline slabs alone while its epilogue stages
+the whole f32 tile; the launch now allocates the tile, a unit test pins
+every half cell to the larger of the two, and a GPU test launches every
+Ada cell on its measured shape with and without a bias.
 
 ## 0.7.2 (2026-09-16)
 

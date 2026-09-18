@@ -20,7 +20,7 @@ use crate::mamba_ssm::gpu::context::HalfTriadPolicy;
 use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
 use crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Tf32ExactShape {
     output_rows: usize,
     output_columns: usize,
@@ -579,6 +579,78 @@ mod sm89_exact_f32_d128_admission_tests {
     }
 
     #[test]
+    fn other_sm80_boards_reach_the_d128_routes_through_the_proof_tier() {
+        let ada = facts(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2]);
+        for (route, dims, selected) in CASES {
+            assert_eq!(
+                scalar_proof_plan(ada, request(dims), operands()).unwrap(),
+                Some(selected),
+                "{route:?} is the proof candidate on the evidence board too"
+            );
+            for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0)] {
+                let board = ScalarLaunchFacts {
+                    compute_capability: cc,
+                    ..ada
+                };
+                assert_eq!(
+                    scalar_launch_plan(board, request(dims), operands()).unwrap(),
+                    FALLBACK,
+                    "{route:?} holds no frozen evidence on {cc:?}"
+                );
+                assert_eq!(
+                    scalar_proof_plan(board, request(dims), operands()).unwrap(),
+                    Some(selected),
+                    "{route:?} is the proof candidate on {cc:?}"
+                );
+            }
+            for multiprocessor_count in [84, 108, 132, 148, 170] {
+                let board = ScalarLaunchFacts {
+                    compute_capability: (9, 0),
+                    multiprocessor_count,
+                    ..ada
+                };
+                let expected = (scalar_dispatch_plan(request(dims), multiprocessor_count).unwrap()
+                    == FALLBACK)
+                    .then_some(selected);
+                assert_eq!(
+                    scalar_proof_plan(board, request(dims), operands()).unwrap(),
+                    expected,
+                    "{route:?} stands in for exactly the split it reproduces at {multiprocessor_count} SMs"
+                );
+            }
+            let pre_ampere = ScalarLaunchFacts {
+                compute_capability: (7, 5),
+                ..ada
+            };
+            assert_eq!(
+                scalar_proof_plan(pre_ampere, request(dims), operands()).unwrap(),
+                None
+            );
+            let unloaded = ScalarLaunchFacts {
+                compute_capability: (9, 0),
+                sm89_exact_f32_d128_symbols_loaded: [false; 2],
+                ..ada
+            };
+            assert_eq!(
+                scalar_proof_plan(unloaded, request(dims), operands()).unwrap(),
+                None
+            );
+            let nonunit = F32TriadOperands {
+                alpha: -0.75,
+                ..operands()
+            };
+            let hopper = ScalarLaunchFacts {
+                compute_capability: (9, 0),
+                ..ada
+            };
+            assert_eq!(
+                scalar_proof_plan(hopper, request(dims), nonunit).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn forced_route_accepts_nonunit_alpha_while_auto_epilogue_stays_exact() {
         let facts = facts(SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES[2]);
         for (route, dims, selected) in CASES {
@@ -835,26 +907,27 @@ mod sm89_exact_f32_d128_admission_tests {
 }
 
 impl Tf32ExactShape {
-    fn matches_contiguous(self, request: F32TriadRequest) -> bool {
-        let rows = request.shape.output_rows(request.op);
-        let columns = request.shape.output_columns(request.op);
-        let reduction = request.shape.reduction(request.op);
-        if (rows, columns, reduction) != (self.output_rows, self.output_columns, self.reduction) {
-            return false;
-        }
-        let dims = match request.op {
-            crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn => {
-                (rows, reduction, columns)
-            }
-            crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn => {
-                (reduction, rows, columns)
-            }
-            crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt => {
-                (rows, columns, reduction)
-            }
+    /// The contiguous layout the cell was measured under.
+    fn contiguous(self, op: ResolvedGemmOp) -> super::contract::F32TriadShape {
+        let dims = match op {
+            ResolvedGemmOp::Nn => (self.output_rows, self.reduction, self.output_columns),
+            ResolvedGemmOp::Tn => (self.reduction, self.output_rows, self.output_columns),
+            ResolvedGemmOp::Nt => (self.output_rows, self.output_columns, self.reduction),
         };
-        request.shape == super::contract::F32TriadShape::contiguous(request.op, dims)
+        super::contract::F32TriadShape::contiguous(op, dims)
     }
+
+    fn matches_contiguous(self, request: F32TriadRequest) -> bool {
+        request.shape == self.contiguous(request.op)
+    }
+}
+
+/// Which operands the portable kernels stage with vector loads: an operand
+/// whose leading dimension is a multiple of four floats takes the 16-byte
+/// path, any other takes scalar loads. The two paths run different code, so
+/// a measured cell speaks only for shapes staged the same way.
+fn tf32_staging_class(shape: super::contract::F32TriadShape) -> (bool, bool) {
+    (shape.lda.is_multiple_of(4), shape.ldb.is_multiple_of(4))
 }
 
 /// The archived cells record whether their exact strides use scalar or vector
@@ -1153,20 +1226,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (12, 8),
         [
-            255, 27, 179, 175, 49, 195, 220, 57, 81, 4, 233, 23, 212, 220, 124, 30, 172, 59, 222,
-            70, 45, 144, 71, 13, 59, 248, 230, 163, 169, 48, 72, 158,
+            157, 113, 129, 244, 24, 39, 141, 93, 93, 88, 18, 90, 14, 233, 243, 232, 247, 20, 159,
+            98, 218, 173, 165, 187, 228, 90, 236, 80, 108, 106, 179, 94,
         ],
         [
-            99, 21, 151, 22, 179, 74, 70, 10, 92, 200, 127, 43, 157, 224, 115, 48, 173, 138, 4,
-            231, 71, 196, 131, 54, 81, 200, 13, 145, 170, 63, 123, 126,
+            44, 86, 165, 161, 220, 211, 123, 117, 144, 104, 162, 165, 244, 76, 33, 197, 70, 123,
+            28, 235, 186, 45, 65, 85, 155, 78, 120, 10, 169, 72, 237, 232,
         ],
         [
-            239, 119, 127, 79, 153, 85, 90, 125, 113, 76, 90, 229, 111, 165, 135, 228, 254, 206,
-            106, 11, 151, 66, 128, 4, 232, 220, 83, 86, 72, 47, 124, 17,
+            242, 200, 73, 75, 37, 106, 81, 236, 21, 20, 39, 78, 11, 91, 242, 198, 84, 14, 171, 150,
+            251, 62, 162, 184, 120, 113, 7, 64, 64, 244, 219, 92,
         ],
         [
-            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
-            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
+            186, 53, 13, 225, 82, 68, 163, 142, 255, 48, 0, 27, 225, 141, 183, 34, 152, 30, 159,
+            101, 145, 62, 138, 43, 147, 214, 179, 196, 4, 139, 50, 24,
         ],
         [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -1179,20 +1252,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (13, 0),
         [
-            216, 84, 187, 198, 106, 103, 3, 8, 171, 198, 238, 148, 125, 120, 42, 151, 167, 5, 75,
-            41, 236, 62, 251, 172, 107, 90, 33, 101, 69, 81, 157, 71,
+            40, 229, 221, 14, 92, 94, 202, 180, 67, 81, 31, 189, 107, 26, 175, 184, 127, 249, 99,
+            52, 233, 31, 153, 99, 254, 181, 104, 1, 198, 128, 208, 175,
         ],
         [
-            131, 109, 64, 125, 50, 109, 192, 76, 24, 246, 177, 247, 211, 189, 51, 178, 28, 133,
-            109, 28, 252, 230, 216, 16, 17, 120, 240, 159, 142, 220, 224, 188,
+            126, 144, 164, 115, 237, 98, 169, 67, 119, 75, 80, 190, 19, 39, 78, 57, 99, 171, 132,
+            111, 45, 26, 14, 252, 103, 161, 21, 164, 163, 111, 177, 200,
         ],
         [
-            239, 119, 127, 79, 153, 85, 90, 125, 113, 76, 90, 229, 111, 165, 135, 228, 254, 206,
-            106, 11, 151, 66, 128, 4, 232, 220, 83, 86, 72, 47, 124, 17,
+            242, 200, 73, 75, 37, 106, 81, 236, 21, 20, 39, 78, 11, 91, 242, 198, 84, 14, 171, 150,
+            251, 62, 162, 184, 120, 113, 7, 64, 64, 244, 219, 92,
         ],
         [
-            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
-            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
+            186, 53, 13, 225, 82, 68, 163, 142, 255, 48, 0, 27, 225, 141, 183, 34, 152, 30, 159,
+            101, 145, 62, 138, 43, 147, 214, 179, 196, 4, 139, 50, 24,
         ],
         [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -1205,20 +1278,20 @@ const SM89_JOINT_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         ModuleKind::TriadSm89Tf32Joint,
         (13, 2),
         [
-            105, 204, 114, 94, 169, 30, 56, 20, 117, 137, 110, 220, 42, 142, 95, 62, 46, 162, 249,
-            208, 52, 238, 135, 72, 126, 147, 207, 193, 15, 169, 123, 64,
+            15, 157, 134, 244, 146, 14, 59, 164, 249, 20, 96, 26, 94, 193, 232, 14, 222, 105, 142,
+            227, 99, 211, 191, 202, 68, 234, 176, 189, 207, 203, 229, 109,
         ],
         [
-            6, 10, 130, 158, 216, 96, 26, 143, 104, 229, 56, 129, 81, 34, 31, 9, 67, 114, 204, 226,
-            181, 193, 152, 212, 114, 181, 187, 40, 92, 126, 180, 90,
+            35, 189, 187, 147, 182, 210, 35, 127, 216, 47, 4, 177, 107, 34, 76, 127, 41, 5, 71,
+            122, 242, 56, 23, 200, 24, 131, 5, 71, 29, 77, 206, 159,
         ],
         [
-            239, 119, 127, 79, 153, 85, 90, 125, 113, 76, 90, 229, 111, 165, 135, 228, 254, 206,
-            106, 11, 151, 66, 128, 4, 232, 220, 83, 86, 72, 47, 124, 17,
+            242, 200, 73, 75, 37, 106, 81, 236, 21, 20, 39, 78, 11, 91, 242, 198, 84, 14, 171, 150,
+            251, 62, 162, 184, 120, 113, 7, 64, 64, 244, 219, 92,
         ],
         [
-            219, 155, 211, 153, 143, 68, 74, 50, 254, 177, 226, 185, 9, 129, 19, 231, 123, 246,
-            155, 177, 238, 35, 247, 52, 231, 207, 156, 118, 3, 86, 57, 210,
+            186, 53, 13, 225, 82, 68, 163, 142, 255, 48, 0, 27, 225, 141, 183, 34, 152, 30, 159,
+            101, 145, 62, 138, 43, 147, 214, 179, 196, 4, 139, 50, 24,
         ],
         [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -2904,13 +2977,13 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (768, 3072, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
         Tn,
         (1536, 768, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96,
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -2937,7 +3010,7 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (3072, 1536, 4096),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96,
+        Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -2955,7 +3028,13 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Nt,
         (4096, 3072, 1536),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+        Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4621, 384, 1928),
+        Tf32PhysicalRoute::Sm89NtRnaM144N96S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
 ];
@@ -2966,13 +3045,13 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (768, 3072, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
         Tn,
         (1536, 768, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96,
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -3002,19 +3081,25 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (3072, 1536, 4096),
-        Tf32PhysicalRoute::Sm89TnPreRnaN96,
+        Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
         Nt,
         (4096, 3072, 1536),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+        Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
         Nt,
         (2048, 1536, 768),
         Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4621, 384, 1928),
+        Tf32PhysicalRoute::Sm89NtRnaM144N96S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
 ];
@@ -3248,6 +3333,119 @@ fn measured_tf32_cell(
         .map(|cell| cell.route)
 }
 
+/// How far, per axis and in natural-log units, a shape may sit from the
+/// nearest measured portable cell and still take that cell's tile: a
+/// factor of four in output rows, output columns and reduction. The
+/// leave-one-out check over the measured portable cells settled the width:
+/// at a factor of four the band reaches 37 of the 58 cells and names the
+/// measured tile for 31 of them, at a factor of eight it reaches 54 and
+/// names it for 37, so the wider band buys its reach with a coin-flip on
+/// the extra cells. Outside the band the exact f32 family serves, as it
+/// did before.
+const TF32_PORTABLE_NEIGHBOUR_LOG_BOUND: f64 = 1.386_294_361_119_890_6;
+
+/// The portable tile of the nearest measured cell of the same operation,
+/// for a shape no cell names exactly. Only the portable tier is widened
+/// this way: its tiles keep one owner CTA per output tile and one k order,
+/// so any tile of the tier gives the same bits, and what the neighbour
+/// contributes is a speed choice. The specialized tiles stay on their
+/// exact cells. A neighbour measured on a larger output may carry a wide
+/// tile that leaves this board idle, so when the shape fills less than one
+/// wave with it and less than half of what the neighbour filled, the 64x64
+/// tile serves at the neighbour's pipeline depth, as the SM120 rule does.
+fn nearest_tf32_portable_cell(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    cells: &[Tf32AutoCell],
+    multiprocessors: u32,
+) -> Option<Tf32PhysicalRoute> {
+    nearest_tf32_portable_cell_within(
+        request,
+        operands,
+        cells,
+        multiprocessors,
+        TF32_PORTABLE_NEIGHBOUR_LOG_BOUND,
+    )
+}
+
+fn nearest_tf32_portable_cell_within(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    cells: &[Tf32AutoCell],
+    multiprocessors: u32,
+    log_bound: f64,
+) -> Option<Tf32PhysicalRoute> {
+    if multiprocessors == 0 || !tf32_auto_operands_match(request.op, operands) {
+        return None;
+    }
+    let shape = request.shape;
+    if shape != F32TriadShape::contiguous(request.op, (shape.m, shape.k, shape.n)) {
+        return None;
+    }
+    let geometry = |rows: usize, columns: usize, reduction: usize| {
+        [rows as f64, columns as f64, reduction as f64].map(f64::ln)
+    };
+    let target = geometry(
+        shape.output_rows(request.op),
+        shape.output_columns(request.op),
+        shape.reduction(request.op),
+    );
+    let staging = tf32_staging_class(shape);
+    let mut best: Option<(f64, &Tf32AutoCell)> = None;
+    for cell in cells {
+        if cell.op != request.op
+            || cell.route.module_kind() != ModuleKind::TriadSm80
+            || tf32_staging_class(cell.shape.contiguous(cell.op)) != staging
+        {
+            continue;
+        }
+        let axes = geometry(
+            cell.shape.output_rows,
+            cell.shape.output_columns,
+            cell.shape.reduction,
+        );
+        let deltas = axes
+            .iter()
+            .zip(target.iter())
+            .map(|(cell_axis, target_axis)| (cell_axis - target_axis).abs());
+        if deltas.clone().any(|delta| delta > log_bound) {
+            continue;
+        }
+        let distance = deltas.map(|delta| delta * delta).sum::<f64>().sqrt();
+        // A later record supersedes an earlier one at the same distance,
+        // as it does for an exact match.
+        if best.is_none_or(|(best_distance, _)| distance <= best_distance) {
+            best = Some((distance, cell));
+        }
+    }
+    let (_, neighbour) = best?;
+    let Tf32PhysicalRoute::MmaTf32Rna(portable) = neighbour.route else {
+        return Some(neighbour.route);
+    };
+    let tile = tf32_kernel_spec(request.op, neighbour.route).ok()?.tile;
+    let grid = |rows: usize, columns: usize| {
+        (rows as f64 / f64::from(tile.0)).ceil() * (columns as f64 / f64::from(tile.1)).ceil()
+    };
+    let target_grid = grid(
+        shape.output_rows(request.op),
+        shape.output_columns(request.op),
+    );
+    let neighbour_grid = grid(neighbour.shape.output_rows, neighbour.shape.output_columns);
+    let wide = matches!(
+        portable.tile,
+        super::contract::Tf32PortableTile::M128N64 | super::contract::Tf32PortableTile::M128N128
+    );
+    if wide && target_grid < f64::from(multiprocessors) && target_grid * 2.0 < neighbour_grid {
+        return Some(Tf32PhysicalRoute::MmaTf32Rna(
+            super::contract::Tf32PortableRoute {
+                tile: super::contract::Tf32PortableTile::M64N64,
+                stages: portable.stages,
+            },
+        ));
+    }
+    Some(neighbour.route)
+}
+
 /// Separately qualified NN bias epilogues on the frozen Ada module. Their
 /// qualification measured 21 discovery and 101 final
 /// windows per order/path, with repeat, graph and red-zone gates. No-bias
@@ -3370,7 +3568,17 @@ fn measured_tf32_route_with_operands(
         return None;
     }
     let route = measured_tf32_cell(request, operands, cohort.cells)
-        .or_else(|| sm89_measured_tf32_bias_route(request, operands, cohort))?;
+        .or_else(|| sm89_measured_tf32_bias_route(request, operands, cohort))
+        .or_else(|| {
+            availability.specialized.is_none().then(|| {
+                nearest_tf32_portable_cell(
+                    request,
+                    operands,
+                    cohort.cells,
+                    availability.multiprocessors,
+                )
+            })?
+        })?;
     if availability.specialized.is_some() && route.module_kind() == ModuleKind::TriadSm80 {
         let twin = cohort.portable?;
         if !availability
@@ -3429,6 +3637,11 @@ fn resolve_f32_triad_auto_impl(
                 None => None,
             };
             let Some(route) = route else {
+                if let Some(operands) = operands
+                    && let Some(selection) = proof_tf32_selection(request, operands, availability)
+                {
+                    return Ok(selection);
+                }
                 return Ok(exact_or_scalar_selection(request, operands, availability));
             };
             match resolve_tf32_forced(request, availability, route) {
@@ -3447,6 +3660,83 @@ fn resolve_f32_triad_auto_impl(
             }
         }
     }
+}
+
+/// The Ada evidence offered to a board that holds no cohort of its own.
+/// The portable route the Ada portable cohort names for this cell serves by
+/// design under the TF32 policy on every board that binds the portable
+/// module: single-owner tiles and a fixed k-order make it deterministic
+/// wherever it compiles. The specialized route for the same cell, when its
+/// module is bound here, is offered as a candidate that must first
+/// reproduce that portable route bit for bit on this board.
+/// A module the proof tier may trust: its structure is what this build
+/// composes and compiles, whatever board or toolkit produced its digests.
+/// The frozen cohorts pin the provenance as well; this tier pins only what
+/// a drifted provenance cannot change.
+fn portable_module_well_formed(module: Tf32QualifiedModule) -> bool {
+    module.module_kind == ModuleKind::TriadSm80
+        && module.artifact.module_kind == ModuleKind::TriadSm80
+        && module.artifact.artifact_kind == ArtifactKind::Ptx
+        && module.compiler.output_kind == ArtifactKind::Ptx
+        && module.compiler.nvrtc_library_known
+        && module.compiler.composer_revision == COMPOSER_REVISION
+        && module.compiler.compiler_revision == COMPILER_REVISION
+        && module.compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
+        && module.compiler.schedule_revision == SCHEDULE_REVISION
+        && module.compiler.target == module.target
+        && module.device_caps.accepted_target == Some(module.target)
+}
+
+fn proof_tf32_selection(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    availability: F32TriadAvailability,
+) -> Option<F32TriadSelection> {
+    availability
+        .portable
+        .filter(|module| portable_module_well_formed(*module))?;
+    let reference = measured_tf32_cell(request, operands, SM89_TF32_EVIDENCE_CELLS)
+        .filter(|route| route.module_kind() == ModuleKind::TriadSm80)
+        .or_else(|| {
+            availability.specialized.is_none().then(|| {
+                nearest_tf32_portable_cell(
+                    request,
+                    operands,
+                    SM89_TF32_EVIDENCE_CELLS,
+                    availability.multiprocessors,
+                )
+            })?
+        })?;
+    resolve_tf32_forced(request, availability, reference).ok()?;
+    let specialized = [
+        (
+            availability.joint,
+            SM89_JOINT_TF32_EVIDENCE_COHORTS
+                .last()
+                .map(|cohort| cohort.cells),
+        ),
+        (
+            availability.finalist,
+            SM89_FINALIST_TF32_EVIDENCE_COHORTS
+                .last()
+                .map(|cohort| cohort.cells),
+        ),
+    ];
+    let candidate = specialized
+        .into_iter()
+        .filter_map(|(module, cells)| module.and(cells))
+        .find_map(|cells| measured_tf32_cell(request, operands, cells))
+        .filter(|route| {
+            route.module_kind() != ModuleKind::TriadSm80
+                && resolve_tf32_forced(request, availability, *route).is_ok()
+        });
+    Some(match candidate {
+        Some(candidate) => F32TriadSelection::Tf32Proof {
+            candidate,
+            reference,
+        },
+        None => F32TriadSelection::Tf32(reference),
+    })
 }
 
 /// The exact-F32 family is the floor under both policies. A shape with no
@@ -3495,7 +3785,12 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
         | Tf32PhysicalRoute::Sm89NnDirectN96
         | Tf32PhysicalRoute::Sm89NnN96
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => availability.joint,
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+        | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+        | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => availability.joint,
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
@@ -3563,6 +3858,21 @@ fn sm89_joint_route_matches_request(route: Tf32PhysicalRoute, request: F32TriadR
                 )
                 && contiguous
         }
+        Tf32PhysicalRoute::Sm89NtRnaM144N96S2 => {
+            request.op == ResolvedGemmOp::Nt && dims == (4_621, 384, 1_928) && contiguous
+        }
+        Tf32PhysicalRoute::Sm89NtRowstageM128N192S2 => {
+            request.op == ResolvedGemmOp::Nt && dims == DEEP && contiguous
+        }
+        Tf32PhysicalRoute::Sm89TnDirectM192N192S2 => {
+            request.op == ResolvedGemmOp::Tn && dims == DEEP && contiguous
+        }
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2 => {
+            request.op == ResolvedGemmOp::Tn && dims == (2_048, 768, 3_072) && contiguous
+        }
+        Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => {
+            request.op == ResolvedGemmOp::Tn && dims == (2_048, 1_536, 768) && contiguous
+        }
         _ => true,
     }
 }
@@ -3620,6 +3930,11 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::Sm89NnDirectN96
             | Tf32PhysicalRoute::Sm89NnN96
             | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+            | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+            | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
     ) && !binding.device_caps.tensor_map_access
     {
         return Err(format!(
@@ -3653,21 +3968,28 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((10, 0), "sm_100a", "sm_100a")
                 | ((10, 1), "sm_101a", "sm_101a")
                 | ((10, 3), "sm_103a", "sm_103a")
+                | ((10, 7), "sm_107a", "sm_107a")
                 | ((11, 0), "sm_110a", "sm_110a")
                 | ((12, 0), "compute_120", "sm_120")
                 | ((12, 1), "compute_121", "sm_121")
                 | ((12, 1), "compute_120", "sm_120")
         ),
-        Tf32PhysicalRoute::Sm89MmaTf32Compact8 => {
-            (cc, target, device_target) == ((8, 9), "sm_89", "sm_89")
-        }
-        Tf32PhysicalRoute::Sm89TnPreRnaN96
+        // The Ada-found routes are sm_80-tier PTX: any board that compiles
+        // their module for its own target runs them, and the first-use
+        // proof decides their admission where no cohort does.
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8
+        | Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
         | Tf32PhysicalRoute::Sm89NnDirectN96
         | Tf32PhysicalRoute::Sm89NnN96
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => {
-            (cc, target, device_target) == ((8, 9), "sm_89", "sm_89")
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+        | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+        | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => {
+            cc.0 >= 8 && super::modules::sm80_ptx_target(target) == Some(device_target)
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
             (cc, target, device_target) == ((9, 0), "sm_90a", "sm_90a")
@@ -3678,6 +4000,8 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((10, 0), "compute_100a", "sm_100a")
                 | ((10, 3), "compute_103f", "sm_103f")
                 | ((10, 3), "compute_103a", "sm_103a")
+                | ((10, 7), "compute_107f", "sm_107f")
+                | ((10, 7), "compute_107a", "sm_107a")
                 | ((11, 0), "compute_110f", "sm_110f")
                 | ((11, 0), "compute_110a", "sm_110a")
         ),
@@ -3968,6 +4292,8 @@ pub(super) fn sm120_fma_exact_route(
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC100: &[Sm100ForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC103: &[Sm100ForcedRoute] = &[];
+/// Automatic CC 10.7 routes. Empty until a board measures them.
+pub const SM100_AUTO_CELLS_CC107: &[Sm100ForcedRoute] = &[];
 /// Automatic CC 11.0 routes. Empty until a board measures them.
 pub const SM100_AUTO_CELLS_CC110: &[Sm100ForcedRoute] = &[];
 
@@ -3989,6 +4315,7 @@ pub fn sm100_auto_cells(device_cc: (i32, i32)) -> &'static [Sm100ForcedRoute] {
     match device_cc {
         (10, 0) => SM100_AUTO_CELLS_CC100,
         (10, 3) => SM100_AUTO_CELLS_CC103,
+        (10, 7) => SM100_AUTO_CELLS_CC107,
         (11, 0) => SM100_AUTO_CELLS_CC110,
         _ => &[],
     }
@@ -5751,6 +6078,21 @@ const SM100_CC103_TARGETS: [Sm100TargetCandidate; 2] = [
     },
 ];
 
+const SM100_CC107_TARGETS: [Sm100TargetCandidate; 2] = [
+    Sm100TargetCandidate {
+        device_cc: (10, 7),
+        nvrtc_arch: "compute_107f",
+        ptx_target: "sm_107f",
+        kind: Sm100TargetKind::Family,
+    },
+    Sm100TargetCandidate {
+        device_cc: (10, 7),
+        nvrtc_arch: "compute_107a",
+        ptx_target: "sm_107a",
+        kind: Sm100TargetKind::Exact,
+    },
+];
+
 const SM100_CC110_TARGETS: [Sm100TargetCandidate; 2] = [
     Sm100TargetCandidate {
         device_cc: (11, 0),
@@ -5770,6 +6112,7 @@ pub fn sm100_target_candidates(cc: (i32, i32)) -> &'static [Sm100TargetCandidate
     match cc {
         (10, 0) => &SM100_CC100_TARGETS,
         (10, 3) => &SM100_CC103_TARGETS,
+        (10, 7) => &SM100_CC107_TARGETS,
         (11, 0) => &SM100_CC110_TARGETS,
         _ => &[],
     }
@@ -5778,7 +6121,8 @@ pub fn sm100_target_candidates(cc: (i32, i32)) -> &'static [Sm100TargetCandidate
 /// The SM100 candidates a toolkit can compile and that the contract has
 /// verified. Family-specific targets (`compute_100f` and siblings) and the
 /// CC 10.3 targets arrived with CUDA 12.9, the CC 11.0 targets with CUDA
-/// 13.2, and CUDA 12.8 assembles the tcgen allocation with a different
+/// 13.2, the CC 10.7 targets with CUDA 13.4 (PTX ISA 9.4), and CUDA 12.8
+/// assembles the tcgen allocation with a different
 /// instruction pairing than the one the contract freezes; below 12.9 the
 /// family is not offered at all rather than run unverified.
 pub fn sm100_target_candidates_for_nvrtc(
@@ -5790,6 +6134,7 @@ pub fn sm100_target_candidates_for_nvrtc(
         .copied()
         .filter(|candidate| {
             let floor = match candidate.device_cc {
+                (10, 7) => (13, 4),
                 (11, 0) => (13, 2),
                 _ => (12, 9),
             };
@@ -6083,6 +6428,55 @@ pub(super) struct ScalarLaunchFacts {
     pub multiprocessor_count: u32,
 }
 
+/// How a scalar route measured on the Ada board is admitted on this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ScalarAdmission {
+    /// A frozen evidence cohort matches the board and the compiled module.
+    Evidence,
+    /// The qualification tooling's own candidate cohorts, for forced routes.
+    Candidate,
+    /// The board runs the instruction tier the module was compiled for and
+    /// proves the route's output words against the reference at first use.
+    Proof,
+}
+
+/// The boards whose portable-tier compile of an Ada Triad module admits its
+/// routes to the first-use proof: the whole sm_80 tier.
+fn scalar_proof_board(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability.0 >= 8
+}
+
+/// The boards whose Fixed module composes the Ada overlay and so may prove
+/// its copy-plan routes: the sm_80 tier without the CC 12 family, which
+/// keeps its Fixed module byte-identical to the one its own cohorts pin.
+fn fixed_overlay_proof_board(facts: ScalarLaunchFacts) -> bool {
+    facts.compute_capability.0 >= 8
+        && !crate::mamba_ssm::gpu::device::is_sm120_family(facts.compute_capability)
+        && facts.fixed_copyplan_loaded
+}
+
+fn scalar_admitted(
+    admission: ScalarAdmission,
+    facts: ScalarLaunchFacts,
+    evidence: fn(ScalarLaunchFacts) -> bool,
+) -> bool {
+    match admission {
+        ScalarAdmission::Evidence | ScalarAdmission::Candidate => evidence(facts),
+        ScalarAdmission::Proof => scalar_proof_board(facts),
+    }
+}
+
+fn fixed_overlay_admitted(
+    admission: ScalarAdmission,
+    facts: ScalarLaunchFacts,
+    evidence: fn(ScalarLaunchFacts) -> bool,
+) -> bool {
+    match admission {
+        ScalarAdmission::Evidence | ScalarAdmission::Candidate => evidence(facts),
+        ScalarAdmission::Proof => fixed_overlay_proof_board(facts),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Sm89ExactF32D128QualificationIdentity {
     nvrtc_version: (i32, i32),
@@ -6121,8 +6515,8 @@ impl Sm89ExactF32D128QualificationIdentity {
 }
 
 const SM89_EXACT_F32_D128_SOURCE_DIGEST: [u8; 32] = [
-    0xa7, 0x28, 0x6b, 0x22, 0x00, 0xbc, 0x89, 0x84, 0xd7, 0x61, 0xb8, 0x74, 0x8e, 0xb6, 0x06, 0xde,
-    0x57, 0x59, 0x11, 0xfb, 0x47, 0x70, 0x76, 0x80, 0xc2, 0xdd, 0x16, 0x2a, 0x84, 0xe9, 0x5c, 0x4c,
+    0x61, 0x7f, 0x74, 0x63, 0x10, 0xee, 0x68, 0xee, 0xba, 0xe1, 0xfa, 0x52, 0x6f, 0x6d, 0x97, 0x44,
+    0x69, 0x26, 0xe8, 0xb9, 0x0a, 0xdf, 0x49, 0x10, 0x4b, 0x5a, 0x33, 0x9c, 0x3c, 0xc1, 0x32, 0x6f,
 ];
 
 const SM89_EXACT_F32_D128_HEADER_MANIFEST_DIGEST: [u8; 32] = [
@@ -6390,13 +6784,13 @@ impl FixedCopyPlanQualificationIdentity {
 }
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
-    228, 202, 225, 51, 193, 185, 255, 242, 190, 127, 211, 33, 119, 218, 21, 240, 26, 245, 46, 144,
-    189, 138, 33, 115, 1, 202, 31, 225, 10, 113, 154, 93,
+    119, 174, 146, 168, 93, 214, 187, 213, 91, 20, 177, 15, 170, 54, 235, 179, 63, 221, 51, 42, 47,
+    30, 230, 253, 253, 255, 173, 236, 253, 244, 187, 80,
 ];
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
-    59, 61, 181, 142, 246, 42, 171, 60, 223, 231, 21, 127, 189, 104, 241, 87, 33, 47, 244, 166,
-    170, 12, 241, 68, 208, 240, 65, 177, 173, 11, 188, 0,
+    221, 183, 245, 160, 109, 71, 88, 166, 191, 219, 218, 235, 215, 59, 97, 13, 108, 199, 87, 83,
+    111, 15, 240, 120, 102, 86, 81, 124, 50, 110, 224, 73,
 ];
 
 /// Exact Fixed identities from the six initial complete-module compilations,
@@ -6407,17 +6801,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            70, 123, 254, 220, 121, 238, 98, 236, 73, 211, 40, 224, 136, 190, 17, 112, 79, 7, 80,
-            191, 63, 73, 137, 217, 79, 2, 151, 134, 158, 242, 71, 140,
+            79, 39, 247, 26, 0, 116, 25, 168, 176, 188, 1, 234, 70, 71, 180, 107, 143, 238, 228,
+            154, 33, 48, 211, 208, 211, 238, 21, 49, 45, 40, 191, 131,
         ],
         artifact_digest: [
-            246, 50, 31, 65, 116, 41, 65, 48, 142, 233, 201, 224, 214, 188, 11, 242, 152, 178, 19,
-            70, 255, 45, 215, 199, 159, 1, 244, 138, 68, 152, 230, 113,
+            88, 181, 186, 180, 4, 236, 100, 178, 178, 204, 205, 249, 41, 59, 176, 254, 181, 11, 68,
+            68, 173, 119, 202, 7, 231, 26, 191, 170, 168, 176, 189, 97,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            156, 11, 63, 239, 63, 56, 85, 5, 121, 3, 20, 243, 33, 89, 144, 38, 113, 229, 86, 161,
-            9, 18, 51, 138, 125, 233, 196, 26, 217, 67, 57, 129,
+            70, 171, 196, 145, 117, 47, 221, 147, 226, 143, 113, 117, 103, 30, 220, 65, 254, 39,
+            105, 61, 189, 201, 147, 124, 194, 104, 166, 187, 73, 17, 67, 22,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6427,17 +6821,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            17, 181, 199, 195, 76, 142, 1, 250, 56, 165, 14, 12, 202, 121, 118, 219, 110, 63, 104,
-            144, 211, 92, 25, 232, 101, 180, 116, 90, 86, 16, 120, 65,
+            48, 25, 205, 128, 107, 149, 14, 81, 200, 20, 229, 213, 15, 87, 138, 187, 10, 175, 72,
+            105, 30, 28, 57, 11, 72, 90, 68, 74, 45, 34, 240, 94,
         ],
         artifact_digest: [
-            21, 195, 76, 153, 30, 245, 211, 144, 4, 203, 60, 79, 92, 4, 211, 149, 79, 227, 242, 25,
-            89, 24, 51, 111, 130, 222, 176, 9, 153, 85, 29, 70,
+            74, 9, 132, 71, 241, 61, 73, 149, 185, 44, 86, 214, 82, 83, 103, 74, 12, 3, 27, 209,
+            160, 36, 190, 55, 48, 72, 250, 177, 248, 216, 11, 57,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            62, 41, 42, 120, 186, 164, 8, 224, 221, 190, 250, 70, 90, 58, 135, 197, 230, 213, 150,
-            46, 204, 224, 39, 182, 201, 96, 31, 74, 107, 141, 25, 52,
+            141, 117, 99, 127, 164, 1, 176, 231, 124, 214, 141, 137, 68, 4, 190, 243, 84, 42, 148,
+            91, 189, 24, 175, 121, 57, 167, 174, 203, 138, 95, 182, 144,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6447,17 +6841,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            34, 170, 160, 32, 29, 206, 254, 102, 86, 239, 170, 128, 77, 133, 78, 18, 239, 206, 174,
-            34, 81, 21, 253, 13, 168, 187, 142, 207, 101, 103, 247, 190,
+            246, 116, 108, 219, 140, 135, 175, 80, 20, 99, 203, 133, 7, 152, 213, 7, 193, 205, 226,
+            101, 3, 10, 116, 212, 227, 159, 197, 243, 243, 241, 155, 85,
         ],
         artifact_digest: [
-            74, 195, 55, 215, 88, 86, 186, 189, 56, 80, 81, 173, 158, 245, 6, 138, 187, 19, 103,
-            94, 23, 4, 201, 77, 3, 154, 64, 130, 209, 226, 253, 168,
+            25, 92, 63, 75, 119, 208, 213, 27, 125, 83, 179, 184, 241, 148, 193, 43, 104, 184, 148,
+            234, 149, 133, 207, 18, 220, 218, 86, 101, 235, 227, 108, 161,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            61, 0, 75, 92, 39, 246, 144, 171, 11, 189, 148, 32, 172, 238, 92, 155, 226, 212, 106,
-            252, 10, 221, 253, 38, 9, 110, 92, 220, 52, 19, 143, 239,
+            59, 217, 6, 210, 198, 189, 210, 241, 157, 109, 186, 254, 194, 50, 223, 126, 120, 48,
+            205, 167, 24, 88, 149, 44, 65, 123, 32, 97, 156, 136, 70, 47,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6467,17 +6861,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            154, 51, 45, 37, 57, 119, 51, 122, 254, 84, 168, 121, 178, 142, 43, 79, 44, 165, 41,
-            42, 66, 2, 44, 78, 64, 25, 185, 62, 113, 39, 230, 171,
+            174, 241, 151, 250, 9, 162, 36, 146, 70, 18, 114, 132, 111, 217, 0, 91, 148, 196, 121,
+            86, 36, 141, 174, 123, 243, 10, 236, 146, 235, 24, 199, 111,
         ],
         artifact_digest: [
-            148, 27, 214, 149, 112, 248, 78, 192, 111, 196, 45, 227, 214, 23, 177, 245, 100, 104,
-            230, 118, 225, 39, 42, 6, 30, 238, 9, 79, 185, 218, 112, 124,
+            158, 250, 100, 169, 63, 150, 216, 122, 162, 206, 190, 241, 203, 158, 124, 66, 11, 185,
+            233, 12, 5, 198, 216, 146, 192, 166, 218, 120, 200, 171, 152, 196,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            211, 118, 236, 166, 255, 30, 25, 79, 89, 65, 31, 8, 213, 85, 248, 95, 22, 112, 194, 21,
-            62, 183, 240, 190, 137, 173, 32, 247, 46, 224, 17, 49,
+            13, 100, 191, 48, 53, 172, 10, 12, 107, 103, 179, 48, 6, 171, 248, 232, 153, 205, 217,
+            13, 76, 103, 39, 188, 40, 162, 157, 147, 94, 146, 29, 105,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6487,17 +6881,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            205, 185, 119, 119, 118, 98, 33, 168, 160, 29, 195, 59, 180, 232, 171, 237, 48, 33,
-            164, 198, 246, 154, 125, 28, 238, 60, 42, 149, 51, 182, 200, 87,
+            149, 109, 67, 34, 128, 112, 84, 31, 139, 49, 194, 210, 113, 202, 160, 141, 107, 109, 8,
+            216, 159, 123, 154, 28, 136, 23, 204, 129, 131, 228, 17, 9,
         ],
         artifact_digest: [
-            123, 105, 105, 54, 46, 229, 138, 98, 95, 229, 73, 80, 102, 205, 44, 140, 32, 181, 51,
-            51, 30, 111, 88, 33, 186, 61, 69, 111, 205, 59, 93, 59,
+            175, 103, 94, 47, 76, 120, 178, 210, 65, 199, 149, 163, 15, 164, 65, 109, 101, 181,
+            137, 198, 40, 4, 254, 129, 26, 90, 138, 201, 155, 153, 174, 151,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            35, 69, 209, 52, 231, 166, 253, 157, 43, 184, 57, 192, 53, 72, 172, 25, 129, 229, 172,
-            78, 195, 93, 120, 238, 98, 65, 107, 170, 43, 197, 44, 224,
+            241, 166, 249, 53, 198, 64, 211, 30, 5, 146, 50, 239, 240, 86, 153, 136, 185, 67, 109,
+            156, 205, 147, 72, 187, 45, 151, 28, 176, 73, 241, 209, 135,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -6507,17 +6901,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            171, 68, 244, 217, 123, 222, 80, 190, 74, 211, 145, 44, 194, 4, 175, 126, 83, 143, 122,
-            74, 170, 163, 92, 20, 167, 152, 32, 58, 220, 196, 106, 102,
+            58, 19, 247, 157, 205, 43, 196, 38, 169, 234, 159, 57, 60, 115, 199, 54, 107, 104, 251,
+            195, 249, 152, 125, 62, 17, 215, 241, 83, 244, 5, 95, 205,
         ],
         artifact_digest: [
-            26, 124, 84, 89, 60, 250, 163, 109, 225, 179, 97, 147, 55, 75, 139, 33, 151, 254, 167,
-            238, 32, 190, 66, 173, 151, 117, 234, 242, 127, 20, 167, 31,
+            47, 56, 253, 103, 181, 242, 106, 103, 92, 71, 160, 188, 142, 39, 90, 17, 109, 132, 45,
+            4, 53, 189, 200, 210, 193, 46, 12, 140, 247, 245, 253, 89,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            86, 173, 15, 240, 15, 244, 220, 134, 253, 69, 160, 193, 87, 159, 82, 232, 25, 66, 52,
-            128, 137, 198, 183, 83, 15, 15, 43, 79, 53, 141, 4, 46,
+            58, 100, 121, 64, 117, 62, 25, 46, 9, 237, 236, 95, 247, 53, 29, 184, 71, 96, 217, 167,
+            121, 196, 217, 127, 79, 50, 95, 69, 26, 27, 92, 38,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -7151,7 +7545,7 @@ fn sm89_exact_f32_d128_plan_for_route(
     request: F32TriadRequest,
     operands: F32TriadOperands,
     route: super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route,
-    admitted: bool,
+    admission: ScalarAdmission,
 ) -> Result<ScalarDispatchPlan, String> {
     use super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route;
     let (shape, plan, symbol_index) = match route {
@@ -7171,15 +7565,15 @@ fn sm89_exact_f32_d128_plan_for_route(
         m_chunk: 16,
         chunks: 64,
     };
-    let environment_ok = if admitted {
-        qualified_sm89_exact_f32_d128_environment(facts)
-    } else {
-        qualified_sm89_exact_f32_d128_candidate_environment(facts)
+    let environment_ok = match admission {
+        ScalarAdmission::Evidence => qualified_sm89_exact_f32_d128_environment(facts),
+        ScalarAdmission::Candidate => qualified_sm89_exact_f32_d128_candidate_environment(facts),
+        ScalarAdmission::Proof => scalar_proof_board(facts),
     };
-    let operands_ok = if admitted {
-        qualified_sm89_exact_f32_tn_operands(operands)
-    } else {
+    let operands_ok = if admission == ScalarAdmission::Candidate {
         qualified_sm89_exact_f32_d128_forced_operands(operands)
+    } else {
+        qualified_sm89_exact_f32_tn_operands(operands)
     };
     if actual_fallback != required_fallback
         || request.op != crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn
@@ -7199,7 +7593,13 @@ pub(super) fn forced_sm89_exact_f32_d128_plan(
     operands: F32TriadOperands,
     route: super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route,
 ) -> Result<ScalarDispatchPlan, String> {
-    let plan = sm89_exact_f32_d128_plan_for_route(facts, request, operands, route, false)?;
+    let plan = sm89_exact_f32_d128_plan_for_route(
+        facts,
+        request,
+        operands,
+        route,
+        ScalarAdmission::Candidate,
+    )?;
     if matches!(
         plan,
         ScalarDispatchPlan::TnD128InSm89DirectFoldQualified
@@ -7219,7 +7619,7 @@ fn sm89_exact_f32_plan_for_route(
     request: F32TriadRequest,
     operands: F32TriadOperands,
     route: super::sm89_exact_f32_source::Sm89ExactF32TnRoute,
-    admitted: bool,
+    admission: ScalarAdmission,
 ) -> Result<ScalarDispatchPlan, String> {
     use super::sm89_exact_f32_source::Sm89ExactF32TnRoute;
     let (shape, fallback, plan, symbol_index) = match route {
@@ -7252,10 +7652,10 @@ fn sm89_exact_f32_plan_for_route(
         ),
     };
     let actual_fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
-    let environment_ok = if admitted {
-        qualified_sm89_exact_f32_environment(facts)
-    } else {
-        qualified_sm89_exact_f32_candidate_environment(facts)
+    let environment_ok = match admission {
+        ScalarAdmission::Evidence => qualified_sm89_exact_f32_environment(facts),
+        ScalarAdmission::Candidate => qualified_sm89_exact_f32_candidate_environment(facts),
+        ScalarAdmission::Proof => scalar_proof_board(facts),
     };
     if actual_fallback != fallback
         || request.op != crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn
@@ -7275,7 +7675,8 @@ pub(super) fn forced_sm89_exact_f32_plan(
     operands: F32TriadOperands,
     route: super::sm89_exact_f32_source::Sm89ExactF32TnRoute,
 ) -> Result<ScalarDispatchPlan, String> {
-    let plan = sm89_exact_f32_plan_for_route(facts, request, operands, route, false)?;
+    let plan =
+        sm89_exact_f32_plan_for_route(facts, request, operands, route, ScalarAdmission::Candidate)?;
     if matches!(
         plan,
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified
@@ -7293,18 +7694,39 @@ pub(super) fn forced_sm89_exact_f32_plan(
 
 /// Resolves the scalar physical launch plan from request, operands, and the
 /// complete device/compiler policy facts available to both prepared and raw
-/// launch paths. Unsupported evidence cells retain the ordinary scalar plan.
+/// launch paths, by the frozen evidence alone. Cells without evidence retain
+/// the ordinary scalar plan.
 pub(super) fn scalar_launch_plan(
     facts: ScalarLaunchFacts,
     request: F32TriadRequest,
     operands: F32TriadOperands,
+) -> Result<ScalarDispatchPlan, String> {
+    scalar_plan_with_admission(facts, request, operands, ScalarAdmission::Evidence)
+}
+
+/// The plan a board without frozen evidence for the cell would serve once
+/// the first-use proof admits it; `None` when the cell has no candidate.
+pub(super) fn scalar_proof_plan(
+    facts: ScalarLaunchFacts,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+) -> Result<Option<ScalarDispatchPlan>, String> {
+    let plan = scalar_plan_with_admission(facts, request, operands, ScalarAdmission::Proof)?;
+    Ok((plan != scalar_dispatch_plan(request, facts.multiprocessor_count)?).then_some(plan))
+}
+
+fn scalar_plan_with_admission(
+    facts: ScalarLaunchFacts,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    admission: ScalarAdmission,
 ) -> Result<ScalarDispatchPlan, String> {
     let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
     for route in [
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128InDirectFold,
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128OutDirectFold,
     ] {
-        let plan = sm89_exact_f32_d128_plan_for_route(facts, request, operands, route, true)?;
+        let plan = sm89_exact_f32_d128_plan_for_route(facts, request, operands, route, admission)?;
         if plan != fallback {
             return Ok(plan);
         }
@@ -7314,13 +7736,13 @@ pub(super) fn scalar_launch_plan(
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D768OutDirectBk16,
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::PrismDirectBk16,
     ] {
-        let plan = sm89_exact_f32_plan_for_route(facts, request, operands, route, true)?;
+        let plan = sm89_exact_f32_plan_for_route(facts, request, operands, route, admission)?;
         if plan != fallback {
             return Ok(plan);
         }
     }
     if fallback == (ScalarDispatchPlan::NnFinal { slim: false })
-        && qualified_fixed_copyplan_environment(facts)
+        && fixed_overlay_admitted(admission, facts, qualified_fixed_copyplan_environment)
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn
         && NN_FIXED_COPYPLAN_SM89_CELLS.contains(&request.shape)
         && qualified_nn_m64n64_operands(operands)
@@ -7328,7 +7750,7 @@ pub(super) fn scalar_launch_plan(
         return Ok(ScalarDispatchPlan::NnSm89FixedCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_fixed_copyplan_environment(facts)
+        && fixed_overlay_admitted(admission, facts, qualified_fixed_copyplan_environment)
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && request.shape == NT_D768_OUT_FIXED_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
@@ -7336,7 +7758,11 @@ pub(super) fn scalar_launch_plan(
         return Ok(ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && fixed_overlay_admitted(
+            admission,
+            facts,
+            qualified_nt_fixed_copyplan_sibling_environment,
+        )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && request.shape == NT_D768_IN_FIXED_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
@@ -7344,7 +7770,11 @@ pub(super) fn scalar_launch_plan(
         return Ok(ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
-        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && fixed_overlay_admitted(
+            admission,
+            facts,
+            qualified_nt_fixed_copyplan_sibling_environment,
+        )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && request.shape == NT_PRISM_FIXED_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
@@ -7352,7 +7782,11 @@ pub(super) fn scalar_launch_plan(
         return Ok(ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_nt_fixed_copyplan_sibling_environment(facts)
+        && fixed_overlay_admitted(
+            admission,
+            facts,
+            qualified_nt_fixed_copyplan_sibling_environment,
+        )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && qualified_nt_large_deep_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
@@ -7429,7 +7863,11 @@ pub(super) fn scalar_launch_plan(
             chunks: 16,
         })
         && (qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
-            || qualified_scalar_sm89_ada142_tn_environment(facts))
+            || scalar_admitted(
+                admission,
+                facts,
+                qualified_scalar_sm89_ada142_tn_environment,
+            ))
         && qualified_tn_m16n16_splitm16_request(request)
         && qualified_tn_m16n16_splitm16_operands(operands)
     {
@@ -7899,6 +8337,7 @@ mod scalar_wave_policy_tests {
         ScalarTransposeQualificationIdentity, TN_M16N16_SPLITM16_SM89_BINDINGS,
         qualified_fixed_copyplan_environment, qualified_nt_fixed_copyplan_sibling_environment,
         qualified_scalar_sm89_ada142_tn_environment, scalar_dispatch_plan, scalar_launch_plan,
+        scalar_proof_plan,
     };
     use crate::mamba_ssm::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::mamba_ssm::gpu::kernel_identity::{
@@ -7932,10 +8371,10 @@ mod scalar_wave_policy_tests {
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
-                fixed_key: "467bfedc79ee62ec49d328e088be11704f0750bf3f4989d94f0297869ef2478c",
-                fixed_artifact: "f6321f41742941308ee9c9e0d6bc0bf298b21346ff2dd7c79f01f48a4498e671",
-                fixed_header: "9c0b3fef3f385505790314f32159902671e556a10912338a7de9c41ad9433981",
+                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                fixed_key: "4f27f71a007419a8b0bc01ea4647b46b8feee49a2130d3d0d3ee15312d28bf83",
+                fixed_artifact: "58b5bab404ec64b2b2cccdf9293bb0feb50b4444ad77ca07e71abfaaa8b0bd61",
+                fixed_header: "46abc491752fdd93e28f7175671edc41fe27693dbdc9937cc268a6bb49114316",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -7943,10 +8382,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
-                fixed_key: "11b5c7c34c8e01fa38a50e0cca7976db6e3f6890d35c19e865b4745a56107841",
-                fixed_artifact: "15c34c991ef5d39004cb3c4f5c04d3954fe3f2195918336f82deb00999551d46",
-                fixed_header: "3e292a78baa408e0ddbefa465a3a87c5e6d5962ecce027b6c9601f4a6b8d1934",
+                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                fixed_key: "3019cd806b950e51c814e5d50f578abb0aaf48691e1c390b485a444a2d22f05e",
+                fixed_artifact: "4a098447f13d4995b92c56d65253674a0c031bd1a024be373048fab1f8d80b39",
+                fixed_header: "8d75637fa401b0e77cd68d894404bef3542a945bbd18af7939a7aecb8a5fb690",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -7954,10 +8393,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
-                fixed_key: "22aaa0201dcefe6656efaa804d854e12efceae225115fd0da8bb8ecf6567f7be",
-                fixed_artifact: "4ac337d75856babd385051ad9ef5068abb13675e1704c94d039a4082d1e2fda8",
-                fixed_header: "3d004b5c27f690ab0bbd9420acee5c9be2d46afc0addfd26096e5cdc34138fef",
+                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                fixed_key: "f6746cdb8c87af501463cb850798d507c1cde265030a74d4e39fc5f3f3f19b55",
+                fixed_artifact: "195c3f4b77d0d51b7d53b3b8f194c12b68b894ea9585cf12dcda5665ebe36ca1",
+                fixed_header: "3bd906d2c6bdd2f19d6dbafec232df7e7830cda71858952c417b20619c88462f",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -7965,10 +8404,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
-                fixed_key: "9a332d253977337afe54a879b28e2b4f2ca5292a42022c4e4019b93e7127e6ab",
-                fixed_artifact: "941bd69570f84ec06fc42de3d617b1f56468e676e1272a061eee094fb9da707c",
-                fixed_header: "d376eca6ff1e194f59411f08d555f85f1670c2153eb7f0be89ad20f72ee01131",
+                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                fixed_key: "aef197fa09a22492461272846fd9005b94c47956248dae7bf30aec92eb18c76f",
+                fixed_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
+                fixed_header: "0d64bf3035ac0a0c6b67b33006abf8e899cdd90d4c6727bc28a29d935e921d69",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -7976,10 +8415,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "e4cae133c1b9fff2be7fd32177da15f01af52e90bd8a217301ca1fe10a719a5d",
-                fixed_key: "cdb97777766221a8a01dc33bb4e8abed3021a4c6f69a7d1cee3c2a9533b6c857",
-                fixed_artifact: "7b6969362ee58a625fe5495066cd2c8c20b533331e6f5821ba3d456fcd3b5d3b",
-                fixed_header: "2345d134e7a6fd9d2bb839c03548ac1981e5ac4ec35d78ee62416baa2bc52ce0",
+                fixed_source: "77ae92a85dd6bbd55b14b10faa36ebb33fdd332a2f1ee6fdfdffadecfdf4bb50",
+                fixed_key: "956d43228070541f8b31c2d271caa08d6b6d08d89f7b9a1c8817cc8183e41109",
+                fixed_artifact: "af675e2f4c78b2d241c795a30fa4416d65b589c62804fe811a5a8ac99b99ae97",
+                fixed_header: "f1a6f935c640d31e059232eff0569988b9436d9ccd9348bb2d971cb049f1d187",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
@@ -7987,10 +8426,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "3b3db58ef62aab3cdfe7157fbd68f157212ff4a6aa0cf144d0f041b1ad0bbc00",
-                fixed_key: "ab44f4d97bde50be4ad3912cc204af7e538f7a4aaaa35c14a798203adcc46a66",
-                fixed_artifact: "1a7c54593cfaa36de1b36193374b8b2197fea7ee20be42ad9775eaf27f14a71f",
-                fixed_header: "56ad0ff00ff4dc86fd45a0c1579f52e81942348089c6b7530f0f2b4f358d042e",
+                fixed_source: "ddb7f5a06d4758a6bfdbdaebd73b610d6cc757536f0ff0786656517c326ee049",
+                fixed_key: "3a13f79dcd2bc426a9ea9f393c73c7366b68fbc3f9987d3e11d7f153f4055fcd",
+                fixed_artifact: "2f38fd67b5f26a675c47a0bc8e275a116d842d0435bdc8d2c12e0c8cf7f5fd59",
+                fixed_header: "3a647940753e192e09edec5ff7351db84760d9a779c4d97f4f325f451a1b5c26",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
@@ -9170,6 +9609,57 @@ mod scalar_wave_policy_tests {
                 ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
             );
         }
+    }
+
+    #[test]
+    fn other_sm80_boards_reach_the_fixed_copyplan_routes_through_the_proof_tier() {
+        let ada = fixed_copyplan_facts(2);
+        let operands = nn_qualified_operands();
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
+        };
+        let selected = ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        assert_eq!(
+            scalar_proof_plan(ada, request, operands).unwrap(),
+            Some(selected)
+        );
+        for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (11, 0)] {
+            let board = ScalarLaunchFacts {
+                compute_capability: cc,
+                ..ada
+            };
+            assert_eq!(
+                scalar_launch_plan(board, request, operands).unwrap(),
+                ScalarDispatchPlan::NtFinal { slim: false },
+                "no frozen evidence on {cc:?}"
+            );
+            assert_eq!(
+                scalar_proof_plan(board, request, operands).unwrap(),
+                Some(selected),
+                "the overlay route is the proof candidate on {cc:?}"
+            );
+        }
+        for cc in [(7, 5), (12, 0), (12, 1)] {
+            let board = ScalarLaunchFacts {
+                compute_capability: cc,
+                ..ada
+            };
+            assert_eq!(
+                scalar_proof_plan(board, request, operands).unwrap(),
+                None,
+                "the overlay is not composed on {cc:?}"
+            );
+        }
+        let unloaded = ScalarLaunchFacts {
+            compute_capability: (9, 0),
+            fixed_copyplan_loaded: false,
+            ..ada
+        };
+        assert_eq!(
+            scalar_proof_plan(unloaded, request, operands).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -11041,7 +11531,12 @@ pub(super) fn tc_pick_tile_backward_for_device(
     half_policy: HalfTriadPolicy,
 ) -> Option<TcTile> {
     let portable = tc_pick_tile_backward(op, dims, multiprocessor_count);
-    if compute_capability != (8, 9) || multiprocessor_count == 0 {
+    let (major, minor) = compute_capability;
+    let composed = u32::try_from(major)
+        .ok()
+        .zip(u32::try_from(minor).ok())
+        .is_some_and(super::contract::portable_extensions_composed_for_cc);
+    if !composed || multiprocessor_count == 0 {
         return portable;
     }
     // The stream-K dW schedule serves any 64x64 grid whose (tile, slab)
@@ -11050,7 +11545,9 @@ pub(super) fn tc_pick_tile_backward_for_device(
     // stays on the tiled contract never sees it. Its persistent grid is
     // bounded by the resident CTA count, so the tile count itself no longer
     // limits it: the census shows it winning from one wave of tiles to
-    // eight wherever the reduction runs 2048 rows or more.
+    // eight wherever the reduction runs 2048 rows or more. It runs on every
+    // board whose portable module composes it; the CC 12.x boards keep
+    // their own stream-K kernel instead.
     if op == super::super::kernel_identity::PolicyOp::Dw
         && half_policy == HalfTriadPolicy::AllowStreamKFixedOrder
     {
@@ -11066,6 +11563,10 @@ pub(super) fn tc_pick_tile_backward_for_device(
         }
     }
 
+    // The tile preferences below were measured on the Ada board alone.
+    if compute_capability != (8, 9) {
+        return portable;
+    }
     let (batch, n_in, n_out) = dims;
     let geometry = match op {
         super::super::kernel_identity::PolicyOp::Dw => TcGeometry {
@@ -11150,15 +11651,21 @@ mod tc_policy_tests {
                 Some(TcTile::Tile64StreamK),
                 "{dims:?}"
             );
-            // Off SM89 the measured rule does not apply.
-            assert_ne!(
+            // Every board whose portable module composes the schedule runs
+            // it; the CC 12.x boards compose their own stream-K instead.
+            assert_eq!(
                 pick(dims, stream_k, (8, 6)),
                 Some(TcTile::Tile64StreamK),
                 "{dims:?}"
             );
+            assert_ne!(
+                pick(dims, stream_k, (12, 0)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
             assert_eq!(
-                pick(dims, stream_k, (8, 6)),
-                pick(dims, tiled, (8, 6)),
+                pick(dims, stream_k, (12, 0)),
+                pick(dims, tiled, (12, 0)),
                 "{dims:?}"
             );
         }
@@ -12632,6 +13139,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            multiprocessors: 142,
         }
     }
 
@@ -12654,7 +13162,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
                 Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
-                9,
+                10,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
                 Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N128,
@@ -12664,7 +13172,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
                 Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
-                9,
+                10,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
                 Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M128N128,
@@ -12674,7 +13182,7 @@ mod tf32_tests {
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
                 None,
-                9,
+                10,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
                 Tf32PhysicalRoute::Sm89NnDirectN96,
             ),
@@ -12700,6 +13208,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: Some(qualified_module_for_auto_identity(joint)),
+            multiprocessors: 142,
         }
     }
 
@@ -12864,7 +13373,13 @@ mod tf32_tests {
                         sm89_joint_operands(cell.op),
                         availability,
                     ) {
-                        assert_no_tf32_route_for(selection, "neighboring joint request");
+                        if field < 3 {
+                            // A shape one element off the cell may take the
+                            // portable tier's nearest cell, never the joint route.
+                            assert_no_tf32_route(selection);
+                        } else {
+                            assert_no_tf32_route_for(selection, "neighboring joint request");
+                        }
                     }
                 }
                 for bad_operands in [
@@ -12915,9 +13430,157 @@ mod tf32_tests {
     /// TF32 fail-closed: a request or operand set that drifts off a measured
     /// cell may still run on the exact family, which carries its own
     /// qualification, but it must never reach a TF32 route.
-    fn assert_no_tf32_route(selection: F32TriadSelection) {
+    /// A drifted request may still land on the portable tier by design,
+    /// or on a proof candidate whose reference is that tier, but never on
+    /// a specialized route without the proof.
+    fn portable_cell_request(cell: &super::Tf32AutoCell) -> (F32TriadRequest, F32TriadOperands) {
+        let dims = match cell.op {
+            ResolvedGemmOp::Nn => (
+                cell.shape.output_rows,
+                cell.shape.reduction,
+                cell.shape.output_columns,
+            ),
+            ResolvedGemmOp::Tn => (
+                cell.shape.reduction,
+                cell.shape.output_rows,
+                cell.shape.output_columns,
+            ),
+            ResolvedGemmOp::Nt => (
+                cell.shape.output_rows,
+                cell.shape.output_columns,
+                cell.shape.reduction,
+            ),
+        };
+        let request = F32TriadRequest {
+            op: cell.op,
+            shape: F32TriadShape::contiguous(cell.op, dims),
+        };
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: if cell.op == ResolvedGemmOp::Tn {
+                1.0
+            } else {
+                0.0
+            },
+        };
+        (request, operands)
+    }
+
+    /// The portable cells this tree serves exactly: the last record of each
+    /// (op, shape) wins, as it does for the exact lookup.
+    fn portable_cells_last_wins() -> Vec<&'static super::Tf32AutoCell> {
+        let mut seen = std::collections::HashSet::new();
+        let mut cells = Vec::new();
+        for cell in SM89_TF32_EVIDENCE_CELLS.iter().rev() {
+            if cell.route.module_kind() == ModuleKind::TriadSm80
+                && seen.insert((cell.op, cell.shape))
+            {
+                cells.push(cell);
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn nearest_portable_cell_reproduces_every_exact_cell_and_keeps_a_far_shape_out() {
+        for cell in portable_cells_last_wins() {
+            let (request, operands) = portable_cell_request(cell);
+            assert_eq!(
+                super::nearest_tf32_portable_cell(request, operands, SM89_TF32_EVIDENCE_CELLS, 142),
+                Some(cell.route),
+                "{:?} {:?}",
+                cell.op,
+                cell.shape
+            );
+        }
+        // Without a board the band stays shut.
+        let (request, operands) = portable_cell_request(&SM89_TF32_EVIDENCE_CELLS[0]);
+        assert_eq!(
+            super::nearest_tf32_portable_cell(request, operands, SM89_TF32_EVIDENCE_CELLS, 0),
+            None
+        );
+        // A shape a factor of sixteen from every measured reduction is out.
+        let far = F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (2048, 49_152, 3072)),
+        };
+        assert_eq!(
+            super::nearest_tf32_portable_cell(far, operands, SM89_TF32_EVIDENCE_CELLS, 142),
+            None
+        );
+        // A drifted stride never matches: the band widens shapes, not layouts.
+        let mut strided = request;
+        strided.shape.lda += 1;
+        assert_eq!(
+            super::nearest_tf32_portable_cell(strided, operands, SM89_TF32_EVIDENCE_CELLS, 142),
+            None
+        );
+    }
+
+    /// Leave one measured cell out and ask the band for it: how often the
+    /// nearest other cell names the tile the census measured. The rate is
+    /// pinned so a table change that weakens the band is noticed.
+    #[test]
+    fn nearest_portable_cell_leave_one_out_agreement_is_pinned() {
+        let cells = portable_cells_last_wins();
+        let leave_one_out = |log_bound: f64| {
+            let mut agreed = 0usize;
+            let mut covered = 0usize;
+            let mut disagreements = Vec::new();
+            for held_out in &cells {
+                let remaining = SM89_TF32_EVIDENCE_CELLS
+                    .iter()
+                    .filter(|cell| !(cell.op == held_out.op && cell.shape == held_out.shape))
+                    .copied()
+                    .collect::<Vec<_>>();
+                let (request, operands) = portable_cell_request(held_out);
+                let Some(chosen) = super::nearest_tf32_portable_cell_within(
+                    request, operands, &remaining, 142, log_bound,
+                ) else {
+                    continue;
+                };
+                covered += 1;
+                if chosen == held_out.route {
+                    agreed += 1;
+                } else {
+                    disagreements.push(format!(
+                        "{:?} {:?}: measured {:?}, band {:?}",
+                        held_out.op, held_out.shape, held_out.route, chosen
+                    ));
+                }
+            }
+            (agreed, covered, disagreements)
+        };
+        for factor in [2.0_f64, 4.0, 8.0] {
+            let (agreed, covered, disagreements) = leave_one_out(factor.ln());
+            eprintln!(
+                "portable neighbour band x{factor}: {agreed} of {covered} covered cells agree ({} cells, {} disagreements)\n{}",
+                cells.len(),
+                disagreements.len(),
+                disagreements.join("\n")
+            );
+        }
+        let (agreed, covered, _) = leave_one_out(super::TF32_PORTABLE_NEIGHBOUR_LOG_BOUND);
         assert!(
-            !matches!(selection, F32TriadSelection::Tf32(_)),
+            covered * 10 >= cells.len() * 6,
+            "the band covers {covered} of {}",
+            cells.len()
+        );
+        assert!(agreed * 10 >= covered * 8, "{agreed} of {covered} agree");
+    }
+
+    fn assert_no_tf32_route(selection: F32TriadSelection) {
+        let portable_tier = |route: Tf32PhysicalRoute| route.module_kind() == ModuleKind::TriadSm80;
+        assert!(
+            match selection {
+                F32TriadSelection::Tf32(route) => portable_tier(route),
+                F32TriadSelection::Tf32Proof { reference, .. } => portable_tier(reference),
+                _ => true,
+            },
             "drifted request selected {selection:?}"
         );
     }
@@ -12938,6 +13601,7 @@ mod tf32_tests {
             specialized: Some(specialized),
             finalist: None,
             joint: None,
+            multiprocessors: 170,
         }
     }
 
@@ -14019,8 +14683,8 @@ mod tf32_tests {
 
     #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
-        assert_eq!(TUNING_TABLE_REVISION, 45);
-        assert_eq!(F32_TF32_TUNING_REVISION, 45);
+        assert_eq!(TUNING_TABLE_REVISION, 46);
+        assert_eq!(F32_TF32_TUNING_REVISION, 46);
     }
 
     #[test]
@@ -14188,17 +14852,24 @@ mod tf32_tests {
             ),
             F32TriadSelection::ScalarFma,
         );
+        // A drifted specialized identity is no evidence: the portable
+        // tier may serve the cell by design, a specialized route never.
         for mutate in sm120_identity_mutations() {
             let mut rejected = availability();
             mutate(rejected.specialized.as_mut().unwrap());
-            assert_eq!(
-                resolve(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    rejected,
-                ),
-                F32TriadSelection::ScalarFma,
+            let selection = resolve(
+                F32TriadPolicy::AllowDeterministicTf32,
+                request,
+                operands,
+                rejected,
+            );
+            assert!(
+                matches!(selection, F32TriadSelection::ScalarFma)
+                    || matches!(
+                        selection,
+                        F32TriadSelection::Tf32(route) if route.module_kind() == ModuleKind::TriadSm80
+                    ),
+                "drifted specialized identity selected {selection:?}"
             );
         }
         for (specialized, portable) in [
@@ -14231,21 +14902,29 @@ mod tf32_tests {
                 "CUDA {:?} exact portable twin",
                 specialized.nvrtc_version,
             );
+            // A mismatched portable twin is no evidence for the cohort's
+            // route; the portable tier may still serve the cell by design
+            // where the twin's structure is sound.
             for mutate in sm120_identity_mutations()
                 .into_iter()
                 .chain(portable_sm120_coupled_mutations())
             {
                 let mut rejected = availability();
                 mutate(rejected.portable.as_mut().unwrap());
-                assert_eq!(
-                    resolve(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        request,
-                        operands,
-                        rejected,
-                    ),
-                    F32TriadSelection::ScalarFma,
-                    "CUDA {:?} mismatched portable twin",
+                let selection = resolve(
+                    F32TriadPolicy::AllowDeterministicTf32,
+                    request,
+                    operands,
+                    rejected,
+                );
+                assert!(
+                    matches!(selection, F32TriadSelection::ScalarFma)
+                        || matches!(
+                            selection,
+                            F32TriadSelection::Tf32(route)
+                                if route.module_kind() == ModuleKind::TriadSm80
+                        ),
+                    "CUDA {:?} mismatched portable twin selected {selection:?}",
                     specialized.nvrtc_version,
                 );
             }
@@ -15411,21 +16090,44 @@ mod tf32_tests {
                 .unwrap(),
                 F32TriadSelection::Tf32(expected),
             );
+            // These cells stage both operands with scalar loads. The band
+            // widens them to a contiguous neighbour that stays scalar-staged
+            // and to nothing else: a neighbour that gains a vector-staged
+            // operand is served by the vector-staged evidence or not at all.
+            let scalar_staged =
+                |shape: F32TriadShape| super::tf32_staging_class(shape) == (false, false);
+            let vector_staged_cells = SM89_TF32_EVIDENCE_CELLS
+                .iter()
+                .filter(|cell| !scalar_staged(cell.shape.contiguous(cell.op)))
+                .copied()
+                .collect::<Vec<_>>();
             for (axis, value) in [rows, columns, reduction].into_iter().enumerate() {
                 for changed in [value - 1, value + 1] {
                     let mut normalized = [rows, columns, reduction];
                     normalized[axis] = changed;
-                    assert_eq!(
-                        resolve_f32_triad_auto_with_operands(
-                            F32TriadPolicy::AllowDeterministicTf32,
-                            normalized_request(op, normalized[0], normalized[1], normalized[2]),
+                    let neighbour =
+                        normalized_request(op, normalized[0], normalized[1], normalized[2]);
+                    let served = resolve_f32_triad_auto_with_operands(
+                        F32TriadPolicy::AllowDeterministicTf32,
+                        neighbour,
+                        operands,
+                        sm89_availability(),
+                    )
+                    .unwrap();
+                    let label =
+                        format!("{op:?} {rows}x{columns}x{reduction} axis {axis} -> {changed}");
+                    if scalar_staged(neighbour.shape) {
+                        assert_eq!(served, F32TriadSelection::Tf32(expected), "{label}");
+                    } else {
+                        let from_vector_staged = super::nearest_tf32_portable_cell(
+                            neighbour,
                             operands,
-                            sm89_availability(),
+                            &vector_staged_cells,
+                            142,
                         )
-                        .unwrap(),
-                        F32TriadSelection::ScalarFma,
-                        "bucket bleed for {op:?} {rows}x{columns}x{reduction} axis {axis}",
-                    );
+                        .map_or(F32TriadSelection::ScalarFma, F32TriadSelection::Tf32);
+                        assert_eq!(served, from_vector_staged, "{label}");
+                    }
                 }
             }
 
@@ -15492,6 +16194,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                multiprocessors: 142,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -15505,6 +16208,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                multiprocessors: 142,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -15518,6 +16222,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                multiprocessors: 142,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -15531,19 +16236,33 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                multiprocessors: 142,
             },
         ];
-        for availability in cases {
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    selected,
-                    operands,
-                    availability,
-                )
-                .unwrap(),
-                F32TriadSelection::ScalarFma,
+        for (index, availability) in cases.into_iter().enumerate() {
+            let selection = resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32,
+                selected,
+                operands,
+                availability,
+            )
+            .unwrap();
+            // No module, a target the board does not own, or a module of
+            // another kind leaves the exact family serving; a different
+            // multiprocessor count or another board of the same tier is
+            // served by the portable tier by design.
+            let portable_tier = matches!(
+                selection,
+                F32TriadSelection::Tf32(route) if route.module_kind() == ModuleKind::TriadSm80
             );
+            match index {
+                1 | 2 | 4 => assert!(portable_tier, "case {index} selected {selection:?}"),
+                _ => assert_eq!(
+                    selection,
+                    F32TriadSelection::ScalarFma,
+                    "case {index} selected {selection:?}"
+                ),
+            }
         }
         assert_eq!(
             measured_tf32_route_with_operands(
@@ -15567,21 +16286,26 @@ mod tf32_tests {
             alpha: 1.0,
             beta: 1.0,
         };
+        // Another toolkit holds no cohort: the portable tier serves the
+        // cell by design, and only the portable tier.
         for version in [(13, 1), (13, 0), (12, 8), (0, 0)] {
             let mut availability = sm89_availability();
             let portable = availability.portable.as_mut().unwrap();
             portable.compiler.nvrtc_version = version;
             portable.device_caps.nvrtc_version = version;
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    selected,
-                    operands,
-                    availability,
-                )
-                .unwrap(),
-                F32TriadSelection::ScalarFma,
-                "NVRTC {version:?} escaped the exact compiler key",
+            let selection = resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32,
+                selected,
+                operands,
+                availability,
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    selection,
+                    F32TriadSelection::Tf32(route) if route.module_kind() == ModuleKind::TriadSm80
+                ),
+                "NVRTC {version:?} selected {selection:?}"
             );
         }
 
@@ -15737,20 +16461,40 @@ mod tf32_tests {
             |module| module.device_caps.optin_shared_bytes -= 1,
             |module| module.device_caps.tensor_map_access = true,
         ];
-        for mutate in mutations {
+        // A mutated identity is no evidence. Structural drift (the module
+        // kind, artifact and output kinds, an unknown NVRTC library, the
+        // revisions, a target the board did not accept) leaves the exact
+        // family serving; provenance drift (digests, versions, board) is
+        // what another board looks like, and the portable tier serves it by
+        // design. A specialized route or a proof candidate never appears.
+        let structural: [usize; 10] = [0, 2, 3, 12, 13, 14, 15, 16, 17, 23];
+        for (index, mutate) in mutations.into_iter().enumerate() {
             let mut availability = sm89_availability();
             mutate(availability.portable.as_mut().unwrap());
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    availability,
-                )
-                .unwrap(),
-                F32TriadSelection::ScalarFma,
-                "mutated qualification identity was admitted",
-            );
+            let selection = resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32,
+                request,
+                operands,
+                availability,
+            )
+            .unwrap();
+            if structural.contains(&index) {
+                assert_eq!(
+                    selection,
+                    F32TriadSelection::ScalarFma,
+                    "structural mutation {index} was admitted"
+                );
+            } else {
+                assert!(
+                    matches!(selection, F32TriadSelection::ScalarFma)
+                        || matches!(
+                            selection,
+                            F32TriadSelection::Tf32(route)
+                                if route.module_kind() == ModuleKind::TriadSm80
+                        ),
+                    "mutation {index} selected {selection:?}"
+                );
+            }
         }
     }
 
@@ -16862,6 +17606,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
             ] {
                 assert_eq!(
@@ -16906,6 +17651,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
             ),
             (
@@ -16924,6 +17670,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
             ),
             (
@@ -16944,6 +17691,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
             ),
             (
@@ -16963,6 +17711,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
             ),
         ];
@@ -17018,6 +17767,31 @@ mod tf32_tests {
                 ResolvedGemmOp::Nt,
                 (2_048, 768, 3_072),
                 Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NtRnaM144N96S2,
             ),
         ] {
             let request = F32TriadRequest {
@@ -17359,6 +18133,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            multiprocessors: 142,
         };
 
         assert_eq!(
@@ -17385,6 +18160,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            multiprocessors: 142,
         };
 
         assert_eq!(
@@ -17434,6 +18210,7 @@ mod tf32_tests {
                 )),
                 finalist: None,
                 joint: None,
+                multiprocessors: 142,
             };
             assert_eq!(
                 resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
@@ -17453,6 +18230,7 @@ mod tf32_tests {
             )),
             finalist: None,
             joint: None,
+            multiprocessors: 142,
         };
         assert!(resolve_tf32_forced(request(ResolvedGemmOp::Nn), generic, route).is_err());
     }
@@ -17526,6 +18304,7 @@ mod tf32_tests {
                         specialized: Some(invalid),
                         finalist: None,
                         joint: None,
+                        multiprocessors: 142,
                     },
                     route,
                 )
@@ -17553,6 +18332,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    multiprocessors: 142,
                 },
                 illegal,
             )
@@ -17580,6 +18360,8 @@ mod sm100_toolkit_tests {
         assert_eq!(sm100_target_candidates_for_nvrtc((10, 3), (12, 9)).len(), 2);
         assert!(sm100_target_candidates_for_nvrtc((11, 0), (13, 0)).is_empty());
         assert_eq!(sm100_target_candidates_for_nvrtc((11, 0), (13, 2)).len(), 2);
+        assert!(sm100_target_candidates_for_nvrtc((10, 7), (13, 3)).is_empty());
+        assert_eq!(sm100_target_candidates_for_nvrtc((10, 7), (13, 4)).len(), 2);
         assert!(sm100_target_candidates_for_nvrtc((12, 0), (13, 2)).is_empty());
     }
 }
@@ -17634,7 +18416,7 @@ mod sm100_sm90a_auto_tests {
             stages: Sm100Stages::S3,
             schedule: Sm100Schedule::C4,
         };
-        for device_cc in [(10, 0), (10, 3), (11, 0)] {
+        for device_cc in [(10, 0), (10, 3), (10, 7), (11, 0)] {
             assert!(sm100_auto_cells(device_cc).is_empty());
             let target = sm100_target_candidates(device_cc).first().copied();
             let resolved = resolve_sm100_auto(device_cc, target, request)

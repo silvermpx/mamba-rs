@@ -298,7 +298,7 @@ fn assert_sm89_nt_finalist_manifest(
     let evidence = launch.evidence();
     assert_eq!(evidence.launch_count(), 1);
     assert!(evidence.eager_graph_equal());
-    assert_eq!(evidence.route_identity().tuning_table_revision, 45);
+    assert_eq!(evidence.route_identity().tuning_table_revision, 46);
     let [node] = evidence.nodes() else {
         panic!("finalist must have one physical node")
     };

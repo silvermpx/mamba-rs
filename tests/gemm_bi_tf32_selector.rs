@@ -61,6 +61,7 @@ fn sm89_availability() -> F32TriadAvailability {
         specialized: None,
         finalist: None,
         joint: None,
+        multiprocessors: 142,
     }
 }
 

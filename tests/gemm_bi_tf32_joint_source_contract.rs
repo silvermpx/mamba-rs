@@ -378,9 +378,12 @@ fn joint_source_has_frozen_exact_inventory_and_one_transpose_export() {
         digest_hex(sha256(joint::SOURCE.as_bytes())),
         joint::SOURCE_SHA256
     );
+    for (name, source, digest) in joint::WIDE_FRAGMENTS {
+        assert_eq!(digest_hex(sha256(source.as_bytes())), digest, "{name}");
+    }
     assert_eq!(
         joint::export_inventory(joint::SOURCE).unwrap(),
-        joint::SM89_TF32_JOINT_SYMBOLS
+        joint::SM89_TF32_JOINT_SEALED_SYMBOLS
     );
     assert_eq!(
         joint::SOURCE
@@ -483,13 +486,13 @@ fn sealed_validator_rejects_extra_exports_and_discovery_markers() {
 }
 
 #[test]
-fn composed_source_contains_only_the_seven_sealed_exports() {
+fn composed_source_contains_the_sealed_seven_and_the_five_wide_exports() {
     let composed = joint::compose_source().expect("compose standalone joint source");
     assert_eq!(
         joint::export_inventory(&composed).unwrap(),
         joint::SM89_TF32_JOINT_SYMBOLS
     );
-    assert_eq!(composed.matches("extern \"C\"").count(), 7);
+    assert_eq!(composed.matches("extern \"C\"").count(), 12);
     assert!(composed.starts_with(joint::PRIMITIVES));
     joint::validate_source_text(&composed).expect("composed inventory remains sealed");
 }
@@ -597,10 +600,10 @@ fn typed_params_match_the_frozen_driver_abi() {
 }
 
 #[test]
-fn seven_typed_specs_bind_symbols_abi_and_retained_resources() {
+fn twelve_typed_specs_bind_symbols_abi_and_retained_resources() {
     use joint::Sm89Tf32JointKernelKind as Kind;
 
-    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 7);
+    assert_eq!(joint::SM89_TF32_JOINT_KERNEL_SPECS.len(), 12);
     let expected = [
         (
             joint::NN_ADD_HALF_DIRECT_N96_SYMBOL,
@@ -669,6 +672,61 @@ fn seven_typed_specs_bind_symbols_abi_and_retained_resources() {
             64,
         ),
         (
+            joint::NT_RNA_M144N96_S2_SYMBOL,
+            Kind::NtRnaM144N96Bk32S2,
+            (384, 1, 1),
+            61_440,
+            0,
+            168,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::NT_ROWSTAGE_M128N192_S2_SYMBOL,
+            Kind::NtRowstageM128N192Bk32S2,
+            (256, 1, 1),
+            81_920,
+            0,
+            255,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::TN_DIRECT_M192N192_S2_SYMBOL,
+            Kind::TnDirectM192N192Bk32S2,
+            (384, 1, 1),
+            98_304,
+            0,
+            168,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::TN_PRE_RNA_M96N192_S2_SYMBOL,
+            Kind::TnPreRnaM96N192Bk32S2,
+            (384, 1, 1),
+            73_728,
+            0,
+            168,
+            Some(1),
+            5,
+            64,
+        ),
+        (
+            joint::TN_PRE_RNA_M96N96_S3_SYMBOL,
+            Kind::TnPreRnaM96N96Bk32S3,
+            (256, 1, 1),
+            73_728,
+            0,
+            255,
+            Some(1),
+            5,
+            64,
+        ),
+        (
             joint::TN_PRE_RNA_TRANSPOSE_SYMBOL,
             Kind::TnPreRnaTranspose32x32,
             (32, 8, 1),
@@ -687,7 +745,17 @@ fn seven_typed_specs_bind_symbols_abi_and_retained_resources() {
         assert_eq!(spec.dynamic_shared_bytes, dynamic);
         assert_eq!(spec.static_shared_bytes, static_bytes);
         assert_eq!(spec.register_cap, regs);
-        assert_eq!(spec.local_bytes, 0);
+        assert_eq!(
+            spec.local_bytes,
+            if spec.symbol == joint::TN_DIRECT_M192N192_S2_SYMBOL {
+                // The widest TN tile holds 96 accumulators per thread; 384
+                // threads leave 168 registers each, so the rest spills. It
+                // was measured that way and still takes its cell.
+                88
+            } else {
+                0
+            }
+        );
         assert_eq!(spec.minimum_max_threads, 256);
         assert_eq!(spec.minimum_active_blocks, occupancy);
         assert_eq!(spec.abi_parameters.len(), argc);

@@ -3366,7 +3366,12 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
         | Tf32PhysicalRoute::Sm89NnDirectN96
         | Tf32PhysicalRoute::Sm89NnN96
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => ctx.kernels.f32_triad_availability().joint,
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+        | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+        | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => ctx.kernels.f32_triad_availability().joint,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3432,19 +3437,26 @@ fn tf32_params(
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8
         | Tf32PhysicalRoute::Sm89NnDirectN96
         | Tf32PhysicalRoute::Sm89NnN96
-        | Tf32PhysicalRoute::Sm89NtALdmatrixN96 => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-            alpha: operands.alpha,
-            beta: operands.beta,
-            m,
-            k,
-            n,
-            lda: checked_i32(shape.lda, "lda")?,
-            ldb: checked_i32(shape.ldb, "ldb")?,
-            ldc,
-        }),
+        | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+        | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+        | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2 => {
+            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+                alpha: operands.alpha,
+                beta: operands.beta,
+                m,
+                k,
+                n,
+                lda: checked_i32(shape.lda, "lda")?,
+                ldb: checked_i32(shape.ldb, "ldb")?,
+                ldc,
+            })
+        }
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => {
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => {
             return Err("Ada TF32 TN parameters require the two-node pre-RNA pipeline".into());
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
@@ -3793,15 +3805,25 @@ fn tf32_resolved_route(
         ),
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
-        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => (
+        | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => (
             PhysicalGemmBackend::Sm89MmaTf32PreRna,
             ResolvedNumericContract::MmaTf32PreRnaAV1,
+        ),
+        Tf32PhysicalRoute::Sm89NtRnaM144N96S2 => (
+            PhysicalGemmBackend::Sm89MmaTf32NtRna,
+            ResolvedNumericContract::MmaTf32Rna,
+        ),
+        Tf32PhysicalRoute::Sm89TnDirectM192N192S2 => (
+            PhysicalGemmBackend::Sm89MmaTf32TnDirectRna,
+            ResolvedNumericContract::MmaTf32Rna,
         ),
         Tf32PhysicalRoute::Sm89NnDirectN96 | Tf32PhysicalRoute::Sm89NnN96 => (
             PhysicalGemmBackend::Sm89MmaTf32AddHalf,
             ResolvedNumericContract::MmaTf32AddHalfUlp,
         ),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96 => (
+        Tf32PhysicalRoute::Sm89NtALdmatrixN96 | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2 => (
             PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix,
             ResolvedNumericContract::MmaTf32AddHalfUlp,
         ),
@@ -4086,7 +4108,7 @@ fn prepare_scalar_f32(
     operands: F32TriadOperands,
     output_resources: F32LaunchResourceSnapshot,
 ) -> Result<PreparedF32TriadLaunch, String> {
-    let plan = scalar_launch_plan(scalar_launch_facts(&ctx.kernels), request, operands)?;
+    let plan = scalar_ledger_plan(ctx, request, operands)?;
     prepare_scalar_f32_with_plan(ctx, request, operands, output_resources, plan)
 }
 
@@ -4236,6 +4258,8 @@ fn prepare_tf32_f32(
         Tf32PhysicalRoute::Sm89TnPreRnaN96
             | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
             | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
     ) {
         return prepare_sm89_tf32_tn_pre_rna(ctx, request, operands, output_resources, route);
     }
@@ -4266,6 +4290,9 @@ fn prepare_tf32_f32(
             | Tf32PhysicalRoute::Sm89NnDirectN96
             | Tf32PhysicalRoute::Sm89NnN96
             | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+            | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+            | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
     ) {
         None
     } else {
@@ -4344,6 +4371,11 @@ fn validate_sm89_tf32_joint_operands(
             | Tf32PhysicalRoute::Sm89NnDirectN96
             | Tf32PhysicalRoute::Sm89NnN96
             | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+            | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+            | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
+            | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
     ) {
         return Ok(());
     }
@@ -4819,6 +4851,549 @@ fn physical_prepared_f32_route(
     physical
 }
 
+fn stream_is_capturing(ctx: &GpuCtx) -> Result<bool, String> {
+    let status = ctx
+        .stream
+        .capture_status()
+        .map_err(|error| format!("query route proof capture status: {error:?}"))?;
+    Ok(status != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+}
+
+/// The resident CTA count of one kernel on this board at the block and
+/// dynamic shared memory it launches with.
+fn resident_ctas(
+    function: &cudarc::driver::CudaFunction,
+    symbol: &str,
+    threads: u32,
+    dynamic_shared_bytes: u32,
+) -> Result<u32, String> {
+    function
+        .occupancy_max_active_blocks_per_multiprocessor(
+            threads,
+            dynamic_shared_bytes as usize,
+            None,
+        )
+        .map_err(|error| format!("query {symbol} occupancy: {error:?}"))
+}
+
+/// The footprint of the tiled 64x64 kernel every half proof compares
+/// against, for the op the request runs.
+fn tc64_reference_footprint(
+    ctx: &GpuCtx,
+    op: ResolvedGemmOp,
+    dtype: WeightDtype,
+) -> Result<super::proof::TileFootprint, String> {
+    let (symbol, function) = match op {
+        ResolvedGemmOp::Nn => ("nn_tc64", ctx.kernels.gemm_bi_nn_tc64_typed.get(dtype)),
+        ResolvedGemmOp::Tn => ("tn_tc64", ctx.kernels.gemm_bi_tn_tc64_typed.get(dtype)),
+        ResolvedGemmOp::Nt => ("nt_tc64", ctx.kernels.gemm_bi_nt_tc64_typed.get(dtype)),
+    };
+    Ok(super::proof::TileFootprint {
+        tile: TcTile::Tile64.extents(),
+        resident: resident_ctas(function, symbol, TcTile::Tile64.block_dim(), 0)?,
+    })
+}
+
+/// Declines a candidate on this board without running its proof, with the
+/// reason said once, and records the verdict so the cell is not asked
+/// again in this process.
+fn decline_unproven_route(
+    ctx: &GpuCtx,
+    key: super::proof::RouteProofKey,
+    reason: &str,
+) -> Result<(), String> {
+    ctx.with_route_proofs(|ledger| ledger.record(key, super::proof::RouteProofVerdict::Declined))?;
+    static DECLINED_BY_WAVES: std::sync::Once = std::sync::Once::new();
+    crate::mamba_ssm::gpu::diagnostics::warn_once(&DECLINED_BY_WAVES, || {
+        format!(
+            "route {} is declined on this board before its proof: {reason}; the reference \
+             route serves its shapes",
+            key.candidate
+        )
+    });
+    Ok(())
+}
+
+/// The board's own wave arithmetic for a retained half tile against the
+/// tiled reference: a tile measured on another board may spill into an
+/// extra wave here. Returns whether the candidate may go on to its proof.
+fn half_wave_guard_admits(
+    ctx: &GpuCtx,
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
+    key: super::proof::RouteProofKey,
+    output: (usize, usize),
+) -> Result<bool, String> {
+    // A persistent schedule sizes its own grid to the board; only a tiled
+    // grid can spill.
+    if spec.schedule != super::sm89_half_source::Sm89HalfSchedule::Tiled {
+        return Ok(true);
+    }
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
+        return Ok(false);
+    };
+    let candidate = super::proof::TileFootprint {
+        tile: spec.tile,
+        resident: resident_ctas(
+            function,
+            spec.symbol,
+            spec.threads,
+            spec.dynamic_shared_bytes,
+        )?,
+    };
+    let reference = tc64_reference_footprint(ctx, key.op, key.dtype)?;
+    let multiprocessors = ctx.kernels.multiprocessor_count();
+    if super::proof::wave_guard_admits(output.0, output.1, candidate, reference, multiprocessors) {
+        return Ok(true);
+    }
+    decline_unproven_route(
+        ctx,
+        key,
+        &format!(
+            "its {}x{} tile takes more waves on {multiprocessors} multiprocessors than the tiled \
+             64x64 reference",
+            spec.tile.0, spec.tile.1
+        ),
+    )?;
+    Ok(false)
+}
+
+/// Honours a first-use proof for a candidate route: the ledger's verdict
+/// when the context already holds one, the reference inside a capture, and
+/// otherwise the proof itself (`gemm_bi_triad::proof`). Returns whether the
+/// candidate serves.
+pub(in crate::mamba_ssm::gpu) fn proven_candidate<Candidate, Reference>(
+    ctx: &GpuCtx,
+    key: super::proof::RouteProofKey,
+    output: CUptr,
+    elements: usize,
+    dtype: WeightDtype,
+    candidate: Candidate,
+    reference: Reference,
+) -> Result<bool, String>
+where
+    Candidate: FnOnce(CUptr) -> Result<(), String>,
+    Reference: FnOnce(CUptr) -> Result<(), String>,
+{
+    use super::proof::RouteProofVerdict;
+    if let Some(verdict) = ctx.with_route_proofs(|ledger| ledger.verdict(key))? {
+        return Ok(verdict == RouteProofVerdict::Admitted);
+    }
+    if stream_is_capturing(ctx)? {
+        return Ok(false);
+    }
+    let verdict = match super::proof::prove_bits(
+        &ctx.stream,
+        output,
+        elements,
+        dtype,
+        candidate,
+        reference,
+    ) {
+        Ok(verdict) => verdict,
+        Err(reason) => {
+            static FAILED: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&FAILED, || {
+                format!(
+                    "the first-use proof of route {} could not run on this board ({reason}); \
+                     the reference route serves it",
+                    key.candidate
+                )
+            });
+            RouteProofVerdict::Declined
+        }
+    };
+    ctx.with_route_proofs(|ledger| ledger.record(key, verdict))?;
+    if verdict == RouteProofVerdict::Declined {
+        static DECLINED: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&DECLINED, || {
+            format!(
+                "route {} was declined on this board: its output words differ from the \
+                 reference route of the same contract; the reference serves its shapes",
+                key.candidate
+            )
+        });
+    }
+    Ok(verdict == RouteProofVerdict::Admitted)
+}
+
+/// The footprint of a TF32 route on this board: its spec's tile at the
+/// resident CTA count of its loaded kernel.
+fn tf32_route_footprint(
+    ctx: &GpuCtx,
+    op: ResolvedGemmOp,
+    route: Tf32PhysicalRoute,
+) -> Result<Option<super::proof::TileFootprint>, String> {
+    let spec = super::contract::tf32_kernel_spec(op, route)?;
+    let Some(function) = ctx.kernels.tf32_function(spec.symbol) else {
+        return Ok(None);
+    };
+    Ok(Some(super::proof::TileFootprint {
+        tile: spec.tile,
+        resident: resident_ctas(
+            function,
+            spec.symbol,
+            spec.threads,
+            spec.dynamic_shared_bytes,
+        )?,
+    }))
+}
+
+/// The board's own wave arithmetic for a specialized TF32 route against the
+/// portable route it would replace. Returns whether the candidate may go on
+/// to its proof.
+fn tf32_wave_guard_admits(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    key: super::proof::RouteProofKey,
+    candidate: Tf32PhysicalRoute,
+    reference: Tf32PhysicalRoute,
+) -> Result<bool, String> {
+    let (Some(candidate_footprint), Some(reference_footprint)) = (
+        tf32_route_footprint(ctx, request.op, candidate)?,
+        tf32_route_footprint(ctx, request.op, reference)?,
+    ) else {
+        return Ok(false);
+    };
+    let shape = request.shape;
+    let (rows, columns) = match request.op {
+        ResolvedGemmOp::Nn => (shape.m, shape.n),
+        ResolvedGemmOp::Tn => (shape.k, shape.n),
+        ResolvedGemmOp::Nt => (shape.m, shape.k),
+    };
+    let multiprocessors = ctx.kernels.multiprocessor_count();
+    if super::proof::wave_guard_admits(
+        rows,
+        columns,
+        candidate_footprint,
+        reference_footprint,
+        multiprocessors,
+    ) {
+        return Ok(true);
+    }
+    decline_unproven_route(
+        ctx,
+        key,
+        &format!(
+            "its {}x{} tile takes more waves on {multiprocessors} multiprocessors than the \
+             portable {}x{} tile",
+            candidate_footprint.tile.0,
+            candidate_footprint.tile.1,
+            reference_footprint.tile.0,
+            reference_footprint.tile.1
+        ),
+    )?;
+    Ok(false)
+}
+
+/// The output span of an F32 Triad request in elements, the last element
+/// of the last row included.
+fn f32_triad_output_elements(request: F32TriadRequest) -> Result<usize, String> {
+    let shape = request.shape;
+    let (rows, columns) = match request.op {
+        ResolvedGemmOp::Nn => (shape.m, shape.n),
+        ResolvedGemmOp::Tn => (shape.k, shape.n),
+        ResolvedGemmOp::Nt => (shape.m, shape.k),
+    };
+    if rows == 0 || columns == 0 {
+        return Ok(0);
+    }
+    (rows - 1)
+        .checked_mul(shape.ldc)
+        .and_then(|span| span.checked_add(columns))
+        .ok_or_else(|| "f32 Triad output span overflows usize".to_string())
+}
+
+/// Decides between a TF32 candidate measured on another board and the
+/// portable reference it must reproduce here. Each arm is prepared as a
+/// forced route into the scratch output the proof hands it.
+fn proven_tf32_route(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    candidate: Tf32PhysicalRoute,
+    reference: Tf32PhysicalRoute,
+) -> Result<Tf32PhysicalRoute, String> {
+    let spec = super::contract::tf32_kernel_spec(request.op, candidate)?;
+    let key = super::proof::RouteProofKey {
+        candidate: spec.symbol,
+        op: request.op,
+        dtype: WeightDtype::F32,
+        dims: (request.shape.m, request.shape.k, request.shape.n),
+    };
+    if let Some(verdict) = ctx.with_route_proofs(|ledger| ledger.verdict(key))? {
+        return Ok(if verdict == super::proof::RouteProofVerdict::Admitted {
+            candidate
+        } else {
+            reference
+        });
+    }
+    if stream_is_capturing(ctx)? {
+        return Ok(reference);
+    }
+    if !tf32_wave_guard_admits(ctx, request, key, candidate, reference)? {
+        return Ok(reference);
+    }
+    let elements = f32_triad_output_elements(request)?;
+    let arm = |output: CUptr, route: Tf32PhysicalRoute| -> Result<(), String> {
+        let prepared =
+            prepare_f32_triad_forced(ctx, request, F32TriadOperands { output, ..operands }, route)?;
+        unsafe {
+            launch_prepared_f32_triad(ctx, &prepared, |_| {
+                Err("a TF32 proof arm has no scalar fallback".into())
+            })
+        }
+    };
+    let admitted = proven_candidate(
+        ctx,
+        key,
+        operands.output,
+        elements,
+        WeightDtype::F32,
+        |scratch| arm(scratch, candidate),
+        |scratch| arm(scratch, reference),
+    )?;
+    Ok(if admitted { candidate } else { reference })
+}
+
+/// Drives a scalar body with a plan resolved outside a prepared route set
+/// and enqueues its kernels directly. The first-use proof arms and the raw
+/// entry points launch through it.
+struct ProvenScalarLaunch {
+    plan: ScalarDispatchPlan,
+    operands: F32TriadOperands,
+}
+
+impl ScalarLaunchController for ProvenScalarLaunch {
+    #[inline(always)]
+    fn enqueue(
+        &mut self,
+        _symbol: &'static str,
+        config: LaunchConfig,
+        builder: &mut ScalarLaunchArgs<'_>,
+    ) -> Result<(), PhysicalCudaLaunchError> {
+        let mut observer = NoPhysicalObserver;
+        unsafe {
+            enqueue_with_physical_observation(&mut observer, builder.launch_args(), config, None)
+        }
+    }
+
+    fn plan(&self) -> ScalarDispatchPlan {
+        self.plan
+    }
+
+    fn operands(&self) -> F32TriadOperands {
+        self.operands
+    }
+
+    fn validate_operands(&self, actual: F32TriadOperands) -> Result<(), String> {
+        let expected = self.operands;
+        if actual.output != expected.output
+            || actual.a != expected.a
+            || actual.b != expected.b
+            || actual.bias != expected.bias
+            || actual.alpha.to_bits() != expected.alpha.to_bits()
+            || actual.beta.to_bits() != expected.beta.to_bits()
+        {
+            return Err(
+                "resolved scalar operands differ from the physical launch arguments".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Launches one scalar plan for a request from its raw operand pointers,
+/// through the same bodies the prepared routes bind against.
+fn launch_scalar_plan_raw(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    plan: ScalarDispatchPlan,
+) -> Result<(), String> {
+    let dims = (request.shape.m, request.shape.k, request.shape.n);
+    let mut control = ProvenScalarLaunch { plan, operands };
+    match request.op {
+        ResolvedGemmOp::Nn => {
+            let mut output = RawScalarArgument(operands.output);
+            let scalar_operands = GemmBiFwdSubOperands {
+                x_ptr: operands.a,
+                lda: request.shape.lda,
+                w_ptr: operands.b,
+                bias_ptr: operands.bias.unwrap_or(0),
+            };
+            gemm_bi_forward_sub_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                &mut output,
+                &scalar_operands,
+                dims,
+                Some(&mut control),
+            )
+        }
+        ResolvedGemmOp::Tn => {
+            let x_saved = RawScalarArgument(operands.a);
+            let dy = RawScalarArgument(operands.b);
+            gemm_bi_backward_dw_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                operands.output,
+                &dy,
+                &x_saved,
+                dims,
+                Some(&mut control),
+            )
+        }
+        ResolvedGemmOp::Nt => {
+            let mut output = RawScalarArgument(operands.output);
+            let dy = RawScalarArgument(operands.a);
+            gemm_bi_backward_dx_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                &mut output,
+                &dy,
+                operands.b,
+                dims,
+                Some(&mut control),
+            )
+        }
+    }
+}
+
+/// Whether the scalar bodies, launched from the raw pointers, rebuild this
+/// exact request and operand set: they derive the strides from the
+/// dimensions and fix the accumulation of each operation themselves.
+fn scalar_arms_reproduce_the_request(request: F32TriadRequest, operands: F32TriadOperands) -> bool {
+    let dims = (request.shape.m, request.shape.k, request.shape.n);
+    let contiguous = F32TriadShape::contiguous(request.op, dims);
+    match request.op {
+        ResolvedGemmOp::Nn => {
+            request.shape
+                == F32TriadShape {
+                    lda: request.shape.lda,
+                    ..contiguous
+                }
+        }
+        ResolvedGemmOp::Tn => {
+            request.shape == contiguous
+                && operands.bias.is_none()
+                && operands.beta.to_bits() == 1.0f32.to_bits()
+        }
+        ResolvedGemmOp::Nt => {
+            request.shape == contiguous
+                && operands.bias.is_none()
+                && operands.beta.to_bits() == 0.0f32.to_bits()
+        }
+    }
+}
+
+/// The proof ledger key of a scalar candidate: its first kernel names it.
+fn scalar_proof_key(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    candidate: ScalarDispatchPlan,
+) -> Result<Option<super::proof::RouteProofKey>, String> {
+    let nodes = scalar_physical_nodes(request, operands, candidate)?;
+    Ok(nodes.first().map(|node| super::proof::RouteProofKey {
+        candidate: node.symbol,
+        op: request.op,
+        dtype: WeightDtype::F32,
+        dims: (request.shape.m, request.shape.k, request.shape.n),
+    }))
+}
+
+/// The scalar plan a prepared launch takes: the frozen evidence, or the
+/// proof-tier candidate the ledger has already admitted for the cell.
+fn scalar_ledger_plan(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+) -> Result<ScalarDispatchPlan, String> {
+    let facts = scalar_launch_facts(&ctx.kernels);
+    let plan = scalar_launch_plan(facts, request, operands)?;
+    if plan != scalar_dispatch_plan(request, facts.multiprocessor_count)? {
+        return Ok(plan);
+    }
+    let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
+        return Ok(plan);
+    };
+    let Some(key) = scalar_proof_key(request, operands, candidate)? else {
+        return Ok(plan);
+    };
+    Ok(match ctx.with_route_proofs(|ledger| ledger.verdict(key))? {
+        Some(super::proof::RouteProofVerdict::Admitted) => candidate,
+        _ => plan,
+    })
+}
+
+/// Resolves the scalar plan this board serves for a cell: the frozen
+/// evidence where it exists, otherwise the proof-tier candidate once the
+/// arms have proven its output words against the ordinary plan.
+fn prove_scalar_plan<Arm>(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    arm: Arm,
+) -> Result<ScalarDispatchPlan, String>
+where
+    Arm: Fn(CUptr, ScalarDispatchPlan) -> Result<(), String>,
+{
+    let facts = scalar_launch_facts(&ctx.kernels);
+    let plan = scalar_launch_plan(facts, request, operands)?;
+    if plan != scalar_dispatch_plan(request, facts.multiprocessor_count)? {
+        return Ok(plan);
+    }
+    let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
+        return Ok(plan);
+    };
+    if !scalar_arms_reproduce_the_request(request, operands) {
+        return Ok(plan);
+    }
+    let Some(key) = scalar_proof_key(request, operands, candidate)? else {
+        return Ok(plan);
+    };
+    let elements = f32_triad_output_elements(request)?;
+    let admitted = proven_candidate(
+        ctx,
+        key,
+        operands.output,
+        elements,
+        WeightDtype::F32,
+        |scratch| arm(scratch, candidate),
+        |scratch| arm(scratch, plan),
+    )?;
+    Ok(if admitted { candidate } else { plan })
+}
+
+/// Runs the first-use proof of a scalar cell before the cache prepares it,
+/// so the prepared launch reads a settled ledger.
+fn prove_scalar_route_for_cache(
+    ctx: &GpuCtx,
+    selection: F32PreparedSelection,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+) -> Result<(), String> {
+    let scalar = match selection {
+        F32PreparedSelection::ExactScalar => true,
+        F32PreparedSelection::Automatic => matches!(
+            resolve_f32_triad_auto_with_operands(
+                ctx.f32_triad_policy(),
+                request,
+                operands,
+                ctx.kernels.f32_triad_availability(),
+            )?,
+            F32TriadSelection::ScalarFma
+        ),
+        F32PreparedSelection::Forced(_) => false,
+    };
+    if !scalar || request.shape.reduction(request.op) == 0 {
+        return Ok(());
+    }
+    prove_scalar_plan(ctx, request, operands, |output, plan| {
+        launch_scalar_plan_raw(ctx, request, F32TriadOperands { output, ..operands }, plan)
+    })
+    .map(drop)
+}
+
 pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
     ctx: &GpuCtx,
     request: F32TriadRequest,
@@ -4850,6 +5425,13 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
     )? {
         F32TriadSelection::ScalarFma => {
             prepare_scalar_f32(ctx, request, operands, output_resources)
+        }
+        F32TriadSelection::Tf32Proof {
+            candidate,
+            reference,
+        } => {
+            let route = proven_tf32_route(ctx, request, operands, candidate, reference)?;
+            prepare_tf32_f32(ctx, request, operands, output_resources, route)
         }
         F32TriadSelection::Tf32(route) => {
             // A measured TF32 route whose kernel this toolkit could not serve
@@ -4989,6 +5571,7 @@ impl F32PreparedLaunchCache {
                     "prepared f32 Triad cache entry is {reason} during graph capture; run eager warmup again"
                 ));
             }
+            prove_scalar_route_for_cache(ctx, selection, request, operands)?;
             let prepared = Self::prepare(ctx, selection, request, operands)?;
             make_room_in_bounded_cache(
                 &mut self.entries,
@@ -5574,7 +6157,10 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
                     | Tf32PhysicalRoute::Sm89MmaTf32Compact8
                     | Tf32PhysicalRoute::Sm89NnDirectN96
                     | Tf32PhysicalRoute::Sm89NnN96
-                    | Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+                    | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+                    | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+                    | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+                    | Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -6787,7 +7373,10 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8
             | Tf32PhysicalRoute::Sm89NnDirectN96
             | Tf32PhysicalRoute::Sm89NnN96
-            | Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            | Tf32PhysicalRoute::Sm89NtALdmatrixN96
+            | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
+            | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
+            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {
@@ -8324,8 +8913,7 @@ pub(in crate::mamba_ssm::gpu) fn prepare_sm120_auto_graph_sequence<O: PhysicalLa
 /// - `n_in`: K (input dimension)
 /// - `n_out`: N (output dimension)
 pub fn gemm_bi_forward(
-    stream: &Arc<cudarc::driver::CudaStream>,
-    kernels: &GpuKernels,
+    ctx: &GpuCtx,
     y: &mut GpuBuffer,
     x: &GpuBuffer,
     w_ptr: CUptr,
@@ -8335,7 +8923,7 @@ pub fn gemm_bi_forward(
     GemmDims::nn(dims, dims.1)?;
     let x_ptr = {
         use cudarc::driver::DevicePtr;
-        let (ptr, _r) = x.inner().device_ptr(stream);
+        let (ptr, _r) = x.inner().device_ptr(&ctx.stream);
         ptr
     };
     let operands = GemmBiFwdSubOperands {
@@ -8344,7 +8932,7 @@ pub fn gemm_bi_forward(
         w_ptr,
         bias_ptr,
     };
-    gemm_bi_forward_sub(stream, kernels, y, &operands, dims)
+    gemm_bi_forward_sub(ctx, y, &operands, dims)
 }
 
 /// [`gemm_bi_forward`] over a STRIDED X operand: `x_ptr` is the first
@@ -8354,19 +8942,46 @@ pub fn gemm_bi_forward(
 /// ascending-K FMA chain as a gathered copy — bit-identical operands,
 /// gather kernel deleted at the call site.
 pub fn gemm_bi_forward_sub(
-    stream: &Arc<cudarc::driver::CudaStream>,
-    kernels: &GpuKernels,
+    ctx: &GpuCtx,
     y: &mut GpuBuffer,
     operands: &GemmBiFwdSubOperands,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let checked_dims = GemmDims::nn(dims, operands.lda)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
+    let request = F32TriadRequest {
+        op: ResolvedGemmOp::Nn,
+        shape: F32TriadShape {
+            m: batch,
+            k: n_in,
+            n: n_out,
+            lda: operands.lda,
+            ldb: n_out,
+            ldc: n_out,
+        },
+    };
+    let triad = F32TriadOperands {
+        output: y.cached_ptr(),
+        a: operands.x_ptr,
+        b: operands.w_ptr,
+        bias: (operands.bias_ptr != 0).then_some(operands.bias_ptr),
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    let plan = prove_scalar_plan(ctx, request, triad, |output, plan| {
+        launch_scalar_plan_raw(ctx, request, F32TriadOperands { output, ..triad }, plan)
+    })?;
+    let mut control = ProvenScalarLaunch {
+        plan,
+        operands: triad,
+    };
     gemm_bi_forward_sub_with_control(
-        stream,
-        kernels,
+        &ctx.stream,
+        &ctx.kernels,
         y,
         operands,
         dims,
-        None::<&mut ScalarLaunchControl<'_>>,
+        Some(&mut control),
     )
 }
 
@@ -9148,30 +9763,42 @@ fn enqueue_scalar_backward<C: ScalarLaunchController>(
 ///
 /// Note: beta=1.0 for gradient accumulation.
 pub fn gemm_bi_backward_dw(
-    stream: &Arc<cudarc::driver::CudaStream>,
-    kernels: &GpuKernels,
+    ctx: &GpuCtx,
     dw_ptr: CUptr, // accumulated in place (+=)
     dy: &GpuBuffer,
     x_saved: &GpuBuffer,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let (_, request) = scalar_backward_request(ResolvedGemmOp::Tn, dims)?;
+    let operands = F32TriadOperands {
+        output: dw_ptr,
+        a: x_saved.cached_ptr(),
+        b: dy.cached_ptr(),
+        bias: None,
+        alpha: 1.0,
+        beta: 1.0,
+    };
+    let plan = prove_scalar_plan(ctx, request, operands, |output, plan| {
+        launch_scalar_plan_raw(ctx, request, F32TriadOperands { output, ..operands }, plan)
+    })?;
+    let mut control = ProvenScalarLaunch { plan, operands };
     gemm_bi_backward_dw_with_control(
-        stream,
-        kernels,
+        &ctx.stream,
+        &ctx.kernels,
         dw_ptr,
         dy,
         x_saved,
         dims,
-        None::<&mut ScalarLaunchControl<'_>>,
+        Some(&mut control),
     )
 }
 
-fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
+fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController, Input: ScalarInputArgument>(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
     dw_ptr: CUptr,
-    dy: &GpuBuffer,
-    x_saved: &GpuBuffer,
+    dy: &Input,
+    x_saved: &Input,
     dims: (usize, usize, usize),
     mut control: Option<&mut C>,
 ) -> Result<(), String> {
@@ -9183,8 +9810,8 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         .unwrap_or(1.0);
     let operands = F32TriadOperands {
         output: dw_ptr,
-        a: x_saved.raw_ptr(stream),
-        b: dy.raw_ptr(stream),
+        a: x_saved.scalar_ptr(),
+        b: dy.scalar_ptr(),
         bias: None,
         alpha,
         beta: 1.0,
@@ -9434,7 +10061,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
         };
         let rows = checked_dims.m_i32;
         let columns = checked_dims.k_i32;
-        let x_ptr = x_saved.raw_ptr(stream);
+        let x_ptr = x_saved.scalar_ptr();
         let mut transpose =
             scalar_launch_builder(stream, &kernels.gemm_bi_transpose_f32_32x16_d768, &control);
         transpose.arg(&transposed_ptr);
@@ -9466,7 +10093,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
             ldb: checked_dims.n_i32,
             ldc: checked_dims.n_i32,
         };
-        let dy_ptr = dy.raw_ptr(stream);
+        let dy_ptr = dy.scalar_ptr();
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (576, 1, 1),
             block_dim: (128, 1, 1),
@@ -9699,21 +10326,33 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
 /// C^T = B @ A^T in col-major
 /// gemm(T, N, K, B, N, 1.0, W, N, dY, N, 0.0, dX, K)
 pub fn gemm_bi_backward_dx(
-    stream: &Arc<cudarc::driver::CudaStream>,
-    kernels: &GpuKernels,
+    ctx: &GpuCtx,
     dx: &mut GpuBuffer,
     dy: &GpuBuffer,
     w_ptr: CUptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let (_, request) = scalar_backward_request(ResolvedGemmOp::Nt, dims)?;
+    let operands = F32TriadOperands {
+        output: dx.cached_ptr(),
+        a: dy.cached_ptr(),
+        b: w_ptr,
+        bias: None,
+        alpha: 1.0,
+        beta: 0.0,
+    };
+    let plan = prove_scalar_plan(ctx, request, operands, |output, plan| {
+        launch_scalar_plan_raw(ctx, request, F32TriadOperands { output, ..operands }, plan)
+    })?;
+    let mut control = ProvenScalarLaunch { plan, operands };
     gemm_bi_backward_dx_with_control(
-        stream,
-        kernels,
+        &ctx.stream,
+        &ctx.kernels,
         dx,
         dy,
         w_ptr,
         dims,
-        None::<&mut ScalarLaunchControl<'_>>,
+        Some(&mut control),
     )
 }
 
@@ -10662,11 +11301,14 @@ fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
 
 /// How a half kernel reduces one output tile: the tiled kernels keep one
 /// owner CTA and one reduction order per tile; the stream-K kernel folds
-/// per-CTA partial slabs in a fixed order.
+/// per-CTA partial slabs in a fixed order; the relay keeps the tiled order
+/// exactly but lets a tile's chain cross a CTA boundary, the earlier CTA
+/// handing its accumulators to the later one untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HalfSchedule {
     Tiled,
     StreamKFixedOrder,
+    RelayChain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10684,8 +11326,13 @@ impl HalfKernelIdentity {
                 | "tn_sm89_m64n64_bk64_s2_compact_bxor"
                 | "tn_sm89_m64n64_bk64_s2_regpipe_vec2"
                 | "tn_sm89_m16n16_bk64_s2_ldb72"
+                | "tn_sm89_half_d128_in_m32n16_bk64_s4_cg"
+                | "tn_sm89_half_d128_out_m32n16_bk64_s4_cg"
+                | "nt_sm89_m16n64_bk64_s4"
+                | "nn_sm89_m16n64_bk64_s4"
                 | "nt_sm89_m128n128_bk64_s3_bxor"
                 | "nt_sm89_m96n128_bk64_s3"
+                | "tn_sm89_relay_m64n64_bk64_s3"
         ) {
             ModuleKind::TriadSm89Half
         } else if matches!(
@@ -10704,10 +11351,10 @@ impl HalfKernelIdentity {
         } else {
             ModuleKind::TriadScalar
         };
-        let schedule = if base == "tn_tc64_streamk" {
-            HalfSchedule::StreamKFixedOrder
-        } else {
-            HalfSchedule::Tiled
+        let schedule = match base {
+            "tn_tc64_streamk" => HalfSchedule::StreamKFixedOrder,
+            SM89_HALF_RELAY_BASE => HalfSchedule::RelayChain,
+            _ => HalfSchedule::Tiled,
         };
         let symbol = match (base, dtype) {
             ("nn_gemv", WeightDtype::Bf16) => "nn_gemv_bf16",
@@ -10769,6 +11416,36 @@ impl HalfKernelIdentity {
             }
             ("tn_sm89_m16n16_bk64_s2_ldb72", WeightDtype::F16) => {
                 "tn_sm89_m16n16_bk64_s2_ldb72_f16"
+            }
+            ("tn_sm89_half_d128_in_m32n16_bk64_s4_cg", WeightDtype::Bf16) => {
+                super::sm89_half_d128_source::D128_IN_BF16_SYMBOL
+            }
+            ("tn_sm89_half_d128_in_m32n16_bk64_s4_cg", WeightDtype::F16) => {
+                super::sm89_half_d128_source::D128_IN_F16_SYMBOL
+            }
+            ("tn_sm89_half_d128_out_m32n16_bk64_s4_cg", WeightDtype::Bf16) => {
+                super::sm89_half_d128_source::D128_OUT_BF16_SYMBOL
+            }
+            ("tn_sm89_half_d128_out_m32n16_bk64_s4_cg", WeightDtype::F16) => {
+                super::sm89_half_d128_source::D128_OUT_F16_SYMBOL
+            }
+            ("tn_sm89_relay_m64n64_bk64_s3", WeightDtype::Bf16) => {
+                super::sm89_half_relay_source::RELAY_BF16_SYMBOL
+            }
+            ("tn_sm89_relay_m64n64_bk64_s3", WeightDtype::F16) => {
+                super::sm89_half_relay_source::RELAY_F16_SYMBOL
+            }
+            ("nt_sm89_m16n64_bk64_s4", WeightDtype::Bf16) => {
+                super::sm89_half_small_source::NT_BF16_SYMBOL
+            }
+            ("nt_sm89_m16n64_bk64_s4", WeightDtype::F16) => {
+                super::sm89_half_small_source::NT_F16_SYMBOL
+            }
+            ("nn_sm89_m16n64_bk64_s4", WeightDtype::Bf16) => {
+                super::sm89_half_small_source::NN_BF16_SYMBOL
+            }
+            ("nn_sm89_m16n64_bk64_s4", WeightDtype::F16) => {
+                super::sm89_half_small_source::NN_F16_SYMBOL
             }
             ("nt_sm89_m128n128_bk64_s3_bxor", WeightDtype::Bf16) => {
                 "nt_sm89_m128n128_bk64_s3_bxor_bf16"
@@ -11101,6 +11778,11 @@ fn resolved_half_gemm_route_with_compiler(
                     HalfSchedule::StreamKFixedOrder => {
                         ResolvedNumericContract::MmaSyncF32StreamKFixedOrder
                     }
+                    // The relay lives in the retained module; the portable
+                    // one composes no kernel that hands a chain over.
+                    HalfSchedule::RelayChain => {
+                        return Err("TriadSm80 owns no relay schedule".into());
+                    }
                 },
                 ResolvedInstructionFamily::MmaSync,
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
@@ -11110,12 +11792,12 @@ fn resolved_half_gemm_route_with_compiler(
                     .artifacts
                     .sm89_half
                     .ok_or_else(|| "SM89 half route has no artifact identity".to_string())?,
-                if super::sm89_half_source::runtime_kernel_spec(identity.symbol)
-                    .is_some_and(|spec| spec.stages == 2)
+                match super::sm89_half_source::runtime_kernel_spec(identity.symbol)
+                    .map(|spec| spec.stages)
                 {
-                    PhysicalGemmBackend::Sm89Mma16HalfS2
-                } else {
-                    PhysicalGemmBackend::Sm89Mma16HalfS3
+                    Some(2) => PhysicalGemmBackend::Sm89Mma16HalfS2,
+                    Some(4) => PhysicalGemmBackend::Sm89Mma16HalfS4,
+                    _ => PhysicalGemmBackend::Sm89Mma16HalfS3,
                 },
                 ResolvedNumericContract::MmaSyncF32,
                 ResolvedInstructionFamily::MmaSync,
@@ -11151,6 +11833,7 @@ fn resolved_half_gemm_route_with_compiler(
             HalfSchedule::StreamKFixedOrder => {
                 ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrder
             }
+            HalfSchedule::RelayChain => ResolvedOutputOwnership::RelayCtaChainPerOutputTile,
         },
         symbol: identity.symbol,
         module_kind: identity.module_kind,
@@ -11459,11 +12142,16 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
                     "prepared SM89 half TN regpipe+vec2 symbol is unavailable".to_string()
                 })?,
         ),
-        "tn_sm89_m16n16_bk64_s2_ldb72" => HalfKernelChoice::new(
+        "tn_sm89_m16n16_bk64_s2_ldb72"
+        | "tn_sm89_half_d128_in_m32n16_bk64_s4_cg"
+        | "tn_sm89_half_d128_out_m32n16_bk64_s4_cg"
+        | "nt_sm89_m16n64_bk64_s4"
+        | "nn_sm89_m16n64_bk64_s4"
+        | "tn_sm89_relay_m64n64_bk64_s3" => HalfKernelChoice::new(
             base,
             ctx.kernels
                 .triad_sm89_half_runtime_function(expected.symbol())
-                .ok_or_else(|| "prepared SM89 half TN small16 symbol is unavailable".to_string())?,
+                .ok_or_else(|| "prepared SM89 half runtime symbol is unavailable".to_string())?,
         ),
         "nt_sm89_m128n128_bk64_s3_bxor" => HalfKernelChoice::new(
             base,
@@ -11549,6 +12237,23 @@ unsafe fn enqueue_half_gemm<O: PhysicalLaunchObserver>(
     Ok(half_native_branch_seal(observation, config))
 }
 
+/// The dispatch base of the retained half relay, named once so the eager
+/// launcher and the prepared-graph builder cannot drift apart.
+pub const SM89_HALF_RELAY_BASE: &str = "tn_sm89_relay_m64n64_bk64_s3";
+
+/// How many Driver parameters a half TN kernel reached by `base` takes.
+/// The TN list is where the persistent schedules live, and each of them
+/// carries two workspace pointers the tiled kernels do not; the
+/// prepared-graph builder checks its own argument list against this so a
+/// schedule it does not bind fails closed.
+pub fn half_tn_graph_parameter_count(base: &str) -> usize {
+    match base {
+        "tn_gemv" => 8,
+        "tn_tc64_streamk" | SM89_HALF_RELAY_BASE => 9,
+        _ => 7,
+    }
+}
+
 fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRuntimeRoute) -> &'static str {
     match route {
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
@@ -11563,6 +12268,19 @@ fn sm89_half_base(route: super::sm89_half_source::Sm89HalfRuntimeRoute) -> &'sta
         super::sm89_half_source::Sm89HalfRuntimeRoute::TnSmall16Bk64S2Ldb72 => {
             "tn_sm89_m16n16_bk64_s2_ldb72"
         }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::TnD128InM32N16Bk64S4 => {
+            "tn_sm89_half_d128_in_m32n16_bk64_s4_cg"
+        }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::TnD128OutM32N16Bk64S4 => {
+            "tn_sm89_half_d128_out_m32n16_bk64_s4_cg"
+        }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::NtSmallM16N64Bk64S4 => {
+            "nt_sm89_m16n64_bk64_s4"
+        }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::NnSmallM16N64Bk64S4 => {
+            "nn_sm89_m16n64_bk64_s4"
+        }
+        super::sm89_half_source::Sm89HalfRuntimeRoute::TnRelayM64N64Bk64S3 => SM89_HALF_RELAY_BASE,
         super::sm89_half_source::Sm89HalfRuntimeRoute::Legacy(
             super::sm89_half_source::Sm89HalfRoute::NtM128N128Bk64S3Bxor,
         ) => "nt_sm89_m128n128_bk64_s3_bxor",
@@ -11604,17 +12322,94 @@ enum Sm89HalfTnArgument {
     ScalarI32(i32),
 }
 
+/// The two workspaces a relay launch adds after the tiled argument list:
+/// the slab a CTA publishes an unfinished tile's accumulators into, and the
+/// one flag word per CTA that releases them to the next CTA.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Sm89HalfTnArguments([Sm89HalfTnArgument; 7]);
+struct Sm89HalfRelayWorkspace {
+    partial: CUptr,
+    flags: CUptr,
+}
+
+/// The persistent parts of one relay launch: the grid the board's resident
+/// CTA count allows, and the workspaces its hand-off uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sm89HalfRelayLaunch {
+    grid: u32,
+    workspace: Sm89HalfRelayWorkspace,
+}
+
+/// The persistent grid of the retained half TN relay: never more CTAs than
+/// the (tile, slab) units it deals, never more than stay resident on the
+/// board, never zero. A hand-off waits on a lower CTA only, and cannot
+/// starve while every CTA of the grid is resident, so the resident count is
+/// the schedule's hard bound rather than a tuning knob.
+pub fn sm89_half_relay_grid(
+    kernels: &GpuKernels,
+    dims: (usize, usize, usize),
+) -> Result<u32, String> {
+    let checked = GemmDims::tn(dims)?;
+    let (batch, n_in, n_out) = checked.tuple();
+    let tiles = checked_tile_grid(
+        checked_u32(n_in, "half relay tile rows")?,
+        64,
+        checked_u32(n_out, "half relay tile columns")?,
+        64,
+    )?;
+    let slabs = checked_u32(batch, "half relay reduction rows")?.div_ceil(64);
+    let units = u64::from(tiles) * u64::from(slabs);
+    let resident = u64::from(kernels.multiprocessor_count().max(1))
+        * u64::from(kernels.sm89_half_relay_resident_ctas().max(1));
+    u32::try_from(units.min(resident).max(1))
+        .map_err(|_| "the half relay grid exceeds u32".to_string())
+}
+
+/// The hand-off slab and flag pointers of the relay, from the fixed split-K
+/// workspaces: one slab and one flag word per CTA, with the extents checked
+/// against their caps so a grid the workspace cannot hold fails here rather
+/// than in the kernel.
+pub fn sm89_half_relay_workspace(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    grid: u32,
+) -> Result<(CUptr, CUptr), String> {
+    use cudarc::driver::DevicePtr;
+    let slots = grid as usize;
+    let partial_floats = slots
+        .checked_mul(super::sm89_half_relay_source::SLAB_FLOATS)
+        .ok_or_else(|| "the half relay slab extent overflows usize".to_string())?;
+    if partial_floats > SPLITK_SCRATCH_CAP {
+        return Err("the half relay slabs exceed the fixed workspace".into());
+    }
+    if slots > TF32_SPLITK_COUNTER_CAP {
+        return Err("the half relay flags exceed the fixed counter workspace".into());
+    }
+    let (partial, _) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
+    let (flags, _) = kernels
+        .triad_kernels()
+        .tf32_splitk_counter_buf(stream)?
+        .device_ptr(stream);
+    Ok((partial, flags))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sm89HalfTnArguments {
+    core: [Sm89HalfTnArgument; 7],
+    relay: Option<Sm89HalfRelayWorkspace>,
+}
 
 impl Sm89HalfTnArguments {
     fn bind<'a>(&'a self, builder: &mut LaunchArgs<'a>) {
-        for argument in &self.0 {
+        for argument in &self.core {
             match argument {
                 Sm89HalfTnArgument::Pointer(value) => builder.arg(value),
                 Sm89HalfTnArgument::ScalarF32(value) => builder.arg(value),
                 Sm89HalfTnArgument::ScalarI32(value) => builder.arg(value),
             };
+        }
+        if let Some(workspace) = &self.relay {
+            builder.arg(&workspace.partial);
+            builder.arg(&workspace.flags);
         }
     }
 }
@@ -11632,24 +12427,40 @@ fn sm89_half_tn_launch_plan(
     dy: TypedPtr,
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
+    relay: Option<Sm89HalfRelayLaunch>,
 ) -> Result<Sm89HalfTnLaunchPlan, String> {
     if spec.op != ResolvedGemmOp::Tn || spec.dtype != dy.dtype || x_saved.dtype != dy.dtype {
         return Err("SM89 half TN launch plan does not match the selected dtype and op".into());
+    }
+    if relay.is_some() != (spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay) {
+        return Err(
+            "SM89 half TN launch plan pairs the relay schedule with its persistent grid".into(),
+        );
     }
     let shape = F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims);
     let checked = GemmDims::tn(dims)?;
     let base = sm89_half_base(spec.route);
     Ok(Sm89HalfTnLaunchPlan {
-        arguments: Sm89HalfTnArguments([
-            Sm89HalfTnArgument::Pointer(dw_ptr),
-            Sm89HalfTnArgument::Pointer(x_saved.ptr),
-            Sm89HalfTnArgument::Pointer(dy.ptr),
-            Sm89HalfTnArgument::ScalarF32(1.0),
-            Sm89HalfTnArgument::ScalarI32(checked.m_i32),
-            Sm89HalfTnArgument::ScalarI32(checked.k_i32),
-            Sm89HalfTnArgument::ScalarI32(checked.n_i32),
-        ]),
-        config: sm89_half_launch_config(spec, dims)?,
+        arguments: Sm89HalfTnArguments {
+            core: [
+                Sm89HalfTnArgument::Pointer(dw_ptr),
+                Sm89HalfTnArgument::Pointer(x_saved.ptr),
+                Sm89HalfTnArgument::Pointer(dy.ptr),
+                Sm89HalfTnArgument::ScalarF32(1.0),
+                Sm89HalfTnArgument::ScalarI32(checked.m_i32),
+                Sm89HalfTnArgument::ScalarI32(checked.k_i32),
+                Sm89HalfTnArgument::ScalarI32(checked.n_i32),
+            ],
+            relay: relay.map(|launch| launch.workspace),
+        },
+        config: match relay {
+            Some(launch) => LaunchConfig {
+                grid_dim: (launch.grid, 1, 1),
+                block_dim: (spec.threads, 1, 1),
+                shared_mem_bytes: spec.dynamic_shared_bytes,
+            },
+            None => sm89_half_launch_config(spec, dims)?,
+        },
         observation: HalfGemmObservation {
             base,
             op: ResolvedGemmOp::Tn,
@@ -11696,21 +12507,94 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLa
         alpha: 1.0,
         beta: 0.0,
     };
-    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
-        sm89_half_auto_context(ctx),
-        super::sm89_half_source::Sm89HalfAutoRequest {
-            request: F32TriadRequest {
-                op: ResolvedGemmOp::Nn,
-                shape,
+    let Some((spec, admission)) =
+        super::sm89_half_source::select_sm89_half_auto_cell_with_admission(
+            sm89_half_auto_context(ctx),
+            super::sm89_half_source::Sm89HalfAutoRequest {
+                request: F32TriadRequest {
+                    op: ResolvedGemmOp::Nn,
+                    shape,
+                },
+                operands,
+                dtype: ops.y.dtype,
+                half_policy: ctx.half_triad_policy(),
             },
-            operands,
-            dtype: ops.y.dtype,
-        },
-    ) else {
+        )
+    else {
         return Ok(None);
     };
-    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
+    if ctx
+        .kernels
+        .triad_sm89_half_runtime_function(spec.symbol)
+        .is_none()
+    {
         return Ok(None);
+    }
+    if admission == super::sm89_half_source::Sm89HalfAdmission::Proof {
+        let key = super::proof::RouteProofKey {
+            candidate: spec.symbol,
+            op: ResolvedGemmOp::Nn,
+            dtype: ops.y.dtype,
+            dims,
+        };
+        let elements = dims
+            .0
+            .checked_mul(dims.2)
+            .ok_or_else(|| "SM89 half NN output span overflows usize".to_string())?;
+        if !half_wave_guard_admits(ctx, spec, key, (dims.0, dims.2))? {
+            return Ok(None);
+        }
+        let admitted = proven_candidate(
+            ctx,
+            key,
+            ops.y.ptr,
+            elements,
+            ops.y.dtype,
+            |scratch| {
+                let scratch_ops = TcFwdOperands {
+                    y: TypedPtr {
+                        ptr: scratch,
+                        dtype: ops.y.dtype,
+                    },
+                    ..*ops
+                };
+                enqueue_sm89_half_nn(ctx, &mut NoPhysicalObserver, spec, &scratch_ops, dims)
+                    .map(drop)
+            },
+            |scratch| {
+                let scratch_ops = TcFwdOperands {
+                    y: TypedPtr {
+                        ptr: scratch,
+                        dtype: ops.y.dtype,
+                    },
+                    ..*ops
+                };
+                gemm_bi_forward_tc_with_tile(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    &scratch_ops,
+                    dims,
+                    TcTile::Tile64,
+                )
+            },
+        )?;
+        if !admitted {
+            return Ok(None);
+        }
+    }
+    enqueue_sm89_half_nn(ctx, observer, spec, ops, dims).map(Some)
+}
+
+fn enqueue_sm89_half_nn<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
+    ops: &TcFwdOperands,
+    dims: (usize, usize, usize),
+) -> Result<HalfNativeBranchSeal, String> {
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims);
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
+        return Err("prepared SM89 half NN symbol is unavailable".into());
     };
     let cfg = sm89_half_launch_config(spec, dims)?;
     let checked = GemmDims::nn(dims, shape.lda)?;
@@ -11755,7 +12639,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nn_auto_observed<O: PhysicalLa
             format_args!("{base}"),
         )
     }?;
-    Ok(Some(seal))
+    Ok(seal)
 }
 
 pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLaunchObserver>(
@@ -11779,23 +12663,103 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLa
         alpha: 1.0,
         beta: 1.0,
     };
-    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
-        sm89_half_auto_context(ctx),
-        super::sm89_half_source::Sm89HalfAutoRequest {
-            request: F32TriadRequest {
-                op: ResolvedGemmOp::Tn,
-                shape,
+    let Some((spec, admission)) =
+        super::sm89_half_source::select_sm89_half_auto_cell_with_admission(
+            sm89_half_auto_context(ctx),
+            super::sm89_half_source::Sm89HalfAutoRequest {
+                request: F32TriadRequest {
+                    op: ResolvedGemmOp::Tn,
+                    shape,
+                },
+                operands,
+                dtype: dy.dtype,
+                half_policy: ctx.half_triad_policy(),
             },
-            operands,
+        )
+    else {
+        return Ok(None);
+    };
+    if ctx
+        .kernels
+        .triad_sm89_half_runtime_function(spec.symbol)
+        .is_none()
+    {
+        return Ok(None);
+    }
+    if admission == super::sm89_half_source::Sm89HalfAdmission::Proof {
+        let key = super::proof::RouteProofKey {
+            candidate: spec.symbol,
+            op: ResolvedGemmOp::Tn,
             dtype: dy.dtype,
-        },
-    ) else {
-        return Ok(None);
-    };
+            dims,
+        };
+        let elements = dims
+            .1
+            .checked_mul(dims.2)
+            .ok_or_else(|| "SM89 half TN output span overflows usize".to_string())?;
+        if !half_wave_guard_admits(ctx, spec, key, (dims.1, dims.2))? {
+            return Ok(None);
+        }
+        let admitted = proven_candidate(
+            ctx,
+            key,
+            dw_ptr,
+            elements,
+            WeightDtype::F32,
+            |scratch| {
+                enqueue_sm89_half_tn(
+                    ctx,
+                    &mut NoPhysicalObserver,
+                    spec,
+                    scratch,
+                    dy,
+                    x_saved,
+                    dims,
+                )
+                .map(drop)
+            },
+            |scratch| {
+                gemm_bi_backward_dw_tc_with_tile(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    scratch,
+                    dy,
+                    x_saved,
+                    dims,
+                    TcTile::Tile64,
+                )
+            },
+        )?;
+        if !admitted {
+            return Ok(None);
+        }
+    }
+    enqueue_sm89_half_tn(ctx, observer, spec, dw_ptr, dy, x_saved, dims).map(Some)
+}
+
+fn enqueue_sm89_half_tn<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
+    dw_ptr: CUptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<HalfNativeBranchSeal, String> {
     let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
-        return Ok(None);
+        return Err("prepared SM89 half TN symbol is unavailable".into());
     };
-    let plan = sm89_half_tn_launch_plan(spec, dw_ptr, dy, x_saved, dims)?;
+    let relay = if spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay {
+        let grid = sm89_half_relay_grid(&ctx.kernels, dims)?;
+        let (partial, flags) = sm89_half_relay_workspace(&ctx.stream, &ctx.kernels, grid)?;
+        Some(Sm89HalfRelayLaunch {
+            grid,
+            workspace: Sm89HalfRelayWorkspace { partial, flags },
+        })
+    } else {
+        None
+    };
+    let plan = sm89_half_tn_launch_plan(spec, dw_ptr, dy, x_saved, dims, relay)?;
     let mut builder = ctx.stream.launch_builder(function);
     plan.arguments.bind(&mut builder);
     let seal = unsafe {
@@ -11808,7 +12772,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLa
             format_args!("{}", plan.observation.base),
         )
     }?;
-    Ok(Some(seal))
+    Ok(seal)
 }
 
 pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLaunchObserver>(
@@ -11832,21 +12796,92 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLa
         alpha: 1.0,
         beta: 0.0,
     };
-    let Some(spec) = super::sm89_half_source::select_sm89_half_auto_cell(
-        sm89_half_auto_context(ctx),
-        super::sm89_half_source::Sm89HalfAutoRequest {
-            request: F32TriadRequest {
-                op: ResolvedGemmOp::Nt,
-                shape,
+    let Some((spec, admission)) =
+        super::sm89_half_source::select_sm89_half_auto_cell_with_admission(
+            sm89_half_auto_context(ctx),
+            super::sm89_half_source::Sm89HalfAutoRequest {
+                request: F32TriadRequest {
+                    op: ResolvedGemmOp::Nt,
+                    shape,
+                },
+                operands,
+                dtype: dx.dtype,
+                half_policy: ctx.half_triad_policy(),
             },
-            operands,
-            dtype: dx.dtype,
-        },
-    ) else {
+        )
+    else {
         return Ok(None);
     };
-    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
+    if ctx
+        .kernels
+        .triad_sm89_half_runtime_function(spec.symbol)
+        .is_none()
+    {
         return Ok(None);
+    }
+    if admission == super::sm89_half_source::Sm89HalfAdmission::Proof {
+        let key = super::proof::RouteProofKey {
+            candidate: spec.symbol,
+            op: ResolvedGemmOp::Nt,
+            dtype: dx.dtype,
+            dims,
+        };
+        let elements = dims
+            .0
+            .checked_mul(dims.1)
+            .ok_or_else(|| "SM89 half NT output span overflows usize".to_string())?;
+        if !half_wave_guard_admits(ctx, spec, key, (dims.0, dims.1))? {
+            return Ok(None);
+        }
+        let admitted = proven_candidate(
+            ctx,
+            key,
+            dx.ptr,
+            elements,
+            dx.dtype,
+            |scratch| {
+                let scratch_dx = TypedPtr {
+                    ptr: scratch,
+                    dtype: dx.dtype,
+                };
+                enqueue_sm89_half_nt(ctx, &mut NoPhysicalObserver, spec, scratch_dx, dy, w, dims)
+                    .map(drop)
+            },
+            |scratch| {
+                let scratch_dx = TypedPtr {
+                    ptr: scratch,
+                    dtype: dx.dtype,
+                };
+                gemm_bi_backward_dx_tc_with_tile(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    scratch_dx,
+                    dy,
+                    w,
+                    dims,
+                    TcTile::Tile64,
+                )
+            },
+        )?;
+        if !admitted {
+            return Ok(None);
+        }
+    }
+    enqueue_sm89_half_nt(ctx, observer, spec, dx, dy, w, dims).map(Some)
+}
+
+fn enqueue_sm89_half_nt<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    spec: super::sm89_half_source::Sm89HalfRuntimeSpec,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<HalfNativeBranchSeal, String> {
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims);
+    let Some(function) = ctx.kernels.triad_sm89_half_runtime_function(spec.symbol) else {
+        return Err("prepared SM89 half NT symbol is unavailable".into());
     };
     let cfg = sm89_half_launch_config(spec, dims)?;
     let checked = GemmDims::nt(dims)?;
@@ -11884,7 +12919,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm89_half_nt_auto_observed<O: PhysicalLa
             format_args!("{base}"),
         )
     }?;
-    Ok(Some(seal))
+    Ok(seal)
 }
 
 impl TcTile {
@@ -15986,7 +17021,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [0; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 45);
+        assert_eq!(resolved.tuning_table_revision, 46);
 
         let eager = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         let graph = build_resolved_gemm_launch_set(&[resolved]).unwrap();
@@ -16050,7 +17085,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [1; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 45);
+        assert_eq!(resolved.tuning_table_revision, 46);
 
         let launch_set = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         assert_eq!(launch_set.launch_count, 1);
@@ -16844,19 +17879,23 @@ mod half_physical_trace_tests {
                 TypedPtr { ptr: 0x2000, dtype },
                 TypedPtr { ptr: 0x1000, dtype },
                 dims,
+                None,
             )
             .unwrap();
             assert_eq!(
                 plan.arguments,
-                Sm89HalfTnArguments([
-                    Sm89HalfTnArgument::Pointer(0x3000),
-                    Sm89HalfTnArgument::Pointer(0x1000),
-                    Sm89HalfTnArgument::Pointer(0x2000),
-                    Sm89HalfTnArgument::ScalarF32(1.0),
-                    Sm89HalfTnArgument::ScalarI32(1024),
-                    Sm89HalfTnArgument::ScalarI32(256),
-                    Sm89HalfTnArgument::ScalarI32(128),
-                ])
+                Sm89HalfTnArguments {
+                    core: [
+                        Sm89HalfTnArgument::Pointer(0x3000),
+                        Sm89HalfTnArgument::Pointer(0x1000),
+                        Sm89HalfTnArgument::Pointer(0x2000),
+                        Sm89HalfTnArgument::ScalarF32(1.0),
+                        Sm89HalfTnArgument::ScalarI32(1024),
+                        Sm89HalfTnArgument::ScalarI32(256),
+                        Sm89HalfTnArgument::ScalarI32(128),
+                    ],
+                    relay: None,
+                }
             );
             let ranges = std::cell::RefCell::new(Vec::new());
             half_gemm_arguments_digest(
@@ -16884,6 +17923,94 @@ mod half_physical_trace_tests {
             assert_eq!(plan.config.grid_dim, (128, 1, 1));
             assert_eq!(plan.config.block_dim, (32, 1, 1));
             assert_eq!(plan.config.shared_mem_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn triad_retained_half_relay_plan_carries_the_persistent_grid_and_its_workspaces() {
+        let dims = (2048, 1536, 768);
+        for (dtype, symbol) in [
+            (
+                WeightDtype::Bf16,
+                super::super::sm89_half_relay_source::RELAY_BF16_SYMBOL,
+            ),
+            (
+                WeightDtype::F16,
+                super::super::sm89_half_relay_source::RELAY_F16_SYMBOL,
+            ),
+        ] {
+            let spec = super::super::sm89_half_source::runtime_kernel_spec(symbol).unwrap();
+            let relay = Sm89HalfRelayLaunch {
+                grid: 284,
+                workspace: Sm89HalfRelayWorkspace {
+                    partial: 0x5000,
+                    flags: 0x6000,
+                },
+            };
+            let plan = sm89_half_tn_launch_plan(
+                spec,
+                0x3000,
+                TypedPtr { ptr: 0x2000, dtype },
+                TypedPtr { ptr: 0x1000, dtype },
+                dims,
+                Some(relay),
+            )
+            .unwrap();
+            assert_eq!(plan.config.grid_dim, (284, 1, 1));
+            assert_eq!(plan.config.block_dim, (128, 1, 1));
+            assert_eq!(plan.config.shared_mem_bytes, 49_152);
+            assert_eq!(plan.arguments.relay, Some(relay.workspace));
+            assert_eq!(
+                plan.arguments.core,
+                [
+                    Sm89HalfTnArgument::Pointer(0x3000),
+                    Sm89HalfTnArgument::Pointer(0x1000),
+                    Sm89HalfTnArgument::Pointer(0x2000),
+                    Sm89HalfTnArgument::ScalarF32(1.0),
+                    Sm89HalfTnArgument::ScalarI32(2048),
+                    Sm89HalfTnArgument::ScalarI32(1536),
+                    Sm89HalfTnArgument::ScalarI32(768),
+                ]
+            );
+
+            let identity = HalfKernelIdentity::resolve(plan.observation.base, dtype).unwrap();
+            assert_eq!(identity.symbol, symbol);
+            assert_eq!(identity.module_kind, ModuleKind::TriadSm89Half);
+            assert_eq!(identity.schedule, HalfSchedule::RelayChain);
+
+            // Neither half of the schedule may travel without the other.
+            assert!(
+                sm89_half_tn_launch_plan(
+                    spec,
+                    0x3000,
+                    TypedPtr { ptr: 0x2000, dtype },
+                    TypedPtr { ptr: 0x1000, dtype },
+                    dims,
+                    None,
+                )
+                .is_err()
+            );
+            let tiled = super::super::sm89_half_source::runtime_kernel_spec(
+                super::super::sm89_half_tn_source::SMALL16_BF16_SYMBOL,
+            )
+            .unwrap();
+            assert!(
+                sm89_half_tn_launch_plan(
+                    tiled,
+                    0x3000,
+                    TypedPtr {
+                        ptr: 0x2000,
+                        dtype: WeightDtype::Bf16
+                    },
+                    TypedPtr {
+                        ptr: 0x1000,
+                        dtype: WeightDtype::Bf16
+                    },
+                    (1024, 256, 128),
+                    Some(relay),
+                )
+                .is_err()
+            );
         }
     }
 
@@ -16919,6 +18046,7 @@ mod half_physical_trace_tests {
                 TypedPtr { ptr: 0x2000, dtype },
                 TypedPtr { ptr: 0x1000, dtype },
                 (1024, 256, 128),
+                None,
             )
             .unwrap();
             let identity = HalfKernelIdentity::resolve(plan.observation.base, dtype).unwrap();
@@ -17159,20 +18287,18 @@ mod sm89_exact_f32_tn_route_tests {
 
     #[test]
     fn d128_direct_folds_are_one_node_exact_routes_without_scratch() {
-        for (dims, plan, symbol, tile, shared) in [
+        for (dims, plan, symbol, grid) in [
             (
                 (1_024, 128, 512),
                 ScalarDispatchPlan::TnD128InSm89DirectFoldQualified,
                 super::super::D128_IN_SYMBOL,
-                (16, 16),
-                4_096,
+                256,
             ),
             (
                 (1_024, 256, 128),
                 ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified,
                 super::super::D128_OUT_SYMBOL,
-                (8, 16),
-                3_072,
+                128,
             ),
         ] {
             let request = F32TriadRequest {
@@ -17191,17 +18317,17 @@ mod sm89_exact_f32_tn_route_tests {
             assert_eq!(scalar_node_count(plan), 1);
             assert_eq!(nodes.len(), 1);
             assert_eq!(nodes[0].symbol, symbol);
-            assert_eq!(nodes[0].tile, tile);
+            assert_eq!(nodes[0].tile, (16, 16));
             assert_eq!(nodes[0].bk, 16);
             assert_eq!(nodes[0].stages, 2);
-            assert_eq!(nodes[0].launch.grid_dim, (256, 1, 1));
-            assert_eq!(nodes[0].launch.block_dim, (64, 1, 1));
-            assert_eq!(nodes[0].launch.shared_mem_bytes, shared);
+            assert_eq!(nodes[0].launch.grid_dim, (grid, 1, 1));
+            assert_eq!(nodes[0].launch.block_dim, (256, 1, 1));
+            assert_eq!(nodes[0].launch.shared_mem_bytes, 49_152);
             assert!(!plan.needs_split_scratch());
             assert!(!plan.needs_transpose_scratch());
             assert_eq!(
                 scalar_plan_fields(plan).0,
-                if tile.0 == 16 { 44 } else { 45 }
+                if grid == 256 { 44 } else { 45 }
             );
             assert_eq!(
                 scalar_route_contract(symbol),
@@ -17315,6 +18441,31 @@ mod sm89_tf32_joint_route_tests {
                 ResolvedGemmOp::Nt,
                 (2_048, 768, 3_072),
                 Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NtRnaM144N96S2,
             ),
         ] {
             let request = request(op, dims);
