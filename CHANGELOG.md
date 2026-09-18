@@ -2,48 +2,40 @@
 
 ## 0.7.3 (2026-09-18)
 
-Two settings, names, and every SM80-tier card. No bit change on the
-exact f32, BF16 and F16 routes: every bit-ledger key is the one 0.7.1
-and 0.7.2 printed, the routes this release adds reproduce the routes
-they replace word for word, and a program that set none of the withdrawn
-controls runs the same route it ran before. One numeric change, in the
-precision that asks for it: a `Tf32` context's products that had no
-measured TF32 kernel and ran exact now run on the portable TF32 tier
-through the neighbour band below, on the Ada as on every other SM80-tier
-board.
+Two settings instead of seven knobs, plain names, and the measured kernels
+on every SM80-tier card. Bits are unchanged on the exact f32, BF16 and F16
+routes: every bit-ledger key matches 0.7.1 and 0.7.2, and each new route
+reproduces the one it replaces word for word. One numeric change: a `Tf32`
+context whose shape had no measured TF32 kernel used to run exact f32 and
+now runs the portable TF32 tier (the neighbour band below), on the Ada and
+everywhere else.
 
 ### The GEMM contract is two settings
 
-A GPU context is now described by `WeightDtype` and `GemmMode` and by
-nothing else. `WeightDtype` gains `Tf32`: f32 storage whose products run
-on the deterministic TF32 kernels where a measured one exists and on the
-exact f32 kernel elsewhere, the same route 0.7.0 spelled as
-`set_f32_triad_policy(AllowDeterministicTf32)` or
-`MAMBA_RS_BI_F32_POLICY=tf32`; the `--dtype tf32` of the `generate`
-binary selects it too. Everything that tuned the deterministic mode from
-outside is withdrawn: `set_batch_invariant`, `set_fast_gemm` and
-`disable_tf32` (deprecated since 0.7.0), `set_bi_gemm_family`,
-`set_bi_tensor_cores`, `set_f32_triad_policy`, `set_half_triad_policy`,
-their getters and `gemm_flags`, the public use of `BiGemmFamily`,
-`F32TriadPolicy` and `HalfTriadPolicy`, and the variables
+A GPU context is `WeightDtype` plus `GemmMode`, nothing else. `WeightDtype`
+gains `Tf32`: f32 storage, products on the deterministic TF32 kernels
+where one is measured and on exact f32 elsewhere. It is the route 0.7.0
+spelled `set_f32_triad_policy(AllowDeterministicTf32)` or
+`MAMBA_RS_BI_F32_POLICY=tf32`; `generate --dtype tf32` selects it too.
+
+Everything that tuned the deterministic mode from outside is gone and no
+longer read: `set_batch_invariant`, `set_fast_gemm`, `disable_tf32`,
+`set_bi_gemm_family`, `set_bi_tensor_cores`, `set_f32_triad_policy`,
+`set_half_triad_policy`, their getters, `gemm_flags`, the public
+`BiGemmFamily`, `F32TriadPolicy` and `HalfTriadPolicy`, and the variables
 `MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_FAST_GEMM`, `MAMBA_RS_BI_GEMM_FAMILY`,
 `MAMBA_RS_BI_TENSOR_CORES`, `MAMBA_RS_BI_F32_POLICY`,
-`MAMBA_RS_BI_HALF_POLICY` and `MAMBA_RS_ARCH_RUNG`. `MAMBA_RS_GEMM_MODE`
-is the one variable left, and the withdrawn ones are no longer read at
-all. Every one of them named a way to make the kernels slower or to
-reproduce an older bit family, and none was a choice a user of the crate
-should have to make: the family follows the context's role (Inference
-for a model, Triad for a trainer or a plain context), tensor cores serve
-every half-precision product a shape and board gate admits, the stream-K
-weight gradient serves every deep reduction, and the architecture rungs
-stay behind their first-use self-check. The qualification instruments
-and the tests that pin one tier against another reach the derived
-controls through `GpuCtx::route_controls()`, which is hidden from the
-documentation and is not part of the API. One route moves for one kind
-of program: a context built from the environment in a cuBLAS mode and
-switched to `Deterministic` afterwards used to run its half-precision
-weight gradients on the tiled kernels; it now runs them on the stream-K
-kernels like every other deterministic context.
+`MAMBA_RS_BI_HALF_POLICY` and `MAMBA_RS_ARCH_RUNG`. `MAMBA_RS_GEMM_MODE` is
+the one variable left. Each of those knobs only made the kernels slower
+or reproduced an older bit family. The context derives them itself: the
+family from its role (Inference for a model, Triad for a trainer), tensor
+cores wherever the shape and the board allow, stream-K for the deep
+weight-gradient reductions, the architecture kernels behind their
+self-check. The qualification tools reach the derived controls through
+`GpuCtx::route_controls()`, which is hidden and not part of the API. One
+route moves: a context built from the environment in a cuBLAS mode and
+switched to `Deterministic` afterwards now runs its half-precision weight
+gradients on the stream-K kernels like every other deterministic context.
 
 | you had | you do now |
 |---|---|
@@ -59,127 +51,99 @@ kernels like every other deterministic context.
 | `MAMBA_RS_ARCH_RUNG=off` | no replacement; the rung's self-check decides |
 | `gemm_flags()`, `batch_invariant()`, `fast_gemm()`, `tf32()`, `bi_gemm_family()`, `gemm_policy()` | `gemm_mode()`, the model's or trainer's `dtype()`, and `gemm_route()` for the complete identity |
 
-### The measured routes serve every card
+### The measured kernels run on every SM80-tier card
 
-Until now the six specialized GEMM modules were compiled for one target
-and one board: the loader built them only for `("sm_89", (8, 9))`, and
-their selectors additionally required 142 multiprocessors. Every kernel
-in them uses the SM80 instruction tier and nothing above it - `mma.sync`
-m16n8k8 and m16n8k16, `cp.async`, `ldmatrix`, `cvt.rna.tf32`, scalar FMA -
-so the restriction was a rule, not a hardware limit. It is gone. Each of
-those modules now compiles for the device's own target on any SM80-tier
-board, and the inference family's specialized overlay composes on every
-SM80-tier target except CC 12.x, whose own kernels serve there and whose
-module must stay byte-identical to the artifact its cohorts were frozen
-against.
+The six specialized GEMM modules were built only for `("sm_89", (8, 9))`
+with 142 SMs. Every kernel in them uses the SM80 instruction tier
+(`mma.sync`, `cp.async`, `ldmatrix`, `cvt.rna.tf32`, scalar FMA), so the
+restriction was a rule, not a hardware limit. Each module now compiles for
+the device's own target on any SM80-tier board. The inference overlay
+composes on every such target except CC 12.x, where the board's own
+kernels serve and the module must stay byte-identical to its frozen
+cohorts. The board table follows the CUDA 13.4 docs: CC 10.7 (`sm_107a`)
+joins the SM100 family beside 10.0, 10.3 and 11.0.
 
-The board table follows the CUDA 13.4 documentation: CC 10.7 (Rubin,
-`sm_107a`, a PTX ISA 9.4 target) joins the SM100 family beside CC 10.0,
-10.3 and 11.0, with the toolkit floor the target needs, where the tree
-used to refuse the board outright.
+How a route is admitted:
 
-Admission follows the evidence, not the compilation:
+- A board with a frozen cohort for the route (the RTX 6000 Ada, on CUDA
+  12.8, 13.0 and 13.2) takes it as before. The cohort pins the toolkit,
+  the composed source, the compiled artifact and the board.
+- Any other board proves the route at first use. The candidate and the
+  reference of the same numeric contract run on the same operands into
+  scratch outputs and every output word is compared. Equal words admit
+  the candidate for the rest of the process; a difference declines it
+  once, with the reason printed, and the reference serves from then on.
+  A proof never runs inside a graph capture (the reference serves there),
+  and the proof's own launches stay out of the eager route recording, so
+  the manifest a trainer builds from its first eager step matches the
+  capture that follows. The A100 gate lane caught the manifest carrying
+  the proof launches (`tc_mixed_training_is_bit_identical_across_runs`).
+- Before any proof the board counts waves. A candidate tile that takes
+  strictly more waves on this board than the reference while computing a
+  tile no smaller is declined outright; that is how a tile tuned for one
+  SM count spills on another. Half tiles are held against the tiled 64x64
+  kernel, the specialized TF32 tiles against the portable tile they
+  replace.
 
-- A board that holds a **frozen cohort** for a route - today the RTX 6000
-  Ada the cells were measured on, at CUDA 12.8, 13.0 and 13.2 - takes it
-  as before. The cohort pins the toolkit, the composed source, the
-  compiled artifact and the board together.
-- Any other board **proves the route at first use**. The launcher runs
-  the candidate and the reference route of the same numeric contract on
-  the same operands, each into its own scratch output, and compares every
-  output word. Equal words admit the candidate for the rest of the
-  process; a difference declines it once, with the reason said aloud, and
-  the reference serves that cell from then on. A proof never runs inside
-  a graph capture: the reference serves there, and since an admitted
-  candidate is bit-equal to it, the bits a process produces do not depend
-  on which call came first. The arms of a proof are not part of the step:
-  the eager route recorder is set aside while they run, so the launch
-  manifest a trainer prepares from its first eager step is the step's own
-  and matches the capture that follows. The A100 gate lane found the
-  manifest carrying the arms (`tc_mixed_training_is_bit_identical_across_runs`,
-  one eager step then a capture); a board with cohorts never showed it.
+A proof says nothing about speed. A route admitted on a board without a
+cohort carries the speed evidence of the board it was measured on, and
+the route identity records which kind of admission it holds.
 
-What a proof cannot say is speed. A candidate admitted on a board with no
-cohort carries the speed evidence of the board it was measured on, not of
-this one. The route identity records which kind of admission it holds, so
-a report can say so. One thing the board can say for itself is counted
-before the proof: the waves a candidate's tile takes on this board against
-the waves the reference's tile takes, from the CTA counts the board keeps
-resident. A candidate that takes strictly more waves while computing a
-tile no smaller is declined without a proof - that is the one case no
-throughput advantage recovers, and it is exactly how a tile tuned to one
-multiprocessor count spills on another. The half tiles are held against
-the tiled 64x64 kernel, the specialized TF32 tiles against the portable
-tile they replace.
+`WeightDtype::Tf32` off the Ada used to fall back to exact f32 because the
+TF32 policy had no measured route there. It now serves the portable
+deterministic TF32 tier; exact f32 still serves any shape the tier does
+not cover. The tier's bits are its own, as the precision documents.
 
-**One behaviour changes for programs on a board that is not the Ada.**
-`WeightDtype::Tf32` used to fall back to the exact f32 kernels on every
-SM80-tier board but the Ada, because the TF32 policy had no measured
-route there. It now serves the portable deterministic TF32 tier, which is
-what the precision asks for; the exact f32 kernel still serves any shape
-the tier does not cover. The bits of that tier are its own, as the
-storage precision has always documented.
+The portable tier also reads the census by neighbourhood. A contiguous
+shape within a factor of four of a measured shape on every dimension,
+staged the same way (16-byte loads only when the leading dimension is a
+multiple of four floats), takes the nearest measured shape's tile, and a
+wide tile drops to 64x64 when the shape would not fill the board. Held
+out one at a time, the measured cells reproduce their own tiles from
+their neighbours 33 of 38 times at a factor of four, 12 of 12 at two and
+37 of 54 at eight, so the band stops at four. Every route the band names
+still passes the bit proof and the wave count. The dispatch epoch
+`gemm_route()` reports moves to 46; the cohorts pin the TF32 tuning
+revision separately and none is orphaned. The band serves the Ada too: a
+shape with a cell keeps it, a shape without one takes its neighbour's
+tile instead of the exact f32 kernel. On the Ada that is the Mamba-3
+input projection, 10400 x 384 x 1716, whose three GEMMs ran scalar in
+0.7.1 and run on the portable TF32 tiles now; the Mamba-1 projections all
+have cells and do not move.
 
-On such a board the portable tier reads the census by neighbourhood as
-well as by exact shape. A contiguous shape within a factor of four of a
-measured shape on every dimension, staged the same way - an operand takes
-the 16-byte loads only when its leading dimension is a multiple of four
-floats, scalar loads otherwise - takes the tile of the nearest measured
-shape, and a wide tile is brought down to 64x64 when the shape would not
-fill the board with it. Held out one at a time, the measured cells
-reproduce their own tiles from their neighbours 33 times in 38 at a
-factor of four, 12 in 12 at two and 37 in 54 at eight, which is why the
-band stops at four. Every route the band names still passes the first-use
-bit proof and the wave count above. The dispatch epoch `gemm_route()`
-reports moves to 46 for it; the frozen cohorts pin the TF32 tuning
-revision separately and none of them is orphaned. The band is the
-portable tier's, so it serves the Ada as well: a shape with a measured
-cell keeps its cell, and a shape without one that used to fall to the
-exact f32 kernel now takes its neighbour's tile. On the Ada at the
-production training shape that is the Mamba-3 input projection, 10400 x
-384 x 1716, whose forward, input gradient and weight gradient ran on the
-scalar kernels in 0.7.1 and run on the portable TF32 tiles now; the
-Mamba-1 projections all have measured cells and do not move.
+A board with its own module keeps its own table first. The RTX 5090
+(SM120), and the SM90a and SM100 boards when they come, load the common
+modules beside their own module; the loader used to refuse that pairing
+and the artifact set had one slot for both. The dispatcher reads the
+board's own cohort first: a shape it names runs the board's kernel, any
+other shape takes the common tier through the proof. The common finalist
+has its own slot (`sm89_finalist`) in `ArtifactSetIdentity`; the Ada set
+hashes as before and cohorts compare per-module digests, so nothing was
+re-minted for it. The SM90a WGMMA module loads on CUDA 13.3 and newer
+(the CUDA 13.3 release notes on `wgmma.wait_group`). Which modules a
+board loads is one function, `triad_module_plan`, with a host test over
+every compute capability.
 
-**A board with its own module keeps its own table first.** The RTX 5090
-(SM120) and, when they come, the SM90a and SM100 boards load the common
-modules beside their own architecture module - the loader used to refuse
-that pairing and the artifact set had one slot for either - and the
-dispatcher reads the board's own frozen cohort before anything else: a
-shape it names runs the board's own kernel, a shape it does not name
-takes the common tier the way every other board does, through the
-first-use proof. The common finalist has its own slot in
-`ArtifactSetIdentity` (`sm89_finalist`); the Ada set hashes exactly as
-before, and a board's cohorts compare per-module digests, so nothing is
-re-minted. The SM90a WGMMA module loads on CUDA 13.3 and newer only:
-ptxas before 13.3 could drop the register moves after
-`wgmma.wait_group 1` (CUDA 13.3 release notes), and the kernel waits
-that way. The policy of which modules a board loads is one function,
-`triad_module_plan`, with a host test over every compute capability.
-
-**The inference cells are their own module.** The measured inference
-cells - the exact f32 SIMT, half MMA and TF32 MMA tiles behind the Ada
-inference table - were composed into the Fixed inference module, whose
-cohorts pin the digest of the whole compiled artifact. NVRTC 13.2
-compiles one of them, `nn_sm89_m112n128_bk32_s3_f32`, two ways from the
-same source: the register allocation and one shared-memory load differ
-between cold compiles, the arithmetic does not. A process that drew the
-other allocation found every Fixed cohort declined, and with them the
-copy-plan kernels those cohorts admit. The cells now compile as a module
-of their own, `InferenceSm89Cells`, admitted by symbol on every board
-that composes the overlay, and the Fixed module carries exactly what its
-cohorts pin; its identities are re-minted on CUDA 12.8, 13.0 and 13.2.
-The cells slot is the last of `ArtifactSetIdentity`.
+The inference cells are their own module. The measured inference cells
+(exact f32 SIMT, half MMA and TF32 MMA tiles) were composed into the
+Fixed inference module, whose cohorts pin the digest of the whole
+artifact. NVRTC 13.2 compiles one of them,
+`nn_sm89_m112n128_bk32_s3_f32`, two ways from the same source (the
+register allocation and one shared load differ, the arithmetic does not),
+and a process that got the other build lost every Fixed cohort with it.
+The cells now compile as `InferenceSm89Cells`, admitted by symbol
+wherever the overlay composes; the Fixed module holds exactly what its
+cohorts pin, re-minted on CUDA 12.8, 13.0 and 13.2. The cells slot is the
+last in `ArtifactSetIdentity`.
 
 ### The fastest measured route in every family
 
-Every route below reproduces the route it replaces bit for bit: the
-kernels were searched under that constraint and each candidate was
-compared word for word against the incumbent on three corpora - uniform
-full-mantissa values, log-uniform mixed exponents, and an exceptional
-corpus with Inf, NaN, -0 and denormals - eager and through a captured
-graph, before and after timing. Numbers are graph-replay medians on an
-RTX 6000 Ada at CUDA 13.2, candidate over incumbent.
+Every route below reproduces the one it replaces bit for bit. Each
+candidate was compared word for word against the incumbent on three
+corpora (uniform full-mantissa values, log-uniform mixed exponents, and
+Inf, NaN, -0 and denormals), eager and through a captured graph, before
+and after timing. Graph-replay medians on an RTX 6000 Ada at CUDA 13.2,
+candidate over incumbent.
 
 | family | cell (m, k, n) | route | before | after | ratio |
 |---|---|---|---:|---:|---:|
@@ -201,103 +165,85 @@ RTX 6000 Ada at CUDA 13.2, candidate over incumbent.
 | inference | 2048 x 2304 x 768 half | `nn_sm89_m128n96_bk64_s2_vec_bf16` | 60.60 us | 57.51 us | 0.949 |
 | inference | 2048 x 768 x 2304 half | `nn_sm89_m128n144_bk32_s2_vec_bf16` | 65.04 us | 62.50 us | 0.961 |
 
-Two of them are schedules rather than tiles. The **relay** weight
-gradient walks a persistent grid of (tile, slab) units: when a tile's
-chain crosses a CTA boundary the earlier CTA hands its f32 accumulators
-to the next one untouched, so nothing is ever folded and the result is
-the tiled result bit for bit, while a tile count that is not a multiple
-of the resident CTA count no longer pays a whole second wave. Like the
-stream-K weight gradient it is a persistent grid, so it serves only where
-the request permits a schedule other than one owner CTA per output tile,
-which is what every deterministic context permits by default. The
-**pre-RNA** TF32 tiles round the transposed operand once in their own
-pass, as the routes they replace do, and keep that operand's conversion
-contract.
+Two of them are schedules rather than tiles. The relay weight gradient
+walks a persistent grid of (tile, slab) units; when a tile's chain crosses
+a CTA boundary the earlier CTA hands its f32 accumulators to the next one
+untouched, so nothing is folded, the result is the tiled result bit for
+bit, and a tile count that is not a multiple of the resident CTAs no
+longer pays a whole second wave. Like stream-K it is persistent, so it
+serves where the request permits a schedule other than one owner CTA per
+tile, which every deterministic context permits by default. The pre-RNA
+TF32 tiles round the transposed operand once in their own pass, as the
+routes they replace do.
 
 ### Changed
 
-- **No version stamps in names.** Every identifier that carried a `V1`,
-  `V2` or `_v1` stamp is renamed to say what it is: `F32TriadPolicy::
-  {ExactScalarFma, AllowDeterministicTf32}`, `HalfTriadPolicy::{TiledParity,
-  AllowStreamKFixedOrder}`, `Sm80TcPolicy`, `ScalarWavePolicy`, the
-  `TRIAD_*`/`FIXED_*` numeric contracts, the `cublas` policy constants
-  (`CUBLAS_ONE_CONTRACT`, `CUBLAS_FAST_AND_PEDANTIC`), the Ada half-auto
-  expectations (`expected_ada_half_auto`, `expected_ada_half_auto_before_streamk`),
-  and every kernel symbol whose name ended in `_v1`. Test decoys that
-  used a stamp to differ from the real symbol now end in `_decoy`. The
-  two split-K helpers whose `_v2` meant a float2 vector width are
-  `tf32_partial_load_cg_float2` and `tf32_partial_store_cg_float2`.
-  A new `names` rule of `make ci-fast` (xtask) keeps the tree at zero
-  stamps; vendor entry points (`cuMemAlloc_v2`, `CUDA_KERNEL_NODE_PARAMS_v2`)
-  are exempt, and string literals are not scanned, so wire-format schema
-  tags such as `MambaBiTf32QualificationV5` stay as the data format they
-  name.
-- **Kernel symbols name the product, not the family.** The `gemm_bi_`
-  prefix and the `fixed`/`inference` family tokens are gone from every
-  kernel: `gemm_bi_nn_fixed_sm89_tc128_pipeline_bf16` is
-  `nn_sm89_tc128_pipeline_bf16`, `gemm_bi_tn_sm120_tma_128x64_bk32_s3_f16`
-  is `tn_sm120_tma_128x64_bk32_s3_f16`, the three base scalar kernels
-  `gemm_bi_{nn,tn,nt}` are `{nn,tn,nt}_big` beside their typed twins
-  `nn_big_bf16`, the SM120 post-bias kernels drop their `fixed` infix,
-  and the device helpers follow (`cp_async_16_zfill`, `is_aligned_16`,
-  `splitk_reduce`). The family is the module that composes a kernel;
-  the two families never share a PTX module.
-- **Kernels by instruction tier.** Every kernel lives in the folder of
-  the lowest instruction set it needs, under its family:
+- No version stamps in names. Every `V1`, `V2` or `_v1` identifier now
+  says what it is: `F32TriadPolicy::{ExactScalarFma, AllowDeterministicTf32}`,
+  `HalfTriadPolicy::{TiledParity, AllowStreamKFixedOrder}`, `Sm80TcPolicy`,
+  `ScalarWavePolicy`, the `TRIAD_*` and `FIXED_*` numeric contracts,
+  `CUBLAS_ONE_CONTRACT`, `CUBLAS_FAST_AND_PEDANTIC`, `expected_ada_half_auto`,
+  `expected_ada_half_auto_before_streamk`, and every kernel symbol that
+  ended in `_v1`. Test decoys end in `_decoy`. The two split-K helpers
+  whose `_v2` meant a float2 width are `tf32_partial_load_cg_float2` and
+  `tf32_partial_store_cg_float2`. A `names` rule in `make ci-fast` keeps
+  the tree at zero stamps; vendor entry points such as `cuMemAlloc_v2` are
+  exempt and string literals are not scanned, so wire tags such as
+  `MambaBiTf32QualificationV5` stay.
+- Kernel symbols name the product, not the family. The `gemm_bi_` prefix
+  and the `fixed` and `inference` tokens are gone:
+  `gemm_bi_nn_fixed_sm89_tc128_pipeline_bf16` is `nn_sm89_tc128_pipeline_bf16`,
+  `gemm_bi_tn_sm120_tma_128x64_bk32_s3_f16` is `tn_sm120_tma_128x64_bk32_s3_f16`,
+  the base scalar kernels are `{nn,tn,nt}_big` beside `nn_big_bf16`, the
+  SM120 post-bias kernels drop `fixed`, and the device helpers follow
+  (`cp_async_16_zfill`, `is_aligned_16`, `splitk_reduce`). The family is
+  the module that composes a kernel; the two families never share a PTX
+  module.
+- Kernels by instruction tier. Each kernel lives in the folder of the
+  lowest instruction set it needs:
   `kernels/gemm_bi_triad/{sm80,sm90a,sm100,sm120}/` and
-  `kernels/gemm_bi_inference/{sm80,sm90a,sm100,sm120}/`, with the file
-  names shortened to what the folder does not already say
-  (`sm80/half_tn.cu`, `sm120/tma.cu`, `sm80/mma.cu`). `sm80/` is the
-  tier every supported board runs - the portable reference kernels and
-  the tiles found on the RTX 6000 Ada alike, since those use `mma.sync`,
-  `cp.async`, `ldmatrix` and `cvt.rna.tf32` and nothing above them; which
-  board measured a tile is the dispatcher's business, recorded in its
-  per-board tables and cohorts, not the source tree's. `sm90a/`, `sm100/`
-  and `sm120/` hold only what needs that architecture (WGMMA, tcgen05,
-  the CC 12.x TMA kernels). There is no `sm89/` folder: nothing in the
-  tree needs an instruction the A100 lacks. Portable helpers and shared
-  headers stay in the family root. The composed-source manifests name
-  the real paths (the inference family's fragments were still logged
-  under the pre-0.7.0 `kernels/gemm_bi_fixed/` name).
-- **Frozen identities re-pinned in one pass.** A rename moves every
-  composed-source, compile-key, artifact and header digest the
-  dispatcher's cohorts are frozen against, and a cohort that no longer
-  matches declines silently. `tools/qualification/identity_mint.rs`
-  prints those identities for the toolkit on PATH without a device
-  (so the compute_120 and sm_90a modules mint on any box with the
-  toolkit), and `tools/identity_repin.py` substitutes the reference
-  tree's values for this tree's. Every Ada cohort (CUDA 12.8, 13.0,
-  13.2) and the SM120 cohorts for 12.8 and 13.0 carry the same NVRTC
-  library identity as before and are re-minted exactly; the SM120 13.2
-  cohort is re-minted against the 13.2 build on the Ada box, since the
-  board it was first minted on ran a different 13.2 build. The Mamba-1
-  fold fixture `legacy_fixed.cu` is regenerated from the capacity-32
-  composition it stands for.
-
-- **A toolkit lane.** Eight targets need the CUDA toolkit and no device:
-  the cross-architecture compile gates, the identity contract, the TF32
-  selector, the SM90/SM100/SM120 PTX contracts and two source contracts.
-  They were in the gate lane, so every board ran them - half an hour of
-  NVRTC on a rented A100 for a result the build box already had. They are
-  the `toolkit` lane now (`qual/run.sh toolkit`, once per toolkit build),
-  and `qual/run.sh board` is the gate lane without them, for a board that
-  only has to run.
-- **The contract lane runs to the end, and a target written for one
-  board skips on every other.** `qual/run.sh contract` used to stop at
-  its first red target, and on any one board the first red was a target
-  written for another board, which asserted that board's compute
-  capability; every target after it went unrun, `gpu_bf16_parity` among
-  them, which the lane could not even build because it needs the `hf`
-  feature. The lane now builds with `cuda,hf`, runs every target and
-  names each red at its end. The board-pinned targets - the Ada gates in
-  `gemm_bi_inference_correctness`, `gemm_bi_inference_sm89_exact_n64`,
-  `gemm_bi_inference_sm89_pipeline`, `gemm_bi_tc` and
-  `gemm_bi_async_allocation`, the SM120 gates in
-  `gemm_bi_inference_sm120_exact_n64` and `gemm_bi_inference_sm120_sliced`
-  - print `skip:` with the board they pin and the board they found, the
-  way the relay-cell gate already did, so every red the lane names is a
-  broken contract. In 0.7.2 those seven targets were red on the RTX 5090
-  and on the A100 for that reason alone.
+  `kernels/gemm_bi_inference/{sm80,sm90a,sm100,sm120}/`, file names
+  shortened to what the folder does not say (`sm80/half_tn.cu`,
+  `sm120/tma.cu`). `sm80/` is the tier every supported board runs, the
+  portable kernels and the Ada-found tiles alike; which board measured a
+  tile lives in the dispatcher's tables and cohorts. `sm90a/`, `sm100/`
+  and `sm120/` hold only what needs that architecture. There is no
+  `sm89/` folder: nothing in the tree needs an instruction the A100
+  lacks. Shared headers stay in the family root; the composed-source
+  manifests name the real paths (the inference fragments were still
+  logged under `kernels/gemm_bi_fixed/`).
+- Frozen identities re-pinned in one pass. A rename moves every
+  composed-source, compile-key, artifact and header digest the cohorts
+  pin, and a cohort that no longer matches declines silently.
+  `tools/qualification/identity_mint.rs` prints the identities for the
+  toolkit on PATH without a device and `tools/identity_repin.py` swaps
+  the old values for the new. Every Ada cohort (CUDA 12.8, 13.0, 13.2)
+  and the SM120 cohorts for 12.8 and 13.0 are re-minted exactly; the
+  SM120 13.2 cohort exists twice, for the Ada box's 13.2.51 build and for
+  the 13.2.78 build the rented boards run. The Mamba-1 fold fixture
+  `legacy_fixed.cu` is regenerated from the capacity-32 composition.
+- A toolkit lane. Eight targets need the CUDA toolkit and no device: the
+  cross-architecture compile gates, the identity contract, the TF32
+  selector, the SM90, SM100 and SM120 PTX contracts and two source
+  contracts. They used to run on every board, half an hour of NVRTC on a
+  rented A100 for a result the build box already had. They are the
+  `toolkit` lane now (`qual/run.sh toolkit`), and `qual/run.sh board` is
+  the gate lane without them.
+- The contract lane runs to the end, and board-pinned targets skip on
+  other boards. `qual/run.sh contract` stopped at its first red, which on
+  any board was a target written for another board; everything after it
+  went unrun, `gpu_bf16_parity` included, which needs the `hf` feature
+  the lane did not enable. The lane now builds with `cuda,hf`, runs every
+  target and lists the reds at the end. The Ada gates
+  (`gemm_bi_inference_correctness`, `gemm_bi_inference_sm89_exact_n64`,
+  `gemm_bi_inference_sm89_pipeline`, `gemm_bi_tc`,
+  `gemm_bi_async_allocation`) and the SM120 gates
+  (`gemm_bi_inference_sm120_exact_n64`, `gemm_bi_inference_sm120_sliced`)
+  print `skip:` on any other board instead of failing, so a red in the
+  lane is a broken contract. In 0.7.2 those seven were red on the RTX
+  5090 and on the A100 for that reason alone.
+- A CUDA 13.4 toolkit builds with `CUDARC_CUDA_VERSION=13030` (cudarc
+  0.19.9 lists toolkits up to 13.3); the README says so.
 
 ### What each board gets in this release
 
@@ -311,37 +257,32 @@ contract.
 
 ### Measurements and verification
 
-RTX 6000 Ada, CUDA 13.2, this tree against the v0.7.1 ledger recorded on
-the same board: all 263 ledger keys identical (the 161 original Mamba keys
-and the 102 decode keys), none moved, none missing. Every test target of
-the crate is green on that board (163 targets and the unit tests), the
-crate builds and lints clean with `-D warnings` without the `cuda`
-feature and with `cuda,hf,qualification`, and the host-only gates were
-also run against the CUDA 13.4 toolkit, where the CC 10.7 target compiles
-(cudarc 0.19.9 lists toolkits up to 13.3, so a 13.4 box builds with
-`CUDARC_CUDA_VERSION=13030`; the README says so).
+RTX 6000 Ada, CUDA 13.2, against the 0.7.1 ledger recorded on the same
+board: all 263 keys identical (161 Mamba keys and 102 decode keys), none
+moved, none missing. Every test target of the crate is green there (163
+targets and the unit tests), the crate builds and lints clean with
+`-D warnings` without `cuda` and with `cuda,hf,qualification`, and the
+host gates also pass on the CUDA 13.4 toolkit, where the CC 10.7 target
+compiles.
 
-The kernel-level adapter that timed 0.7.1 on this board, run once on the
-assembled tree against its own 0.7.1 record (same harness, same operands,
-same windows) and against the 0.7.1 page, is in
-[docs/gemm-benchmarks-0.7.3-ada.md](docs/gemm-benchmarks-0.7.3-ada.md).
-Over the 21 Triad cells of the adapter the geometric means of 0.7.1 time
-over new time are 1.16x for exact f32, 1.17x for bf16 and 1.16x for f16;
-over its five inference cells 1.04x for exact f32, 1.00x for bf16 and
-0.98x for f16, the last within the run-to-run band of its one changed
-shape. The TF32 cells have no adapter record; against the page, whose
-cuBLAS arm ran 6-12 percent faster than this run's, the TF32 means are
-0.99x for Triad and 0.94x for inference before that drift and 1.05x and
-1.06x after it. That run also caught the bf16 packed-store tile of hot_d
-asking the driver for its pipeline slabs alone while its epilogue stages
-the whole f32 tile; the launch now allocates the tile, a unit test pins
-every half cell to the larger of the two, and a GPU test launches every
-Ada cell on its measured shape with and without a bias.
+The kernel adapter that timed 0.7.1 on this board, run once on the
+assembled tree against its own 0.7.1 record and against the 0.7.1 page,
+is in [docs/gemm-benchmarks-0.7.3-ada.md](docs/gemm-benchmarks-0.7.3-ada.md).
+Over its 21 Triad cells the geometric means of 0.7.1 time over new time
+are 1.16x for exact f32, 1.17x for bf16 and 1.16x for f16; over its five
+inference cells 1.04x, 1.00x and 0.98x, the last within run-to-run noise
+of its one changed shape. TF32 has no adapter record; against the page,
+whose cuBLAS arm ran 6 to 12 percent faster than this run's, the TF32
+means are 0.99x for Triad and 0.94x for inference before that drift and
+1.05x and 1.06x after it. The same run caught the bf16 packed-store tile
+of hot_d asking the driver for its pipeline slabs alone while its
+epilogue stages the whole f32 tile; the launch now allocates the tile, a
+unit test pins every half cell to the larger of the two, and a GPU test
+launches every Ada cell on its measured shape with and without a bias.
 
 Whole training steps at the production shape (d_model 384, 24 layers,
-B=8, T=1300), one process per storage on 0.7.3 against the 0.7.1 medians
-of the benchmark pages, CUDA Graph replay; `old/new` above 1 means
-faster:
+B=8, T=1300), graph replay, one process per storage, against the 0.7.1
+medians of the benchmark pages; `old/new` above 1 is faster:
 
 | model | precision / policy | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
 |---|---|---:|---:|---:|
@@ -354,35 +295,29 @@ faster:
 | Mamba-3 | exact F32 | 174.18 | 173.67 | 1.003× |
 | Mamba-3 | F32, TF32 permitted | 164.52 | 149.73 | 1.099× |
 
-The Mamba-3 TF32 row is the neighbour band: a kernel census of that
-step under the CUDA profiler, one process per tree, shows the input
-projection's three GEMMs moving from the scalar kernels (1972 ms of the
-0.7.2 process) to the portable TF32 tiles (1215 ms), every other kernel
+The Mamba-3 TF32 row is the neighbour band: under the CUDA profiler the
+input projection's three GEMMs move from the scalar kernels (1972 ms of
+the 0.7.2 process) to the portable TF32 tiles (1215 ms), everything else
 the same, the process 9.3 percent shorter. Every other row is within 1
-percent of 0.7.1 in either direction, and a same-day control shows the
-Mamba-1 BF16 and F16 rows are the board's day, not the release: the 0.7.2 tree, whose kernels are 0.7.1's, and
-this tree each ran those two instruments once more under the CUDA
-profiler that afternoon and gave the same graph step time within 0.1
-percent, the same peak memory to the mebibyte, and the same kernel
-census (the same kernels under their new names, the same launch counts,
-per-kernel time within 3 percent, the sum within 0.2 percent). The
-sampled peak memory of every process is 82 MiB above the September 14
-figures for the same reason. Text generation from
-`state-spaces/mamba-130m-hf` (64 tokens, seed 42) is byte-identical
-between 0.7.2 and 0.7.3 on CPU f32, GPU f32 and GPU bf16. The tables
-with eager timings, peaks and fixture details are in
-[Mamba-1](docs/mamba1-benchmarks.md) and
-[Mamba-3](docs/mamba3-benchmarks.md); the remaining published
-instruments, the GEMM training-step bench, both full GPU benchmarks,
-the Mamba-3 default-shape step and the serve prefill, ran once each
-with their logs kept.
+percent of 0.7.1 either way. The Mamba-1 BF16 and F16 rows are the
+board's day, not the release: the 0.7.2 tree and this tree, run once more
+the same afternoon under the profiler, gave the same graph step time
+within 0.1 percent, the same peak memory to the mebibyte and the same
+kernel census (the same kernels under their new names, the same launch
+counts, per-kernel time within 3 percent, the sum within 0.2 percent).
+Peak memory of every process is 82 MiB above the September 14 figures for
+the same reason. Text generation from `state-spaces/mamba-130m-hf` (64
+tokens, seed 42) is byte-identical between 0.7.2 and 0.7.3 on CPU f32,
+GPU f32 and GPU bf16. Eager timings, peaks and fixtures are on the
+[Mamba-1](docs/mamba1-benchmarks.md) and [Mamba-3](docs/mamba3-benchmarks.md)
+pages; the other published instruments ran once each with their logs
+kept.
 
-Two more boards, both rented, both on CUDA 13.2.78, graph replay,
-`old/new` above 1 means faster. The RTX 5090 (CC 12.0) against the 0.7.2
-numbers of its own page section (0.7.2 measured the same instrument
-there), and the A100 SXM4 40 GB (CC 8.0), which had no saved numbers,
-against 0.7.2 run once on the same board. On both boards the bit ledger
-against 0.7.2 holds on all 263 keys and generation is byte-identical.
+Two rented boards, both on CUDA 13.2.78, graph replay. The RTX 5090
+(CC 12.0) against the 0.7.2 numbers of its own page section; the A100
+SXM4 40 GB (CC 8.0) had no saved numbers, so 0.7.2 ran once on the same
+board first. On both the bit ledger against 0.7.2 holds on all 263 keys
+and generation is byte-identical.
 
 | board | model | precision / policy | 0.7.2 ms/step | 0.7.3 ms/step | old/new |
 |---|---|---|---:|---:|---:|
@@ -403,58 +338,44 @@ against 0.7.2 holds on all 263 keys and generation is byte-identical.
 | A100 | Mamba-3 | exact F32 | 258.21 | 258.84 | 0.998× |
 | A100 | Mamba-3 | F32, TF32 permitted | 258.83 | 188.51 | 1.373× |
 
-The RTX 5090 keeps its own measured kernels on every shape they name;
-its gains are the shapes they do not name, which fell to the scalar or
-portable kernels before and take the common cells now. The A100 had no
-kernels of its own; in 0.7.2 its TF32 rows equal its F32 rows because the
-TF32 storage fell back to the exact kernels there, and 0.7.3 serves it
-with the common cells and the neighbour band. The first run of the
-release candidate on the RTX 5090 found that 0.7.3 could not create a GPU
-context on any board with an architecture module, and that the SM120 TF32
-cohort had been re-minted against the NVRTC 13.2.51 build of the Ada box
-while the rented boards carry 13.2.78; both are fixed in this release
-(the loader paragraph above, and a second CUDA 13.2 cohort minted on the
-13.2.78 build). The common tier declines a route whose kernel the board's
-portable module did not compose (the CC 12.x portable module leaves the
-extension kernels out) instead of failing at launch.
+The RTX 5090 keeps its own kernels on every shape they name; its gains
+are the other shapes, which fell to the scalar or portable kernels before
+and take the common cells now. The A100 had no kernels of its own; its
+0.7.2 TF32 rows equal its F32 rows because TF32 fell back to exact f32
+there. The first run of the release candidate on the RTX 5090 found two
+defects, both fixed here: the loader refused to create a context on any
+board with an architecture module, and the SM120 TF32 cohort had been
+minted against the Ada box's NVRTC 13.2.51 while the rented boards run
+13.2.78. The common tier also declines a route whose kernel the board's
+portable module did not compose (CC 12.x leaves the extension kernels
+out) instead of failing at launch.
 
-The final tree of this release, with the cells module, the moved kernel
-folders and the recorder fix, was run again on the RTX 5090: the contract
-lane green on every target, the acceptance capture against 0.7.2 89 of
-89 identical, the bit ledger against 0.7.2 263 of 263, the identity trace
-and the graph-capture bit-identity gate green, and the two TF32 training
-rows at 109.85 ms/step (Mamba-1) and 102.62 ms/step (Mamba-3). Its
-per-cell GEMM timings against cuBLAS on the same board are on the
-[RTX 5090 page](docs/gemm-benchmarks-0.7.3-rtx5090.md). On the A100 the
-same final tree: contract lane green on every target, acceptance capture
-89 of 89 identical to 0.7.2, bit ledger 263 of 263, the graph-capture
-gate that first failed there and the identity trace green, and the TF32
-rows at 229.06 ms/step
-(Mamba-1) and 187.74 ms/step (Mamba-3); its per-cell page is
-[docs/gemm-benchmarks-0.7.3-a100.md](docs/gemm-benchmarks-0.7.3-a100.md).
-On the RTX 6000 Ada the final tree holds the bit ledger against 0.7.1 at
-263 of 263, the contract lane green with its capture 97 of 97 identical
-to the release candidate's, the identity trace green twice with the
-kernel cache off, and the whole-step rows within noise of the release
-run (Mamba-1 TF32 180.98 against 180.91 ms/step, BF16 111.95 against
-111.87, Mamba-3 TF32 149.11 against 149.73). The RTX 5090 was also run
-with its own tier left out, so its measured tiles could be judged
-against the common tier on the same board: eager, the common cells win
-on the small shapes by 2 to 6 times because every SM120 route there sits
-on a 15 us per-launch floor, while in the graph-replayed training step
-the board's own tier wins at d_model 128 (33.70 against 39.58 ms/step in
-BF16) as at 384; the tables keep the SM120 tier, and the eager floor is
-on the board's tuning list. Both per-cell pages carry the numbers.
+The final tree was run again on all three boards. RTX 5090: contract lane
+green on every target, acceptance capture 89 of 89 identical to 0.7.2,
+bit ledger 263 of 263, identity trace and graph-capture gate green, TF32
+rows 109.85 ms/step (Mamba-1) and 102.62 (Mamba-3); per-cell timings
+against cuBLAS on the [RTX 5090 page](docs/gemm-benchmarks-0.7.3-rtx5090.md).
+A100: the same set green, TF32 rows 229.06 and 187.74;
+[A100 page](docs/gemm-benchmarks-0.7.3-a100.md). RTX 6000 Ada: ledger
+against 0.7.1 at 263 of 263, contract lane green with its capture 97 of
+97 identical to the release candidate's, identity trace green twice with
+the kernel cache off, whole-step rows within noise (Mamba-1 TF32 180.98
+vs 180.91 ms/step, BF16 111.95 vs 111.87, Mamba-3 TF32 149.11 vs 149.73).
+The 5090 was also run with its own tier left out: eager, the common cells
+beat its small-shape routes 2 to 6 times because every SM120 route there
+sits on a 15 us per-launch floor; in the graph-replayed training step the
+board's own tier wins at d_model 128 (33.70 vs 39.58 ms/step in BF16) as
+at 384, so the tables keep the SM120 tier and the eager floor is on the
+board's tuning list.
 
-An H100 PCIe (CC 9.0, CUDA 13.2) ran the final tree last: the routing
-contracts, the graph-capture bit-identity gate, the invariance matrix
-and the adapter green on the first attempt, with the common tier alone,
-since the SM90a WGMMA module waits for CUDA 13.3. Its training rows
-(Mamba-1 BF16 128.07, TF32 181.56; Mamba-3 BF16 154.42, TF32 160.85
-ms/step) and per-cell timings are on the benchmark pages and on
-[docs/gemm-benchmarks-0.7.3-h100.md](docs/gemm-benchmarks-0.7.3-h100.md);
-this is the first release to boot on one board of every module family it
-claims except SM100.
+An H100 PCIe (CC 9.0, CUDA 13.2) ran the final tree last: routing
+contracts, the graph-capture gate, the invariance matrix and the adapter
+green on the first try, on the common tier since the WGMMA module waits
+for CUDA 13.3. Its training rows (Mamba-1 BF16 128.07, TF32 181.56;
+Mamba-3 BF16 154.42, TF32 160.85 ms/step) and per-cell timings are on the
+benchmark pages and the [H100 page](docs/gemm-benchmarks-0.7.3-h100.md).
+The release has booted on one board of every module family it claims
+except SM100.
 
 ## 0.7.2 (2026-09-16)
 
