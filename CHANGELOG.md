@@ -103,8 +103,7 @@ out one at a time, the measured cells reproduce their own tiles from
 their neighbours 33 of 38 times at a factor of four, 12 of 12 at two and
 37 of 54 at eight, so the band stops at four. Every route the band names
 still passes the bit proof and the wave count. The dispatch epoch
-`gemm_route()` reports moves to 46; the cohorts pin the TF32 tuning
-revision separately and none is orphaned. The band serves the Ada too: a
+`gemm_route()` reports is 46. The band serves the Ada too: a
 shape with a cell keeps it, a shape without one takes its neighbour's
 tile instead of the exact f32 kernel. On the Ada that is the Mamba-3
 input projection, 10400 x 384 x 1716, whose three GEMMs ran scalar in
@@ -116,25 +115,15 @@ A board with its own module keeps its own table first. The RTX 5090
 modules beside their own module; the loader used to refuse that pairing
 and the artifact set had one slot for both. The dispatcher reads the
 board's own cohort first: a shape it names runs the board's kernel, any
-other shape takes the common tier through the proof. The common finalist
-has its own slot (`sm89_finalist`) in `ArtifactSetIdentity`; the Ada set
-hashes as before and cohorts compare per-module digests, so nothing was
-re-minted for it. The SM90a WGMMA module loads on CUDA 13.3 and newer
-(the CUDA 13.3 release notes on `wgmma.wait_group`). Which modules a
-board loads is one function, `triad_module_plan`, with a host test over
-every compute capability.
+other shape takes the common tier through the proof. The SM90a WGMMA
+module loads on CUDA 13.3 and newer (the CUDA 13.3 release notes on
+`wgmma.wait_group`).
 
-The inference cells are their own module. The measured inference cells
-(exact f32 SIMT, half MMA and TF32 MMA tiles) were composed into the
-Fixed inference module, whose cohorts pin the digest of the whole
-artifact. NVRTC 13.2 compiles one of them,
-`nn_sm89_m112n128_bk32_s3_f32`, two ways from the same source (the
-register allocation and one shared load differ, the arithmetic does not),
-and a process that got the other build lost every Fixed cohort with it.
-The cells now compile as `InferenceSm89Cells`, admitted by symbol
-wherever the overlay composes; the Fixed module holds exactly what its
-cohorts pin, re-minted on CUDA 12.8, 13.0 and 13.2. The cells slot is the
-last in `ArtifactSetIdentity`.
+Fixed on the Ada: NVRTC 13.2 compiles one inference cell two ways from
+the same source (the register allocation differs, the arithmetic does
+not), and a process that got the other build lost the inference
+copy-plan routes with it. The measured inference cells now compile as a
+module of their own, so that variance no longer touches anything else.
 
 ### The fastest measured route in every family
 
@@ -178,70 +167,11 @@ routes they replace do.
 
 ### Changed
 
-- No version stamps in names. Every `V1`, `V2` or `_v1` identifier now
-  says what it is: `F32TriadPolicy::{ExactScalarFma, AllowDeterministicTf32}`,
-  `HalfTriadPolicy::{TiledParity, AllowStreamKFixedOrder}`, `Sm80TcPolicy`,
-  `ScalarWavePolicy`, the `TRIAD_*` and `FIXED_*` numeric contracts,
-  `CUBLAS_ONE_CONTRACT`, `CUBLAS_FAST_AND_PEDANTIC`, `expected_ada_half_auto`,
-  `expected_ada_half_auto_before_streamk`, and every kernel symbol that
-  ended in `_v1`. Test decoys end in `_decoy`. The two split-K helpers
-  whose `_v2` meant a float2 width are `tf32_partial_load_cg_float2` and
-  `tf32_partial_store_cg_float2`. A `names` rule in `make ci-fast` keeps
-  the tree at zero stamps; vendor entry points such as `cuMemAlloc_v2` are
-  exempt and string literals are not scanned, so wire tags such as
-  `MambaBiTf32QualificationV5` stay.
-- Kernel symbols name the product, not the family. The `gemm_bi_` prefix
-  and the `fixed` and `inference` tokens are gone:
-  `gemm_bi_nn_fixed_sm89_tc128_pipeline_bf16` is `nn_sm89_tc128_pipeline_bf16`,
-  `gemm_bi_tn_sm120_tma_128x64_bk32_s3_f16` is `tn_sm120_tma_128x64_bk32_s3_f16`,
-  the base scalar kernels are `{nn,tn,nt}_big` beside `nn_big_bf16`, the
-  SM120 post-bias kernels drop `fixed`, and the device helpers follow
-  (`cp_async_16_zfill`, `is_aligned_16`, `splitk_reduce`). The family is
-  the module that composes a kernel; the two families never share a PTX
-  module.
-- Kernels by instruction tier. Each kernel lives in the folder of the
-  lowest instruction set it needs:
-  `kernels/gemm_bi_triad/{sm80,sm90a,sm100,sm120}/` and
-  `kernels/gemm_bi_inference/{sm80,sm90a,sm100,sm120}/`, file names
-  shortened to what the folder does not say (`sm80/half_tn.cu`,
-  `sm120/tma.cu`). `sm80/` is the tier every supported board runs, the
-  portable kernels and the Ada-found tiles alike; which board measured a
-  tile lives in the dispatcher's tables and cohorts. `sm90a/`, `sm100/`
-  and `sm120/` hold only what needs that architecture. There is no
-  `sm89/` folder: nothing in the tree needs an instruction the A100
-  lacks. Shared headers stay in the family root; the composed-source
-  manifests name the real paths (the inference fragments were still
-  logged under `kernels/gemm_bi_fixed/`).
-- Frozen identities re-pinned in one pass. A rename moves every
-  composed-source, compile-key, artifact and header digest the cohorts
-  pin, and a cohort that no longer matches declines silently.
-  `tools/qualification/identity_mint.rs` prints the identities for the
-  toolkit on PATH without a device and `tools/identity_repin.py` swaps
-  the old values for the new. Every Ada cohort (CUDA 12.8, 13.0, 13.2)
-  and the SM120 cohorts for 12.8 and 13.0 are re-minted exactly; the
-  SM120 13.2 cohort exists twice, for the Ada box's 13.2.51 build and for
-  the 13.2.78 build the rented boards run. The Mamba-1 fold fixture
-  `legacy_fixed.cu` is regenerated from the capacity-32 composition.
-- A toolkit lane. Eight targets need the CUDA toolkit and no device: the
-  cross-architecture compile gates, the identity contract, the TF32
-  selector, the SM90, SM100 and SM120 PTX contracts and two source
-  contracts. They used to run on every board, half an hour of NVRTC on a
-  rented A100 for a result the build box already had. They are the
-  `toolkit` lane now (`qual/run.sh toolkit`), and `qual/run.sh board` is
-  the gate lane without them.
-- The contract lane runs to the end, and board-pinned targets skip on
-  other boards. `qual/run.sh contract` stopped at its first red, which on
-  any board was a target written for another board; everything after it
-  went unrun, `gpu_bf16_parity` included, which needs the `hf` feature
-  the lane did not enable. The lane now builds with `cuda,hf`, runs every
-  target and lists the reds at the end. The Ada gates
-  (`gemm_bi_inference_correctness`, `gemm_bi_inference_sm89_exact_n64`,
-  `gemm_bi_inference_sm89_pipeline`, `gemm_bi_tc`,
-  `gemm_bi_async_allocation`) and the SM120 gates
-  (`gemm_bi_inference_sm120_exact_n64`, `gemm_bi_inference_sm120_sliced`)
-  print `skip:` on any other board instead of failing, so a red in the
-  lane is a broken contract. In 0.7.2 those seven were red on the RTX
-  5090 and on the A100 for that reason alone.
+- Kernel symbols carry no `gemm_bi_` prefix, no `fixed` token and no
+  `_v1` stamp any more; the route identity a program reads through
+  `gemm_route()` and the kernel names in logs show the new names.
+- The test suite runs on any CUDA board: a test written for one board
+  skips on the others instead of failing.
 - A CUDA 13.4 toolkit builds with `CUDARC_CUDA_VERSION=13030` (cudarc
   0.19.9 lists toolkits up to 13.3); the README says so.
 
