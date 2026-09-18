@@ -55,10 +55,9 @@ the mode guide is [docs/gemm-modes.md](docs/gemm-modes.md); the numbers are in
 
 The 0.7.x releases continue optimizing the scan, convolution and norm
 kernels around the GEMMs, and the GEMM kernels toward cuBLAS Fast.
-The boards without kernels of their own run the Ada-measured routes under
-the first-use bit proof: the A100 and the H100 are timed that way in 0.7.3
-(see the changelog's board table); the native Hopper and Blackwell paths,
-each measured on its own board, are the work of the next releases.
+The A100 and the H100 run the shared kernels in 0.7.3 (the changelog has
+the board table); native Hopper and Blackwell kernels come in the next
+releases.
 
 ## Features
 

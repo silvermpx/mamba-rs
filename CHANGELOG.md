@@ -301,16 +301,13 @@ contract.
 
 ### What each board gets in this release
 
-| board | in 0.7.3 |
+| board | 0.7.3 |
 |---|---|
-| RTX 6000 Ada (SM89) | the measured cells under their frozen cohorts: the reference board |
-| RTX 5090 (SM120) | its own kernels on every shape they name, the common tier on the rest; measured, faster than 0.7.2 on every training row |
-| A100 (SM80) | the common tier under the first-use bit proof; measured |
-| H100 / H200 (SM90) | the common tier under the first-use bit proof; the H100 measured on CUDA 13.2; the board's own WGMMA module loads on CUDA 13.3 and newer and has not had its tuning pass |
-| B200 / B300 (SM100) | the tree compiles for them and the common tier serves; the board's own kernels sit behind their first-use self-check; not yet run on the hardware |
-
-The native Hopper and Blackwell paths are the work of the next releases,
-each measured on its own board.
+| RTX 6000 Ada | all the measured kernels; the reference board |
+| RTX 5090 | its own kernels plus the shared ones; faster than 0.7.2 on every training row |
+| A100 | the shared kernels; TF32 now runs on the tensor cores instead of the exact f32 path; faster than 0.7.2 |
+| H100 / H200 | the shared kernels; the Hopper WGMMA kernels come in a later release |
+| B200 / B300 | builds and runs on the shared kernels; not measured yet |
 
 ### Measurements and verification
 
