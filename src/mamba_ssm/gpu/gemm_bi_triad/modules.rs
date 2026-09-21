@@ -11644,32 +11644,32 @@ mod tests {
             (
                 (12, 8),
                 16,
-                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
             ),
             (
                 (12, 8),
                 64,
-                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
             ),
             (
                 (13, 0),
                 16,
-                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
             ),
             (
                 (13, 0),
                 64,
-                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
             ),
             (
                 (13, 2),
                 16,
-                "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
+                "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
             ),
             (
                 (13, 2),
                 64,
-                "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
+                "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
             ),
         ] {
             let live = super::module_source_digest_for_compile(
@@ -15483,26 +15483,26 @@ mod tests {
             (
                 "base",
                 compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap(),
-                588_316,
-                "0069db587259bae91bb80ced886022c67155e3571c6fdb3bc7b16038940e93f2",
+                590_184,
+                "8fea22457053245c3465295d3cd69717452fd44dce2628a1830bedc1dfe4fefe",
             ),
             (
                 "sm_80",
                 compose_module_source_for(ModuleKind::Fixed, "sm_80").unwrap(),
-                695_736,
-                "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7",
+                697_604,
+                "ed45b82ec0a49deaede546707e230c537e6fd45c2a19d2ae89fd1ae358c9c317",
             ),
             (
                 "sm_89",
                 compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap(),
-                695_736,
-                "cc63181f2f0376b79d8eb14a6f6c7d4a6d79b3de9e5a60a65e5423027241adf7",
+                697_604,
+                "ed45b82ec0a49deaede546707e230c537e6fd45c2a19d2ae89fd1ae358c9c317",
             ),
             (
                 "compute_120",
                 compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap(),
-                691_504,
-                "73c8f1c603c878a349eb066d7fcb1670601a50e30f9557584bbd67ea8bcd748a",
+                693_372,
+                "c88e385a33c4e91bebaa0633106e90f64a5280f5bd7967e8c95df6d140bb30c8",
             ),
         ];
 

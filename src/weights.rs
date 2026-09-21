@@ -98,13 +98,22 @@ impl MambaWeights {
 
     /// Initialize weights with Mamba-specific scheme from the paper.
     ///
-    /// - Linear layers: Kaiming uniform (fan_in)
+    /// - Linear layers: the PyTorch default, uniform with bound 1/sqrt(fan_in)
+    /// - dt_proj weight: uniform with bound 1/sqrt(dt_rank), which is the
+    ///   reference's `dt_rank^-0.5 * dt_scale` at the shipped scale 1.0
+    /// - out_proj: the same draw, then divided by sqrt(n_layers) — the
+    ///   GPT-2 prenorm-residual rule the reference applies to this one
+    ///   weight (one residual per layer for Mamba-1)
     /// - A_log: log(1..=d_state) repeated across d_inner (Section 3.5)
-    /// - dt_proj bias: inverse softplus of uniform(dt_min, dt_max) (Section 3.5)
+    /// - dt_proj bias: inverse softplus of log-uniform(dt_min, dt_max) (Section 3.5)
     /// - D: ones
     /// - RMSNorm: ones
-    /// - conv1d: Kaiming uniform
+    /// - conv1d weight and bias: the PyTorch default with fan_in = d_conv
     pub fn init(cfg: &MambaConfig, input_dim: usize, seed: u64) -> Self {
+        /// The reference clamps the log-uniform dt draw from below before
+        /// inverting the softplus; inside the shipped [0.001, 0.1] range the
+        /// clamp never fires, and it keeps a narrower range faithful.
+        const DT_INIT_FLOOR: f32 = 1e-4;
         let mut w = Self::zeros(cfg, input_dim);
         let mut rng = SimpleRng::new(seed);
         let d = cfg.d_model;
@@ -113,30 +122,39 @@ impl MambaWeights {
         let dc = cfg.d_conv;
         let dr = cfg.dt_rank();
 
-        // input_proj: Kaiming uniform(fan_in=input_dim)
-        kaiming_uniform(&mut w.input_proj_w, input_dim, &mut rng);
+        // input_proj: the Linear default on fan_in = input_dim
+        linear_default_uniform(&mut w.input_proj_w, input_dim, &mut rng);
         // input_proj bias: zero (default)
 
+        let residual_rescale = 1.0 / (cfg.n_layers as f64).sqrt() as f32;
+
         for lw in &mut w.layers {
-            // in_proj: Kaiming uniform(fan_in=d_model)
-            kaiming_uniform(&mut lw.in_proj_w, d, &mut rng);
+            // in_proj: the Linear default on fan_in = d_model
+            linear_default_uniform(&mut lw.in_proj_w, d, &mut rng);
 
-            // conv1d: Kaiming uniform(fan_in=d_conv)
-            kaiming_uniform(&mut lw.conv1d_weight, dc, &mut rng);
-            // conv1d bias: zero
+            // conv1d weight and bias: the Conv1d default, fan_in = d_conv
+            // (in_channels/groups * kernel_size = 1 * d_conv). `_init_weights`
+            // zeroes Linear biases only, so the conv bias keeps this draw.
+            linear_default_uniform(&mut lw.conv1d_weight, dc, &mut rng);
+            linear_default_uniform(&mut lw.conv1d_bias, dc, &mut rng);
 
-            // x_proj: Kaiming uniform(fan_in=d_inner)
-            kaiming_uniform(&mut lw.x_proj_w, di, &mut rng);
+            // x_proj: the Linear default on fan_in = d_inner
+            linear_default_uniform(&mut lw.x_proj_w, di, &mut rng);
 
-            // dt_proj: special init (Section 3.5)
-            kaiming_uniform(&mut lw.dt_proj_w, dr, &mut rng);
+            // dt_proj weight: the reference draws uniform(-s, s) with
+            // s = dt_rank^-0.5 * dt_scale to preserve the variance of the
+            // dt branch; at the shipped dt_scale = 1.0 that is exactly the
+            // Linear default on fan_in = dt_rank.
+            linear_default_uniform(&mut lw.dt_proj_w, dr, &mut rng);
             // dt_proj bias: inv_softplus(uniform(0.001, 0.1))
             // dt_proj bias: inv_softplus(log-uniform(dt_min, dt_max))
             // Log-uniform sampling matches official Python init (Section 3.5)
             let log_dt_min = 0.001_f32.ln();
             let log_dt_max = 0.1_f32.ln();
             for b in &mut lw.dt_proj_b {
-                let dt = (rng.next_f32() * (log_dt_max - log_dt_min) + log_dt_min).exp();
+                let dt = (rng.next_f32() * (log_dt_max - log_dt_min) + log_dt_min)
+                    .exp()
+                    .max(DT_INIT_FLOOR);
                 *b = inv_softplus(dt);
             }
 
@@ -147,8 +165,13 @@ impl MambaWeights {
                 }
             }
 
-            // out_proj: Kaiming uniform(fan_in=d_inner)
-            kaiming_uniform(&mut lw.out_proj_w, di, &mut rng);
+            // out_proj: the Linear default, then the GPT-2 prenorm-residual
+            // rescale. Without it every block's residual contribution starts
+            // n_layers times too large in variance.
+            linear_default_uniform(&mut lw.out_proj_w, di, &mut rng);
+            for v in &mut lw.out_proj_w {
+                *v *= residual_rescale;
+            }
 
             // D = ones, norm_weight = ones (already set in zeros())
 
@@ -238,13 +261,118 @@ impl SimpleRng {
     }
 }
 
-fn kaiming_uniform(w: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
-    let bound = (3.0 / fan_in as f32).sqrt();
+/// The reference Linear init: `nn.Linear`'s default `reset_parameters`
+/// is `kaiming_uniform_(a=sqrt(5))`, i.e. gain 1/sqrt(3) and bound
+/// 1/sqrt(fan_in), not the gain-1 bound sqrt(3/fan_in). The official
+/// `_init_weights` re-touches only biases and the embedding, so the
+/// PyTorch default IS the shipped Mamba-1 init. `nn.Conv1d` draws its
+/// weight and its bias from the same rule with fan_in = d_conv.
+/// The Mamba-3 twin carries the identical helper.
+fn linear_default_uniform(w: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
+    let bound = (1.0 / fan_in as f64).sqrt() as f32;
     for v in w.iter_mut() {
         *v = -bound + 2.0 * bound * rng.next_f32();
     }
 }
 
+/// Inverse softplus. `exp_m1` keeps the small-x branch cancellation-free;
+/// the naive `(y.exp() - 1.0).ln()` loses about half the mantissa at the
+/// low end of the init range.
 fn inv_softplus(y: f32) -> f32 {
-    if y > 20.0 { y } else { (y.exp() - 1.0).ln() }
+    if y > 20.0 { y } else { y.exp_m1().ln() }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    fn cfg(n_layers: usize) -> MambaConfig {
+        MambaConfig {
+            d_model: 64,
+            d_state: 16,
+            d_conv: 4,
+            expand: 2,
+            n_layers,
+            ..MambaConfig::default()
+        }
+    }
+
+    fn bound_of(w: &[f32]) -> f32 {
+        w.iter().fold(0.0_f32, |m, v| m.max(v.abs()))
+    }
+
+    #[test]
+    fn linear_weights_draw_the_pytorch_default_bound() {
+        // nn.Linear's reset_parameters is kaiming_uniform_(a=sqrt(5)),
+        // which is uniform with bound 1/sqrt(fan_in). The gain-1 bound
+        // sqrt(3/fan_in) that this crate used gave every projection three
+        // times the reference variance.
+        let c = cfg(2);
+        let w = MambaWeights::init(&c, c.d_model, 11);
+        let lw = &w.layers[0];
+        let expect = |fan_in: usize| 1.0 / (fan_in as f32).sqrt();
+        for (name, buf, fan_in) in [
+            ("in_proj", &lw.in_proj_w, c.d_model),
+            ("x_proj", &lw.x_proj_w, c.d_inner()),
+            ("dt_proj", &lw.dt_proj_w, c.dt_rank()),
+            ("conv1d", &lw.conv1d_weight, c.d_conv),
+        ] {
+            let b = bound_of(buf);
+            let e = expect(fan_in);
+            assert!(
+                b <= e && b > 0.80 * e,
+                "{name}: max |w| = {b}, expected just under {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_proj_carries_the_residual_rescale() {
+        // The reference re-draws out_proj and divides it by
+        // sqrt(n_residuals_per_layer * n_layer); Mamba-1 has one residual
+        // per layer, so the factor is 1/sqrt(n_layer).
+        let c = cfg(16);
+        let w = MambaWeights::init(&c, c.d_model, 12);
+        let b = bound_of(&w.layers[0].out_proj_w);
+        let e = (1.0 / (c.d_inner() as f32).sqrt()) / (c.n_layers as f32).sqrt();
+        assert!(
+            b <= e && b > 0.80 * e,
+            "out_proj: max |w| = {b}, expected just under {e}"
+        );
+    }
+
+    #[test]
+    fn conv1d_bias_is_drawn_not_zeroed() {
+        // _init_weights zeroes nn.Linear biases only; nn.Conv1d keeps its
+        // own uniform(-1/sqrt(d_conv), +1/sqrt(d_conv)) draw, and the bias
+        // enters before the SiLU, so a zero bias starts every channel on
+        // the symmetric part of the activation.
+        let c = cfg(2);
+        let w = MambaWeights::init(&c, c.d_model, 13);
+        let bias = &w.layers[0].conv1d_bias;
+        assert!(
+            bias.iter().any(|v| *v != 0.0),
+            "conv1d bias must not be all zeros"
+        );
+        let b = bound_of(bias);
+        let e = 1.0 / (c.d_conv as f32).sqrt();
+        assert!(b <= e, "conv1d bias: max |b| = {b}, bound {e}");
+    }
+
+    #[test]
+    fn a_log_is_the_s4d_real_ladder() {
+        let c = cfg(1);
+        let w = MambaWeights::init(&c, c.d_model, 14);
+        let lw = &w.layers[0];
+        for d in 0..c.d_inner() {
+            for n in 0..c.d_state {
+                let got = lw.a_log[d * c.d_state + n];
+                let want = ((n + 1) as f32).ln();
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "A_log[{d},{n}] = {got}, want {want}"
+                );
+            }
+        }
+    }
 }

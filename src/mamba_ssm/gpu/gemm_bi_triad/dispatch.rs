@@ -6904,13 +6904,13 @@ impl FixedCopyPlanQualificationIdentity {
 }
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
-    85, 141, 232, 44, 19, 179, 69, 189, 16, 41, 123, 149, 102, 115, 34, 189, 187, 36, 187, 202,
-    247, 249, 247, 216, 120, 219, 247, 100, 87, 45, 35, 225,
+    228, 106, 241, 227, 21, 211, 35, 219, 106, 191, 90, 209, 117, 105, 54, 113, 80, 182, 50, 5,
+    169, 247, 81, 115, 170, 248, 8, 29, 180, 94, 14, 144,
 ];
 
 const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
-    7, 21, 237, 156, 160, 124, 11, 216, 108, 38, 38, 31, 141, 138, 254, 13, 164, 180, 62, 255, 134,
-    38, 156, 198, 115, 93, 193, 160, 142, 117, 161, 207,
+    115, 17, 29, 85, 12, 211, 55, 120, 203, 161, 47, 39, 235, 56, 204, 139, 48, 228, 23, 180, 11,
+    100, 105, 243, 243, 109, 220, 56, 21, 224, 220, 171,
 ];
 
 /// Exact Fixed identities from the six initial complete-module compilations,
@@ -6921,17 +6921,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            166, 47, 54, 58, 28, 157, 17, 104, 245, 216, 173, 230, 246, 205, 200, 93, 110, 47, 99,
-            141, 133, 109, 212, 229, 169, 65, 90, 100, 55, 147, 18, 111,
+            40, 38, 84, 166, 63, 118, 16, 227, 231, 122, 248, 220, 26, 188, 177, 61, 237, 52, 57,
+            90, 237, 253, 178, 38, 114, 107, 155, 157, 217, 66, 243, 246,
         ],
         artifact_digest: [
-            246, 50, 31, 65, 116, 41, 65, 48, 142, 233, 201, 224, 214, 188, 11, 242, 152, 178, 19,
-            70, 255, 45, 215, 199, 159, 1, 244, 138, 68, 152, 230, 113,
+            48, 83, 107, 208, 145, 221, 237, 54, 223, 79, 190, 228, 100, 240, 151, 149, 253, 214,
+            106, 122, 60, 135, 46, 108, 179, 206, 192, 180, 64, 5, 242, 211,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            156, 11, 63, 239, 63, 56, 85, 5, 121, 3, 20, 243, 33, 89, 144, 38, 113, 229, 86, 161,
-            9, 18, 51, 138, 125, 233, 196, 26, 217, 67, 57, 129,
+            41, 90, 28, 248, 109, 177, 114, 166, 101, 88, 33, 169, 246, 40, 246, 75, 177, 57, 3,
+            231, 218, 127, 19, 175, 21, 243, 133, 66, 41, 157, 25, 172,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6941,17 +6941,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            106, 147, 189, 39, 240, 97, 195, 233, 114, 233, 150, 255, 157, 229, 233, 185, 48, 117,
-            175, 113, 39, 54, 213, 74, 20, 229, 227, 176, 26, 143, 17, 228,
+            232, 157, 8, 230, 245, 198, 87, 201, 15, 189, 133, 47, 195, 181, 46, 144, 211, 254,
+            183, 9, 91, 230, 9, 58, 41, 152, 145, 93, 63, 57, 196, 219,
         ],
         artifact_digest: [
-            21, 195, 76, 153, 30, 245, 211, 144, 4, 203, 60, 79, 92, 4, 211, 149, 79, 227, 242, 25,
-            89, 24, 51, 111, 130, 222, 176, 9, 153, 85, 29, 70,
+            199, 51, 148, 167, 38, 145, 169, 213, 65, 27, 87, 115, 57, 69, 247, 254, 13, 109, 196,
+            198, 236, 53, 133, 214, 87, 161, 11, 100, 241, 142, 119, 132,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            62, 41, 42, 120, 186, 164, 8, 224, 221, 190, 250, 70, 90, 58, 135, 197, 230, 213, 150,
-            46, 204, 224, 39, 182, 201, 96, 31, 74, 107, 141, 25, 52,
+            95, 72, 218, 83, 232, 0, 212, 34, 241, 28, 99, 193, 37, 110, 226, 125, 210, 6, 31, 25,
+            126, 59, 205, 91, 114, 143, 133, 18, 228, 74, 197, 153,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6961,17 +6961,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            191, 159, 199, 215, 97, 69, 96, 59, 185, 15, 19, 151, 197, 153, 61, 57, 133, 228, 234,
-            244, 29, 233, 226, 179, 6, 48, 192, 200, 155, 72, 34, 144,
+            150, 113, 145, 232, 99, 212, 108, 81, 23, 216, 108, 167, 29, 147, 58, 37, 156, 181, 43,
+            102, 253, 226, 168, 137, 169, 39, 136, 158, 13, 2, 87, 153,
         ],
         artifact_digest: [
-            74, 195, 55, 215, 88, 86, 186, 189, 56, 80, 81, 173, 158, 245, 6, 138, 187, 19, 103,
-            94, 23, 4, 201, 77, 3, 154, 64, 130, 209, 226, 253, 168,
+            29, 145, 211, 101, 64, 243, 47, 108, 137, 22, 198, 148, 235, 117, 224, 190, 140, 112,
+            250, 179, 89, 41, 112, 176, 171, 69, 120, 30, 171, 37, 19, 160,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            61, 0, 75, 92, 39, 246, 144, 171, 11, 189, 148, 32, 172, 238, 92, 155, 226, 212, 106,
-            252, 10, 221, 253, 38, 9, 110, 92, 220, 52, 19, 143, 239,
+            65, 180, 50, 8, 184, 220, 49, 112, 66, 46, 53, 126, 16, 203, 46, 224, 202, 8, 75, 10,
+            147, 239, 224, 31, 241, 212, 227, 195, 159, 211, 60, 194,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6981,8 +6981,8 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            92, 210, 5, 249, 80, 191, 29, 0, 6, 240, 137, 29, 131, 95, 89, 30, 125, 7, 105, 227,
-            14, 199, 1, 219, 89, 174, 242, 171, 248, 204, 148, 234,
+            62, 106, 196, 94, 150, 126, 236, 129, 124, 167, 163, 234, 112, 121, 152, 206, 148, 171,
+            60, 231, 206, 79, 211, 92, 158, 153, 103, 10, 209, 12, 50, 217,
         ],
         artifact_digest: [
             158, 250, 100, 169, 63, 150, 216, 122, 162, 206, 190, 241, 203, 158, 124, 66, 11, 185,
@@ -6990,8 +6990,8 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            211, 118, 236, 166, 255, 30, 25, 79, 89, 65, 31, 8, 213, 85, 248, 95, 22, 112, 194, 21,
-            62, 183, 240, 190, 137, 173, 32, 247, 46, 224, 17, 49,
+            183, 131, 32, 166, 164, 22, 77, 115, 215, 224, 240, 101, 40, 121, 115, 97, 216, 132,
+            213, 100, 168, 50, 100, 145, 188, 188, 120, 143, 170, 210, 18, 158,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -7001,17 +7001,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            242, 241, 65, 9, 80, 83, 234, 58, 192, 47, 68, 248, 178, 86, 170, 232, 52, 81, 149,
-            182, 85, 179, 178, 184, 79, 182, 206, 153, 91, 115, 136, 93,
+            64, 234, 181, 34, 254, 181, 41, 162, 25, 207, 72, 187, 38, 9, 49, 174, 162, 202, 121,
+            227, 239, 11, 140, 167, 222, 173, 137, 58, 225, 223, 63, 24,
         ],
         artifact_digest: [
-            123, 105, 105, 54, 46, 229, 138, 98, 95, 229, 73, 80, 102, 205, 44, 140, 32, 181, 51,
-            51, 30, 111, 88, 33, 186, 61, 69, 111, 205, 59, 93, 59,
+            131, 208, 156, 113, 96, 92, 98, 221, 166, 89, 8, 187, 182, 255, 28, 237, 233, 149, 91,
+            19, 107, 164, 240, 185, 24, 217, 4, 77, 77, 30, 69, 228,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
-            35, 69, 209, 52, 231, 166, 253, 157, 43, 184, 57, 192, 53, 72, 172, 25, 129, 229, 172,
-            78, 195, 93, 120, 238, 98, 65, 107, 170, 43, 197, 44, 224,
+            156, 37, 38, 105, 194, 169, 155, 210, 128, 109, 239, 74, 65, 38, 170, 164, 62, 150, 7,
+            243, 164, 210, 107, 112, 158, 60, 159, 9, 61, 122, 244, 54,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -7021,17 +7021,17 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
     FixedCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            65, 188, 12, 126, 125, 44, 102, 16, 112, 37, 250, 41, 52, 83, 7, 102, 117, 231, 73,
-            205, 227, 252, 51, 98, 38, 112, 172, 135, 112, 0, 18, 56,
+            244, 82, 102, 107, 95, 169, 215, 120, 179, 137, 166, 13, 212, 20, 14, 130, 251, 162,
+            183, 173, 155, 17, 83, 117, 236, 143, 120, 213, 30, 86, 201, 218,
         ],
         artifact_digest: [
-            26, 124, 84, 89, 60, 250, 163, 109, 225, 179, 97, 147, 55, 75, 139, 33, 151, 254, 167,
-            238, 32, 190, 66, 173, 151, 117, 234, 242, 127, 20, 167, 31,
+            57, 155, 175, 93, 19, 222, 42, 191, 85, 198, 183, 206, 85, 176, 97, 9, 104, 146, 163,
+            110, 155, 78, 19, 186, 32, 82, 251, 4, 105, 154, 91, 115,
         ],
         source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
-            86, 173, 15, 240, 15, 244, 220, 134, 253, 69, 160, 193, 87, 159, 82, 232, 25, 66, 52,
-            128, 137, 198, 183, 83, 15, 15, 43, 79, 53, 141, 4, 46,
+            245, 204, 65, 250, 5, 45, 192, 124, 0, 78, 252, 37, 44, 87, 101, 38, 109, 151, 163, 65,
+            14, 251, 78, 249, 166, 229, 159, 54, 190, 91, 84, 79,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -8491,10 +8491,10 @@ mod scalar_wave_policy_tests {
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
-                fixed_key: "a62f363a1c9d1168f5d8ade6f6cdc85d6e2f638d856dd4e5a9415a643793126f",
-                fixed_artifact: "f6321f41742941308ee9c9e0d6bc0bf298b21346ff2dd7c79f01f48a4498e671",
-                fixed_header: "9c0b3fef3f385505790314f32159902671e556a10912338a7de9c41ad9433981",
+                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                fixed_key: "282654a63f7610e3e77af8dc1abcb13ded34395aedfdb226726b9b9dd942f3f6",
+                fixed_artifact: "30536bd091dded36df4fbee464f09795fdd66a7a3c872e6cb3cec0b44005f2d3",
+                fixed_header: "295a1cf86db172a6655821a9f628f64bb13903e7da7f13af15f38542299d19ac",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -8502,10 +8502,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
-                fixed_key: "6a93bd27f061c3e972e996ff9de5e9b93075af712736d54a14e5e3b01a8f11e4",
-                fixed_artifact: "15c34c991ef5d39004cb3c4f5c04d3954fe3f2195918336f82deb00999551d46",
-                fixed_header: "3e292a78baa408e0ddbefa465a3a87c5e6d5962ecce027b6c9601f4a6b8d1934",
+                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                fixed_key: "e89d08e6f5c657c90fbd852fc3b52e90d3feb7095be6093a2998915d3f39c4db",
+                fixed_artifact: "c73394a72691a9d5411b57733945f7fe0d6dc4c6ec3585d657a10b64f18e7784",
+                fixed_header: "5f48da53e800d422f11c63c1256ee27dd2061f197e3bcd5b728f8512e44ac599",
                 scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
                 scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
                 scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
@@ -8513,10 +8513,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
-                fixed_key: "bf9fc7d76145603bb90f1397c5993d3985e4eaf41de9e2b30630c0c89b482290",
-                fixed_artifact: "4ac337d75856babd385051ad9ef5068abb13675e1704c94d039a4082d1e2fda8",
-                fixed_header: "3d004b5c27f690ab0bbd9420acee5c9be2d46afc0addfd26096e5cdc34138fef",
+                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                fixed_key: "967191e863d46c5117d86ca71d933a259cb52b66fde2a889a927889e0d025799",
+                fixed_artifact: "1d91d36540f32f6c8916c694eb75e0be8c70fab3592970b0ab45781eab2513a0",
+                fixed_header: "41b43208b8dc3170422e357e10cb2ee0ca084b0a93efe01ff1d4e3c39fd33cc2",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -8524,10 +8524,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
-                fixed_key: "5cd205f950bf1d0006f0891d835f591e7d0769e30ec701db59aef2abf8cc94ea",
+                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                fixed_key: "3e6ac45e967eec817ca7a3ea707998ce94ab3ce7ce4fd35c9e99670ad10c32d9",
                 fixed_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
-                fixed_header: "d376eca6ff1e194f59411f08d555f85f1670c2153eb7f0be89ad20f72ee01131",
+                fixed_header: "b78320a6a4164d73d7e0f06528797361d884d564a8326491bcbc788faad2129e",
                 scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
                 scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
                 scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
@@ -8535,10 +8535,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "558de82c13b345bd10297b95667322bdbb24bbcaf7f9f7d878dbf764572d23e1",
-                fixed_key: "f2f141095053ea3ac02f44f8b256aae8345195b655b3b2b84fb6ce995b73885d",
-                fixed_artifact: "7b6969362ee58a625fe5495066cd2c8c20b533331e6f5821ba3d456fcd3b5d3b",
-                fixed_header: "2345d134e7a6fd9d2bb839c03548ac1981e5ac4ec35d78ee62416baa2bc52ce0",
+                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                fixed_key: "40eab522feb529a219cf48bb260931aea2ca79e3ef0b8ca7dead893ae1df3f18",
+                fixed_artifact: "83d09c71605c62dda65908bbb6ff1cede9955b136ba4f0b918d9044d4d1e45e4",
+                fixed_header: "9c252669c2a99bd2806def4a4126aaa43e9607f3a4d26b709e3c9f093d7af436",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
@@ -8546,10 +8546,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "0715ed9ca07c0bd86c26261f8d8afe0da4b43eff86269cc6735dc1a08e75a1cf",
-                fixed_key: "41bc0c7e7d2c66107025fa293453076675e749cde3fc33622670ac8770001238",
-                fixed_artifact: "1a7c54593cfaa36de1b36193374b8b2197fea7ee20be42ad9775eaf27f14a71f",
-                fixed_header: "56ad0ff00ff4dc86fd45a0c1579f52e81942348089c6b7530f0f2b4f358d042e",
+                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                fixed_key: "f452666b5fa9d778b389a60dd4140e82fba2b7ad9b115375ec8f78d51e56c9da",
+                fixed_artifact: "399baf5d13de2abf55c6b7ce55b061096892a36e9b4e13ba2052fb04699a5b73",
+                fixed_header: "f5cc41fa052dc07c004efc252c5765266d97a3410efb4ef9a6e59f36be5b544f",
                 scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
                 scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
                 scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",

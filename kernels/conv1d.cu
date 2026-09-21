@@ -196,6 +196,21 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
              * backward reconstructs every later window from x_branch. */   \
             conv_states_saved[state_base + k] = win[k];                      \
         }                                                                    \
+        /* Carry-out, written by the block that owns the carry-in and      \
+         * never by another: after T steps the serial walk holds           \
+         * win[k] = x[T - d_conv + k], and the surviving tail of the       \
+         * incoming window where that index is negative. Reading the       \
+         * whole closed form before storing keeps this thread's own        \
+         * carry-in intact. No other block reads or writes state, so       \
+         * the launch carries no cross-block order. */                     \
+        float carry[8];                                                      \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            int th = T_len - d_conv + k;                                     \
+            carry[k] = (th >= 0)                                             \
+                ? to_f(x_branch[(b * T_len + th) * x_stride + d])            \
+                : state[state_base + k + T_len];                             \
+        }                                                                    \
+        for (int k = 0; k < d_conv; k++) state[state_base + k] = carry[k];   \
     } else {                                                                 \
         /* Halo: the serial walk's window after step t0-1 holds           \
          * win[k] = x[t0 - d_conv + k] (win[0] is about to shift out).   \
@@ -214,9 +229,6 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
             val += win[k] * weight[d * d_conv + k];                          \
         }                                                                    \
         u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
-    }                                                                        \
-    if (t_end == T_len) {                                                    \
-        for (int k = 0; k < d_conv; k++) state[state_base + k] = win[k];     \
     }                                                                        \
 }
 
@@ -252,6 +264,21 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
         for (int k = 0; k < d_conv; k++) {                                   \
             win[k] = state[state_base + k];                                  \
         }                                                                    \
+        /* Carry-out, written by the block that owns the carry-in and      \
+         * never by another: after T steps the serial walk holds           \
+         * win[k] = x[T - d_conv + k], and the surviving tail of the       \
+         * incoming window where that index is negative. Reading the       \
+         * whole closed form before storing keeps this thread's own        \
+         * carry-in intact. No other block reads or writes state, so       \
+         * the launch carries no cross-block order. */                     \
+        float carry[8];                                                      \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            int th = T_len - d_conv + k;                                     \
+            carry[k] = (th >= 0)                                             \
+                ? to_f(x_branch[(b * T_len + th) * x_stride + d])            \
+                : state[state_base + k + T_len];                             \
+        }                                                                    \
+        for (int k = 0; k < d_conv; k++) state[state_base + k] = carry[k];   \
     } else {                                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
             int th = t0 - d_conv + k;                                        \
@@ -267,9 +294,6 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
             val += win[k] * weight[d * d_conv + k];                          \
         }                                                                    \
         u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
-    }                                                                        \
-    if (t_end == T_len) {                                                    \
-        for (int k = 0; k < d_conv; k++) state[state_base + k] = win[k];     \
     }                                                                        \
 }
 

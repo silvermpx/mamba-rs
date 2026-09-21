@@ -229,6 +229,8 @@ pub struct BackwardOpts {
     /// and starves the representational columns. Honored by the M3 f32
     /// and mixed lanes; the M1 lanes ignore it (their dt path has no
     /// such route).
+    /// Read by the Mamba-3 trainer only: Mamba-1 has no control region
+    /// and leaves this unset regardless of what a caller passes.
     pub control_clip_max_norm: Option<f32>,
 }
 
@@ -672,12 +674,12 @@ impl MambaTrainer {
         }
     }
 
-    /// Toggle the reference-faithful AdamW no-decay parameter groups
-    /// (`a_log` / `d_param` / `dt_proj_b` / RMSNorm scales get
-    /// `weight_decay = 0`, matching the reference `_no_weight_decay`
-    /// marks — decaying `a_log` pulls every decay rate toward A = -1 over
-    /// long runs). Default OFF preserves the historical decay-everything
-    /// behavior bit-for-bit. Errs while a captured graph exists: the decay
+    /// Toggle the AdamW no-decay parameter groups (`a_log` / `d_param` /
+    /// `dt_proj_b` / RMSNorm scales get `weight_decay = 0`; the reference
+    /// marks `A_log` and `D`, the bias and the norm scales follow the usual
+    /// practice; decaying `a_log` pulls every decay rate toward A = -1 over
+    /// long runs). Default ON since 0.7.4; OFF reproduces the
+    /// decay-everything numbers of 0.7.3 and earlier. Errs while a captured graph exists: the decay
     /// coefficient is baked by value into the captured per-tensor AdamW
     /// launches.
     pub fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
@@ -1431,7 +1433,8 @@ impl MambaTrainerMixed {
                         .into(),
                 );
             }
-            let m = self.backward_split_f16(d_temporal, opts.clip_max_norm)?;
+            let m =
+                self.backward_split_f16(d_temporal, opts.clip_max_norm, opts.step_skip_above)?;
             return Ok(m);
         }
 
@@ -1528,6 +1531,7 @@ impl MambaTrainerMixed {
         &mut self,
         d_temporal: &[f32],
         clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.staged_upload(2, d_temporal)?;
@@ -1570,6 +1574,7 @@ impl MambaTrainerMixed {
             .read(&self.ctx.stream)?
             != 0;
         let mut grad_norm = None;
+        let mut skipped = false;
         if !overflow {
             let unscale = self.unscale_factor.as_ref().expect("unscale buf");
             scale_grads_skip_gpu(
@@ -1582,18 +1587,24 @@ impl MambaTrainerMixed {
             if let Some(c) = clip_max_norm {
                 grad_norm = Some(self.apply_clip(c)?);
             }
-            self.eager_optimize()?;
+            // Spike skip: a window whose PRE-clip norm exceeds the threshold
+            // is discarded whole, as in the f32 and bf16 lanes.
+            skipped = matches!((grad_norm, step_skip_above), (Some(n), Some(thr)) if n > thr);
+            if !skipped {
+                self.eager_optimize()?;
+            }
         }
         self.scaler.as_mut().expect("f16 scaler").update(overflow);
-        let final_step = if overflow {
+        let stepped = !overflow && !skipped;
+        let final_step = if stepped {
+            next_step
+        } else {
             self.adam.step = prev_step;
             prev_step
-        } else {
-            next_step
         };
         Ok(BackwardMetrics {
             step: final_step,
-            optimizer_stepped: !overflow,
+            optimizer_stepped: stepped,
             grad_norm,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),

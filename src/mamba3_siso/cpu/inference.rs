@@ -6,6 +6,12 @@
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569).
 //! Reference: `mamba3_siso_step.py` lines 128-222.
 
+/// Widest state the decode step stages on the stack, matching
+/// `cpu/prefill.rs`, `cpu/forward.rs` and `cpu/backward.rs`; the config
+/// admits `d_state` up to this value.
+const MAX_DS: usize = 256;
+const MAX_ANGLES: usize = MAX_DS / 2;
+
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
@@ -144,7 +150,7 @@ pub fn mamba3_layer_step(
     // 6. Per-head: bias + RoPE + A/DT + trapezoidal SSM
     // tanh(angles_raw) * pi depends only on the angle index — hoist out of
     // the head loop (it was recomputed nh times per step).
-    let mut tanh_pi = [0.0_f32; 64];
+    let mut tanh_pi = [0.0_f32; MAX_ANGLES];
     if n_rope > 0 {
         let pi = std::f32::consts::PI;
         for (a, tp) in tanh_pi[..n_rope].iter_mut().enumerate() {
@@ -163,8 +169,8 @@ pub fn mamba3_layer_step(
         let dt_val = super::forward::softplus(scratch.proj[dd_dt_off + h] + lw.dt_bias[h]);
 
         // Per-head B/C with bias
-        let mut k_local = [0.0_f32; 64];
-        let mut q_local = [0.0_f32; 64];
+        let mut k_local = [0.0_f32; MAX_DS];
+        let mut q_local = [0.0_f32; MAX_DS];
         for n in 0..ds {
             k_local[n] = scratch.b_normed[g * ds + n] + lw.b_bias[h * ds + n];
             q_local[n] = scratch.c_normed[g * ds + n] + lw.c_bias[h * ds + n];

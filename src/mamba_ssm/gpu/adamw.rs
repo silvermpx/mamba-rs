@@ -142,15 +142,18 @@ pub struct GpuAdamW {
     pub beta2: f32,
     pub eps: f32,
     pub weight_decay: f32,
-    /// Reference-faithful no-decay parameter groups. When true, the
-    /// per-tensor step functions ([`step_m1_capturable`] /
-    /// [`step_m3_capturable`]) pass `weight_decay = 0` for the parameters
-    /// the reference implementation marks `_no_weight_decay` — M1: `a_log`,
-    /// `d_param`, `dt_proj_b` and the RMSNorm scales; M3: `dt_bias`,
-    /// `d_param` and every norm scale. Decaying `a_log` pulls all decay
-    /// rates toward A = -1 over long runs. Default `false` preserves the
-    /// historical decay-everything behavior bit-for-bit; costs nothing
-    /// either way (the decay coefficient is a per-launch scalar).
+    /// No-decay parameter groups. When true, the per-tensor step functions
+    /// ([`step_m1_capturable`] / [`step_m3_capturable`]) pass
+    /// `weight_decay = 0` for M1 `a_log`, `d_param`, `dt_proj_b` and the
+    /// RMSNorm scales, and for M3 `dt_bias`, `d_param` and every norm
+    /// scale. The reference marks `A_log` and `D` (Mamba-1) and `dt_bias`
+    /// and `D` (Mamba-3) `_no_weight_decay`; the remaining bias and the
+    /// norm scales follow the usual AdamW practice of never decaying
+    /// biases and normalization weights. Decaying `a_log` pulls every
+    /// decay rate toward A = -1 over long runs. Default `true`; set it to
+    /// `false` to reproduce the decay-everything numbers of 0.7.3 and
+    /// earlier. Costs nothing either way (the decay coefficient is a
+    /// per-launch scalar).
     pub reference_no_decay: bool,
 }
 
@@ -170,7 +173,7 @@ impl GpuAdamW {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 1e-2,
-            reference_no_decay: false,
+            reference_no_decay: true,
         })
     }
 

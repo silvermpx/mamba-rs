@@ -32,6 +32,10 @@ struct RawConfig {
     vocab_size: Option<usize>,
     // HF-specific flags
     tie_word_embeddings: Option<bool>,
+    // The original format spells the same flag `tie_embeddings` and pads
+    // the vocabulary itself; `save_pretrained` writes both keys.
+    tie_embeddings: Option<bool>,
+    pad_vocab_size_multiple: Option<usize>,
     use_bias: Option<bool>,
     use_conv_bias: Option<bool>,
     // (residual_in_fp32 intentionally not parsed — serde skips unknown
@@ -73,6 +77,20 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     let (d_model, n_layers, d_state, d_conv) = extract_dims(&raw)?;
     let expand = raw.expand.unwrap_or(2);
     let vocab_size = raw.vocab_size.ok_or("missing vocab_size in config.json")?;
+    // The original format stores the UNPADDED vocabulary and rounds it up
+    // before allocating the embedding and the head, so a checkpoint saved
+    // with the default 50277 carries 50280 rows. The HF format stores the
+    // final row count, so it is left alone.
+    let is_original = raw.model_type.is_none() && raw.hidden_size.is_none();
+    let vocab_size = if is_original {
+        let multiple = raw.pad_vocab_size_multiple.unwrap_or(8);
+        match multiple {
+            0 | 1 => vocab_size,
+            m => vocab_size.div_ceil(m) * m,
+        }
+    } else {
+        vocab_size
+    };
 
     if let Some(tsr) = raw.time_step_rank {
         let expected = d_model.div_ceil(16);
@@ -96,7 +114,10 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         d_conv,
         expand,
         vocab_size,
-        tie_word_embeddings: raw.tie_word_embeddings.unwrap_or(true),
+        tie_word_embeddings: raw
+            .tie_word_embeddings
+            .or(raw.tie_embeddings)
+            .unwrap_or(true),
         use_bias: raw.use_bias.unwrap_or(false),
         use_conv_bias: raw.use_conv_bias.unwrap_or(true),
         rms_norm_eps,
@@ -141,6 +162,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn original_format_tie_embeddings_is_honoured() {
+        // The original format spells the flag `tie_embeddings`; reading
+        // only the HF spelling defaulted an untied checkpoint to tied and
+        // dropped the lm_head that had just been read.
+        let json = br#"{"d_model":64,"n_layer":2,"vocab_size":128,"tie_embeddings":false}"#;
+        let cfg = parse_config_json(json).unwrap();
+        assert!(!cfg.tie_word_embeddings);
+
+        let tied = br#"{"d_model":64,"n_layer":2,"vocab_size":128,"tie_embeddings":true}"#;
+        assert!(parse_config_json(tied).unwrap().tie_word_embeddings);
+
+        // Absent in both spellings: the reference default is tied.
+        let silent = br#"{"d_model":64,"n_layer":2,"vocab_size":128}"#;
+        assert!(parse_config_json(silent).unwrap().tie_word_embeddings);
+    }
+
+    #[test]
+    fn original_format_pads_the_vocabulary() {
+        // The original format stores the unpadded vocabulary and rounds it
+        // up before allocating the embedding, so the reference's own
+        // default lands 50280 rows on disk against a config that says
+        // 50277.
+        let json = br#"{"d_model":768,"n_layer":24,"vocab_size":50277}"#;
+        assert_eq!(parse_config_json(json).unwrap().vocab_size, 50280);
+
+        let explicit =
+            br#"{"d_model":768,"n_layer":24,"vocab_size":50277,"pad_vocab_size_multiple":16}"#;
+        assert_eq!(parse_config_json(explicit).unwrap().vocab_size, 50288);
+
+        // The HF format stores the final row count and must not be padded.
+        let hf = br#"{"model_type":"mamba","hidden_size":768,"num_hidden_layers":24,"state_size":16,"conv_kernel":4,"vocab_size":50277}"#;
+        assert_eq!(parse_config_json(hf).unwrap().vocab_size, 50277);
+    }
+
+    #[test]
     fn test_parse_hf_native_config() {
         let json = br#"{
             "model_type": "mamba",
@@ -176,7 +232,9 @@ mod tests {
         assert_eq!(cfg.n_layers, 24);
         assert_eq!(cfg.d_state, 16);
         assert_eq!(cfg.d_conv, 4);
-        assert_eq!(cfg.vocab_size, 50257);
+        // 50257 is not a multiple of the default 8: the reference model
+        // built from this config holds 50264 embedding rows.
+        assert_eq!(cfg.vocab_size, 50264);
     }
 
     #[test]

@@ -454,9 +454,10 @@ impl Mamba3Trainer {
         }
     }
 
-    /// Toggle the reference-faithful AdamW no-decay parameter groups
-    /// (dt bias / `d_param` / every norm scale get `weight_decay = 0`).
-    /// Default OFF preserves the historical behavior bit-for-bit. Errs
+    /// Toggle the AdamW no-decay parameter groups (dt bias / `d_param` /
+    /// every norm scale get `weight_decay = 0`; the reference marks the dt
+    /// bias and `D`, the norm scales follow the usual practice). Default
+    /// ON since 0.7.4; OFF reproduces the numbers of 0.7.3 and earlier. Errs
     /// while a captured graph exists (the decay coefficient is baked by
     /// value into the captured per-tensor launches). Mirrors
     /// `MambaTrainer::set_reference_no_decay`.
@@ -1231,21 +1232,27 @@ impl Mamba3TrainerMixed {
                 self.overflow_flag.as_mut().unwrap(),
                 &self.grads.flat,
             )?;
-            let unscale = self.unscale_factor.as_ref().unwrap();
-            scale_grads_skip_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &mut self.grads.flat,
-                unscale,
-            )?;
-            self.eager_optimize()?;
             let overflow = self
                 .overflow_flag
                 .as_ref()
                 .unwrap()
                 .read(&self.ctx.stream)?
                 != 0;
+            if !overflow {
+                // Clean step only: unscale, then optimize. On overflow the
+                // parameters, both moments and the step counter stay where
+                // the previous step left them, which is what GradScaler
+                // does. The M1 twin reads the flag in the same place.
+                let unscale = self.unscale_factor.as_ref().unwrap();
+                scale_grads_skip_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &mut self.grads.flat,
+                    unscale,
+                )?;
+                self.eager_optimize()?;
+            }
             self.scaler.as_mut().expect("f16 scaler").update(overflow);
             (next_step, overflow, false)
         };
@@ -1630,7 +1637,12 @@ impl Mamba3TrainerMixed {
                         .into(),
                 );
             }
-            let m = self.backward_split_f16(d_temporal, opts.clip_max_norm)?;
+            let m = self.backward_split_f16(
+                d_temporal,
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )?;
             return Ok(m);
         }
 
@@ -1723,6 +1735,8 @@ impl Mamba3TrainerMixed {
         &mut self,
         d_temporal: &[f32],
         clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         {
@@ -1765,6 +1779,7 @@ impl Mamba3TrainerMixed {
             .read(&self.ctx.stream)?
             != 0;
         let mut grad_norm = None;
+        let mut skipped = false;
         if !overflow {
             let unscale = self.unscale_factor.as_ref().expect("unscale buf");
             scale_grads_skip_gpu(
@@ -1774,21 +1789,40 @@ impl Mamba3TrainerMixed {
                 &mut self.grads.flat,
                 unscale,
             )?;
+            // Control-channel clip first, then the global one: the same
+            // order the f32 and bf16 lanes use in `apply_step_inner`.
+            if let Some(cb) = control_clip_max_norm {
+                let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+                clip_region_device(
+                    &self.ctx,
+                    &mut self.grads.flat,
+                    &mut self.clip_partials,
+                    &mut self.clip_scratch,
+                    geom,
+                    cb,
+                )?;
+            }
             if let Some(c) = clip_max_norm {
                 grad_norm = Some(self.apply_clip(c)?);
             }
-            self.eager_optimize()?;
+            // Spike skip: a window whose PRE-clip norm exceeds the threshold
+            // is discarded whole, exactly as in the other lanes.
+            skipped = matches!((grad_norm, step_skip_above), (Some(n), Some(thr)) if n > thr);
+            if !skipped {
+                self.eager_optimize()?;
+            }
         }
         self.scaler.as_mut().expect("f16 scaler").update(overflow);
-        let final_step = if overflow {
+        let stepped = !overflow && !skipped;
+        let final_step = if stepped {
+            next_step
+        } else {
             self.adam.step = prev_step;
             prev_step
-        } else {
-            next_step
         };
         Ok(BackwardMetrics {
             step: final_step,
-            optimizer_stepped: !overflow,
+            optimizer_stepped: stepped,
             grad_norm,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),

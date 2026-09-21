@@ -444,7 +444,12 @@ fn test_finite_diff_dt_proj_bias() {
         .map(|i| (i as f32) * 0.001)
         .collect();
 
-    let eps = 1e-3_f32;
+    // The f32 central-difference step that balances roundoff against
+    // truncation sits near the cube root of the f32 epsilon, about 5e-3.
+    // At 1e-3 the rounding of the forward swamps a dt-bias gradient of
+    // this size (measured: the numerical estimate drifts 50 to 300 percent
+    // off the analytical value), while at 1e-2 it lands within 2 percent.
+    let eps = 1e-2_f32;
 
     // Find a dt_proj_b index with non-saturated softplus (gradient != 0).
     // dt_proj_b init = inv_softplus(exp(log_uniform)) — some elements have
@@ -515,13 +520,17 @@ fn test_finite_diff_dt_proj_bias() {
     // Numerical gradient for that element
     let mut tw_plus = tw.clone();
     tw_plus.layers[0].dt_proj_b[param_idx] += eps;
-    let (_, loss_plus) = run_forward(&tw_plus, &dims, &input);
+    let (temporal_plus, _) = run_forward(&tw_plus, &dims, &input);
 
     let mut tw_minus = tw.clone();
     tw_minus.layers[0].dt_proj_b[param_idx] -= eps;
-    let (_, loss_minus) = run_forward(&tw_minus, &dims, &input);
+    let (temporal_minus, _) = run_forward(&tw_minus, &dims, &input);
 
-    let numerical_grad = (loss_plus - loss_minus) / (2.0 * eps);
+    // Sum the loss in f64: the difference of two f32 sums of every output
+    // loses the small change this derivative is made of.
+    let loss_plus: f64 = temporal_plus.iter().map(|v| *v as f64).sum();
+    let loss_minus: f64 = temporal_minus.iter().map(|v| *v as f64).sum();
+    let numerical_grad = ((loss_plus - loss_minus) / (2.0 * eps as f64)) as f32;
 
     let rel_err = if numerical_grad.abs() > 1e-8 {
         ((analytical_grad - numerical_grad) / numerical_grad).abs()
@@ -529,13 +538,11 @@ fn test_finite_diff_dt_proj_bias() {
         (analytical_grad - numerical_grad).abs()
     };
 
-    // 0.15: f32 central finite differences carry
-    // ~10% truncation+roundoff error on this loss surface, and platform
-    // libm ULP spread (Windows ucrt exp/ln vs glibc/macOS) shifts the
-    // numerical estimate across the old margin — Windows CI measured
-    // rel_err=0.1174 while Linux/macOS pass the same code. The analytical
-    // gradient itself is cross-validated by the CPU<->GPU parity suites
-    // and the 30-step convergence tests on real checkpoints.
+    // 0.15 leaves room for the platform libm spread (Windows ucrt exp/ln
+    // against glibc and macOS), which moves the numerical estimate by a
+    // few percent. The measured error at this step is about 2 percent. The
+    // analytical gradient itself is cross-validated by the CPU<->GPU parity
+    // suites and the 30-step convergence tests on real checkpoints.
     assert!(
         rel_err < 0.15,
         "finite-diff gradient check failed for dt_proj_b[{param_idx}]: \

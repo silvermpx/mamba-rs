@@ -294,6 +294,49 @@ fn test_m3_sequence_matches_steps() {
     }
 }
 
+#[test]
+fn m3_decode_step_runs_at_the_reference_default_d_state() {
+    // The decode step used to stage B, C and the angles in 64-float stack
+    // arrays while the config admits d_state up to 256 and the prefill,
+    // the training forward and the backward all stage 256. At the
+    // reference's own default width the step indexed past the end and
+    // panicked, and no test reached it because every other M3 test runs
+    // d_state in {4, 8, 16}.
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 128,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 1,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: false,
+        ..Mamba3Config::default()
+    };
+    cfg.validate()
+        .expect("d_state 128 is inside the accepted range");
+    let w = Mamba3Weights::init(&cfg, cfg.d_model, 7);
+    let mut state = Mamba3State::zeros(&cfg);
+    let mut scratch = Mamba3StepScratch::new(&cfg);
+    let mut temporal = vec![0.0_f32; cfg.d_model];
+    let input = vec![0.25_f32; cfg.d_model];
+    for _ in 0..3 {
+        mamba3_step(
+            &mut temporal,
+            &input,
+            &mut scratch,
+            &w,
+            &mut state.layers,
+            &cfg,
+        );
+        assert!(
+            temporal.iter().all(|v| v.is_finite()),
+            "decode output must stay finite at d_state 128"
+        );
+    }
+}
+
 // =========================================================================
 // Serialization
 // =========================================================================
