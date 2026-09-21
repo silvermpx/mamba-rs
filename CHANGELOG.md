@@ -2,56 +2,25 @@
 
 ## 0.7.4 (2026-09-22)
 
-We checked the math of both models against the reference implementation,
-formula by formula and kernel by kernel. No formula was wrong in either
-model. The check did turn up three defects, and a few places where
-initialization and checkpoint loading did not match the reference. This
-release fixes all of them. Inference from a pretrained checkpoint gives
-the same bits as 0.7.3.
-
 ### Fixed
 
-- Mamba-3 decoding on the CPU panicked when `d_state` was above 64. The
-  config allows up to 256 and the reference default is 128.
-- Mamba-3 training in f16 on the eager path still ran the optimizer on a
-  step whose gradients overflowed, so weight decay and momentum kept
-  moving the weights. That step is now skipped and nothing moves, like
-  GradScaler and like the Mamba-1 trainer.
-- The f16 training path of both models ignored `step_skip_above`, and the
-  Mamba-3 one also ignored `control_clip_max_norm`. Both work now.
-- The tiled conv kernel could in principle start a sequence longer than
-  128 tokens from the conv state it was about to write for the next one.
-  It did not happen in practice, but nothing ruled it out. The state is
-  now written by the only block that reads it, and the bits are the same.
-- Checkpoints in the original (non-HF) format: `tie_embeddings` is read,
-  so an untied checkpoint keeps its own output head, and the vocabulary is
-  padded to `pad_vocab_size_multiple` (8 by default) the way the reference
-  builds the model. A checkpoint saved with 50277 tokens now loads with
-  its 50280 rows instead of failing.
+- Mamba-3 CPU decoding with `d_state` above 64.
+- Mamba-3 f16 eager training now skips the optimizer step when the
+  gradients overflow.
+- The f16 training path now honours `step_skip_above` in both models and
+  `control_clip_max_norm` in Mamba-3.
+- A possible race on the conv state in the tiled conv kernel for
+  sequences longer than 128 tokens.
+- Original-format checkpoints: `tie_embeddings` is read, and the
+  vocabulary is padded to `pad_vocab_size_multiple`.
 
 ### Changed
 
-- Mamba-1 initialization follows the reference. Projections draw from the
-  PyTorch default (bound `1/sqrt(fan_in)`, a third of the old variance),
-  `out_proj` is scaled by `1/sqrt(n_layers)`, and the conv bias gets its
-  own random draw instead of zero. Mamba-3 already did this. It changes
-  the starting weights of a model trained from scratch; loading a
-  checkpoint is not affected.
-- AdamW no longer decays `A_log` and `D` by default, which the reference
-  marks as never decayed, and it also leaves the dt bias and the norm
-  scales alone, as AdamW training usually does. Trainers that already
-  turned this on see no change. `with_reference_no_decay(false)` brings
-  back the 0.7.3 behavior.
-
-### Verification
-
-On the RTX 6000 Ada, a build with every fix except the new initialization
-and the decay default reproduces the 0.7.3 bit ledger on all 263 keys,
-the tiled conv hashes included. The full release moves exactly the 96
-keys whose Mamba-1 weights come from `MambaWeights::init`, which is the
-new initialization at work, and no Mamba-3 key. The initialization rules
-were checked against PyTorch itself: `nn.Linear`, `nn.Conv1d` and the
-reference's own `_init_weights` give the same bounds to six digits.
+- Mamba-1 initialization matches the reference: PyTorch default bounds,
+  `out_proj` scaled by `1/sqrt(n_layers)`, random conv bias.
+- AdamW no longer applies weight decay to `A_log`, `D`, the dt bias and
+  the norm scales by default. `with_reference_no_decay(false)` restores
+  the previous behavior.
 
 ## 0.7.3 (2026-09-18)
 
