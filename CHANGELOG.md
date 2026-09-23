@@ -10,8 +10,13 @@
 
 - Some deterministic TF32 kernels now round a subnormal operand toward
   zero instead of to nearest. Normal values keep their bits.
-- Exact f32 GEMMs, and BF16 and F16 GEMMs without Tensor Cores, run up to
-  45 percent faster, with the same output bits.
+- Exact f32 GEMMs, and BF16 and F16 GEMMs without Tensor Cores, keep their
+  output bits and take less time:
+  - the large NT kernel up to 45 percent less;
+  - the large NN kernel up to 30 percent less;
+  - the slim NN, NT and TN kernels up to 19 percent less;
+  - the large BF16 and F16 kernels up to 14 percent less;
+  - the narrow, large TN and split-K kernels up to 11 percent less.
 - One more deterministic TF32 shape runs on the faster kernels under CUDA
   12.8 and 13.0.
 
