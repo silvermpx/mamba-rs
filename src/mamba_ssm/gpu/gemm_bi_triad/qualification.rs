@@ -3551,11 +3551,16 @@ fn exceptional_class_for_spec(spec: &Tf32KernelSpec, value: f32) -> ExceptionalC
         return exceptional_class(value);
     }
 
-    // This route does an unconditional wrapping integer add, then MMA
-    // consumes only the upper 19 bits. Classify that operand, not the input:
-    // low-payload NaNs can become infinities, and payload carry can wrap
-    // across the sign bit to zero. Do not change the older route oracles.
-    let converted = f32::from_bits(value.to_bits().wrapping_add(0x1000) & 0xffff_e000);
+    // This route adds half an ulp in floating point, from the operand's own
+    // exponent, then MMA consumes only the upper 19 bits. Classify that
+    // operand, not the input: a normal value rounds as the integer add does,
+    // a subnormal gets no half ulp, and every NaN stays a NaN. Do not change
+    // the older route oracles.
+    let rounded = f32::from_bits(value.to_bits() & 0xff80_0000).mul_add(1.0 / 2048.0, value);
+    if rounded.is_nan() {
+        return ExceptionalClass::Nan;
+    }
+    let converted = f32::from_bits(rounded.to_bits() & 0xffff_e000);
     if converted.is_nan() {
         ExceptionalClass::Nan
     } else if converted.is_infinite() {
@@ -6518,14 +6523,14 @@ mod tests {
         // Literal expectations describe the bits consumed by MMA after the
         // register add and discarded low 13 bits, not the original f32 class.
         for (bits, expected) in [
-            (0x7f80_0001, ExceptionalClass::Infinity { negative: false }),
-            (0xff80_0001, ExceptionalClass::Infinity { negative: true }),
+            (0x7f80_0001, ExceptionalClass::Nan),
+            (0xff80_0001, ExceptionalClass::Nan),
             (0x7f80_1000, ExceptionalClass::Nan),
             (0xff80_1000, ExceptionalClass::Nan),
             (0x7f80_2000, ExceptionalClass::Nan),
             (0xff80_2000, ExceptionalClass::Nan),
-            (0x7fff_ffff, ExceptionalClass::Zero),
-            (0xffff_ffff, ExceptionalClass::Zero),
+            (0x7fff_ffff, ExceptionalClass::Nan),
+            (0xffff_ffff, ExceptionalClass::Nan),
             (0x7fc0_1234, ExceptionalClass::Nan),
             (0xffc0_1234, ExceptionalClass::Nan),
             (0x7f80_0000, ExceptionalClass::Infinity { negative: false }),
@@ -6540,11 +6545,11 @@ mod tests {
             (0x8000_0001, ExceptionalClass::Zero),
             (
                 0x007f_ffff,
-                ExceptionalClass::Finite(f32::MIN_POSITIVE as f64),
+                ExceptionalClass::Finite(f32::from_bits(0x007f_e000) as f64),
             ),
             (
                 0x807f_ffff,
-                ExceptionalClass::Finite(-(f32::MIN_POSITIVE as f64)),
+                ExceptionalClass::Finite(f32::from_bits(0x807f_e000) as f64),
             ),
         ] {
             assert_eq!(

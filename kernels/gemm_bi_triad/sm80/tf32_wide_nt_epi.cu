@@ -66,12 +66,12 @@ __device__ __forceinline__ void nt_epi_mma(
           "r"(b[0]), "r"(b[1]));
 }
 
-// The tensor core reads the upper 19 bits of a tf32 operand. Adding half an
-// ulp of the kept mantissa before that truncation rounds every finite value
-// to nearest, ties away from zero, in one integer add. The retained NT
-// kernel applies exactly this add to every word; the retained portable
-// kernels round with cvt.rna.tf32.f32 instead, which differs only in how a
-// NaN payload is carried, so both are offered and the one matching the
+// The tensor core reads the upper 19 bits of a tf32 operand. Half an ulp of
+// the kept mantissa, added in floating point from the operand's own exponent
+// before that truncation, rounds every normal value to nearest, ties away
+// from zero, keeps a NaN a NaN and needs no predicate. The retained NT kernel
+// rounds every word this way; the retained portable kernels round with
+// cvt.rna.tf32.f32 instead, so both are offered and the one matching the
 // production route of a cell is selected.
 template <bool Rna>
 __device__ __forceinline__ unsigned nt_epi_round(unsigned bits) {
@@ -81,7 +81,7 @@ __device__ __forceinline__ unsigned nt_epi_round(unsigned bits) {
         asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(result) : "f"(value));
         return result;
     } else {
-        return bits + 0x1000U;
+        return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
     }
 }
 

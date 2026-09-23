@@ -459,6 +459,72 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
 
 #[test]
 #[ignore = "requires a CUDA device with the Triad TF32 wide symbol bound"]
+fn fixed_tf32_forced_wide_keeps_gpu_nan_operands_nan() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    if device.compute_capability.0 == 12 {
+        eprintln!(
+            "skip: the Fixed module composes no wide TF32 tile on CC 12.x, this board is {:?}",
+            device.compute_capability
+        );
+        return;
+    }
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let (rows, k, n) = (274, 36, 132);
+    let mut a_host: Vec<_> = synth(rows * k, 0xa129)
+        .into_iter()
+        .map(|x| x * 4.0 + 0.4)
+        .collect();
+    let mut b_host: Vec<_> = synth(k * n, 0xb129)
+        .into_iter()
+        .map(|x| x * 4.0 + 0.4)
+        .collect();
+    // The NaN GPU arithmetic produces, its negation, and the other ends of
+    // the band where a half-ulp add would carry into the sign bit.
+    let band = [0x7fff_ffff_u32, 0xffff_ffff, 0x7fff_f000, 0xffff_f000];
+    let nan_rows = [3_usize, 130, 200, 273];
+    let nan_columns = [5_usize, 64, 127, 131];
+    for (&row, &bits) in nan_rows.iter().zip(&band) {
+        a_host[row * k + row % k] = f32::from_bits(bits);
+    }
+    for (&column, &bits) in nan_columns.iter().zip(&band) {
+        b_host[(column % k) * n + column] = f32::from_bits(bits);
+    }
+    let a = GpuBuffer::from_cpu(&ctx.stream, &a_host).expect("A upload");
+    let b = GpuBuffer::from_cpu(&ctx.stream, &b_host).expect("B upload");
+    let shape = InferenceShape { m: rows, k, n };
+    let run = |tile| {
+        let c = GpuBuffer::zeros(&ctx.stream, rows * n).expect("output");
+        inference_forward_with_tile(
+            &ctx,
+            InferenceFwdOperands {
+                c: f32_pointer(c.cached_ptr()),
+                x: f32_pointer(a.cached_ptr()),
+                w: f32_pointer(b.cached_ptr()),
+                bias_ptr: None,
+            },
+            shape,
+            tile,
+        )
+        .expect("forced launch");
+        output_bits(&ctx, &c)
+    };
+    let wide = run(InferenceTile::Tf32M128N128S3);
+    let portable = run(InferenceTile::Tf32M64S2);
+    for (index, (&got, &reference)) in wide.iter().zip(&portable).enumerate() {
+        let (row, column) = (index / n, index % n);
+        if nan_rows.contains(&row) || nan_columns.contains(&column) {
+            assert!(
+                f32::from_bits(got).is_nan(),
+                "a NaN operand reached output ({row}, {column}) as 0x{got:08x}"
+            );
+        } else {
+            assert_eq!(got, reference, "finite output ({row}, {column}) moved");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a CUDA device with the Triad TF32 wide symbol bound"]
 fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability.0 == 12 {

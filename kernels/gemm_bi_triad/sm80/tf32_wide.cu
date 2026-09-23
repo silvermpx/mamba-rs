@@ -137,18 +137,19 @@ __device__ __forceinline__ void tf32w_fragment_offsets(
     }
 }
 
-// TF32 rounding as one integer add of half an ulp of the ten-bit mantissa.
-// The tensor core reads only the upper 19 bits of a TF32 operand (measured
-// on sm_89: an operand's low 13 bits never reach the product, so 0x7f800001
-// multiplies as +inf even through cvt.rna), so for every finite value and
-// both infinities the mma sees exactly the cvt.rna.tf32.f32 result: the
-// carry of a rounded-up mantissa lands in the exponent the same way, the
-// largest finite values overflow to infinity the same way, and an infinity
-// keeps its upper bits. A NaN whose payload sits in bits 12 to 13 stays a
-// NaN here where cvt.rna followed by the truncation yields +inf. One
-// instruction with no predicate instead of a compare and a predicated add.
+// TF32 rounding: half an ulp of the ten-bit mantissa, the power of two of the
+// operand's own exponent scaled by 2^-11, added in floating point before the
+// tensor core drops the low 13 bits (measured on sm_89: they never reach the
+// product). For every normal value the upper 19 bits of the sum are those of
+// the integer add of 0x1000, the cvt.rna.tf32.f32 result, the carry into the
+// exponent and the overflow to infinity included. A subnormal gets no half
+// ulp and rounds toward zero, as the tensor core truncates it. A NaN stays a
+// NaN, which the integer add does not do: 0x7fffffff, the NaN GPU arithmetic
+// produces, carries into the sign bit and reads as a signed zero. There is no
+// predicate, so the conversions of a step do not compete for the few
+// predicate registers.
 __device__ __forceinline__ unsigned tf32w_round(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }
 
 // The A fragment of one 16 x 8 atom through ldmatrix.x4: lanes 0-7 address

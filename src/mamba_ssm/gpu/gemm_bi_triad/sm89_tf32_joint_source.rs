@@ -11,14 +11,14 @@ pub const WIDE_NT_EPI: &str =
 pub const WIDE_TN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_tn.cu");
 pub const WIDE_NN: &str = include_str!("../../../../kernels/gemm_bi_triad/sm80/tf32_wide_nn.cu");
 
-pub const SOURCE_SHA256: &str = "00b56974628530ac57fb45df26404920655c6c0e21e12db4cb64d8fe9207134c";
+pub const SOURCE_SHA256: &str = "49db8e286cf2d335314fa6b8a92d1288dcdaa2f8a0efcac5458f556c7c1702a6";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
-pub const WIDE_NT_SHA256: &str = "8c6a1a4f735435d8501f534cd13d93fbdea723fad70ff09f085a750ccbee1bcb";
+pub const WIDE_NT_SHA256: &str = "4e74410d3045e8fc21583c64c409777b29593c81a1884974e1c6a701d3fc5458";
 pub const WIDE_NT_EPI_SHA256: &str =
-    "26681b02c5b668b97347d4ac48cdc7bbdf613d0ced8d4b7141daa608f927a349";
+    "823820682537ac24c07ad8535fdddf7f94fefb25a838a5def3fa70c8b80a79d2";
 pub const WIDE_TN_SHA256: &str = "06d1f793a3cc7390d8dab3e7f69cea1c80b992be13e0d03f415e578d6e105ffe";
-pub const WIDE_NN_SHA256: &str = "34296785c5cf89b78eb6f964ba5fab960dee421bdf454b3d74262471867ec96a";
+pub const WIDE_NN_SHA256: &str = "ce4cc1f1267e8788ee1c50ea17bb9e4bb8d56a9cd525fc074c6fcf1286762885";
 
 pub const COPY_CG_PRIMITIVE: &str = "gbf_tf32_copy_cg";
 pub const MMA_M16N8K8_PRIMITIVE: &str = "gbf_tf32_mma_m16n8k8";
@@ -209,24 +209,24 @@ const fn wide_spec(
 }
 
 // Register caps cover the largest spill-free allocation observed across the
-// supported CUDA 12.8, 13.0, and 13.2 JITs. CUDA 13.2 allocates 124/124/127
+// supported CUDA 12.8, 13.0, and 13.2 JITs. CUDA 13.2 allocates 126/126/127
 // registers for the original N96 kernels; CUDA 12.8 and 13.0 allocate
-// 131/131/135. The NT route with both operands through ldmatrix and the
-// half-ulp add allocates 113 on CUDA 13.2.
+// 135/135/135. The NT route with both operands through ldmatrix and the
+// half-ulp add allocates 116 on all three.
 // Occupancy remains sealed independently below.
 pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 12] = [
     gemm_spec(
         NN_ADD_HALF_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfM128N96Bk32S3,
         86_016,
-        131,
+        135,
         1,
     ),
     gemm_spec(
         NN_ADD_HALF_DIRECT_N96_SYMBOL,
         Sm89Tf32JointKernelKind::NnAddHalfDirectM128N96Bk32S3,
         86_016,
-        131,
+        135,
         1,
     ),
     gemm_spec(

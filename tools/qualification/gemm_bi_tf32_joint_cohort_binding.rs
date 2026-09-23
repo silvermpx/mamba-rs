@@ -611,6 +611,192 @@ mod live {
         }
     }
 
+    /// The four joint routes that round with a half-ulp add, each at a shape
+    /// it accepts: a NaN operand from the band where the add would carry into
+    /// the sign bit must reach every output of its row or column as a NaN,
+    /// and every other output must stay finite.
+    #[test]
+    #[ignore = "requires an Ada GPU"]
+    fn add_half_routes_keep_gpu_nan_operands_nan() -> Result<(), String> {
+        let device = GpuDevice::new(0)?;
+        if device.compute_capability != (8, 9) {
+            eprintln!(
+                "skip: the add-half joint routes serve the Ada cohort, this board is {:?}",
+                device.compute_capability
+            );
+            return Ok(());
+        }
+        let ctx = GpuCtx::new(&device)?;
+        configure(&ctx);
+        let band = [0x7fff_ffff_u32, 0xffff_ffff, 0x7fff_f000, 0xffff_f000];
+        let routes = [
+            (
+                ResolvedGemmOp::Nn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NnDirectN96,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89NnN96,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
+            ),
+        ];
+        for (op, (m, k, n), route) in routes {
+            // NN reads A [m x k] and B [k x n] into C [m x n]; NT reads
+            // A [m x n] and B [k x n] into C [m x k].
+            let (reduction, columns) = if op == ResolvedGemmOp::Nt {
+                (n, k)
+            } else {
+                (k, n)
+            };
+            let mut state = 0x5eed_u64 ^ (m * 31 + k * 7 + n) as u64;
+            let mut words = |len: usize| -> Vec<u32> {
+                (0..len)
+                    .map(|_| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        (((state >> 40) as f32 / (1_u64 << 24) as f32) * 2.0 - 1.0).to_bits()
+                    })
+                    .collect()
+            };
+            let mut a = words(m * reduction);
+            let mut b = words(k * n);
+            let rows = [3, 130, m / 2, m - 1];
+            let hit_columns = [5, 64, columns / 2, columns - 1];
+            for (&row, &bits) in rows.iter().zip(&band) {
+                a[row * reduction + row % reduction] = bits;
+            }
+            for (&column, &bits) in hit_columns.iter().zip(&band) {
+                let index = if op == ResolvedGemmOp::Nt {
+                    column * n + column % n
+                } else {
+                    (column % k) * n + column
+                };
+                b[index] = bits;
+            }
+            let output = vec![0_u32; m * columns];
+            let request = PhysicalQualificationRequest::contiguous_f32(
+                op,
+                (m, k, n),
+                PhysicalQualificationRoute::Tf32Forced(route),
+                PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+            );
+            presize_physical_qualification_suite(&ctx, &[request])?;
+            let mut launch = qualify_physical_launch(&ctx, request)?;
+            launch.upload_exact_unbiased_f32_words(&ctx, &output, &a, &b)?;
+            launch.measure_eager_window_ms(&ctx, 1)?;
+            for (index, &word) in launch.f32_output_bits(&ctx)?.iter().enumerate() {
+                let (row, column) = (index / columns, index % columns);
+                let value = f32::from_bits(word);
+                if rows.contains(&row) || hit_columns.contains(&column) {
+                    if !value.is_nan() {
+                        return Err(format!(
+                            "{route:?}: a NaN operand reached output ({row}, {column}) as 0x{word:08x}"
+                        ));
+                    }
+                } else if !value.is_finite() {
+                    return Err(format!(
+                        "{route:?}: output ({row}, {column}) is 0x{word:08x} with finite operands"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Wall time of the routes that round with a half-ulp add, each forced at
+    /// a cell it serves: calibrated windows of about 40 ms, the median of
+    /// seven, printed as microseconds per call. Compare two trees by
+    /// alternating runs of each on the same idle board: separate sessions
+    /// can drift by a few percent.
+    #[test]
+    #[ignore = "requires an idle Ada GPU; prints timings"]
+    fn add_half_route_timings() -> Result<(), String> {
+        let device = GpuDevice::new(0)?;
+        if device.compute_capability != (8, 9) {
+            return Err(format!(
+                "the add-half routes serve the Ada cohort, this board is {:?}",
+                device.compute_capability
+            ));
+        }
+        let ctx = GpuCtx::new(&device)?;
+        configure(&ctx);
+        let wide = Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+            tile: Tf32PortableTile::M128N128,
+            stages: Tf32PortableStages::S3,
+        });
+        let cells = [
+            (
+                "nn_wide_d768_in",
+                ResolvedGemmOp::Nn,
+                (2_048, 768, 3_072),
+                wide,
+            ),
+            ("nn_wide_prism", ResolvedGemmOp::Nn, (4_621, 768, 384), wide),
+            (
+                "nn_prism_direct",
+                ResolvedGemmOp::Nn,
+                (4_621, 384, 1_928),
+                Tf32PhysicalRoute::Sm89NnDirectN96,
+            ),
+            (
+                "nn_d768_out",
+                ResolvedGemmOp::Nn,
+                (2_048, 1_536, 768),
+                Tf32PhysicalRoute::Sm89NnN96,
+            ),
+            (
+                "nt_d768_in",
+                ResolvedGemmOp::Nt,
+                (2_048, 768, 3_072),
+                Tf32PhysicalRoute::Sm89NtALdmatrixN96,
+            ),
+            (
+                "nt_deep",
+                ResolvedGemmOp::Nt,
+                (4_096, 3_072, 1_536),
+                Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
+            ),
+        ];
+        for (name, op, dims, route) in cells {
+            let request = PhysicalQualificationRequest::contiguous_f32(
+                op,
+                dims,
+                PhysicalQualificationRoute::Tf32Forced(route),
+                PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+            );
+            presize_physical_qualification_suite(&ctx, &[request])?;
+            let mut launch = qualify_physical_launch(&ctx, request)?;
+            let probe = launch.measure_prevalidated_forced_eager_window_ms(&ctx, 16)?;
+            let iterations = ((TARGET_WINDOW_US / 1_000.0 / (probe / 16.0)).ceil() as usize)
+                .clamp(16, MAX_ITERATIONS);
+            let mut windows = Vec::with_capacity(OFFICIAL_WINDOWS);
+            for _ in 0..OFFICIAL_WINDOWS {
+                let ms = launch.measure_prevalidated_forced_eager_window_ms(&ctx, iterations)?;
+                windows.push(ms * 1_000.0 / iterations as f64);
+            }
+            windows.sort_by(f64::total_cmp);
+            println!(
+                "ADD-HALF-TIMING {name} {dims:?} median_us={:.2} min_us={:.2} max_us={:.2} iterations={iterations}",
+                windows[OFFICIAL_WINDOWS / 2],
+                windows[0],
+                windows[OFFICIAL_WINDOWS - 1]
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires an Ada GPU and explicit CUDA toolkit selection"]
     fn sm89_portable_identity_inventory() -> Result<(), String> {

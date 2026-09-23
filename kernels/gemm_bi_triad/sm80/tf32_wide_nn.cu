@@ -70,8 +70,10 @@ __device__ __forceinline__ void nn_wide_mma(
           "r"(b[0]), "r"(b[1]));
 }
 
+// Half an ulp added in floating point from the operand's own exponent: normal
+// values round as with cvt.rna, a NaN stays a NaN.
 __device__ __forceinline__ unsigned nn_wide_add_half(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }
 
 __device__ __forceinline__ unsigned nn_wide_rna(unsigned bits) {

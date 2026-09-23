@@ -923,7 +923,7 @@ __device__ __forceinline__ void tf32n96_fragment_offsets(
 }
 
 __device__ __forceinline__ unsigned tf32n96_round(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }
 
 __device__ __forceinline__ void tf32n96_load_fragments(
@@ -1322,7 +1322,7 @@ __device__ __forceinline__ void tf32n96_fragment_offsets(
 }
 
 __device__ __forceinline__ unsigned tf32n96_round(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }
 
 __device__ __forceinline__ void tf32n96_load_fragments(
@@ -2002,11 +2002,12 @@ __device__ __forceinline__ int nt_n96_slot(int row, int reduction) {
     return row * 32 + (reduction ^ ((row & 7) << 2));
 }
 
-// The tensor core reads the upper 19 bits of a tf32 operand. Adding half an
-// ulp of the kept mantissa before that truncation rounds every finite value
-// to the nearest, the result cvt.rna gives, in one instruction.
+// The tensor core reads the upper 19 bits of a tf32 operand. Half an ulp of
+// the kept mantissa, added in floating point from the operand's own exponent
+// before that truncation, gives every normal value the cvt.rna result, keeps
+// a NaN a NaN and needs no predicate.
 __device__ __forceinline__ unsigned nt_n96_add_half(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }
 
 __device__ __forceinline__ void nt_n96_copy_cg(

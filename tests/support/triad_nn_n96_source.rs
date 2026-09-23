@@ -38,7 +38,7 @@ pub const FIXED_RNA_ROUND: &str = r#"__device__ __forceinline__ unsigned tf32n96
 }"#;
 
 pub const TRIAD_ADD_HALF_ROUND: &str = r#"__device__ __forceinline__ unsigned tf32n96_round(unsigned bits) {
-    return bits + 0x1000U;
+    return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }"#;
 
 fn replace_exactly_once(source: &str, old: &str, new: &str, label: &str) -> Result<String, String> {
@@ -85,8 +85,11 @@ pub fn restore_fixed_n96_source(candidate_source: &str) -> Result<String, String
     )
 }
 
-pub const fn triad_add_half_ulp(bits: u32) -> u32 {
-    bits.wrapping_add(0x1000)
+pub fn triad_add_half_ulp(bits: u32) -> u32 {
+    let value = f32::from_bits(bits);
+    f32::from_bits(bits & 0xff80_0000)
+        .mul_add(1.0 / 2048.0, value)
+        .to_bits()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,16 +229,22 @@ mod tests {
     #[test]
     fn add_half_ulp_conversion_matches_current_wide_edge_bits() {
         for (bits, expected) in [
-            (0x0000_0000, 0x0000_1000),
-            (0x8000_0000, 0x8000_1000),
+            (0x0000_0000, 0x0000_0000),
+            (0x8000_0000, 0x8000_0000),
+            (0x007f_ffff, 0x007f_ffff),
             (0x3f80_0000, 0x3f80_1000),
             (0x3f80_1000, 0x3f80_2000),
-            (0x7f80_0000, 0x7f80_1000),
-            (0x7f80_0001, 0x7f80_1001),
-            (0x7fff_ffff, 0x8000_0fff),
-            (0xffff_ffff, 0x0000_0fff),
+            (0x7f7f_ffff, 0x7f80_0000),
+            (0x7f80_0000, 0x7f80_0000),
+            (0xff80_0000, 0xff80_0000),
         ] {
             assert_eq!(triad_add_half_ulp(bits), expected, "bits=0x{bits:08x}");
+        }
+        for bits in [0x7f80_0001, 0x7f80_1000, 0x7fff_ffff, 0xffff_ffff] {
+            assert!(
+                f32::from_bits(triad_add_half_ulp(bits)).is_nan(),
+                "NaN operand 0x{bits:08x} must stay a NaN"
+            );
         }
     }
 

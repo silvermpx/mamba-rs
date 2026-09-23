@@ -1,6 +1,6 @@
 pub const SYMBOL: &str = "nn_triad_sm89_add_half_tf32_direct_epilogue_exp_m128n96_bk32_s3";
 pub const RETAINED_SYMBOL: &str = "nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3";
-const EXPECTED_RETAINED_FNV64: u64 = 0x570f_2590_59f6_5891;
+const EXPECTED_RETAINED_FNV64: u64 = 0x0433_a97c_88e4_c4b3;
 
 const OLD_EPILOGUE_ENTRY: &str = r#"    __syncthreads();
     float* tile_output = reinterpret_cast<float*>(shared_bytes);"#;
