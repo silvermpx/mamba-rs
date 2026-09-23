@@ -79,6 +79,7 @@ fn warm_up_f16_training(
 fn training_dtype_filter_selects_only_the_requested_lane() {
     for (name, dtype) in [
         ("f32", WeightDtype::F32),
+        ("tf32", WeightDtype::Tf32),
         ("bf16", WeightDtype::Bf16),
         ("f16", WeightDtype::F16),
     ] {
@@ -96,7 +97,7 @@ fn training_dtype_filter_selects_only_the_requested_lane() {
 
 #[test]
 fn training_dtype_filter_rejects_a_misspelled_lane() {
-    for value in ["", "bf61", "tf32", "f16,bf16"] {
+    for value in ["", "bf61", "fp32", "f16,bf16"] {
         assert!(training_dtypes(Some(value)).is_err(), "{value}");
     }
 }

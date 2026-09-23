@@ -524,25 +524,26 @@ fn forward_f32_post_normf(
     out
 }
 
-/// Loss computed in f64 to sidestep f32 accumulation noise — needed for
-/// finite-diff where the expected `L(w+h) − L(w−h)` is a small difference
-/// between two nearly-equal sums. f32 accumulation of `||t||² = 64` with
-/// 128 terms introduces ~sqrt(128)·ε·|t|_max ≈ 1e-5 noise, which dominates
-/// any finite-diff signal smaller than 1e-5 — ruling out all useful probes.
-fn scalar_loss_f64(t: &[f32]) -> f64 {
-    0.5 * t.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>()
+/// The finite-difference loss: a fixed random linear functional of the
+/// post-norm_f output, summed in f64 so the difference of two nearly equal
+/// sums keeps its low bits. Half the squared norm of an RMS-normalized
+/// output would be a constant up to the norm's epsilon, and its gradient a
+/// rounding-level signal that no f32 central difference resolves.
+fn linear_loss_f64(t: &[f32], coeffs: &[f32]) -> f64 {
+    t.iter()
+        .zip(coeffs)
+        .map(|(&v, &c)| (v as f64) * (c as f64))
+        .sum()
 }
 
 #[test]
 fn finite_diff_f32_oracle() {
     let cfg = tiny_cfg();
     let dims = dims_for(&cfg, 1, 4);
-    // This coarse f32 finite-diff (h=1e-2, 30% tolerance, top-5 probes) was
-    // calibrated against an identity input projection; a random projection
-    // shifts the loss landscape enough to push 1-2 probes past the noise
-    // floor. Keep its original eye/zero-bias environment — the REAL
-    // gradient certification (all tensors, rel<5e-3, incl. a rectangular
-    // input_proj) lives in tests/grad_oracle.rs.
+    // A coarse f32 finite-diff on out_proj_w over an identity input
+    // projection with a zero bias. The REAL gradient certification (all
+    // tensors, rel<5e-3, incl. a rectangular input_proj) lives in
+    // tests/grad_oracle.rs.
     let (mut w_f32, _) = build_weights(&cfg, 0xF1D1D1FF);
     w_f32.input_proj_w = (0..cfg.d_model * cfg.d_model)
         .map(|i| {
@@ -555,13 +556,16 @@ fn finite_diff_f32_oracle() {
 
     let bt = dims.bt();
     let mamba_input = det_rand(bt * dims.mamba_input_dim, 0xF1);
+    // The loss's gradient with respect to the output is the functional's
+    // own coefficients, which seed the backward.
+    let coeffs = det_rand(bt * dims.d_model, 0xC0EF);
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
 
     let base_t = forward_f32_post_normf(&ctx, &w_f32, &dims, &mamba_input);
-    let base_loss = scalar_loss_f64(&base_t);
-    let (_, grads) = run_f32(&ctx, &w_f32, &cfg, &dims, &mamba_input, &base_t);
+    let base_loss = linear_loss_f64(&base_t, &coeffs);
+    let (_, grads) = run_f32(&ctx, &w_f32, &cfg, &dims, &mamba_input, &coeffs);
 
     let layout = grad_layout(&cfg, dims.mamba_input_dim);
     let mut off = 0usize;
@@ -578,21 +582,14 @@ fn finite_diff_f32_oracle() {
         "finite_diff_f32_oracle: probing {label} (n={tensor_len}) around base_loss={base_loss:.6e}"
     );
 
-    // Choose large-|grad| probes. The expected finite-diff signal scales
-    // with |grad|*h; picking the LARGEST five grads maximizes SNR vs the
-    // ~1e-5 f32 forward-accumulation noise floor.
-    //
-    // Use h=1e-2 so that 2h*|grad| is comfortably above both f32 product
-    // noise in the forward and the O(h²)*|Hess| truncation term. For the
-    // typical |grad|~1e-2 scale of this synthetic config, signal ~2e-4
-    // dominates noise by ~20× while truncation stays ~1e-4·h² = 1e-8.
-    // Central difference truncation error is O(h²)·|L'''|; at h=1e-2
-    // through a 1-layer SSM with RMSNorm at the tail (division by rms
-    // amplifies curvature), we empirically see 10-25% disagreement. 30%
-    // per-probe tolerance catches sign/axis/off-by-one bugs (which would
-    // show 100% disagreement) while allowing normal curvature drift.
+    // The five largest gradients, near 0.8 under this loss. At h = 1e-2 the
+    // difference 2h·|grad| sits far above the f32 rounding of the forward
+    // and the O(h²) truncation, and the central difference matches the
+    // analytic gradient to 3e-5 (measured; every step from 1e-3 to 3e-2
+    // stays within 2e-4). A wrong sign, axis or index shows as a
+    // disagreement near 100%.
     let h: f32 = 1e-2;
-    let rel_tol: f32 = 0.30;
+    let rel_tol: f32 = 1e-3;
 
     let slice = &grads[tensor_off..tensor_off + tensor_len];
     let mut ranked: Vec<(usize, f32)> = slice
@@ -610,11 +607,11 @@ fn finite_diff_f32_oracle() {
         let mut w_plus = w_f32.clone();
         w_plus.layers[0].out_proj_w[i] += h;
         let t_plus = forward_f32_post_normf(&ctx, &w_plus, &dims, &mamba_input);
-        let l_plus = scalar_loss_f64(&t_plus);
+        let l_plus = linear_loss_f64(&t_plus, &coeffs);
         let mut w_minus = w_f32.clone();
         w_minus.layers[0].out_proj_w[i] -= h;
         let t_minus = forward_f32_post_normf(&ctx, &w_minus, &dims, &mamba_input);
-        let l_minus = scalar_loss_f64(&t_minus);
+        let l_minus = linear_loss_f64(&t_minus, &coeffs);
         let numerical = ((l_plus - l_minus) / (2.0 * h as f64)) as f32;
         let denom = analytic.abs().max(numerical.abs()).max(1e-4);
         let rel = (analytic - numerical).abs() / denom;
@@ -629,8 +626,8 @@ fn finite_diff_f32_oracle() {
             if ok { "✓" } else { "✗" }
         );
     }
-    assert!(
-        agree * 5 >= total * 4, // ≥80% must agree within 5% rel tol
+    assert_eq!(
+        agree, total,
         "f32: only {agree}/{total} probes agreed within rel tol {rel_tol}"
     );
     eprintln!("  → {agree}/{total} probes agreed (f32 oracle)");

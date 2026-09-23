@@ -770,8 +770,8 @@ fn set_lr_under_graph_applies_on_next_replay() {
 /// Reference no-decay groups: with the mask ON, masked tensors (a_log,
 /// d_param, dt_proj_b, norm scales) skip the decoupled decay term exactly
 /// (w_on - w_off == lr*wd*w0 elementwise), while unmasked tensors stay
-/// bit-identical to the mask-OFF run. Default OFF must be the historical
-/// behavior.
+/// bit-identical to the mask-OFF run. The mask is on by default, so the
+/// OFF run turns it off explicitly.
 #[test]
 fn reference_no_decay_masks_exactly_the_named_tensors() {
     let cfg = test_cfg();
@@ -790,6 +790,7 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
         WeightDtype::F32,
     )
     .expect("off trainer");
+    off.set_reference_no_decay(false).expect("disable mask");
     off.step(&input, &d_temporal).expect("off step");
     let s_off = off.snapshot_master().expect("off snapshot");
 
