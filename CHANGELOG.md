@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.5 (2026-09-23)
+
+### Fixed
+
+- Deterministic TF32 GEMMs no longer turn a NaN operand into zero.
+
+### Changed
+
+- On SM 8.x cards, some deterministic TF32 kernels now round a subnormal
+  operand toward zero instead of to nearest. Normal values keep their bits.
+
 ## 0.7.4 (2026-09-22)
 
 ### Fixed
