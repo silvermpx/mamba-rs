@@ -1169,58 +1169,6 @@ const fn sm89_observed_tf32_identity(
     }
 }
 
-const SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
-    sm89_observed_tf32_identity(
-        ModuleKind::TriadSm80,
-        (12, 8),
-        [
-            53, 192, 207, 124, 187, 154, 87, 253, 193, 66, 152, 9, 194, 180, 117, 54, 157, 82, 152,
-            180, 36, 140, 247, 22, 25, 176, 208, 3, 223, 63, 26, 250,
-        ],
-        [
-            142, 217, 7, 85, 5, 28, 36, 212, 29, 92, 119, 248, 105, 153, 4, 52, 104, 128, 90, 74,
-            134, 221, 32, 34, 127, 57, 45, 203, 174, 245, 87, 23,
-        ],
-        [
-            50, 13, 224, 95, 151, 71, 128, 115, 170, 111, 113, 10, 168, 54, 132, 169, 93, 239, 203,
-            246, 80, 206, 55, 37, 18, 114, 164, 132, 173, 17, 113, 68,
-        ],
-        [
-            14, 51, 49, 238, 204, 205, 195, 59, 132, 245, 220, 49, 194, 7, 190, 43, 114, 150, 113,
-            111, 55, 80, 35, 152, 230, 133, 165, 181, 69, 215, 43, 238,
-        ],
-        [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    );
-
-const SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
-    sm89_observed_tf32_identity(
-        ModuleKind::TriadSm80,
-        (13, 0),
-        [
-            152, 149, 14, 64, 241, 142, 128, 228, 141, 154, 18, 5, 175, 100, 48, 130, 134, 229,
-            139, 176, 61, 121, 150, 39, 202, 192, 244, 44, 158, 19, 210, 97,
-        ],
-        [
-            207, 73, 189, 109, 87, 179, 129, 190, 239, 108, 167, 85, 104, 17, 59, 188, 127, 142,
-            150, 130, 40, 237, 180, 57, 107, 239, 143, 13, 78, 54, 253, 143,
-        ],
-        [
-            50, 13, 224, 95, 151, 71, 128, 115, 170, 111, 113, 10, 168, 54, 132, 169, 93, 239, 203,
-            246, 80, 206, 55, 37, 18, 114, 164, 132, 173, 17, 113, 68,
-        ],
-        [
-            168, 127, 23, 89, 146, 255, 37, 45, 181, 3, 139, 217, 82, 199, 217, 208, 235, 0, 178,
-            13, 35, 12, 35, 82, 220, 238, 49, 234, 72, 37, 155, 158,
-        ],
-        [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    );
-
 const SM89_JOINT_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
     sm89_observed_tf32_identity(
         ModuleKind::TriadSm89Tf32Joint,
@@ -3057,11 +3005,9 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
-/// CUDA 12.8 and 13.0 share the same exact-cell winner map. Eight rows move
-/// to the joint Ada module; NN Prism retains the measured portable winner.
-/// The joint direct NN kernel now clears admission on that cell too, about
-/// 3 percent faster under both toolkits, but the map keeps the portable
-/// route so the cell's bits on these toolkits stay those of earlier releases.
+/// CUDA 12.8 and 13.0 share the same exact-cell winner map, every row in the
+/// joint Ada module. NN Prism kept the portable winner until the direct NN
+/// kernel measured about 3 percent ahead of it under both toolkits.
 const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
@@ -3081,13 +3027,10 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
         Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
         RequiresVectorAlignmentEvidence,
     ),
-    sm89_tf32_cell(
+    sm89_tf32_route_cell(
         Nn,
-        4621,
-        1928,
-        384,
-        M128N128,
-        S3,
+        (4621, 1928, 384),
+        Tf32PhysicalRoute::Sm89NnDirectN96,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
     sm89_tf32_route_cell(
@@ -3196,13 +3139,13 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
 const SM89_JOINT_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     Tf32AutoEvidenceCohort {
         identity: SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
-        portable: Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
+        portable: None,
         tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
         cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
     },
     Tf32AutoEvidenceCohort {
         identity: SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-        portable: Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
+        portable: None,
         tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
         cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
     },
@@ -13130,7 +13073,6 @@ mod tf32_tests {
         SM89_EXACT_F32_EVIDENCE_COHORTS, SM89_FINALIST_TF32_EVIDENCE_COHORTS,
         SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
         SM89_JOINT_TF32_IDENTITY_CUDA_13_0, SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
-        SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8, SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0,
         SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS, SM89_TF32_QUALIFICATION_IDENTITY,
         SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
         SM120_TF32_EVIDENCE_COHORTS,
@@ -13284,23 +13226,17 @@ mod tf32_tests {
         let expected = [
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
-                Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_12_8),
+                None,
                 10,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
-                Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
-                    tile: Tf32PortableTile::M128N128,
-                    stages: Tf32PortableStages::S3,
-                }),
+                Tf32PhysicalRoute::Sm89NnDirectN96,
             ),
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-                Some(SM89_PORTABLE_TF32_IDENTITY_CUDA_13_0),
+                None,
                 10,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
-                Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
-                    tile: Tf32PortableTile::M128N128,
-                    stages: Tf32PortableStages::S3,
-                }),
+                Tf32PhysicalRoute::Sm89NnDirectN96,
             ),
             (
                 SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
@@ -13381,67 +13317,6 @@ mod tf32_tests {
                     .unwrap(),
                 );
             }
-        }
-    }
-
-    #[test]
-    fn sm89_joint_lower_toolkits_require_the_exact_portable_twin_only_for_nn_prism() {
-        for cohort in &SM89_JOINT_TF32_EVIDENCE_COHORTS[..2] {
-            let without_portable = sm89_joint_availability(cohort.identity, None);
-            for cell in cohort
-                .cells
-                .iter()
-                .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm89Tf32Joint)
-            {
-                let request = normalized_request(
-                    cell.op,
-                    cell.shape.output_rows,
-                    cell.shape.output_columns,
-                    cell.shape.reduction,
-                );
-                assert_eq!(
-                    resolve_f32_triad_auto_with_operands(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        request,
-                        sm89_joint_operands(cell.op),
-                        without_portable,
-                    )
-                    .unwrap(),
-                    F32TriadSelection::Tf32(cell.route),
-                );
-            }
-
-            let prism = cohort.cells[3];
-            let request = normalized_request(
-                prism.op,
-                prism.shape.output_rows,
-                prism.shape.output_columns,
-                prism.shape.reduction,
-            );
-            assert_no_tf32_route(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    sm89_joint_operands(prism.op),
-                    without_portable,
-                )
-                .unwrap(),
-            );
-            let mut wrong_portable = qualified_module_for_auto_identity(cohort.portable.unwrap());
-            wrong_portable.artifact.artifact_digest[0] ^= 1;
-            let wrong_twin = F32TriadAvailability {
-                portable: Some(wrong_portable),
-                ..without_portable
-            };
-            assert_no_tf32_route(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    sm89_joint_operands(prism.op),
-                    wrong_twin,
-                )
-                .unwrap(),
-            );
         }
     }
 

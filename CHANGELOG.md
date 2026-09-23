@@ -11,7 +11,10 @@
 - Some deterministic TF32 kernels now round a subnormal operand toward
   zero instead of to nearest. Normal values keep their bits.
 - Exact f32 GEMMs, and BF16 and F16 GEMMs without Tensor Cores, run up to
-  45 percent faster on an RTX 6000 Ada, with the same output bits.
+  45 percent faster on an NVIDIA RTX 6000 Ada Generation, with the same
+  output bits.
+- One more deterministic TF32 shape runs on the faster kernels under CUDA
+  12.8 and 13.0.
 
 ## 0.7.4 (2026-09-22)
 
