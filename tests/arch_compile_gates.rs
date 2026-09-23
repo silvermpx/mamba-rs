@@ -5280,7 +5280,7 @@ fn scalar_fragment_loads_are_explicit_vectors() {
         "scalar.cu loads register fragments element by element at lines {offenders:?}"
     );
     assert!(
-        source.matches("scalar_load_fragment<").count() >= 40,
+        source.matches("scalar_load_fragment<").count() >= 35,
         "the explicit fragment loader must serve every scalar kernel"
     );
 }

@@ -7089,25 +7089,25 @@ impl NtFixedCopyPlanComposedQualificationIdentity {
 }
 
 const TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST: [u8; 32] = [
-    75, 17, 4, 143, 156, 191, 255, 113, 44, 252, 78, 209, 236, 56, 35, 216, 122, 163, 181, 77, 204,
-    60, 111, 7, 11, 96, 190, 49, 92, 41, 236, 17,
+    148, 22, 131, 74, 177, 54, 161, 143, 11, 58, 59, 191, 142, 176, 255, 179, 192, 63, 245, 204,
+    79, 254, 97, 112, 212, 18, 67, 204, 11, 71, 151, 139,
 ];
 
 const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8: ScalarTransposeQualificationIdentity =
     ScalarTransposeQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            91, 63, 101, 184, 44, 105, 94, 155, 113, 77, 199, 170, 210, 99, 141, 192, 19, 236, 146,
-            100, 117, 103, 20, 134, 197, 221, 33, 10, 51, 255, 202, 152,
+            94, 107, 152, 247, 75, 216, 163, 39, 64, 6, 98, 254, 189, 26, 244, 197, 83, 65, 30,
+            216, 135, 203, 162, 121, 49, 9, 84, 14, 128, 235, 158, 194,
         ],
         artifact_digest: [
-            241, 105, 79, 17, 181, 142, 8, 14, 202, 196, 149, 185, 176, 59, 22, 3, 214, 221, 64,
-            101, 148, 199, 204, 67, 23, 179, 139, 141, 223, 235, 80, 125,
+            225, 113, 159, 182, 210, 68, 18, 244, 100, 139, 77, 233, 7, 139, 65, 129, 54, 219, 17,
+            202, 233, 119, 93, 148, 165, 11, 35, 248, 143, 239, 76, 47,
         ],
         source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
         header_manifest_digest: [
-            145, 108, 170, 21, 194, 14, 167, 107, 142, 20, 233, 83, 15, 25, 174, 3, 22, 206, 207,
-            245, 49, 163, 167, 147, 43, 37, 223, 96, 214, 43, 231, 142,
+            120, 239, 0, 14, 87, 175, 116, 210, 103, 17, 224, 107, 208, 219, 136, 117, 98, 48, 120,
+            184, 162, 247, 35, 165, 208, 130, 103, 204, 139, 97, 140, 27,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -7119,17 +7119,17 @@ const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0: ScalarTransposeQualificationIde
     ScalarTransposeQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            28, 99, 11, 117, 75, 17, 22, 215, 10, 187, 226, 150, 182, 175, 30, 23, 175, 130, 7,
-            170, 12, 98, 34, 239, 241, 36, 56, 176, 82, 119, 136, 180,
+            81, 201, 239, 170, 39, 107, 204, 42, 193, 206, 107, 48, 179, 230, 146, 112, 36, 198,
+            74, 104, 126, 148, 28, 160, 88, 116, 83, 12, 50, 118, 138, 113,
         ],
         artifact_digest: [
-            37, 99, 151, 71, 78, 223, 36, 115, 82, 228, 173, 73, 69, 185, 38, 192, 193, 20, 19,
-            189, 201, 211, 107, 72, 240, 166, 12, 47, 95, 9, 159, 246,
+            252, 98, 119, 75, 183, 148, 159, 223, 209, 16, 250, 60, 245, 197, 186, 36, 122, 161,
+            85, 209, 0, 251, 92, 39, 80, 252, 213, 55, 113, 18, 32, 254,
         ],
         source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
         header_manifest_digest: [
-            124, 181, 100, 127, 48, 32, 30, 118, 196, 50, 152, 12, 206, 241, 71, 106, 249, 30, 220,
-            156, 219, 194, 121, 84, 191, 233, 139, 210, 32, 22, 239, 31,
+            71, 94, 78, 73, 139, 41, 111, 62, 144, 162, 62, 34, 88, 38, 209, 233, 128, 216, 178,
+            197, 209, 244, 235, 253, 61, 100, 113, 175, 111, 8, 26, 170,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -7141,17 +7141,17 @@ const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2: ScalarTransposeQualificationIde
     ScalarTransposeQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            71, 197, 215, 158, 137, 217, 179, 49, 83, 212, 39, 230, 102, 240, 129, 237, 229, 94,
-            174, 126, 141, 21, 13, 54, 16, 161, 33, 23, 219, 167, 125, 189,
+            77, 167, 88, 71, 99, 95, 72, 7, 233, 14, 175, 97, 93, 23, 40, 139, 92, 148, 53, 241,
+            248, 120, 185, 116, 10, 61, 47, 5, 66, 5, 100, 209,
         ],
         artifact_digest: [
-            107, 167, 24, 70, 126, 212, 160, 36, 204, 143, 121, 2, 164, 55, 116, 135, 140, 222, 51,
-            93, 33, 52, 19, 100, 151, 120, 86, 161, 232, 163, 116, 82,
+            206, 16, 237, 230, 229, 54, 125, 159, 251, 62, 215, 110, 191, 110, 99, 35, 43, 127,
+            226, 185, 212, 238, 69, 184, 183, 5, 189, 100, 207, 151, 220, 144,
         ],
         source_digest: TRIAD_SCALAR_TRANSPOSE_SOURCE_DIGEST,
         header_manifest_digest: [
-            250, 112, 31, 143, 180, 144, 31, 11, 170, 60, 180, 213, 4, 172, 199, 141, 236, 254, 41,
-            36, 143, 155, 246, 99, 73, 211, 207, 70, 3, 90, 56, 44,
+            6, 15, 167, 120, 0, 83, 23, 234, 183, 8, 112, 245, 78, 184, 246, 184, 30, 246, 167,
+            104, 167, 189, 129, 238, 10, 114, 32, 221, 90, 83, 231, 84,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -8490,7 +8490,7 @@ mod scalar_wave_policy_tests {
 
     fn measured_composed_identities() -> [NtFixedCopyPlanComposedQualificationIdentity; 6] {
         const SCALAR_SOURCE: &str =
-            "4b11048f9cbfff712cfc4ed1ec3823d87aa3b54dcc3c6f070b60be315c29ec11";
+            "9416834ab136a18f0b3a3bbf8eb0ffb3c03ff5cc4ffe6170d41243cc0b47978b";
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
@@ -8498,9 +8498,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "282654a63f7610e3e77af8dc1abcb13ded34395aedfdb226726b9b9dd942f3f6",
                 fixed_artifact: "30536bd091dded36df4fbee464f09795fdd66a7a3c872e6cb3cec0b44005f2d3",
                 fixed_header: "295a1cf86db172a6655821a9f628f64bb13903e7da7f13af15f38542299d19ac",
-                scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
-                scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
-                scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
+                scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
+                scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
+                scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
                 library: "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
             },
             MeasuredComposedRow {
@@ -8509,9 +8509,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "e89d08e6f5c657c90fbd852fc3b52e90d3feb7095be6093a2998915d3f39c4db",
                 fixed_artifact: "c73394a72691a9d5411b57733945f7fe0d6dc4c6ec3585d657a10b64f18e7784",
                 fixed_header: "5f48da53e800d422f11c63c1256ee27dd2061f197e3bcd5b728f8512e44ac599",
-                scalar_key: "5b3f65b82c695e9b714dc7aad2638dc013ec926475671486c5dd210a33ffca98",
-                scalar_artifact: "f1694f11b58e080ecac495b9b03b1603d6dd406594c7cc4317b38b8ddfeb507d",
-                scalar_header: "916caa15c20ea76b8e14e9530f19ae0316cecff531a3a7932b25df60d62be78e",
+                scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
+                scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
+                scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
                 library: "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
             },
             MeasuredComposedRow {
@@ -8520,9 +8520,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "967191e863d46c5117d86ca71d933a259cb52b66fde2a889a927889e0d025799",
                 fixed_artifact: "1d91d36540f32f6c8916c694eb75e0be8c70fab3592970b0ab45781eab2513a0",
                 fixed_header: "41b43208b8dc3170422e357e10cb2ee0ca084b0a93efe01ff1d4e3c39fd33cc2",
-                scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
-                scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
-                scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
+                scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
+                scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
+                scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
                 library: "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
             },
             MeasuredComposedRow {
@@ -8531,9 +8531,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "3e6ac45e967eec817ca7a3ea707998ce94ab3ce7ce4fd35c9e99670ad10c32d9",
                 fixed_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
                 fixed_header: "b78320a6a4164d73d7e0f06528797361d884d564a8326491bcbc788faad2129e",
-                scalar_key: "1c630b754b1116d70abbe296b6af1e17af8207aa0c6222eff12438b0527788b4",
-                scalar_artifact: "256397474edf247352e4ad4945b926c0c11413bdc9d36b48f0a60c2f5f099ff6",
-                scalar_header: "7cb5647f30201e76c432980ccef1476af91edc9cdbc27954bfe98bd22016ef1f",
+                scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
+                scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
+                scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
                 library: "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
             },
             MeasuredComposedRow {
@@ -8542,9 +8542,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "40eab522feb529a219cf48bb260931aea2ca79e3ef0b8ca7dead893ae1df3f18",
                 fixed_artifact: "83d09c71605c62dda65908bbb6ff1cede9955b136ba4f0b918d9044d4d1e45e4",
                 fixed_header: "9c252669c2a99bd2806def4a4126aaa43e9607f3a4d26b709e3c9f093d7af436",
-                scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
-                scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
-                scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
+                scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
+                scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
+                scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
                 library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
             },
             MeasuredComposedRow {
@@ -8553,9 +8553,9 @@ mod scalar_wave_policy_tests {
                 fixed_key: "f452666b5fa9d778b389a60dd4140e82fba2b7ad9b115375ec8f78d51e56c9da",
                 fixed_artifact: "399baf5d13de2abf55c6b7ce55b061096892a36e9b4e13ba2052fb04699a5b73",
                 fixed_header: "f5cc41fa052dc07c004efc252c5765266d97a3410efb4ef9a6e59f36be5b544f",
-                scalar_key: "47c5d79e89d9b33153d427e666f081ede55eae7e8d150d3610a12117dba77dbd",
-                scalar_artifact: "6ba718467ed4a024cc8f7902a43774878cde335d21341364977856a1e8a37452",
-                scalar_header: "fa701f8fb4901f0baa3cb4d504acc78decfe29248f9bf66349d3cf46035a382c",
+                scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
+                scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
+                scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
                 library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
             },
         ];
