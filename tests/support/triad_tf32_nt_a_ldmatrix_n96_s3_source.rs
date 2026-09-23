@@ -116,6 +116,23 @@ __device__ __forceinline__ void nt_n96_stage_slice(
     }
 }
 
+// A whole 16-byte chunk, for a stage whose K slab lies inside the
+// reduction: no length to clamp, so the copy is the address alone. A row
+// past the matrix reads the clamped row the plan keeps, and the outputs it
+// feeds are never stored.
+__device__ __forceinline__ void nt_n96_copy_whole(unsigned shared_dst, const void* global_src) {
+    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n"
+                 :: "r"(shared_dst), "l"(global_src));
+}
+
+__device__ __forceinline__ void nt_n96_stage_slice_whole(
+    const NtN96CopyPlan& plan, unsigned a_stage_bytes, unsigned b_stage_bytes, int issue) {
+    nt_n96_copy_whole(plan.a_destination[issue] + a_stage_bytes, plan.a_source[issue]);
+    if (issue < 3) {
+        nt_n96_copy_whole(plan.b_destination[issue] + b_stage_bytes, plan.b_source[issue]);
+    }
+}
+
 __device__ __forceinline__ void nt_n96_advance_plan(NtN96CopyPlan& plan) {
 #pragma unroll
     for (int slice = 0; slice < 4; ++slice) plan.a_source[slice] += 32;
@@ -221,6 +238,63 @@ __device__ __forceinline__ void nt_n96_mma(
     }
 }
 
+// The ring stages one tile of the main loop reads, fills and reads next,
+// and the K slab of the stage it fills.
+struct NtN96TileStages {
+    unsigned read_a;
+    unsigned read_b;
+    unsigned write_a;
+    unsigned write_b;
+    unsigned next_a;
+    unsigned next_b;
+    int fill_k;
+    bool fills;
+    bool has_following;
+};
+
+// One quarter of the next stage's copies; `Whole` is the copy form of a
+// stage whose slab lies inside the reduction.
+template <bool Whole>
+__device__ __forceinline__ void nt_n96_fill_slice(
+    const NtN96CopyPlan& plan, const NtN96TileStages& stages, int reduction, int issue) {
+    if (Whole) {
+        nt_n96_stage_slice_whole(plan, stages.write_a, stages.write_b, issue);
+    } else if (stages.fills) {
+        nt_n96_stage_slice(
+            plan, stages.write_a, stages.write_b, stages.fill_k, reduction, issue);
+    }
+}
+
+// One tile of the main loop. The stage wait and barrier sit in step 2,
+// after its mma, and step 3 loads the next tile's step-0 fragments, so a
+// tile starts on its mma rather than on the barrier. Every read of the
+// tile's stage is issued before that barrier, and the copies into the slot
+// read two tiles back start only after the previous tile's barrier.
+template <bool Whole>
+__device__ __forceinline__ void nt_n96_tile(
+    NtN96CopyPlan& plan, const NtN96FragmentAddresses& addresses,
+    const NtN96TileStages& stages, int reduction, NtN96Fragments (&fragments)[2],
+    float (&acc)[4][3][4]) {
+#pragma unroll
+    for (int step = 0; step < 3; ++step) {
+        nt_n96_fill_slice<Whole>(plan, stages, reduction, step);
+        if (step == 2) {
+            nt_n96_fill_slice<Whole>(plan, stages, reduction, 3);
+            asm volatile("cp.async.commit_group;\n" ::);
+        }
+        nt_n96_load_fragments(
+            addresses, stages.read_a, stages.read_b, step + 1, fragments[(step + 1) & 1]);
+        nt_n96_mma(fragments[step & 1], acc);
+    }
+    if (stages.fills) nt_n96_advance_plan(plan);
+    asm volatile("cp.async.wait_group 1;\n" ::);
+    __syncthreads();
+    if (stages.has_following) {
+        nt_n96_load_fragments(addresses, stages.next_a, stages.next_b, 0, fragments[0]);
+    }
+    nt_n96_mma(fragments[1], acc);
+}
+
 __device__ __forceinline__ void nt_n96_zero(
     float* output, Sm80Tf32KernelParams params, int tile_row, int tile_column) {
     for (int linear = (int)threadIdx.x; linear < 128 * 96; linear += 256) {
@@ -267,35 +341,31 @@ __device__ __forceinline__ void nt_n96_s3_kernel(
             asm volatile("cp.async.commit_group;\n" ::);
         }
     }
+    asm volatile("cp.async.wait_group 1;\n" ::);
+    __syncthreads();
+    NtN96Fragments fragments[2];
+    nt_n96_load_fragments(addresses, 0U, 0U, 0, fragments[0]);
     int read_stage = 0;
     for (unsigned tile = 0; tile < tile_count; ++tile) {
-        asm volatile("cp.async.wait_group 1;\n" ::);
-        __syncthreads();
-        unsigned next = tile + 2;
-        bool has_next = next < tile_count;
+        unsigned fill = tile + 2;
         int write_stage = read_stage == 0 ? 2 : read_stage - 1;
-        unsigned write_a_bytes = (unsigned)write_stage * 128U * 32U * 4U;
-        unsigned write_b_bytes = (unsigned)write_stage * 96U * 32U * 4U;
-        unsigned read_a_bytes = (unsigned)read_stage * 128U * 32U * 4U;
-        unsigned read_b_bytes = (unsigned)read_stage * 96U * 32U * 4U;
-        NtN96Fragments fragments[2];
-        nt_n96_load_fragments(addresses, read_a_bytes, read_b_bytes, 0, fragments[0]);
-#pragma unroll
-        for (int issue = 0; issue < 4; ++issue) {
-            if (has_next) {
-                nt_n96_stage_slice(
-                    plan, write_a_bytes, write_b_bytes, (int)(next * 32U), params.n, issue);
-            }
-            if (issue < 3) {
-                nt_n96_load_fragments(
-                    addresses, read_a_bytes, read_b_bytes, issue + 1,
-                    fragments[(issue + 1) & 1]);
-            }
-            nt_n96_mma(fragments[issue & 1], acc);
+        int next_stage = read_stage == 2 ? 0 : read_stage + 1;
+        NtN96TileStages stages;
+        stages.read_a = (unsigned)read_stage * 128U * 32U * 4U;
+        stages.read_b = (unsigned)read_stage * 96U * 32U * 4U;
+        stages.write_a = (unsigned)write_stage * 128U * 32U * 4U;
+        stages.write_b = (unsigned)write_stage * 96U * 32U * 4U;
+        stages.next_a = (unsigned)next_stage * 128U * 32U * 4U;
+        stages.next_b = (unsigned)next_stage * 96U * 32U * 4U;
+        stages.fill_k = (int)(fill * 32U);
+        stages.fills = fill < tile_count;
+        stages.has_following = tile + 1 < tile_count;
+        if (stages.fills && stages.fill_k + 32 <= params.n) {
+            nt_n96_tile<true>(plan, addresses, stages, params.n, fragments, acc);
+        } else {
+            nt_n96_tile<false>(plan, addresses, stages, params.n, fragments, acc);
         }
-        asm volatile("cp.async.commit_group;\n" ::);
-        if (has_next) nt_n96_advance_plan(plan);
-        if (++read_stage == 3) read_stage = 0;
+        read_stage = next_stage;
     }
     __syncthreads();
     float* tile_output = reinterpret_cast<float*>(shared_bytes);

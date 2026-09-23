@@ -41,6 +41,149 @@ pub const TRIAD_ADD_HALF_ROUND: &str = r#"__device__ __forceinline__ unsigned tf
     return __float_as_uint(fmaf(__uint_as_float(bits & 0xff800000U), 1.0f / 2048.0f, __uint_as_float(bits)));
 }"#;
 
+const COPY_PLAN_ADVANCE_SEAM: &str = "__device__ __forceinline__ void tf32n96_advance_plan(";
+const KERNEL_BODY_SEAM: &str = "__device__ __forceinline__ void tf32n96_kernel(";
+
+/// The copy of a stage whose K slab lies inside the reduction, ahead of the
+/// plan's advance.
+pub const TRIAD_WHOLE_SLAB_COPY: &str = r#"// A stage whose K slab lies inside the reduction: each chunk's length is
+// fixed for the CTA (16 bytes inside the matrix, 0 past its rows or
+// columns, which zero-fills without reading memory), so nothing is clamped
+// per tile.
+__device__ __forceinline__ void tf32n96_stage_slice_whole(
+    const Tf32n96CopyPlan& plan, unsigned a_stage_bytes, unsigned b_stage_bytes, int issue) {
+    gbf_tf32_copy_cg(
+        plan.a_destination[issue] + a_stage_bytes, plan.a_source[issue],
+        plan.a_row_valid[issue] ? 16 : 0);
+    if (issue < 3) {
+        gbf_tf32_copy_cg(
+            plan.b_destination[issue] + b_stage_bytes, plan.b_source[issue],
+            plan.b_column_bytes[issue]);
+    }
+}
+
+"#;
+
+/// The rotated tile body, ahead of the kernel body.
+pub const TRIAD_ROTATED_TILE: &str = r#"// The ring stages one tile of the main loop reads, fills and reads next,
+// and the K slab of the stage it fills.
+struct Tf32n96TileStages {
+    const float* a_read;
+    const float* b_read;
+    const float* a_next;
+    const float* b_next;
+    unsigned write_a;
+    unsigned write_b;
+    long long b_slab_rows;
+    int fill_k;
+    bool fills;
+    bool has_following;
+};
+
+// One quarter of the next stage's copies; `Whole` is the copy form of a
+// stage whose slab lies inside the reduction.
+template <bool Whole>
+__device__ __forceinline__ void tf32n96_fill_slice(
+    const Tf32n96CopyPlan& plan, const Tf32n96TileStages& stages, int reduction, int issue) {
+    if (Whole) {
+        tf32n96_stage_slice_whole(plan, stages.write_a, stages.write_b, issue);
+    } else if (stages.fills) {
+        tf32n96_stage_slice(
+            plan, stages.write_a, stages.write_b, stages.fill_k, reduction, issue);
+    }
+}
+
+// One tile of the main loop. The stage wait and barrier sit in step 2,
+// after its mma, and step 3 loads the next tile's step-0 fragments, so a
+// tile starts on its mma rather than on the barrier. Every read of the
+// tile's stage is issued before that barrier, and the copies into the slot
+// read two tiles back start only after the previous tile's barrier.
+template <bool Whole>
+__device__ __forceinline__ void tf32n96_tile(
+    Tf32n96CopyPlan& plan, const Tf32n96FragmentOffsets& offsets,
+    const Tf32n96TileStages& stages, int reduction, Tf32n96Fragments (&fragments)[2],
+    float (&acc)[4][3][4]) {
+#pragma unroll
+    for (int step = 0; step < 3; ++step) {
+        tf32n96_fill_slice<Whole>(plan, stages, reduction, step);
+        if (step == 2) {
+            tf32n96_fill_slice<Whole>(plan, stages, reduction, 3);
+            asm volatile("cp.async.commit_group;\n" ::);
+        }
+        tf32n96_load_fragments(
+            stages.a_read, stages.b_read, step + 1, offsets, fragments[(step + 1) & 1]);
+        tf32n96_mma(fragments[step & 1], acc);
+    }
+    if (stages.fills) tf32n96_advance_plan(plan, stages.b_slab_rows);
+    asm volatile("cp.async.wait_group 1;\n" ::);
+    __syncthreads();
+    if (stages.has_following) {
+        tf32n96_load_fragments(stages.a_next, stages.b_next, 0, offsets, fragments[0]);
+    }
+    tf32n96_mma(fragments[1], acc);
+}
+
+"#;
+
+pub const FIXED_MAIN_LOOP: &str = r#"    int read_stage = 0;
+    for (unsigned tile = 0; tile < tile_count; ++tile) {
+        asm volatile("cp.async.wait_group 1;\n" ::);
+        __syncthreads();
+        unsigned next = tile + 2;
+        bool has_next = next < tile_count;
+        int write_stage = read_stage == 0 ? 2 : read_stage - 1;
+        unsigned write_a_bytes = (unsigned)write_stage * 128U * 32U * 4U;
+        unsigned write_b_bytes = (unsigned)write_stage * 32U * 96U * 4U;
+        const float* a_read = a_stages + read_stage * 128 * 32;
+        const float* b_read = b_stages + read_stage * 32 * 96;
+        Tf32n96Fragments fragments[2];
+        tf32n96_load_fragments(a_read, b_read, 0, offsets, fragments[0]);
+#pragma unroll
+        for (int issue = 0; issue < 4; ++issue) {
+            if (has_next) {
+                tf32n96_stage_slice(
+                    plan, write_a_bytes, write_b_bytes,
+                    (int)(next * 32U), params.k, issue);
+            }
+            if (issue < 3) {
+                tf32n96_load_fragments(
+                    a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);
+            }
+            tf32n96_mma(fragments[issue & 1], acc);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+        if (has_next) tf32n96_advance_plan(plan, b_slab_rows);
+        if (++read_stage == 3) read_stage = 0;
+    }"#;
+
+pub const TRIAD_ROTATED_MAIN_LOOP: &str = r#"    asm volatile("cp.async.wait_group 1;\n" ::);
+    __syncthreads();
+    Tf32n96Fragments fragments[2];
+    tf32n96_load_fragments(a_stages, b_stages, 0, offsets, fragments[0]);
+    int read_stage = 0;
+    for (unsigned tile = 0; tile < tile_count; ++tile) {
+        unsigned fill = tile + 2;
+        int write_stage = read_stage == 0 ? 2 : read_stage - 1;
+        int next_stage = read_stage == 2 ? 0 : read_stage + 1;
+        Tf32n96TileStages stages;
+        stages.a_read = a_stages + read_stage * 128 * 32;
+        stages.b_read = b_stages + read_stage * 32 * 96;
+        stages.a_next = a_stages + next_stage * 128 * 32;
+        stages.b_next = b_stages + next_stage * 32 * 96;
+        stages.write_a = (unsigned)write_stage * 128U * 32U * 4U;
+        stages.write_b = (unsigned)write_stage * 32U * 96U * 4U;
+        stages.b_slab_rows = b_slab_rows;
+        stages.fill_k = (int)(fill * 32U);
+        stages.fills = fill < tile_count;
+        stages.has_following = tile + 1 < tile_count;
+        if (stages.fills && stages.fill_k + 32 <= params.k) {
+            tf32n96_tile<true>(plan, offsets, stages, params.k, fragments, acc);
+        } else {
+            tf32n96_tile<false>(plan, offsets, stages, params.k, fragments, acc);
+        }
+        read_stage = next_stage;
+    }"#;
+
 fn replace_exactly_once(source: &str, old: &str, new: &str, label: &str) -> Result<String, String> {
     let count = source.matches(old).count();
     if count != 1 {
@@ -60,6 +203,24 @@ pub fn compose_triad_nn_n96_source(fixed_source: &str) -> Result<String, String>
     )?;
     let source = replace_exactly_once(
         &source,
+        COPY_PLAN_ADVANCE_SEAM,
+        &format!("{TRIAD_WHOLE_SLAB_COPY}{COPY_PLAN_ADVANCE_SEAM}"),
+        "whole-slab copy",
+    )?;
+    let source = replace_exactly_once(
+        &source,
+        KERNEL_BODY_SEAM,
+        &format!("{TRIAD_ROTATED_TILE}{KERNEL_BODY_SEAM}"),
+        "rotated tile",
+    )?;
+    let source = replace_exactly_once(
+        &source,
+        FIXED_MAIN_LOOP,
+        TRIAD_ROTATED_MAIN_LOOP,
+        "main loop",
+    )?;
+    let source = replace_exactly_once(
+        &source,
         FIXED_N96_SYMBOL,
         TRIAD_NN_N96_SYMBOL,
         "export symbol",
@@ -76,6 +237,24 @@ pub fn restore_fixed_n96_source(candidate_source: &str) -> Result<String, String
         TRIAD_ADD_HALF_ROUND,
         FIXED_RNA_ROUND,
         "restored operand conversion",
+    )?;
+    let source = replace_exactly_once(
+        &source,
+        &format!("{TRIAD_WHOLE_SLAB_COPY}{COPY_PLAN_ADVANCE_SEAM}"),
+        COPY_PLAN_ADVANCE_SEAM,
+        "restored whole-slab copy",
+    )?;
+    let source = replace_exactly_once(
+        &source,
+        &format!("{TRIAD_ROTATED_TILE}{KERNEL_BODY_SEAM}"),
+        KERNEL_BODY_SEAM,
+        "restored rotated tile",
+    )?;
+    let source = replace_exactly_once(
+        &source,
+        TRIAD_ROTATED_MAIN_LOOP,
+        FIXED_MAIN_LOOP,
+        "restored main loop",
     )?;
     replace_exactly_once(
         &source,

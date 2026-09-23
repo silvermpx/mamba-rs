@@ -158,6 +158,26 @@ __device__ __forceinline__ void nt_epi_issue_slice(
     }
 }
 
+// A whole 16-byte chunk, for a stage whose K slab lies inside the reduction
+// in a CTA whose rows all lie inside the matrix: no length to clamp and no
+// row to guard, so the copy is the address alone. A plan whose chunks divide
+// evenly among the threads needs no tile bound either.
+__device__ __forceinline__ void nt_epi_copy_whole(unsigned shared_dst, const void* global_src) {
+    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n"
+                 :: "r"(shared_dst), "l"(global_src));
+}
+
+template <int Rows, int Threads, int BK>
+__device__ __forceinline__ void nt_epi_issue_slice_whole(
+    const NtEpiOperandPlan<Rows, Threads, BK>& plan, int slice, unsigned stage_bytes) {
+    using Plan = NtEpiOperandPlan<Rows, Threads, BK>;
+    if (slice < Plan::Slices) {
+        if (Plan::Chunks % Threads == 0 || (int)threadIdx.x + slice * Threads < Plan::Chunks) {
+            nt_epi_copy_whole(plan.destination[slice] + stage_bytes, plan.source[slice]);
+        }
+    }
+}
+
 template <int Rows, int Threads, int BK>
 __device__ __forceinline__ void nt_epi_advance(
     NtEpiOperandPlan<Rows, Threads, BK>& plan) {
@@ -317,6 +337,9 @@ __device__ __forceinline__ void nt_epi_kernel(
         nt_epi_commit();
     }
 
+    // An edge CTA keeps the sized copies, whose zero-fill reads no memory
+    // for the rows past the matrix.
+    bool interior = tile_row + BM <= params.m && tile_column + BN <= params.k;
     // Main loop, unrolled by Stages so every stage offset is an immediate.
     for (unsigned tile_base = 0; tile_base < tile_count; tile_base += (unsigned)Stages) {
 #pragma unroll
@@ -337,23 +360,43 @@ __device__ __forceinline__ void nt_epi_kernel(
                 NtEpiFragments<MAtoms, NAtoms> fragments[2];
                 nt_epi_load_fragments<MAtoms, NAtoms, BK, Rna>(
                     a_step_address[0] + read_a, b_step_address[0] + read_b, fragments[0]);
+                // The whole-slab form is its own loop body so the copies
+                // interleave with the mma without a branch between them.
+                if (interior && has_next && next_base + BK <= params.n) {
 #pragma unroll
-                for (int step = 0; step < Steps; ++step) {
-                    if (has_next) {
-                        // Spread the copy issue over the k8 steps.
+                    for (int step = 0; step < Steps; ++step) {
 #pragma unroll
                         for (int slot = step; slot < IssueSlots; slot += Steps) {
-                            nt_epi_issue_slice<BM, Threads, BK>(a_plan, slot, write_a, next_base, params.n);
-                            nt_epi_issue_slice<BN, Threads, BK>(b_plan, slot, write_b, next_base, params.n);
+                            nt_epi_issue_slice_whole<BM, Threads, BK>(a_plan, slot, write_a);
+                            nt_epi_issue_slice_whole<BN, Threads, BK>(b_plan, slot, write_b);
                         }
+                        if (step < Steps - 1) {
+                            nt_epi_load_fragments<MAtoms, NAtoms, BK, Rna>(
+                                a_step_address[step + 1] + read_a,
+                                b_step_address[step + 1] + read_b,
+                                fragments[(step + 1) & 1]);
+                        }
+                        nt_epi_mma_step<MAtoms, NAtoms>(fragments[step & 1], acc);
                     }
-                    if (step < Steps - 1) {
-                        nt_epi_load_fragments<MAtoms, NAtoms, BK, Rna>(
-                            a_step_address[step + 1] + read_a,
-                            b_step_address[step + 1] + read_b,
-                            fragments[(step + 1) & 1]);
+                } else {
+#pragma unroll
+                    for (int step = 0; step < Steps; ++step) {
+                        if (has_next) {
+                            // Spread the copy issue over the k8 steps.
+#pragma unroll
+                            for (int slot = step; slot < IssueSlots; slot += Steps) {
+                                nt_epi_issue_slice<BM, Threads, BK>(a_plan, slot, write_a, next_base, params.n);
+                                nt_epi_issue_slice<BN, Threads, BK>(b_plan, slot, write_b, next_base, params.n);
+                            }
+                        }
+                        if (step < Steps - 1) {
+                            nt_epi_load_fragments<MAtoms, NAtoms, BK, Rna>(
+                                a_step_address[step + 1] + read_a,
+                                b_step_address[step + 1] + read_b,
+                                fragments[(step + 1) & 1]);
+                        }
+                        nt_epi_mma_step<MAtoms, NAtoms>(fragments[step & 1], acc);
                     }
-                    nt_epi_mma_step<MAtoms, NAtoms>(fragments[step & 1], acc);
                 }
                 nt_epi_commit();
                 if (has_next) {

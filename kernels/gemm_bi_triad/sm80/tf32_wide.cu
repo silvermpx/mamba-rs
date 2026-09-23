@@ -86,6 +86,22 @@ __device__ __forceinline__ void tf32w_stage_slice(
     }
 }
 
+// A whole 16-byte chunk, for a stage whose K slab lies inside the
+// reduction of a launch whose column count is a multiple of four (no B
+// chunk straddles a row end): no length to clamp, so the copy is the
+// address alone. A row or column past the matrix reads the clamped address
+// the plan keeps, and the outputs it feeds are never stored.
+__device__ __forceinline__ void tf32w_copy_whole(unsigned shared_dst, const void* global_src) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
+                 :: "r"(shared_dst), "l"(global_src));
+}
+
+__device__ __forceinline__ void tf32w_stage_slice_whole(
+    const Tf32wCopyPlan& plan, unsigned stage_bytes, int slice) {
+    tf32w_copy_whole(plan.a_destination[slice] + stage_bytes, plan.a_source[slice]);
+    tf32w_copy_whole(plan.b_destination[slice] + stage_bytes, plan.b_source[slice]);
+}
+
 __device__ __forceinline__ void tf32w_advance_plan(Tf32wCopyPlan& plan, long long b_rows) {
 #pragma unroll
     for (int slice = 0; slice < 4; ++slice) {
@@ -191,6 +207,38 @@ __device__ __forceinline__ void tf32w_mma(const Tf32wFragments& fragments, float
     }
 }
 
+// The stage one tile of the main loop reads and the stage it fills.
+struct Tf32wTileStages {
+    const float* a_read;
+    const float* b_read;
+    unsigned write_bytes;
+    int fill_k;
+    bool fills;
+};
+
+// The four k8 steps of one tile with the next stage's copies spread over
+// them; `Whole` is the copy form of a stage whose slab lies inside the
+// reduction.
+template <bool Whole>
+__device__ __forceinline__ void tf32w_tile_steps(
+    const Tf32wCopyPlan& plan, const Tf32wFragmentOffsets& offsets,
+    const Tf32wTileStages& stages, int reduction, Tf32wFragments (&fragments)[2],
+    float (&acc)[4][4][4]) {
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        if (Whole) {
+            tf32w_stage_slice_whole(plan, stages.write_bytes, issue);
+        } else if (stages.fills) {
+            tf32w_stage_slice(plan, stages.write_bytes, stages.fill_k, reduction, issue);
+        }
+        if (issue < 3) {
+            tf32w_load_fragments(
+                stages.a_read, stages.b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);
+        }
+        tf32w_mma(fragments[issue & 1], acc);
+    }
+}
+
 template <int Stages>
 __device__ __forceinline__ void tf32w_nn_kernel(
     float* output, const float* a, const float* b, const float* bias,
@@ -236,32 +284,30 @@ __device__ __forceinline__ void tf32w_nn_kernel(
             asm volatile("cp.async.commit_group;\n" ::);
         }
     }
+    bool whole_chunks = (params.n & 3) == 0;
     int read_stage = 0;
     for (unsigned tile = 0; tile < tile_count; ++tile) {
         asm volatile("cp.async.wait_group %0;\n" :: "n"(Stages - 2));
         // The barrier also retires every warp's reads of the stage the copies
         // below overwrite (the one computed in the previous iteration).
         __syncthreads();
-        unsigned next = tile + Stages - 1;
-        bool has_next = next < tile_count;
+        unsigned fill = tile + Stages - 1;
         int write_stage = read_stage == 0 ? Stages - 1 : read_stage - 1;
-        unsigned write_bytes = (unsigned)write_stage * 128U * 32U * 4U;
-        const float* a_read = a_stages + read_stage * 128 * 32;
-        const float* b_read = b_stages + read_stage * 32 * 128;
+        Tf32wTileStages stages;
+        stages.a_read = a_stages + read_stage * 128 * 32;
+        stages.b_read = b_stages + read_stage * 32 * 128;
+        stages.write_bytes = (unsigned)write_stage * 128U * 32U * 4U;
+        stages.fill_k = (int)(fill * 32U);
+        stages.fills = fill < tile_count;
         Tf32wFragments fragments[2];
-        tf32w_load_fragments(a_read, b_read, 0, offsets, fragments[0]);
-#pragma unroll
-        for (int issue = 0; issue < 4; ++issue) {
-            if (has_next) {
-                tf32w_stage_slice(plan, write_bytes, (int)(next * 32U), params.k, issue);
-            }
-            if (issue < 3) {
-                tf32w_load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);
-            }
-            tf32w_mma(fragments[issue & 1], acc);
+        tf32w_load_fragments(stages.a_read, stages.b_read, 0, offsets, fragments[0]);
+        if (whole_chunks && stages.fills && stages.fill_k + 32 <= params.k) {
+            tf32w_tile_steps<true>(plan, offsets, stages, params.k, fragments, acc);
+        } else {
+            tf32w_tile_steps<false>(plan, offsets, stages, params.k, fragments, acc);
         }
         asm volatile("cp.async.commit_group;\n" ::);
-        if (has_next) tf32w_advance_plan(plan, b_slab_rows);
+        if (stages.fills) tf32w_advance_plan(plan, b_slab_rows);
         if (++read_stage == Stages) read_stage = 0;
     }
     // Epilogue: the tile goes through shared memory (row stride 136 floats:

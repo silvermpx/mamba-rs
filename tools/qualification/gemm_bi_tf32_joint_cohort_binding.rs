@@ -602,8 +602,7 @@ mod live {
 
     fn expected_rejections(nvrtc: (i32, i32)) -> Result<&'static [&'static str], String> {
         match nvrtc {
-            (12, 8) | (13, 0) => Ok(&["nn_prism/eager screen", "nn_prism/graph screen"]),
-            (13, 2) => Ok(&[]),
+            (12, 8) | (13, 0) | (13, 2) => Ok(&[]),
             _ => Err(format!(
                 "no frozen joint pre-admission expectation for NVRTC {}.{}",
                 nvrtc.0, nvrtc.1,
