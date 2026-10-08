@@ -3,7 +3,8 @@
 //! Platform dispatch:
 //! - `accelerate` feature (macOS): Apple Accelerate `cblas_sgemm` via AMX coprocessor
 //! - `gemm-blas` feature (any): `gemm` crate with AVX2/AVX-512/NEON microkernels
-//! - fallback: pure Rust scalar loops (LLVM auto-vectorizes with target-cpu=native)
+//! - fallback: pure Rust register tiles under the runtime-chosen SIMD level
+//!   (pulp), each output summing in ascending k like the plain loop
 
 // ---------------------------------------------------------------------------
 // Apple Accelerate FFI (macOS only, behind `accelerate` feature)
@@ -133,19 +134,181 @@ pub fn sgemm_forward(
         all(feature = "accelerate", target_os = "macos"),
         feature = "gemm-blas"
     )))]
-    {
-        for row in 0..batch {
-            let x_off = row * n_in;
-            let y_off = row * n_out;
-            for k in 0..n_in {
-                let xv = x[x_off + k];
-                let w_off = k * n_out;
-                for j in 0..n_out {
-                    y[y_off + j] += xv * w[w_off + j];
+    gemm_accumulate(
+        &mut y[..batch * n_out],
+        &x[..batch * n_in],
+        &w[..n_in * n_out],
+        (n_in, n_out),
+    );
+}
+
+/// `Y[B,N] += X[B,K] @ W[K,N]` without a BLAS. Every output adds its
+/// products in ascending k onto the value already in `y`, each one a
+/// rounded multiply and then a rounded add, exactly as the plain triple
+/// loop does; only the running sums of a tile of rows and columns stay in
+/// vector registers across a block of k instead of going back to memory
+/// with every product, and a tile of rows shares each loaded vector of
+/// `W`. A pass of a tile reads four rows of `W` at a time: four
+/// sequential streams the prefetchers keep up with, where a pass down
+/// every row of a large `W` strides a page a row and left a large model's
+/// decode slower than the plain row-by-row loop.
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+fn gemm_accumulate(y: &mut [f32], x: &[f32], w: &[f32], (n_in, n_out): (usize, usize)) {
+    use pulp::{Arch, Simd, WithSimd};
+
+    /// Above this many elements of W (2 MiB, the order of a core's L2)
+    /// a lone row reads W in storage order.
+    const STREAM_FLOATS: usize = 1 << 19;
+
+    /// One tile: `R` rows by `V` vectors of columns starting at `j0`, over
+    /// the rows `ks` of `W`.
+    #[inline(always)]
+    fn tile<S: Simd, const R: usize, const V: usize>(
+        simd: S,
+        (y, x, w): (&mut [f32], &[f32], &[f32]),
+        (n_in, n_out, j0): (usize, usize, usize),
+        ks: core::ops::Range<usize>,
+    ) {
+        let width = V * S::F32_LANES;
+        let mut acc = [[simd.splat_f32s(0.0); V]; R];
+        for (r, row) in acc.iter_mut().enumerate() {
+            let (sums, _) = S::as_simd_f32s(&y[r * n_out + j0..r * n_out + j0 + width]);
+            row.copy_from_slice(sums);
+        }
+        for k in ks {
+            let (wk, _) = S::as_simd_f32s(&w[k * n_out + j0..k * n_out + j0 + width]);
+            for (r, row) in acc.iter_mut().enumerate() {
+                let xk = simd.splat_f32s(x[r * n_in + k]);
+                for (sum, &wv) in row.iter_mut().zip(wk) {
+                    *sum = simd.add_f32s(*sum, simd.mul_f32s(xk, wv));
+                }
+            }
+        }
+        for (r, row) in acc.iter().enumerate() {
+            let (sums, _) = S::as_mut_simd_f32s(&mut y[r * n_out + j0..r * n_out + j0 + width]);
+            sums.copy_from_slice(row);
+        }
+    }
+
+    /// Every column of `R` rows: wide tiles, then narrower ones, then the
+    /// columns short of a vector one by one.
+    #[inline(always)]
+    fn rows<S: Simd, const R: usize>(
+        simd: S,
+        (y, x, w): (&mut [f32], &[f32], &[f32]),
+        (n_in, n_out): (usize, usize),
+    ) {
+        let lanes = S::F32_LANES;
+        let block = 4;
+        let mut j0 = 0;
+        for k0 in (0..n_in).step_by(block) {
+            let ks = k0..(k0 + block).min(n_in);
+            j0 = 0;
+            // A lone row keeps eight independent sums in flight per k; a
+            // tile of four rows fits its sums in the register file, four
+            // vectors a row with four-lane vectors and two with wider ones.
+            if R == 1 {
+                while j0 + 8 * lanes <= n_out {
+                    tile::<S, R, 8>(simd, (&mut *y, x, w), (n_in, n_out, j0), ks.clone());
+                    j0 += 8 * lanes;
+                }
+            } else if lanes <= 4 {
+                while j0 + 4 * lanes <= n_out {
+                    tile::<S, R, 4>(simd, (&mut *y, x, w), (n_in, n_out, j0), ks.clone());
+                    j0 += 4 * lanes;
+                }
+            }
+            while j0 + 2 * lanes <= n_out {
+                tile::<S, R, 2>(simd, (&mut *y, x, w), (n_in, n_out, j0), ks.clone());
+                j0 += 2 * lanes;
+            }
+            while j0 + lanes <= n_out {
+                tile::<S, R, 1>(simd, (&mut *y, x, w), (n_in, n_out, j0), ks.clone());
+                j0 += lanes;
+            }
+        }
+        for r in 0..R {
+            for j in j0..n_out {
+                let mut sum = y[r * n_out + j];
+                for k in 0..n_in {
+                    sum += x[r * n_in + k] * w[k * n_out + j];
+                }
+                y[r * n_out + j] = sum;
+            }
+        }
+    }
+
+    /// One row in the plain loop's order: for each k, every column's sum
+    /// in memory takes x[k] * W[k, j].
+    #[inline(always)]
+    fn stream_row<S: Simd>(simd: S, (y, x, w): (&mut [f32], &[f32], &[f32]), n_out: usize) {
+        for (&xk, wk) in x.iter().zip(w.chunks_exact(n_out)) {
+            let xv = simd.splat_f32s(xk);
+            let (sums, sums_tail) = S::as_mut_simd_f32s(&mut *y);
+            let (wv, w_tail) = S::as_simd_f32s(wk);
+            for (sum, &wj) in sums.iter_mut().zip(wv) {
+                *sum = simd.add_f32s(*sum, simd.mul_f32s(xv, wj));
+            }
+            for (sum, &wj) in sums_tail.iter_mut().zip(w_tail) {
+                *sum += xk * wj;
+            }
+        }
+    }
+
+    struct Gemm<'a> {
+        y: &'a mut [f32],
+        x: &'a [f32],
+        w: &'a [f32],
+        n_in: usize,
+        n_out: usize,
+    }
+    impl WithSimd for Gemm<'_> {
+        type Output = ();
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let Self {
+                y,
+                x,
+                w,
+                n_in,
+                n_out,
+            } = self;
+            let mut ys = y.chunks_exact_mut(4 * n_out);
+            let mut xs = x.chunks_exact(4 * n_in);
+            for (yr, xr) in (&mut ys).zip(&mut xs) {
+                rows::<S, 4>(simd, (yr, xr, w), (n_in, n_out));
+            }
+            let rest = ys.into_remainder();
+            // A lone row reads each element of W once, so a W too large
+            // to stay in cache streams from memory whatever the tiling;
+            // its rows then go in storage order, the one sequential stream
+            // the prefetchers serve best, with the sums through memory.
+            let streams = n_in * n_out > STREAM_FLOATS;
+            for (yr, xr) in rest
+                .chunks_exact_mut(n_out)
+                .zip(xs.remainder().chunks_exact(n_in))
+            {
+                if streams {
+                    stream_row(simd, (yr, xr, w), n_out);
+                } else {
+                    rows::<S, 1>(simd, (yr, xr, w), (n_in, n_out));
                 }
             }
         }
     }
+    if n_in == 0 || n_out == 0 {
+        return;
+    }
+    Arch::new().dispatch(Gemm {
+        y,
+        x,
+        w,
+        n_in,
+        n_out,
+    });
 }
 
 /// [`sgemm_forward`] with the gemm crate's internal rayon parallelism —
@@ -471,6 +634,69 @@ mod tests {
         sgemm_forward(&mut y, &x, &w, Some(&bias), 1, 2, 2);
         assert!((y[0] - 13.0).abs() < 1e-6);
         assert!((y[1] - 24.0).abs() < 1e-6);
+    }
+
+    /// The fallback's register tiles against the plain triple loop: every
+    /// output bit for bit (any NaN matching any NaN, whose payload the
+    /// compiler may pick from either operand), across row counts that leave
+    /// remainders of the four-row tiles, column counts that leave every
+    /// narrower tile and a scalar tail, lone rows of a W large enough to go
+    /// in storage order, and values that reach rounding, signed zeros,
+    /// infinities and NaN.
+    #[cfg(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )))]
+    #[test]
+    fn test_sgemm_forward_matches_the_plain_loop_bitwise() {
+        let synth = |n: usize, seed: u32| -> Vec<f32> {
+            let mut s = seed;
+            (0..n)
+                .map(|i| {
+                    s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let v = ((s >> 8) as f32 / (1 << 24) as f32 - 0.5) * 3.0;
+                    match i % 97 {
+                        13 => -0.0,
+                        41 => f32::INFINITY,
+                        77 => f32::NAN,
+                        _ => v,
+                    }
+                })
+                .collect()
+        };
+        for (batch, n_in, n_out) in [
+            (1, 128, 596),
+            (1, 7, 3),
+            (3, 33, 70),
+            (4, 16, 64),
+            (5, 9, 131),
+            (9, 64, 37),
+            (1, 1, 1),
+            (1, 600, 1003),
+            (5, 600, 1003),
+        ] {
+            let x = synth(batch * n_in, 1 + n_in as u32);
+            let w = synth(n_in * n_out, 2 + n_out as u32);
+            let bias = synth(n_out, 3);
+            let mut want = vec![0.0f32; batch * n_out];
+            for row in 0..batch {
+                want[row * n_out..(row + 1) * n_out].copy_from_slice(&bias);
+                for k in 0..n_in {
+                    let xv = x[row * n_in + k];
+                    for j in 0..n_out {
+                        want[row * n_out + j] += xv * w[k * n_out + j];
+                    }
+                }
+            }
+            let mut got = vec![0.0f32; batch * n_out];
+            sgemm_forward(&mut got, &x, &w, Some(&bias), batch, n_in, n_out);
+            let differ = want
+                .iter()
+                .zip(&got)
+                .filter(|(a, b)| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan()))
+                .count();
+            assert_eq!(differ, 0, "{batch}x{n_in}x{n_out}: {differ} outputs differ");
+        }
     }
 
     #[test]
