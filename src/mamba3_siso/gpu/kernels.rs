@@ -856,12 +856,13 @@ pub fn chunk_scan_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> (bool, cudarc::driver::LaunchConfig) {
-    // q/k/ps rows are padded to ds + 4 floats to avoid bank conflicts.
-    // Keep this host formula in lockstep with the kernel's layout.
+    // q/k rows are padded to ds + 4 floats and the transposed entering
+    // state's rows to hd + 4, to avoid bank conflicts. Keep this host
+    // formula in lockstep with the kernel's layout.
     let smem_floats = chunk_size * (chunk_size - 1) / 2
         + 2 * chunk_size * (ds + 4)
         + chunk_size * hd
-        + hd * (ds + 4)
+        + ds * (hd + 4)
         + 2 * chunk_size;
     let smem_bytes = smem_floats * std::mem::size_of::<f32>();
     if chunk_size <= 64 && smem_bytes <= 48 * 1024 {
