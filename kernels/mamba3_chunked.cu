@@ -355,9 +355,10 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // L2-bound, 76% utilization at the serve shape). The fused kernel
 // computes each K_scaled row once, stores it to global (the scan still
 // consumes it) AND keeps it in shared memory for the state fold, staging
-// x and dA alongside. Requires dA_cumsum as an INPUT, so the launcher
-// reorders the pipeline to adt -> dA_cumsum -> fused (dA_cumsum depends
-// only on adt - the reorder is stream-serial-identical).
+// x and each row's decay to the chunk's end alongside. Requires
+// dA_cumsum as an INPUT, so the launcher reorders the pipeline to adt ->
+// dA_cumsum -> fused (dA_cumsum depends only on adt - the reorder is
+// stream-serial-identical).
 //
 // Bit contract: phase A is the preprocess arithmetic verbatim (one t per
 // thread); phase B is the chunk_state quad fold verbatim (four
@@ -366,8 +367,8 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // pair.
 //
 // Grid: (B * n_chunks, nh). Block: chunk_size (= 64 at the serve shape).
-// Dynamic smem floats: chunk_size * ds (K_scaled) + chunk_size * hd (x)
-// + chunk_size (dA).
+// Dynamic smem floats: chunk_size * (ds + 4) (K_scaled) + chunk_size * hd
+// (x) + chunk_size (the decay).
 extern "C" __global__ void m3_chunk_pre_state_fused(
     float* __restrict__ K_scaled,
     float* __restrict__ qk_dot,
@@ -399,13 +400,20 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
     int k_ld = ds + 4; /* padded rows - see the coop kernel's bank note */
     float* sm_k = m3f_sm;                       // [chunk_size][k_ld]
     float* sm_x = sm_k + chunk_size * k_ld;     // [chunk_size][hd]
-    float* sm_da = sm_x + chunk_size * hd;      // [chunk_size]
+    float* sm_dec = sm_x + chunk_size * hd;     // [chunk_size]
 
     int tid = threadIdx.x;
     int nt = blockDim.x;
+    // Each row's decay to the chunk's end is staged once with its row:
+    // every fold thread reads the same chunk_len values, and computing
+    // them in the fold repeated one exponential per thread and step.
+    // Same inputs, same expression - the values do not move.
+    const float* da_chunk = dA_cumsum + ((b * n_chunks + chunk) * nh + h) * chunk_size;
+    float dA_end = da_chunk[chunk_len - 1];
 
     // Phase A: the preprocess arithmetic, one t per thread (verbatim),
-    // with the K_scaled row written to global AND smem; x and dA staged.
+    // with the K_scaled row written to global AND smem; x and the decay
+    // staged.
     for (int t_local = tid; t_local < chunk_len; t_local += nt) {
         int t = chunk_start + t_local;
         int th = (b * T + t) * nh + h;
@@ -455,12 +463,25 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
             }
         }
         qk_dot[th] = dot * gamma_val;
-        sm_da[t_local] = dA_cumsum[((b * n_chunks + chunk) * nh + h) * chunk_size + t_local];
+        sm_dec[t_local] = FAST_EXP(fminf(dA_end - da_chunk[t_local], 0.0f));
     }
-    for (int i = tid; i < chunk_len * hd; i += nt) {
-        int tl = i / hd;
-        int pp = i % hd;
-        sm_x[tl * hd + pp] = x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp];
+    if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 15) == 0) {
+        // Whole float4s when every row starts on 16 bytes: a quarter of
+        // the loads and index math, the same copied values.
+        int hq = hd >> 2;
+        float4* sm_x4 = reinterpret_cast<float4*>(sm_x);
+        for (int i = tid; i < chunk_len * hq; i += nt) {
+            int tl = i / hq;
+            int pq = i - tl * hq;
+            sm_x4[i] = *reinterpret_cast<const float4*>(
+                x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + 4 * pq);
+        }
+    } else {
+        for (int i = tid; i < chunk_len * hd; i += nt) {
+            int tl = i / hd;
+            int pp = i % hd;
+            sm_x[tl * hd + pp] = x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp];
+        }
     }
     __syncthreads();
 
@@ -469,13 +490,12 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
     // (the launcher guard). Each acc chain folds ascending t, exactly
     // the standalone kernel's arithmetic.
     int quads = ds / 4;
-    float dA_end = sm_da[chunk_len - 1];
     for (int o = tid; o < hd * quads; o += nt) {
         int p = o / quads;
         int nq = o % quads;
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
         for (int t_local = 0; t_local < chunk_len; t_local++) {
-            float decay = FAST_EXP(fminf(dA_end - sm_da[t_local], 0.0f));
+            float decay = sm_dec[t_local];
             float v_t = sm_x[t_local * hd + p];
             const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld);
             float4 kv = k4[nq];
@@ -2229,9 +2249,13 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     int k_ld = ds + 4;                                                        \
     float* sm_k = m3f_sm;                                                     \
     float* sm_x = sm_k + chunk_size * k_ld;                                   \
-    float* sm_da = sm_x + chunk_size * hd;                                    \
+    float* sm_dec = sm_x + chunk_size * hd;                                   \
     int tid = threadIdx.x;                                                    \
     int nt = blockDim.x;                                                      \
+    /* Each row's decay staged once with its row - see the f32 twin. */       \
+    const float* da_chunk =                                                   \
+        dA_cumsum + ((b * n_chunks + chunk) * nh + h) * chunk_size;           \
+    float dA_end = da_chunk[chunk_len - 1];                                   \
     for (int t_local = tid; t_local < chunk_len; t_local += nt) {             \
         int t = chunk_start + t_local;                                        \
         int th = (b * T + t) * nh + h;                                        \
@@ -2277,25 +2301,43 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             }                                                                 \
         }                                                                     \
         qk_dot[th] = dot * gamma_val;                                         \
-        sm_da[t_local] =                                                      \
-            dA_cumsum[((b * n_chunks + chunk) * nh + h) * chunk_size          \
-                      + t_local];                                             \
+        sm_dec[t_local] = FAST_EXP(fminf(dA_end - da_chunk[t_local], 0.0f));  \
     }                                                                         \
-    for (int i = tid; i < chunk_len * hd; i += nt) {                          \
-        int tl = i / hd;                                                      \
-        int pp = i % hd;                                                      \
-        sm_x[tl * hd + pp] = to_f(                                            \
-            x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp]);\
+    if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 7) == 0) {  \
+        /* Four elements a load when every row starts on 8 bytes, each */     \
+        /* widened by to_f exactly as the element-wise copy widens it. */     \
+        int hq = hd >> 2;                                                     \
+        for (int i = tid; i < chunk_len * hq; i += nt) {                      \
+            int tl = i / hq;                                                  \
+            int pq = i - tl * hq;                                             \
+            union { uint2 u; T_ACT e[4]; } xx;                                \
+            xx.u = *reinterpret_cast<const uint2*>(                           \
+                x + (long long)(b * T + chunk_start + tl) * d_inner           \
+                  + h * hd + 4 * pq);                                         \
+            float4 xf;                                                        \
+            xf.x = to_f(xx.e[0]);                                             \
+            xf.y = to_f(xx.e[1]);                                             \
+            xf.z = to_f(xx.e[2]);                                             \
+            xf.w = to_f(xx.e[3]);                                             \
+            reinterpret_cast<float4*>(sm_x)[i] = xf;                          \
+        }                                                                     \
+    } else {                                                                  \
+        for (int i = tid; i < chunk_len * hd; i += nt) {                      \
+            int tl = i / hd;                                                  \
+            int pp = i % hd;                                                  \
+            sm_x[tl * hd + pp] = to_f(                                        \
+                x[(long long)(b * T + chunk_start + tl) * d_inner             \
+                  + h * hd + pp]);                                            \
+        }                                                                     \
     }                                                                         \
     __syncthreads();                                                          \
     int quads = ds / 4;                                                       \
-    float dA_end = sm_da[chunk_len - 1];                                      \
     for (int o = tid; o < hd * quads; o += nt) {                              \
         int p = o / quads;                                                    \
         int nq = o % quads;                                                   \
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;             \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
-            float decay = FAST_EXP(fminf(dA_end - sm_da[t_local], 0.0f));     \
+            float decay = sm_dec[t_local];                                    \
             float v_t = sm_x[t_local * hd + p];                               \
             const float4* k4 =                                                \
                 reinterpret_cast<const float4*>(sm_k + t_local * k_ld);       \

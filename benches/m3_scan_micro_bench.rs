@@ -253,6 +253,135 @@ fn scan_trio_time_and_hash() {
     );
     println!("fused       {:8.1} us", time(&fused));
 
+    // The bf16 and f16 twins: the fused kernel must reproduce the typed
+    // pair bit for bit (its fold reads the round-tripped K_scaled, as the
+    // pair's chunk_state does), and the printed hashes gate any edit of
+    // either macro body, which the dtype parity tests only measure
+    // within tolerance.
+    {
+        use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
+        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let typed = |data: Vec<f32>| {
+                let buf = DtypedBuf::zeros(st, data.len(), dtype).unwrap();
+                buf.upload_f32(st, &data).unwrap();
+                buf
+            };
+            let x_t = typed(det(batch * t * d_inner, 1));
+            let q_t = typed(det(batch * t * nh * ds, 2));
+            let k_t = typed(det(batch * t * nh * ds, 3));
+            let ks_pair = DtypedBuf::zeros(st, batch * t * nh * ds, dtype).unwrap();
+            let ks_fused = DtypedBuf::zeros(st, batch * t * nh * ds, dtype).unwrap();
+            let rows = || GpuBuffer::zeros(st, batch * t * nh).unwrap();
+            let (qkd_pair, scale_pair, gamma_pair) = (rows(), rows(), rows());
+            let (qkd_fused, scale_fused, gamma_fused) = (rows(), rows(), rows());
+            let states_pair = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
+            let states_fused = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
+            let (xp, qp, kp) = (x_t.cached_ptr(), q_t.cached_ptr(), k_t.cached_ptr());
+            let (ksp_pair, ksp_fused) = (ks_pair.cached_ptr(), ks_fused.cached_ptr());
+
+            let pair = || {
+                let cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                    block_dim: (cs as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let mut b = ctx
+                    .stream
+                    .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                b.arg(&ksp_pair);
+                b.arg(qkd_pair.inner());
+                b.arg(scale_pair.inner());
+                b.arg(gamma_pair.inner());
+                b.arg(&kp);
+                b.arg(&qp);
+                b.arg(dt_b.inner());
+                b.arg(trap.inner());
+                b.arg(&b_i);
+                b.arg(&t_i);
+                b.arg(&nh_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                unsafe { b.launch(cfg) }.unwrap();
+                let cfg =
+                    mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+                let mut b = ctx
+                    .stream
+                    .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                b.arg(states_pair.inner());
+                b.arg(&xp);
+                b.arg(&ksp_pair);
+                b.arg(da_cumsum.inner());
+                b.arg(&b_i);
+                b.arg(&t_i);
+                b.arg(&nh_i);
+                b.arg(&hd_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                unsafe { b.launch(cfg) }.unwrap();
+            };
+            let fused_typed = || {
+                let fcfg =
+                    mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
+                        .expect("serve shape must fit the fused kernel");
+                let mut b = ctx
+                    .stream
+                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                b.arg(&ksp_fused);
+                b.arg(qkd_fused.inner());
+                b.arg(scale_fused.inner());
+                b.arg(gamma_fused.inner());
+                b.arg(states_fused.inner());
+                b.arg(&kp);
+                b.arg(&qp);
+                b.arg(dt_b.inner());
+                b.arg(trap.inner());
+                b.arg(&xp);
+                b.arg(da_cumsum.inner());
+                b.arg(&b_i);
+                b.arg(&t_i);
+                b.arg(&nh_i);
+                b.arg(&hd_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                unsafe { b.launch(fcfg) }.unwrap();
+            };
+            pair();
+            fused_typed();
+            ctx.stream.synchronize().unwrap();
+            let typed_down = |buf: &DtypedBuf| {
+                let mut host = vec![0.0f32; buf.len_elems()];
+                buf.download_f32(st, &mut host).unwrap();
+                host
+            };
+            let down = |buf: &GpuBuffer, n: usize| {
+                let mut host = vec![0.0f32; n];
+                buf.download(st, &mut host).unwrap();
+                host
+            };
+            let n_states = batch * nc * nh * hd * ds;
+            let hashes = |ks: &DtypedBuf, qkd: &GpuBuffer, states: &GpuBuffer| {
+                (
+                    fnv(&typed_down(ks)),
+                    fnv(&down(qkd, batch * t * nh)),
+                    fnv(&down(states, n_states)),
+                )
+            };
+            let want = hashes(&ks_pair, &qkd_pair, &states_pair);
+            let got = hashes(&ks_fused, &qkd_fused, &states_fused);
+            println!(
+                "TYPED {dtype:?} HASH k_scaled={:016x} qk_dot={:016x} chunk_states={:016x}",
+                want.0, want.1, want.2
+            );
+            assert_eq!(
+                got, want,
+                "typed {dtype:?} fused diverged from the typed pair"
+            );
+            println!("pair  {dtype:?}  {:8.1} us", time(&pair));
+            println!("fused {dtype:?}  {:8.1} us", time(&fused_typed));
+        }
+    }
+
     // The typed scan macro instantiates an f32 variant with identity
     // conversions, so its output must match the plain coop kernel
     // bit-for-bit. This arm gates the shared macro body: an indexing or
