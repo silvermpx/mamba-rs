@@ -26,7 +26,7 @@ use crate::mamba_ssm::cpu::prefill::{
 };
 use crate::mamba3_siso::cpu::dims::Mamba3Dims;
 use crate::mamba3_siso::cpu::forward::{
-    heavy_tail, simd_rms_scale, simd_ssm_recurrence, simd_sum_sq, softplus,
+    SsmHeadStep, heavy_tail, simd_rms_scale, simd_ssm_head, simd_sum_sq, softplus,
 };
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
@@ -182,17 +182,32 @@ fn ssm_head(
     let a_floor = dims.a_floor;
     let g = h / (nh / ng);
     let gs = g * ds;
+    // The head's B and C rows with bias, staged once per call: every step
+    // writes the first d_state entries before reading them, so the rows
+    // need no zeroing per step.
+    let mut k_local = [0.0_f32; MAX_DS];
+    let mut q_local = [0.0_f32; MAX_DS];
+    let b_bias = &lw.b_bias[h * ds..h * ds + ds];
+    let c_bias = &lw.c_bias[h * ds..h * ds + ds];
 
     for t in 0..t_len {
         let a_val = (-heavy_tail(dd_a_col[t])).min(-a_floor);
         let dt_val = softplus(dd_dt_col[t] + lw.dt_bias[h]);
 
-        let mut k_local = [0.0_f32; MAX_DS];
-        let mut q_local = [0.0_f32; MAX_DS];
-        let b_row = t * ng * ds;
-        for n in 0..ds {
-            k_local[n] = b_normed[b_row + gs + n] + lw.b_bias[h * ds + n];
-            q_local[n] = c_normed[b_row + gs + n] + lw.c_bias[h * ds + n];
+        let b_row = t * ng * ds + gs;
+        for ((k, &b), &bias) in k_local[..ds]
+            .iter_mut()
+            .zip(&b_normed[b_row..b_row + ds])
+            .zip(b_bias)
+        {
+            *k = b + bias;
+        }
+        for ((q, &c), &bias) in q_local[..ds]
+            .iter_mut()
+            .zip(&c_normed[b_row..b_row + ds])
+            .zip(c_bias)
+        {
+            *q = c + bias;
         }
 
         if na > 0 {
@@ -227,21 +242,21 @@ fn ssm_head(
         let beta = alpha * dt_val * (1.0 - trap_sig);
         let gamma = trap_sig * dt_val;
 
-        for p in 0..hd {
-            let x_val = x_cm[(h * hd + p) * t_len + t];
-            let v_prev = v_state[p];
-            let s_off = p * ds;
-            let y_val = simd_ssm_recurrence(
-                &mut ssm[s_off..s_off + ds],
-                &k_state[..ds],
-                &k_local[..ds],
-                &q_local[..ds],
-                alpha,
-                beta * v_prev,
-                gamma * x_val,
-            );
-            y_cols[p * t_len + t] = lw.d_param[h].mul_add(x_val, y_val);
-        }
+        simd_ssm_head(SsmHeadStep {
+            state: &mut ssm[..hd * ds],
+            k_prev: &k_state[..ds],
+            k_cur: &k_local[..ds],
+            q: &q_local[..ds],
+            x: &x_cm[h * hd * t_len + t..],
+            x_stride: t_len,
+            v_prev: &v_state[..hd],
+            y: &mut y_cols[t..],
+            y_stride: t_len,
+            d: lw.d_param[h],
+            alpha,
+            beta,
+            gamma,
+        });
 
         k_state[..ds].copy_from_slice(&k_local[..ds]);
         for p in 0..hd {

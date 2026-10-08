@@ -81,62 +81,85 @@ pub(crate) fn simd_rms_scale(out: &mut [f32], x: &[f32], weight: &[f32], inv_rms
     });
 }
 
-/// SIMD SSM recurrence: state[n] = alpha*state[n] + beta_v*k_prev[n] + gamma_x*k_cur[n]
-/// Returns y = sum(state[n] * q[n]).
-#[inline]
-pub(crate) fn simd_ssm_recurrence(
+/// One state row of the SSM recurrence under a chosen SIMD level:
+/// state[n] = alpha*state[n] + beta_v*k_prev[n] + gamma_x*k_cur[n],
+/// returning y = sum(state[n] * q[n]).
+#[inline(always)]
+fn ssm_row<S: Simd>(
+    simd: S,
     state: &mut [f32],
-    k_prev: &[f32],
-    k_cur: &[f32],
-    q: &[f32],
-    alpha: f32,
-    beta_v: f32,
-    gamma_x: f32,
+    (kp, kc, q): (&[f32], &[f32], &[f32]),
+    (a, bv, gx): (f32, f32, f32),
 ) -> f32 {
-    struct Rec<'a> {
-        state: &'a mut [f32],
-        kp: &'a [f32],
-        kc: &'a [f32],
-        q: &'a [f32],
-        a: f32,
-        bv: f32,
-        gx: f32,
+    let va = simd.splat_f32s(a);
+    let vbv = simd.splat_f32s(bv);
+    let vgx = simd.splat_f32s(gx);
+    let (s_h, s_t) = S::as_mut_simd_f32s(state);
+    let (kp_h, kp_t) = S::as_simd_f32s(kp);
+    let (kc_h, kc_t) = S::as_simd_f32s(kc);
+    let (q_h, q_t) = S::as_simd_f32s(q);
+    let mut yacc = simd.splat_f32s(0.0);
+    for (((s, &kp), &kc), &q) in s_h.iter_mut().zip(kp_h).zip(kc_h).zip(q_h) {
+        let ns = simd.mul_add_f32s(va, *s, simd.mul_add_f32s(vbv, kp, simd.mul_f32s(vgx, kc)));
+        *s = ns;
+        yacc = simd.mul_add_f32s(ns, q, yacc);
     }
-    impl WithSimd for Rec<'_> {
-        type Output = f32;
-        #[inline(always)]
-        fn with_simd<S: Simd>(self, simd: S) -> f32 {
-            let va = simd.splat_f32s(self.a);
-            let vbv = simd.splat_f32s(self.bv);
-            let vgx = simd.splat_f32s(self.gx);
-            let (s_h, s_t) = S::as_mut_simd_f32s(self.state);
-            let (kp_h, kp_t) = S::as_simd_f32s(self.kp);
-            let (kc_h, kc_t) = S::as_simd_f32s(self.kc);
-            let (q_h, q_t) = S::as_simd_f32s(self.q);
-            let mut yacc = simd.splat_f32s(0.0);
-            for (((s, &kp), &kc), &q) in s_h.iter_mut().zip(kp_h).zip(kc_h).zip(q_h) {
-                let ns =
-                    simd.mul_add_f32s(va, *s, simd.mul_add_f32s(vbv, kp, simd.mul_f32s(vgx, kc)));
-                *s = ns;
-                yacc = simd.mul_add_f32s(ns, q, yacc);
-            }
-            let mut y = simd.reduce_sum_f32s(yacc);
-            for (((s, &kp), &kc), &q) in s_t.iter_mut().zip(kp_t).zip(kc_t).zip(q_t) {
-                *s = self.a.mul_add(*s, self.bv.mul_add(kp, self.gx * kc));
-                y = (*s).mul_add(q, y);
-            }
-            y
+    let mut y = simd.reduce_sum_f32s(yacc);
+    for (((s, &kp), &kc), &q) in s_t.iter_mut().zip(kp_t).zip(kc_t).zip(q_t) {
+        *s = a.mul_add(*s, bv.mul_add(kp, gx * kc));
+        y = (*s).mul_add(q, y);
+    }
+    y
+}
+
+/// One head's channels at one step of the SSM recurrence: for every
+/// channel p, its state row takes [`ssm_row`] with beta * v_prev[p] and
+/// gamma * x[p], and y[p] = d * x[p] + the row's readout.
+pub(crate) struct SsmHeadStep<'a> {
+    /// The head's states, `headdim` rows of `d_state`.
+    pub state: &'a mut [f32],
+    pub k_prev: &'a [f32],
+    pub k_cur: &'a [f32],
+    pub q: &'a [f32],
+    /// The step's inputs, channel p at `x[p * x_stride]`.
+    pub x: &'a [f32],
+    pub x_stride: usize,
+    /// The previous step's inputs, one per channel.
+    pub v_prev: &'a [f32],
+    /// The outputs, channel p at `y[p * y_stride]`.
+    pub y: &'a mut [f32],
+    pub y_stride: usize,
+    pub d: f32,
+    pub alpha: f32,
+    pub beta: f32,
+    pub gamma: f32,
+}
+
+impl WithSimd for SsmHeadStep<'_> {
+    type Output = ();
+    #[inline(always)]
+    fn with_simd<S: Simd>(self, simd: S) {
+        let ds = self.k_cur.len();
+        for (p, row) in self.state.chunks_exact_mut(ds).enumerate() {
+            let x_val = self.x[p * self.x_stride];
+            let y_val = ssm_row(
+                simd,
+                row,
+                (self.k_prev, self.k_cur, self.q),
+                (self.alpha, self.beta * self.v_prev[p], self.gamma * x_val),
+            );
+            self.y[p * self.y_stride] = self.d.mul_add(x_val, y_val);
         }
     }
-    Arch::new().dispatch(Rec {
-        state,
-        kp: k_prev,
-        kc: k_cur,
-        q,
-        a: alpha,
-        bv: beta_v,
-        gx: gamma_x,
-    })
+}
+
+/// The SSM recurrence of one head at one step, every channel under one
+/// SIMD dispatch: a dispatch per channel spent more on choosing the
+/// instruction set than on a `d_state`-wide row. The rows run the same
+/// instructions in the same order either way.
+#[inline]
+pub(crate) fn simd_ssm_head(step: SsmHeadStep<'_>) {
+    Arch::new().dispatch(step);
 }
 
 #[inline(always)]
@@ -309,6 +332,11 @@ pub fn forward_mamba3_layer_batched(
 
     // ═══ F5: Per-head trapezoidal SSM (sequential T) ═══
     let h_state_len = nh * hd * ds;
+    // Each head's B and C rows with bias, staged once per call: every head
+    // writes the first d_state entries before reading them, so the rows
+    // need no zeroing per head and step.
+    let mut k_local = [0.0_f32; MAX_DS];
+    let mut q_local = [0.0_f32; MAX_DS];
 
     for t in 0..seq_len {
         let base_t = acts.base(t);
@@ -342,8 +370,6 @@ pub fn forward_mamba3_layer_batched(
             acts.data[base_t + o.dt_val + h] = dt_val;
 
             // Per-head B/C with bias
-            let mut k_local = [0.0_f32; MAX_DS];
-            let mut q_local = [0.0_f32; MAX_DS];
             for n in 0..ds {
                 k_local[n] =
                     acts.data[base_t + o.b_normed + g * ds + n] + layer_w.b_bias[h * ds + n];
@@ -392,30 +418,32 @@ pub fn forward_mamba3_layer_batched(
             acts.data[base_t + o.beta + h] = beta;
             acts.data[base_t + o.gamma + h] = gamma;
 
-            // SSM recurrence
-            let kp_slice = &k_state[h * ds..h * ds + ds];
-            for p in 0..hd {
-                let x_val = acts.data[base_t + o.x + h * hd + p];
-                let v_prev = v_state[h * hd + p];
-                let s_off = (h * hd + p) * ds;
-                let y_val = simd_ssm_recurrence(
-                    &mut ssm_state[s_off..s_off + ds],
-                    kp_slice,
-                    &k_local[..ds],
-                    &q_local[..ds],
-                    alpha,
-                    beta * v_prev,
-                    gamma * x_val,
-                );
-                acts.data[base_t + o.y + h * hd + p] = layer_w.d_param[h].mul_add(x_val, y_val);
-            }
+            // SSM recurrence; x sits before y in a step's fields.
+            let (lo, hi) = acts.data.split_at_mut(base_t + o.y);
+            let x_head = base_t + o.x + h * hd;
+            simd_ssm_head(SsmHeadStep {
+                state: &mut ssm_state[h * hd * ds..(h + 1) * hd * ds],
+                k_prev: &k_state[h * ds..h * ds + ds],
+                k_cur: &k_local[..ds],
+                q: &q_local[..ds],
+                x: &lo[x_head..x_head + hd],
+                x_stride: 1,
+                v_prev: &v_state[h * hd..(h + 1) * hd],
+                y: &mut hi[h * hd..(h + 1) * hd],
+                y_stride: 1,
+                d: layer_w.d_param[h],
+                alpha,
+                beta,
+                gamma,
+            });
 
             // Update states
             k_state[h * ds..h * ds + ds].copy_from_slice(&k_local[..ds]);
-            for p in 0..hd {
-                v_state[h * hd + p] = acts.data[base_t + o.x + h * hd + p];
-            }
         }
+        // Each head read only its own previous inputs above, so the step's
+        // inputs become the next step's in one copy.
+        let xs = base_t + o.x;
+        v_state[..nh * hd].copy_from_slice(&acts.data[xs..xs + nh * hd]);
 
         // Save h_curr
         let hc = base_t + o.h_curr;

@@ -158,6 +158,11 @@ pub fn mamba3_layer_step(
         }
     }
 
+    // Each head's B and C rows with bias, staged once per call: every head
+    // writes the first d_state entries before reading them, so the rows
+    // need no zeroing per head.
+    let mut k_local = [0.0_f32; MAX_DS];
+    let mut q_local = [0.0_f32; MAX_DS];
     for h in 0..nh {
         let g = h / (nh / ng);
 
@@ -169,11 +174,20 @@ pub fn mamba3_layer_step(
         let dt_val = super::forward::softplus(scratch.proj[dd_dt_off + h] + lw.dt_bias[h]);
 
         // Per-head B/C with bias
-        let mut k_local = [0.0_f32; MAX_DS];
-        let mut q_local = [0.0_f32; MAX_DS];
-        for n in 0..ds {
-            k_local[n] = scratch.b_normed[g * ds + n] + lw.b_bias[h * ds + n];
-            q_local[n] = scratch.c_normed[g * ds + n] + lw.c_bias[h * ds + n];
+        let (group, head) = (g * ds..g * ds + ds, h * ds..h * ds + ds);
+        for ((k, &b), &bias) in k_local[..ds]
+            .iter_mut()
+            .zip(&scratch.b_normed[group.clone()])
+            .zip(&lw.b_bias[head.clone()])
+        {
+            *k = b + bias;
+        }
+        for ((q, &c), &bias) in q_local[..ds]
+            .iter_mut()
+            .zip(&scratch.c_normed[group])
+            .zip(&lw.c_bias[head])
+        {
+            *q = c + bias;
         }
 
         // RoPE: per-head angle accumulation and rotation
@@ -207,29 +221,28 @@ pub fn mamba3_layer_step(
         let gamma = trap * dt_val;
 
         // SSM recurrence (SIMD): h = alpha*h + beta*v_prev*k_prev + gamma*x*k_cur
-        let kp = &state.k_state[h * ds..h * ds + ds];
-        for p in 0..hd {
-            let x_val = scratch.x[h * hd + p];
-            let v_prev = state.v_state[h * hd + p];
-            let s_off = (h * hd + p) * ds;
-            let y_val = super::forward::simd_ssm_recurrence(
-                &mut state.ssm_state[s_off..s_off + ds],
-                kp,
-                &k_local[..ds],
-                &q_local[..ds],
-                alpha,
-                beta * v_prev,
-                gamma * x_val,
-            );
-            scratch.y[h * hd + p] = lw.d_param[h].mul_add(x_val, y_val);
-        }
+        super::forward::simd_ssm_head(super::forward::SsmHeadStep {
+            state: &mut state.ssm_state[h * hd * ds..(h + 1) * hd * ds],
+            k_prev: &state.k_state[h * ds..h * ds + ds],
+            k_cur: &k_local[..ds],
+            q: &q_local[..ds],
+            x: &scratch.x[h * hd..(h + 1) * hd],
+            x_stride: 1,
+            v_prev: &state.v_state[h * hd..(h + 1) * hd],
+            y: &mut scratch.y[h * hd..(h + 1) * hd],
+            y_stride: 1,
+            d: lw.d_param[h],
+            alpha,
+            beta,
+            gamma,
+        });
 
-        // Update K and V state for next step
+        // Update K state for next step
         state.k_state[h * ds..h * ds + ds].copy_from_slice(&k_local[..ds]);
-        for p in 0..hd {
-            state.v_state[h * hd + p] = scratch.x[h * hd + p];
-        }
     }
+    // Each head read only its own previous inputs above, so the step's
+    // inputs become the next step's in one copy.
+    state.v_state[..di].copy_from_slice(&scratch.x[..di]);
 
     // 7. Output gating
     if cfg.is_outproj_norm {
