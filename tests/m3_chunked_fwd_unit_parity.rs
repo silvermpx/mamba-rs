@@ -407,33 +407,32 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                     .collect();
                 let dt = upload_f32(&ctx, &dt_vals);
                 let trap = upload_f32(&ctx, &trap_vals);
-                // Poison padding so the endpoint must use the actual chunk length.
-                let mut da_vals = vec![f32::NAN; batch * nc * nh * cs];
+                // The a*dt rows both arms fold into the decay cumsum.
+                let mut adt_vals = vec![0.0f32; th_n];
                 for b in 0..batch {
                     for chunk in 0..nc {
                         for h in 0..nh {
-                            let base = ((b * nc + chunk) * nh + h) * cs;
                             let chunk_len = cs.min(t - chunk * cs);
-                            let mut sum = 0.0f32;
                             for tl in 0..chunk_len {
-                                sum -= 0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32;
+                                let mut a =
+                                    -(0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32);
                                 // Earlier timesteps underflow after the midpoint
                                 // drop; later timesteps still have ordinary decay.
                                 if chunk_len >= 4 && tl == chunk_len / 2 {
-                                    sum -= 160.0;
+                                    a -= 160.0;
                                 }
-                                da_vals[base + tl] = sum;
-                            }
-                            if chunk_len >= 3 {
-                                // The penultimate value deliberately makes the
-                                // endpoint difference positive, exercising fminf.
-                                da_vals[base + chunk_len - 2] =
-                                    da_vals[base + chunk_len - 1] - 0.125;
+                                // A rising last step makes the endpoint
+                                // difference positive, exercising fminf.
+                                if chunk_len >= 3 && tl == chunk_len - 1 {
+                                    a = 0.125;
+                                }
+                                adt_vals[(b * t + chunk * cs + tl) * nh + h] = a;
                             }
                         }
                     }
                 }
-                let da = upload_f32(&ctx, &da_vals);
+                let adt = upload_f32(&ctx, &adt_vals);
+                let da_n = batch * nc * nh * cs;
                 let dims = [batch, t, nh, hd, ds, cs].map(|v| v as i32);
                 let pre_dims = [dims[0], dims[1], dims[2], dims[4], dims[5]];
                 let pre_cfg = LaunchConfig {
@@ -448,6 +447,9 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                     let ks = upload_typed(&ctx, &vec![poison; ks_n], dtype);
                     let [qk, scale, gamma, states] = [th_n, th_n, th_n, states_n]
                         .map(|len| upload_f32(&ctx, &vec![poison; len]));
+                    // Padding past a chunk's length stays NaN in both arms, so
+                    // the endpoint must use the actual chunk length.
+                    let da = upload_f32(&ctx, &vec![f32::NAN; da_n]);
                     let scale_ptr = if save_scale { scale.cached_ptr() } else { 0 };
                     let gamma_ptr = if save_gamma { gamma.cached_ptr() } else { 0 };
                     if fused {
@@ -462,6 +464,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             dt.cached_ptr(),
                             trap.cached_ptr(),
                             x.cached_ptr(),
+                            adt.cached_ptr(),
                             da.cached_ptr(),
                         ];
                         let mut bld = ctx
@@ -475,6 +478,25 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         }
                         unsafe { bld.launch(fused_cfg) }.unwrap();
                     } else {
+                        let block_x = nh.min(256) as u32;
+                        let da_cfg = LaunchConfig {
+                            grid_dim: (
+                                batch as u32,
+                                nc as u32,
+                                nh.div_ceil(block_x as usize) as u32,
+                            ),
+                            block_dim: (block_x, 1, 1),
+                            shared_mem_bytes: 0,
+                        };
+                        let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+                        let (da_ptr, adt_ptr) = (da.cached_ptr(), adt.cached_ptr());
+                        bld.arg(&da_ptr);
+                        bld.arg(&adt_ptr);
+                        let da_dims = [dims[0], dims[1], dims[2], dims[5]];
+                        for dim in &da_dims {
+                            bld.arg(dim);
+                        }
+                        unsafe { bld.launch(da_cfg) }.unwrap();
                         let ptrs = [
                             ks.cached_ptr(),
                             qk.cached_ptr(),
@@ -519,10 +541,18 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         download_f32(&ctx, &scale, th_n),
                         download_f32(&ctx, &gamma, th_n),
                         download_f32(&ctx, &states, states_n),
+                        download_f32(&ctx, &da, da_n),
                     ]
                 };
                 let reference = run(false, true, true);
-                let names = ["K_scaled", "qk_dot", "scale", "gamma", "chunk_states"];
+                let names = [
+                    "K_scaled",
+                    "qk_dot",
+                    "scale",
+                    "gamma",
+                    "chunk_states",
+                    "dA_cumsum",
+                ];
                 for (save_scale, save_gamma) in
                     [(true, true), (false, true), (true, false), (false, false)]
                 {
@@ -535,7 +565,11 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             let want = if (out == 2 && !save_scale) || (out == 3 && !save_gamma) {
                                 -8192.0f32
                             } else {
-                                assert!(want.is_finite(), "{label}: {name}[{i}] oracle nonfinite");
+                                // The cumsum's padding is NaN in both arms.
+                                assert!(
+                                    want.is_finite() || out == 5,
+                                    "{label}: {name}[{i}] oracle nonfinite"
+                                );
                                 want
                             };
                             // Widening finite half values is exact, including signed zero.

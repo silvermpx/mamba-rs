@@ -538,7 +538,10 @@ pub fn gpu_forward_mamba3_layer(
             unsafe { builder.launch(grid_1d(count)) }
                 .map_err(|e| format!("adt compute F6: {:?}", e))?;
         }
-        {
+        // The fused kernel writes the decay cumsum itself; only the unfused
+        // pair reads it from its own launch.
+        let fused = super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+        if fused.is_none() {
             let block_x = nh.min(256) as u32;
             let grid_z = nh.div_ceil(block_x as usize) as u32;
             let cfg = cudarc::driver::LaunchConfig {
@@ -555,11 +558,9 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&cs);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dA_cumsum F6 K2: {:?}", e))?;
         }
-        // K1+K3 fused (preprocess + chunk_state) when the shape allows;
-        // K2 (dA_cumsum) moved ahead - it depends only on adt.
-        if let Some(fcfg) =
-            super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size())
-        {
+        // K1+K2+K3 fused (decay cumsum + preprocess + chunk_state) when
+        // the shape allows.
+        if let Some(fcfg) = fused {
             let mut builder = ctx
                 .stream
                 .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
@@ -573,7 +574,8 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(acts.dt.inner());
             builder.arg(acts.trap.inner());
             builder.arg(acts.x.inner());
-            builder.arg(acts.da_cumsum_saved.inner());
+            builder.arg(scratch.d_alpha.inner());
+            builder.arg(acts.da_cumsum_saved.inner_mut());
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);

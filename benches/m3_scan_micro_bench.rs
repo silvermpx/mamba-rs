@@ -77,6 +77,18 @@ fn scan_trio_time_and_hash() {
     )
     .unwrap();
     let prev_states = GpuBuffer::from_cpu(st, &det(batch * nc * nh * hd * ds, 7)).unwrap();
+    // The a*dt rows the fused kernel folds into its own decay cumsum; the
+    // pair it is held to reads the same cumsum from m3_dA_cumsum.
+    let adt = GpuBuffer::from_cpu(
+        st,
+        &det(batch * t * nh, 9)
+            .iter()
+            .map(|v| -v.abs() * 0.05)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let da_pair = GpuBuffer::zeros(st, batch * nc * nh * cs).unwrap();
+    let da_fused = GpuBuffer::zeros(st, batch * nc * nh * cs).unwrap();
     let d_param = GpuBuffer::from_cpu(st, &det(nh, 8)).unwrap();
     let qk_dot = GpuBuffer::zeros(st, batch * t * nh).unwrap();
     let scale = GpuBuffer::zeros(st, batch * t * nh).unwrap();
@@ -91,6 +103,31 @@ fn scan_trio_time_and_hash() {
     let hd_i = hd as i32;
     let ds_i = ds as i32;
     let cs_i = cs as i32;
+
+    // K2 dA_cumsum: the decay cumsum of the a*dt rows, for the pair the
+    // fused kernel is held to.
+    let cumsum = || {
+        let block_x = nh.min(256) as u32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                batch as u32,
+                nc as u32,
+                nh.div_ceil(block_x as usize) as u32,
+            ),
+            block_dim: (block_x, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+        b.arg(da_pair.inner());
+        b.arg(adt.inner());
+        b.arg(&b_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&cs_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    cumsum();
+    ctx.stream.synchronize().unwrap();
 
     // K1 preprocess: writes k_scaled/qk_dot/scale/gamma consumed below.
     let preprocess = || {
@@ -199,6 +236,31 @@ fn scan_trio_time_and_hash() {
     println!("preprocess  {:8.1} us", time(&preprocess));
     println!("chunk_state {:8.1} us", time(&chunk_state));
     println!("scan_coop   {:8.1} us", time(&scan));
+    println!("da_cumsum   {:8.1} us", time(&cumsum));
+
+    // The pair's chunk states over the cumsum of the a*dt rows, which the
+    // fused kernel computes for itself.
+    let chunk_states_real = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
+    {
+        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+        b.arg(chunk_states_real.inner());
+        b.arg(x.inner());
+        b.arg(k_scaled.inner());
+        b.arg(da_pair.inner());
+        b.arg(&b_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        b.arg(&cs_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    }
+    ctx.stream.synchronize().unwrap();
+    let mut cst_real = vec![0.0f32; batch * nc * nh * hd * ds];
+    chunk_states_real.download(st, &mut cst_real).unwrap();
+    let mut da_pair_h = vec![0.0f32; batch * nc * nh * cs];
+    da_pair.download(st, &mut da_pair_h).unwrap();
 
     // The fused kernel must reproduce the pair's outputs BIT-EXACTLY:
     // zero the outputs, run fused once, re-hash.
@@ -225,7 +287,8 @@ fn scan_trio_time_and_hash() {
         b.arg(dt_b.inner());
         b.arg(trap.inner());
         b.arg(x.inner());
-        b.arg(da_cumsum.inner());
+        b.arg(adt.inner());
+        b.arg(da_fused.inner());
         b.arg(&b_i);
         b.arg(&t_i);
         b.arg(&nh_i);
@@ -248,8 +311,15 @@ fn scan_trio_time_and_hash() {
     assert_eq!(fnv(&ks_f), fnv(&ks_h), "fused k_scaled diverged from pair");
     assert_eq!(
         fnv(&cst_f),
-        fnv(&cst_h),
+        fnv(&cst_real),
         "fused chunk_states diverged from pair"
+    );
+    let mut da_f = vec![0.0f32; batch * nc * nh * cs];
+    da_fused.download(st, &mut da_f).unwrap();
+    assert_eq!(
+        fnv(&da_f),
+        fnv(&da_pair_h),
+        "fused dA_cumsum diverged from m3_dA_cumsum"
     );
     println!("fused       {:8.1} us", time(&fused));
 
@@ -311,7 +381,7 @@ fn scan_trio_time_and_hash() {
                 b.arg(states_pair.inner());
                 b.arg(&xp);
                 b.arg(&ksp_pair);
-                b.arg(da_cumsum.inner());
+                b.arg(da_pair.inner());
                 b.arg(&b_i);
                 b.arg(&t_i);
                 b.arg(&nh_i);
@@ -337,7 +407,8 @@ fn scan_trio_time_and_hash() {
                 b.arg(dt_b.inner());
                 b.arg(trap.inner());
                 b.arg(&xp);
-                b.arg(da_cumsum.inner());
+                b.arg(adt.inner());
+                b.arg(da_fused.inner());
                 b.arg(&b_i);
                 b.arg(&t_i);
                 b.arg(&nh_i);

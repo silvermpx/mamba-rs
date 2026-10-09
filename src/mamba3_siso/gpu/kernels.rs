@@ -834,7 +834,8 @@ pub fn chunk_fused_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> Option<cudarc::driver::LaunchConfig> {
-    let smem_bytes = (chunk_size * (ds + 4) + chunk_size * hd + chunk_size) * 4;
+    // K_scaled rows, x rows, each row's decay and the decay cumsum.
+    let smem_bytes = (chunk_size * (ds + 4) + chunk_size * hd + 2 * chunk_size) * 4;
     if !ds.is_multiple_of(4) || chunk_size > 1024 || smem_bytes > 48 * 1024 {
         return None;
     }

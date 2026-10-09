@@ -558,8 +558,10 @@ pub fn gpu_forward_mamba3_layer_mixed(
             unsafe { bld.launch(grid_1d(count)) }.map_err(|e| format!("m3_mixed F6 adt: {e:?}"))?;
         }
 
-        // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved.
-        {
+        // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved, for the
+        // unfused pair only: the fused kernel writes the cumsum itself.
+        let fused = super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+        if fused.is_none() {
             let block_x = nh.min(256) as u32;
             let grid_z = nh.div_ceil(block_x as usize) as u32;
             let cfg = cudarc::driver::LaunchConfig {
@@ -577,12 +579,10 @@ pub fn gpu_forward_mamba3_layer_mixed(
             unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
         }
 
-        // K1+K3 fused (preprocess + chunk_state) when the shape allows:
-        // K_scaled crosses the seam in shared memory instead of L2. K2
-        // (dA_cumsum) moved ahead - it depends only on adt.
-        if let Some(fcfg) =
-            super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size())
-        {
+        // K1+K2+K3 fused (decay cumsum + preprocess + chunk_state) when the
+        // shape allows: K_scaled crosses the seam in shared memory instead
+        // of L2.
+        if let Some(fcfg) = fused {
             let mut bld = ctx
                 .stream
                 .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
@@ -600,7 +600,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(acts.dt.inner());
             bld.arg(acts.trap.inner());
             bld.arg(&xp);
-            bld.arg(acts.da_cumsum_saved.inner());
+            bld.arg(adt_temp_scratch.inner());
+            bld.arg(acts.da_cumsum_saved.inner_mut());
             bld.arg(&b_i);
             bld.arg(&t_i);
             bld.arg(&nh_i);

@@ -709,7 +709,11 @@ impl Mamba3Prefill {
                 unsafe { b.launch(grid_1d(count)) }
                     .map_err(|e| format!("prefill adt L{l}: {e:?}"))?;
             }
-            {
+            // The fused kernel writes the decay cumsum itself; only the
+            // unfused pair reads it from its own launch.
+            let fused =
+                super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            if fused.is_none() {
                 let block_x = nh.min(256) as u32;
                 let grid_z = nh.div_ceil(block_x as usize) as u32;
                 let cfg = cudarc::driver::LaunchConfig {
@@ -726,12 +730,10 @@ impl Mamba3Prefill {
                 b.arg(&cs);
                 unsafe { b.launch(cfg) }.map_err(|e| format!("prefill da_cumsum L{l}: {e:?}"))?;
             }
-            // Fused preprocess + chunk_state when the shape allows: K_scaled
-            // crosses the seam through shared memory instead of L2. The
-            // dA_cumsum launch moved ahead of it (it depends only on adt).
-            if let Some(fcfg) =
-                super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size())
-            {
+            // Fused decay cumsum + preprocess + chunk_state when the shape
+            // allows: K_scaled crosses the seam through shared memory instead
+            // of L2.
+            if let Some(fcfg) = fused {
                 if let Some(ts) = typed.as_deref_mut() {
                     let ks = ts.k_scaled.cached_ptr();
                     let kp = ts.k.cached_ptr();
@@ -750,7 +752,8 @@ impl Mamba3Prefill {
                     b.arg(tgt.dt.inner());
                     b.arg(tgt.trap.inner());
                     b.arg(&xp);
-                    b.arg(ck.da_cumsum.inner());
+                    b.arg(ck.d_alpha.inner());
+                    b.arg(ck.da_cumsum.inner_mut());
                     b.arg(&b_i);
                     b.arg(&t_i);
                     b.arg(&nh_i);
@@ -773,7 +776,8 @@ impl Mamba3Prefill {
                     b.arg(tgt.dt.inner());
                     b.arg(tgt.trap.inner());
                     b.arg(tgt.x.inner());
-                    b.arg(ck.da_cumsum.inner());
+                    b.arg(ck.d_alpha.inner());
+                    b.arg(ck.da_cumsum.inner_mut());
                     b.arg(&b_i);
                     b.arg(&t_i);
                     b.arg(&nh_i);

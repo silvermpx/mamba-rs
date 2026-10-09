@@ -355,10 +355,9 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // L2-bound, 76% utilization at the serve shape). The fused kernel
 // computes each K_scaled row once, stores it to global (the scan still
 // consumes it) AND keeps it in shared memory for the state fold, staging
-// x and each row's decay to the chunk's end alongside. Requires
-// dA_cumsum as an INPUT, so the launcher reorders the pipeline to adt ->
-// dA_cumsum -> fused (dA_cumsum depends only on adt - the reorder is
-// stream-serial-identical).
+// x and each row's decay to the chunk's end alongside. It reads a*dt and
+// writes the chunk's decay cumsum itself, the standalone m3_dA_cumsum's
+// adds in the same order, so the launch that kernel took is gone.
 //
 // Bit contract: phase A is the preprocess arithmetic verbatim (one t per
 // thread); phase B is the chunk_state quad fold verbatim (four
@@ -368,7 +367,7 @@ extern "C" __global__ void m3_chunk_state_fwd(
 //
 // Grid: (B * n_chunks, nh). Block: chunk_size (= 64 at the serve shape).
 // Dynamic smem floats: chunk_size * (ds + 4) (K_scaled) + chunk_size * hd
-// (x) + chunk_size (the decay).
+// (x) + chunk_size (the decay) + chunk_size (the decay cumsum).
 extern "C" __global__ void m3_chunk_pre_state_fused(
     float* __restrict__ K_scaled,
     float* __restrict__ qk_dot,
@@ -380,7 +379,8 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
     const float* __restrict__ DT,
     const float* __restrict__ trap_sig,
     const float* __restrict__ x,
-    const float* __restrict__ dA_cumsum,
+    const float* __restrict__ adt,       // [B * T * nh] a*dt
+    float* __restrict__ dA_cumsum,       // [B * n_chunks * nh * chunk_size] out
     int batch, int T, int nh, int hd, int ds, int chunk_size
 ) {
     int d_inner = nh * hd;
@@ -401,14 +401,32 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
     float* sm_k = m3f_sm;                       // [chunk_size][k_ld]
     float* sm_x = sm_k + chunk_size * k_ld;     // [chunk_size][hd]
     float* sm_dec = sm_x + chunk_size * hd;     // [chunk_size]
+    float* da_chunk = sm_dec + chunk_size;      // [chunk_size]
 
     int tid = threadIdx.x;
     int nt = blockDim.x;
+    // The chunk's decay cumsum, m3_dA_cumsum's adds from zero in row order
+    // over the a*dt rows, written for the state pass, the scan and the
+    // backward: one thread adds, as every add waits on the one before it,
+    // and the launch the standalone kernel took is gone.
+    for (int t_local = tid; t_local < chunk_len; t_local += nt) {
+        da_chunk[t_local] = adt[(b * T + chunk_start + t_local) * nh + h];
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float cumsum = 0.0f;
+        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
+        for (int t_local = 0; t_local < chunk_len; t_local++) {
+            cumsum += da_chunk[t_local];
+            da_chunk[t_local] = cumsum;
+            dA_cumsum[cs_base + t_local] = cumsum;
+        }
+    }
+    __syncthreads();
     // Each row's decay to the chunk's end is staged once with its row:
     // every fold thread reads the same chunk_len values, and computing
     // them in the fold repeated one exponential per thread and step.
     // Same inputs, same expression - the values do not move.
-    const float* da_chunk = dA_cumsum + ((b * n_chunks + chunk) * nh + h) * chunk_size;
     float dA_end = da_chunk[chunk_len - 1];
 
     // Phase A: the preprocess arithmetic, one t per thread (verbatim),
@@ -2231,7 +2249,8 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     const float* __restrict__ DT,                                             \
     const float* __restrict__ trap_sig,                                       \
     const T_ACT* __restrict__ x,                                              \
-    const float* __restrict__ dA_cumsum,                                      \
+    const float* __restrict__ adt,                                            \
+    float* __restrict__ dA_cumsum,                                            \
     int batch, int T, int nh, int hd, int ds, int chunk_size                  \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
@@ -2250,11 +2269,24 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     float* sm_k = m3f_sm;                                                     \
     float* sm_x = sm_k + chunk_size * k_ld;                                   \
     float* sm_dec = sm_x + chunk_size * hd;                                   \
+    float* da_chunk = sm_dec + chunk_size;                                    \
     int tid = threadIdx.x;                                                    \
     int nt = blockDim.x;                                                      \
-    /* Each row's decay staged once with its row - see the f32 twin. */       \
-    const float* da_chunk =                                                   \
-        dA_cumsum + ((b * n_chunks + chunk) * nh + h) * chunk_size;           \
+    /* The chunk's decay cumsum and each row's decay - see the f32 twin. */   \
+    for (int t_local = tid; t_local < chunk_len; t_local += nt) {             \
+        da_chunk[t_local] = adt[(b * T + chunk_start + t_local) * nh + h];    \
+    }                                                                         \
+    __syncthreads();                                                          \
+    if (tid == 0) {                                                           \
+        float cumsum = 0.0f;                                                  \
+        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {               \
+            cumsum += da_chunk[t_local];                                      \
+            da_chunk[t_local] = cumsum;                                       \
+            dA_cumsum[cs_base + t_local] = cumsum;                            \
+        }                                                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
     float dA_end = da_chunk[chunk_len - 1];                                   \
     for (int t_local = tid; t_local < chunk_len; t_local += nt) {             \
         int t = chunk_start + t_local;                                        \
