@@ -146,10 +146,13 @@ impl Mamba3Trainer {
         dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        // hoisted here so BOTH branches get it -
-        // the f32 branch never validated, un-guarding the shfl width and
-        // n_angles preconditions its kernels rely on.
+        // Hoisted here so both branches get it: the model envelope, then the
+        // head width, shared memory and norm limits the kernels rely on.
         cfg.validate()?;
+        crate::mamba3_siso::route::check_config(
+            &cfg,
+            crate::mamba3_siso::route::RoutePurpose::Training,
+        )?;
         crate::mamba_ssm::gpu::launch::validate_kernel_arg_capacity(
             session.batch,
             session.seq_len,
@@ -783,6 +786,10 @@ impl Mamba3TrainerMixed {
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         cfg.validate()?;
+        crate::mamba3_siso::route::check_config(
+            &cfg,
+            crate::mamba3_siso::route::RoutePurpose::Training,
+        )?;
         let TrainSessionCfg {
             input_dim,
             batch,

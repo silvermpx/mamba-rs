@@ -76,10 +76,12 @@ fn run_training_forward(
 }
 
 /// Run forward + backward and return the loss (sum of output).
-fn compute_loss(w: &TrainMamba3LayerWeights, dims: &Mamba3Dims) -> f32 {
+fn compute_loss(w: &TrainMamba3LayerWeights, dims: &Mamba3Dims) -> f64 {
     let mut temporal = vec![0.5_f32; dims.seq_len * dims.d_model];
     run_training_forward(w, dims, &mut temporal);
-    temporal.iter().sum::<f32>()
+    // Summed in f64 so the sum adds no rounding of its own to a central
+    // difference of two nearby losses.
+    temporal.iter().map(|&v| f64::from(v)).sum()
 }
 
 // =========================================================================
@@ -92,12 +94,31 @@ fn finite_diff_check(
     get_grad: fn(&TrainMamba3LayerWeights) -> &[f32],
     idx: usize,
 ) {
-    let cfg = test_cfg();
-    let dims = Mamba3Dims::from_config(&cfg, 4);
-    let eps = 1e-3_f32;
+    finite_diff_check_cfg(
+        &test_cfg(),
+        init_layer_w_drawn,
+        2e-2,
+        (name, get_param, get_grad, idx),
+    );
+}
+
+type GetParam = fn(&mut TrainMamba3LayerWeights) -> &mut [f32];
+type GetGrad = fn(&TrainMamba3LayerWeights) -> &[f32];
+
+/// One parameter element to check: its name, how to reach it in the
+/// weights and in the gradient, and its index.
+type FdCase<'a> = (&'a str, GetParam, GetGrad, usize);
+
+fn finite_diff_check_cfg(
+    cfg: &Mamba3Config,
+    init: fn(&Mamba3Dims) -> TrainMamba3LayerWeights,
+    eps: f32,
+    (name, get_param, get_grad, idx): FdCase<'_>,
+) {
+    let dims = Mamba3Dims::from_config(cfg, 4);
 
     // Analytic gradient
-    let w = init_layer_w(&dims);
+    let w = init(&dims);
     let mut temporal = vec![0.5_f32; dims.seq_len * dims.d_model];
     let acts = run_training_forward(&w, &dims, &mut temporal);
 
@@ -117,16 +138,22 @@ fn finite_diff_check(
     let analytic = get_grad(&d_w)[idx];
 
     // Finite difference: (loss(w+eps) - loss(w-eps)) / (2*eps)
-    let mut w_plus = init_layer_w(&dims);
+    let mut w_plus = init(&dims);
     get_param(&mut w_plus)[idx] += eps;
     let loss_plus = compute_loss(&w_plus, &dims);
 
-    let mut w_minus = init_layer_w(&dims);
+    let mut w_minus = init(&dims);
     get_param(&mut w_minus)[idx] -= eps;
     let loss_minus = compute_loss(&w_minus, &dims);
 
-    let numeric = (loss_plus - loss_minus) / (2.0 * eps);
+    let numeric = ((loss_plus - loss_minus) / (2.0 * f64::from(eps))) as f32;
 
+    // A gradient this small would pass on the absolute escape below
+    // whatever the backward computed, so the check refuses it.
+    assert!(
+        analytic.abs() > 1e-3,
+        "{name}[{idx}]: gradient {analytic} too small to check"
+    );
     let abs_diff = (analytic - numeric).abs();
     let rel_diff = abs_diff / (analytic.abs().max(numeric.abs()).max(1e-8));
 
@@ -154,6 +181,61 @@ fn test_m3_finite_diff_b_bias() {
 #[test]
 fn test_m3_finite_diff_out_proj_w() {
     finite_diff_check("out_proj_w", |w| &mut w.out_proj_w, |w| &w.out_proj_w, 0);
+}
+
+/// Weights drawn from a deterministic xorshift stream at a scale where the
+/// layer output, not the residual it rides on, sets the loss. With the
+/// patterned weights of `init_layer_w` a wide head's output sits below one
+/// f32 ulp of the residual, so a central difference reads zero.
+fn init_layer_w_drawn(dims: &Mamba3Dims) -> TrainMamba3LayerWeights {
+    let mut w = init_layer_w(dims);
+    let mut s = 0x9E37_79B9u32;
+    let mut draw = |scale: f32| {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        ((s & 0xFFFF) as f32 / 65536.0 - 0.5) * scale
+    };
+    for v in w.in_proj_w.iter_mut().chain(w.out_proj_w.iter_mut()) {
+        *v = draw(0.4);
+    }
+    for v in w.b_bias.iter_mut().chain(w.c_bias.iter_mut()) {
+        *v = 1.0 + draw(0.5);
+    }
+    for v in w.dt_bias.iter_mut() {
+        *v = draw(1.0);
+    }
+    w
+}
+
+/// The official checkpoints' head width and state size (headdim 64,
+/// d_state 128) run on the CPU: the backward agrees with central
+/// differences there, on per-head, per-state and projection parameters,
+/// each with a gradient large enough to resolve.
+#[test]
+fn test_m3_finite_diff_official_head_width() {
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 128,
+        expand: 2,
+        headdim: 64,
+        ..test_cfg()
+    };
+    cfg.validate().unwrap();
+    // A difference step large enough to rise above the f32 rounding of a
+    // loss this size; the parameters checked enter the loss linearly or
+    // nearly so, which keeps the step's own truncation error small.
+    let cases: [FdCase; 6] = [
+        ("dt_bias", |w| &mut w.dt_bias, |w| &w.dt_bias, 0),
+        ("d_param", |w| &mut w.d_param, |w| &w.d_param, 0),
+        ("b_bias", |w| &mut w.b_bias, |w| &w.b_bias, 70),
+        ("c_bias", |w| &mut w.c_bias, |w| &w.c_bias, 3),
+        ("out_proj_w", |w| &mut w.out_proj_w, |w| &w.out_proj_w, 100),
+        ("norm_weight", |w| &mut w.norm_weight, |w| &w.norm_weight, 5),
+    ];
+    for case in cases {
+        finite_diff_check_cfg(&cfg, init_layer_w_drawn, 2e-2, case);
+    }
 }
 
 // Note: in_proj_w finite-diff is numerically unstable because it fans out to
@@ -198,9 +280,9 @@ fn test_m3_finite_diff_norm_gate_weight() {
         ..test_cfg()
     };
     let dims = Mamba3Dims::from_config(&cfg, 4);
-    let eps = 1e-3_f32;
+    let eps = 2e-2_f32;
 
-    let mut w = init_layer_w(&dims);
+    let mut w = init_layer_w_drawn(&dims);
     // Set norm_gate to nonzero for gradient flow
     w.norm_gate_weight.fill(1.0);
     let mut temporal = vec![0.5_f32; dims.seq_len * dims.d_model];
@@ -221,16 +303,20 @@ fn test_m3_finite_diff_norm_gate_weight() {
 
     let analytic = d_w.norm_gate_weight[0];
 
-    let compute = |w: &TrainMamba3LayerWeights| -> f32 {
+    let compute = |w: &TrainMamba3LayerWeights| -> f64 {
         let mut t = vec![0.5_f32; dims.seq_len * dims.d_model];
         run_training_forward(w, &dims, &mut t);
-        t.iter().sum()
+        t.iter().map(|&v| f64::from(v)).sum()
     };
     let mut w_plus = w.clone();
     w_plus.norm_gate_weight[0] += eps;
     let mut w_minus = w.clone();
     w_minus.norm_gate_weight[0] -= eps;
-    let numeric = (compute(&w_plus) - compute(&w_minus)) / (2.0 * eps);
+    let numeric = ((compute(&w_plus) - compute(&w_minus)) / (2.0 * f64::from(eps))) as f32;
+    assert!(
+        analytic.abs() > 1e-3,
+        "norm_gate_weight[0]: gradient {analytic} too small to check"
+    );
 
     let abs_diff = (analytic - numeric).abs();
     let rel_diff = abs_diff / (analytic.abs().max(numeric.abs()).max(1e-8));

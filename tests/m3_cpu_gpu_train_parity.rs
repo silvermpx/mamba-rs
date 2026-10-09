@@ -637,9 +637,9 @@ fn m3_cpu_gpu_train_parity_sequential_d_state_256() {
 }
 
 /// d_state = 256 on the CHUNKED path exceeds the chunked-backward
-/// kernel's shared-memory budget; the config validator must refuse it
-/// loudly (the ceiling falls with the state-tiled redesign of that
-/// kernel).
+/// kernel's shared-memory budget. The shape is a valid model, so the GPU
+/// route must refuse it loudly for chunked training (the ceiling falls
+/// with the state-tiled redesign of that kernel).
 #[test]
 fn m3_chunked_d_state_256_is_refused_loudly() {
     let cfg = Mamba3Config {
@@ -647,6 +647,11 @@ fn m3_chunked_d_state_256_is_refused_loudly() {
         headdim: 16,
         ..base_cfg(true)
     };
-    let err = cfg.validate().unwrap_err();
+    cfg.validate().unwrap();
+    let err = mamba_rs::mamba3_siso::route::check_config(
+        &cfg,
+        mamba_rs::mamba3_siso::route::RoutePurpose::Training,
+    )
+    .unwrap_err();
     assert!(err.contains("shared memory"), "{err}");
 }

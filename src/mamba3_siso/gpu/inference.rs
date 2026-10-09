@@ -380,6 +380,10 @@ impl Mamba3GpuInferenceEngine {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         cfg.validate()?;
+        crate::mamba3_siso::route::check_config(
+            &cfg,
+            crate::mamba3_siso::route::RoutePurpose::Inference,
+        )?;
         // GpuCtx disables cudarc's per-slice event tracking itself (the
         // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
         // its Graph-safe workspace.
@@ -830,6 +834,7 @@ impl Mamba3GpuInferenceEngine {
 
         // F6: m3_step_fwd (trapezoidal SSM recurrence)
         {
+            crate::mamba3_siso::route::require_warp(hd, "m3_step_fwd")?;
             let grid = cudarc::driver::LaunchConfig {
                 grid_dim: (b as u32, nh as u32, 1),
                 block_dim: (hd as u32, 1, 1),
@@ -1470,6 +1475,7 @@ impl Mamba3GpuInferenceMixed {
 
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
             {
+                crate::mamba3_siso::route::require_warp(hd, "m3_step_fwd typed")?;
                 let grid = cudarc::driver::LaunchConfig {
                     grid_dim: (b as u32, nh as u32, 1),
                     block_dim: (hd as u32, 1, 1),

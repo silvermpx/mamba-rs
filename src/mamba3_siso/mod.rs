@@ -7,7 +7,8 @@
 //!
 //! ## Module Structure
 //!
-//! - `config` — `Mamba3Config` with validation
+//! - `config` — `Mamba3Config` with validation (the model envelope)
+//! - `route` — which shapes the GPU kernels can run
 //! - `cpu/` — CPU inference, training forward/backward
 //! - `gpu/` — CUDA GPU inference and training (feature = "cuda")
 
@@ -15,6 +16,7 @@ pub mod config;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+pub mod route;
 pub mod serialize;
 pub mod state;
 pub mod weights;

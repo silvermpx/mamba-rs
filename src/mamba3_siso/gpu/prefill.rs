@@ -164,6 +164,16 @@ impl Mamba3Prefill {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         dims.validate_index_budget()?;
+        crate::mamba3_siso::route::check(
+            &crate::mamba3_siso::route::RouteShape {
+                headdim: dims.headdim,
+                d_state: dims.d_state,
+                d_inner: dims.d_inner,
+                is_outproj_norm: dims.is_outproj_norm,
+                chunked_training: false,
+            },
+            crate::mamba3_siso::route::RoutePurpose::Inference,
+        )?;
         let typed = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => None,
             _ => Some(Mamba3PrefillTypedScratch::new(stream, dims, dtype)?),

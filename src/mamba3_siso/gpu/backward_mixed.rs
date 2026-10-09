@@ -479,6 +479,7 @@ fn gpu_backward_mamba3_layer_mixed(
             block_dim: (hd as u32, t_split, 1),
             shared_mem_bytes: smem as u32,
         };
+        crate::mamba3_siso::route::require_warp(hd, "m3_dqkv typed")?;
         let dqkv = m3k.dqkv_for_shape(dtype, ds, hd, cs_u, dims.seq_len, use_pair_mats == 1);
         let mut builder = ctx.stream.launch_builder(dqkv);
         builder.arg(sc.d_q.inner_mut()); // dQ_mid

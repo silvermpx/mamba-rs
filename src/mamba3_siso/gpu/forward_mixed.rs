@@ -751,6 +751,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         };
+        crate::mamba3_siso::route::require_warp(hd, "m3_burnin_fwd typed")?;
         let kernel = m3k.burnin_fwd_typed_for_state(dtype, ds);
         let mut bld = ctx.stream.launch_builder(kernel);
         bld.arg(&ssm_state);

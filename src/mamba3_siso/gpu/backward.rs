@@ -131,6 +131,7 @@ pub fn gpu_backward_mamba3_layer(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         };
+        crate::mamba3_siso::route::require_warp(hd, "m3_backward_seq")?;
         let mut builder = ctx.stream.launch_builder(m3k.backward_seq_for_state(ds));
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.k_prev_saved.inner());
@@ -353,6 +354,7 @@ pub fn gpu_backward_mamba3_layer(
                 block_dim: (hd as u32, t_split, 1),
                 shared_mem_bytes: smem as u32,
             };
+            crate::mamba3_siso::route::require_warp(hd, "m3_dqkv")?;
             let dqkv = m3k.dqkv_for_shape(
                 WeightDtype::F32,
                 ds,

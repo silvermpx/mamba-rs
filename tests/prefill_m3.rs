@@ -45,6 +45,23 @@ fn test_cfg() -> Mamba3Config {
     }
 }
 
+/// The official Mamba-3 checkpoints' head width and state size (headdim 64,
+/// d_state 128, half the state rotated), at a small model width.
+fn official_width_cfg() -> Mamba3Config {
+    Mamba3Config {
+        d_model: 128,
+        d_state: 128,
+        expand: 2,
+        headdim: 64,
+        ngroups: 1,
+        n_layers: 2,
+        rope_fraction: 0.5,
+        a_floor: 1e-4,
+        is_outproj_norm: false,
+        ..Mamba3Config::default()
+    }
+}
+
 fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
     TrainMamba3Weights {
         input_proj_w: w.input_proj_w.clone(),
@@ -80,7 +97,16 @@ fn assert_bits(label: &str, a: &[f32], b: &[f32]) {
 /// bit-for-bit: same input_proj GEMM, same per-layer math, same norm_f.
 #[test]
 fn m3_prefill_matches_training_layers_bitwise() {
-    let cfg = test_cfg();
+    check_prefill_matches_training_layers(test_cfg());
+}
+
+/// The same contract at the official checkpoints' head width and state size.
+#[test]
+fn m3_prefill_matches_training_layers_bitwise_official_head_width() {
+    check_prefill_matches_training_layers(official_width_cfg());
+}
+
+fn check_prefill_matches_training_layers(cfg: Mamba3Config) {
     let input_dim = 20usize;
     let seq_len = 8usize;
     let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
@@ -139,7 +165,16 @@ fn m3_prefill_matches_training_layers_bitwise() {
 /// Parallel mode must be bit-equal to Single — outputs AND carried states.
 #[test]
 fn m3_prefill_parallel_bit_equals_single() {
-    let cfg = test_cfg();
+    check_prefill_parallel_bit_equals_single(test_cfg());
+}
+
+/// The same contract at the official checkpoints' head width and state size.
+#[test]
+fn m3_prefill_parallel_bit_equals_single_official_head_width() {
+    check_prefill_parallel_bit_equals_single(official_width_cfg());
+}
+
+fn check_prefill_parallel_bit_equals_single(cfg: Mamba3Config) {
     let input_dim = 20usize;
     let seq_len = 16usize;
     let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
@@ -177,7 +212,16 @@ fn m3_prefill_parallel_bit_equals_single() {
 /// uses matvec accumulation orders, prefill uses SGEMM).
 #[test]
 fn m3_prefill_then_decode_handoff() {
-    let cfg = test_cfg();
+    check_prefill_then_decode_handoff(test_cfg());
+}
+
+/// The same handoff at the official checkpoints' head width and state size.
+#[test]
+fn m3_prefill_then_decode_handoff_official_head_width() {
+    check_prefill_then_decode_handoff(official_width_cfg());
+}
+
+fn check_prefill_then_decode_handoff(cfg: Mamba3Config) {
     let input_dim = cfg.d_model;
     let seq_len = 8usize;
     let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);

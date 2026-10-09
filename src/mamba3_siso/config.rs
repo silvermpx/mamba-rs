@@ -13,7 +13,9 @@ pub struct Mamba3Config {
     pub d_state: usize,
     /// Inner dimension expansion factor. d_inner = d_model * expand.
     pub expand: usize,
-    /// Per-head dimension (must be power-of-2, <= 32 for warp shuffle).
+    /// Per-head dimension. Any width that divides `d_inner`, as in the
+    /// reference; the GPU kernels serve a narrower set (see
+    /// [`crate::mamba3_siso::route`]).
     pub headdim: usize,
     /// Number of B/C groups (nheads must be divisible by ngroups).
     pub ngroups: usize,
@@ -68,18 +70,21 @@ impl Mamba3Config {
         2 * di + 2 * ng * ds + 3 * nh + na
     }
 
-    /// Validate all constraints.
+    /// Validate the model envelope: every shape the reference accepts.
+    ///
+    /// The CPU runs every config that passes. The GPU kernels have narrower
+    /// limits of their own (head width, shared memory, the fused output
+    /// norm), checked by [`crate::mamba3_siso::route`] at each GPU entry
+    /// point.
     ///
     /// Returns `Err` with a description on invalid configuration — same
     /// contract as [`crate::config::MambaConfig::validate`] (the old
     /// panicking variant made library constructors abort instead of
     /// surfacing a recoverable error).
     pub fn validate(&self) -> Result<(), String> {
-        if !(self.headdim <= 32 && self.headdim.is_power_of_two()) {
-            return Err(format!(
-                "headdim ({}) must be <= 32 and power of 2 (warp shuffle)",
-                self.headdim
-            ));
+        // Checked first: nheads() divides by it.
+        if self.headdim < 1 {
+            return Err("headdim must be >= 1".into());
         }
         if !self.d_inner().is_multiple_of(self.headdim) {
             return Err(format!(
@@ -104,35 +109,6 @@ impl Mamba3Config {
                  pairs may not cross the head boundary",
                 2 * self.num_rope_angles(),
                 self.d_state
-            ));
-        }
-        // The chunked-backward kernel stages two chunk-by-d_state operand
-        // tiles (chunk size 64) plus smaller pieces in dynamic shared
-        // memory; the kernel loader opts in to the device's extended
-        // budget, and 99 KB is the opt-in floor across every supported
-        // part since Ampere (some parts offer more; the floor keeps one
-        // portable bound). Shapes above it need the state-tiled redesign
-        // of that kernel and are refused loudly until it lands. (This
-        // replaces
-        // the cruder headdim*d_state <= 1024 product bound: the register
-        // arrays it protected spill gracefully under compiler control,
-        // while shared memory is a hard launch limit.)
-        // Only the chunked training path runs that kernel: an explicit
-        // Sequential scan mode trains without it and skips this bound.
-        let cs = 64usize;
-        let chunked_bwd_smem = (2 * cs * self.d_state
-            + 2 * cs * self.headdim
-            + 4 * cs
-            + 2 * self.headdim * self.d_state)
-            * 4;
-        if self.train_use_parallel_scan() && chunked_bwd_smem > 99 * 1024 {
-            return Err(format!(
-                "headdim {} with d_state {} needs {} KB of shared memory in the \
-                 chunked backward — over the 99 KB opt-in budget; this ceiling \
-                 falls with the state-tiled redesign of that kernel",
-                self.headdim,
-                self.d_state,
-                chunked_bwd_smem / 1024
             ));
         }
         if self.ngroups < 1 {
@@ -167,15 +143,6 @@ impl Mamba3Config {
             return Err(format!(
                 "rms_norm_eps must be positive, got {}",
                 self.rms_norm_eps
-            ));
-        }
-        if self.is_outproj_norm && self.d_inner() > 1024 {
-            return Err(format!(
-                "is_outproj_norm requires d_inner ({}) <= 1024: the \
-                 rmsnorm_gated kernels launch one thread per channel and \
-                 SILENTLY no-op past 1024 — reject loudly here \
-                 until the kernels tile the channel dim",
-                self.d_inner()
             ));
         }
         Ok(())
@@ -233,6 +200,29 @@ mod tests {
         assert_eq!(cfg.in_proj_out_dim(), 2 * 256 + 2 * 16 + 3 * 16 + 4);
     }
 
+    /// The official checkpoints' head width is a valid model: the envelope
+    /// asks only that headdim divide d_inner, as the reference does.
+    #[test]
+    fn test_official_headdim_valid() {
+        for (hd, ds) in [(64usize, 128usize), (48, 64), (128, 256), (1, 16)] {
+            Mamba3Config {
+                d_model: 768,
+                headdim: hd,
+                d_state: ds,
+                ..Mamba3Config::default()
+            }
+            .validate()
+            .unwrap_or_else(|e| panic!("headdim {hd} d_state {ds} must validate: {e}"));
+        }
+        let err = Mamba3Config {
+            headdim: 0,
+            ..Mamba3Config::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("headdim"), "{err}");
+    }
+
     #[test]
     fn test_invalid_headdim() {
         let err = Mamba3Config {
@@ -267,22 +257,6 @@ mod tests {
         assert!(err.contains("d_state"), "{err}");
     }
 
-    /// Shapes whose chunked-backward shared-memory tiles exceed the
-    /// opt-in budget are refused loudly, naming the resource — silent
-    /// wrong math past a capacity was the failure mode all these guards
-    /// exist for.
-    #[test]
-    fn test_chunked_backward_smem_budget_rejected_loudly() {
-        let err = Mamba3Config {
-            d_state: 256,
-            headdim: 32,
-            ..Mamba3Config::default()
-        }
-        .validate()
-        .unwrap_err();
-        assert!(err.contains("shared memory"), "{err}");
-    }
-
     /// Scan-mode resolver pins — Auto resolves to the chunked
     /// parallel path for TRAINING (the only route with a mixed backward);
     /// explicit Sequential is honored (f32 lane).
@@ -305,28 +279,6 @@ mod tests {
             }
             .train_use_parallel_scan()
         );
-    }
-
-    /// The rmsnorm_gated kernels silently no-op at d_inner > 1024
-    /// — the config now rejects that combination loudly. d_inner > 1024
-    /// WITHOUT the gated norm stays valid (those kernels never launch).
-    #[test]
-    fn test_gated_norm_d_inner_cap_rejected_loudly() {
-        let big_gated = Mamba3Config {
-            d_model: 1024,
-            expand: 2,
-            headdim: 32,
-            is_outproj_norm: true,
-            ..Mamba3Config::default()
-        };
-        let err = big_gated.validate().unwrap_err();
-        assert!(err.contains("is_outproj_norm"), "{err}");
-
-        let big_silu = Mamba3Config {
-            is_outproj_norm: false,
-            ..big_gated
-        };
-        big_silu.validate().unwrap();
     }
 
     #[test]
