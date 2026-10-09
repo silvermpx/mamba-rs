@@ -105,6 +105,17 @@ pub struct Mamba3Prefill {
     /// scratch allocations.
     sized_for: GpuMamba3Dims,
     eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
+    /// The gated MLP's window buffers, sized by [`Mamba3Prefill::ensure_mlp`]
+    /// for a model that has an MLP.
+    mlp: Option<MlpWindow>,
+}
+
+/// One window's gated-MLP buffers in the executor's compute dtype: the up
+/// projection `[rows * 2 * hidden]` and the activation `[rows * hidden]`.
+struct MlpWindow {
+    up: crate::mamba_ssm::gpu::buffers::DtypedBuf,
+    act: crate::mamba_ssm::gpu::buffers::DtypedBuf,
+    hidden: usize,
 }
 
 /// Output request for [`Mamba3Prefill::run_full`] - the m3 serve surface.
@@ -185,7 +196,33 @@ impl Mamba3Prefill {
             dtype,
             sized_for: *dims,
             eager_gemm_manifest: None,
+            mlp: None,
         })
+    }
+
+    /// Size the gated MLP's window buffers for a model whose MLP is
+    /// `hidden` wide (0 = no MLP, nothing allocated). The engines call it
+    /// when they build the executor, outside any graph capture.
+    pub fn ensure_mlp(
+        &mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        hidden: usize,
+    ) -> Result<(), String> {
+        if hidden == 0 || self.mlp.as_ref().is_some_and(|m| m.hidden == hidden) {
+            return Ok(());
+        }
+        use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+        let rows = self.sized_for.batch * self.sized_for.seq_len;
+        let dtype = match self.dtype {
+            WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
+            half => half,
+        };
+        self.mlp = Some(MlpWindow {
+            up: DtypedBuf::zeros(stream, rows * 2 * hidden, dtype)?,
+            act: DtypedBuf::zeros(stream, rows * hidden, dtype)?,
+            hidden,
+        });
+        Ok(())
     }
 
     /// Run the prompt window through every layer. On return
@@ -1088,6 +1125,126 @@ impl Mamba3Prefill {
                 b.arg(&ne);
                 unsafe { b.launch(grid_1d(bt * dm)) }
                     .map_err(|e| format!("prefill residual L{l}: {e:?}"))?;
+            }
+            // The MLP branch of a model that has one, over every row, in the
+            // lane's dtype: norm2 of the f32 residual stream, the two GEMMs
+            // around the gate, and the branch added back into the stream.
+            if let Some(m) = weights.mlp(l) {
+                let Some(win) = self.mlp.as_mut().filter(|w| w.hidden == m.hidden) else {
+                    return Err(format!(
+                        "prefill: the model's MLP is {} wide but the executor was not \
+                         sized for it (Mamba3Prefill::ensure_mlp)",
+                        m.hidden
+                    ));
+                };
+                let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, m.hidden as i32);
+                let eps: f32 = dims.rms_norm_eps;
+                let nw = m.norm_weight;
+                let up = win.up.cached_ptr();
+                let act = win.act.cached_ptr();
+                let rms = tgt.rms_discard.cached_ptr();
+                let stream_in = tgt.temporal_work.cached_ptr();
+                if let Some(ts) = typed.as_deref_mut() {
+                    let pn = ts.post_norm.cached_ptr();
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
+                    b.arg(&pn);
+                    b.arg(&rms);
+                    b.arg(&stream_in);
+                    b.arg(&nw);
+                    b.arg(&bt_i);
+                    b.arg(&dm_i);
+                    b.arg(&eps);
+                    unsafe { b.launch(grid_norm(bt, dm)) }
+                        .map_err(|e| format!("prefill mlp norm2 typed L{l}: {e:?}"))?;
+                    crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                        ctx,
+                        TypedPtr { ptr: up, dtype },
+                        TypedPtr { ptr: pn, dtype },
+                        TypedPtr {
+                            ptr: m.fc1_w,
+                            dtype,
+                        },
+                        None,
+                        (bt, dm, 2 * m.hidden),
+                    )?;
+                    let mut b = ctx.stream.launch_builder(m3k.mlp_gate_fwd_typed.get(dtype));
+                    b.arg(&act);
+                    b.arg(&up);
+                    b.arg(&bt_i);
+                    b.arg(&h_i);
+                    unsafe { b.launch(grid_1d(bt * m.hidden)) }
+                        .map_err(|e| format!("prefill mlp gate typed L{l}: {e:?}"))?;
+                    let out = ts.out_flat.cached_ptr();
+                    crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                        ctx,
+                        TypedPtr { ptr: out, dtype },
+                        TypedPtr { ptr: act, dtype },
+                        TypedPtr {
+                            ptr: m.fc2_w,
+                            dtype,
+                        },
+                        None,
+                        (bt, m.hidden, dm),
+                    )?;
+                    let ne = (bt * dm) as i32;
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.residual_add_f32_typed.get(dtype));
+                    b.arg(&stream_in);
+                    b.arg(&stream_in);
+                    b.arg(&out);
+                    b.arg(&ne);
+                    unsafe { b.launch(grid_1d(bt * dm)) }
+                        .map_err(|e| format!("prefill mlp residual typed L{l}: {e:?}"))?;
+                } else {
+                    let pn = tgt.out_flat.cached_ptr();
+                    let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
+                    b.arg(&pn);
+                    b.arg(&rms);
+                    b.arg(&stream_in);
+                    b.arg(&nw);
+                    b.arg(&bt_i);
+                    b.arg(&dm_i);
+                    b.arg(&eps);
+                    unsafe { b.launch(grid_norm(bt, dm)) }
+                        .map_err(|e| format!("prefill mlp norm2 L{l}: {e:?}"))?;
+                    unsafe {
+                        crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs(
+                            ctx,
+                            up,
+                            pn,
+                            m.fc1_w,
+                            None,
+                            (bt, dm, 2 * m.hidden),
+                        )
+                    }?;
+                    let mut b = ctx.stream.launch_builder(&m3k.mlp_gate_fwd_typed.f32);
+                    b.arg(&act);
+                    b.arg(&up);
+                    b.arg(&bt_i);
+                    b.arg(&h_i);
+                    unsafe { b.launch(grid_1d(bt * m.hidden)) }
+                        .map_err(|e| format!("prefill mlp gate L{l}: {e:?}"))?;
+                    unsafe {
+                        crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs(
+                            ctx,
+                            pn,
+                            act,
+                            m.fc2_w,
+                            None,
+                            (bt, m.hidden, dm),
+                        )
+                    }?;
+                    let ne = (bt * dm) as i32;
+                    let mut b = ctx.stream.launch_builder(&m3k.vec_add_inplace);
+                    b.arg(&stream_in);
+                    b.arg(&pn);
+                    b.arg(&ne);
+                    unsafe { b.launch(grid_1d(bt * dm)) }
+                        .map_err(|e| format!("prefill mlp residual L{l}: {e:?}"))?;
+                }
             }
         }
 

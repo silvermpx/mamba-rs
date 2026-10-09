@@ -150,6 +150,14 @@ pub struct Mamba3Kernels {
     pub rmsnorm_gated_fwd_typed: TypedKernel,
     /// M3 SSM step — shared with training, already templated in mamba3_siso.cu.
     pub m3_step_fwd_typed: TypedKernel,
+    /// Block-tier decode step for heads wider than a warp (or of a width
+    /// that is not a power of two): one CTA per (batch, head), the
+    /// head-shared values staged in shared memory. Same arguments as
+    /// `m3_step_fwd`; launched with `step_block_cfg`.
+    pub m3_step_fwd_block_typed: TypedKernel,
+    /// The gated MLP's activation `value * silu(gate)` over the up
+    /// projection's rows (value columns, then gate columns).
+    pub mlp_gate_fwd_typed: TypedKernel,
     /// M3 burnin forward (training) — sequential T-loop SSM with activation
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
     pub m3_burnin_fwd_typed_bf16: CudaFunction,
@@ -298,6 +306,11 @@ impl Mamba3Kernels {
             include_str!("../../../kernels/mamba3_siso.cu"),
             include_str!("../../../kernels/mamba3_ops.cu"),
             include_str!("../../../kernels/mamba3_chunked.cu"),
+            // Block-tier twins of the head kernels, for heads wider than a
+            // warp; composed after the warp tier so its entries stay first.
+            include_str!("../../../kernels/mamba3_siso_block.cu"),
+            // The gated MLP's activation, for models trained with an MLP.
+            include_str!("../../../kernels/gated_mlp.cu"),
             // Shared kernels needed by training pipeline
             include_str!("../../../kernels/norms.cu"),
             include_str!("../../../kernels/elementwise.cu"),
@@ -637,6 +650,16 @@ impl Mamba3Kernels {
                 bf16: get("m3_step_fwd_bf16")?,
                 f16: get("m3_step_fwd_f16")?,
             },
+            m3_step_fwd_block_typed: TypedKernel {
+                f32: get("m3_step_fwd_block")?,
+                bf16: get("m3_step_fwd_block_bf16")?,
+                f16: get("m3_step_fwd_block_f16")?,
+            },
+            mlp_gate_fwd_typed: TypedKernel {
+                f32: get("mlp_gate_fwd")?,
+                bf16: get("mlp_gate_fwd_bf16")?,
+                f16: get("mlp_gate_fwd_f16")?,
+            },
             m3_burnin_fwd_typed_bf16: get("m3_burnin_fwd_bf16")?,
             m3_burnin_fwd_typed_f16: get("m3_burnin_fwd_f16")?,
             bcnorm_bwd_typed: TypedKernel {
@@ -830,6 +853,32 @@ pub fn chunk_state_cfg(
             block_dim: (hd as u32, 2, 1),
             shared_mem_bytes: 0,
         }
+    }
+}
+
+/// Launch geometry for the decode step of a head: the warp tier's one
+/// warp of `headdim` lanes, or the block tier's CTA of `headdim` threads
+/// rounded up to whole warps with the step coefficients and the K and Q
+/// rows staged in shared memory.
+pub fn step_head_cfg(
+    tier: crate::mamba3_siso::route::HeadTier,
+    batch: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+) -> cudarc::driver::LaunchConfig {
+    use crate::mamba3_siso::route::HeadTier;
+    match tier {
+        HeadTier::Warp => cudarc::driver::LaunchConfig {
+            grid_dim: (batch as u32, nh as u32, 1),
+            block_dim: (hd as u32, 1, 1),
+            shared_mem_bytes: 0,
+        },
+        HeadTier::Block => cudarc::driver::LaunchConfig {
+            grid_dim: (batch as u32, nh as u32, 1),
+            block_dim: (hd.next_multiple_of(32) as u32, 1, 1),
+            shared_mem_bytes: ((4 + 3 * ds) * std::mem::size_of::<f32>()) as u32,
+        },
     }
 }
 

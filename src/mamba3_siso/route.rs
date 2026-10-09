@@ -2,13 +2,18 @@
 //!
 //! [`Mamba3Config::validate`] holds the model envelope: every shape the
 //! official implementation accepts, all of which the CPU runs. The GPU
-//! kernels have narrower limits of their own. The step, burn-in,
-//! sequential-backward and chunked-backward kernels broadcast across a
-//! head with warp shuffles of width `headdim`, so a head must fit one warp
-//! and its width must be a power of two. The chunked backward stages its
-//! tiles in shared memory, and the fused output norm runs one thread per
-//! channel. Every GPU entry point checks its shape here first, so a shape
-//! the kernels cannot run is refused with the reason instead of computing
+//! kernels have narrower limits of their own:
+//! - The warp-tier head kernels (step, burn-in, sequential backward,
+//!   chunked backward) broadcast across a head with warp shuffles of width
+//!   `headdim`, so a head must fit one warp and be a power of two wide.
+//!   Wider heads take the block tier, which so far serves inference only.
+//! - The chunked forward's fallback tiles run `2 * headdim` threads.
+//! - The chunked backward stages its tiles in shared memory.
+//! - The fused output norm runs one thread per channel and reduces each
+//!   head with a tree that assumes a power-of-two head.
+//!
+//! Every GPU entry point checks its shape here first, so a shape the
+//! kernels cannot run is refused with the reason instead of computing
 //! wrong values.
 //!
 //! The module needs no CUDA feature: a CPU caller can ask whether a model
@@ -53,6 +58,34 @@ impl RouteShape {
 /// element in a single warp.
 pub const WARP_HEADDIM_MAX: usize = 32;
 
+/// The widest head the GPU serves: the chunked forward's fallback tiles
+/// launch two heads of `headdim` threads in one 1024-thread block.
+pub const GPU_HEADDIM_MAX: usize = 512;
+
+/// Which head kernels a width takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadTier {
+    /// One warp per head, head-shared values broadcast by warp shuffle.
+    Warp,
+    /// One CTA per head, head-shared values staged in shared memory.
+    Block,
+}
+
+/// The head tier a width takes on the GPU. Every width the warp kernels
+/// serve stays on them, so no existing shape changes kernels.
+pub fn head_tier(headdim: usize) -> Result<HeadTier, String> {
+    if headdim <= WARP_HEADDIM_MAX && headdim.is_power_of_two() {
+        Ok(HeadTier::Warp)
+    } else if (1..=GPU_HEADDIM_MAX).contains(&headdim) {
+        Ok(HeadTier::Block)
+    } else {
+        Err(format!(
+            "headdim {headdim} is wider than the {GPU_HEADDIM_MAX} the GPU kernels serve; \
+             the CPU runs this shape"
+        ))
+    }
+}
+
 /// The shared memory the chunked backward needs for a head, in bytes.
 ///
 /// The kernel stages two chunk-by-d_state operand tiles (chunk size 64)
@@ -87,15 +120,25 @@ pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
 
 /// Checks that the GPU kernels can run `shape` for `purpose`.
 pub fn check(shape: &RouteShape, purpose: RoutePurpose) -> Result<(), String> {
-    require_warp(
-        shape.headdim,
-        "the Mamba-3 GPU step, burn-in and backward kernels",
-    )?;
+    let tier = head_tier(shape.headdim)?;
+    if purpose == RoutePurpose::Training {
+        require_warp(
+            shape.headdim,
+            "Mamba-3 GPU training (its burn-in and backward kernels have no block tier yet)",
+        )?;
+    }
     if shape.is_outproj_norm && shape.d_inner > FUSED_OUT_NORM_D_INNER_MAX {
         return Err(format!(
             "is_outproj_norm on the GPU needs d_inner ({}) <= {FUSED_OUT_NORM_D_INNER_MAX}: \
              the fused gated norm runs one thread per channel in a single block",
             shape.d_inner
+        ));
+    }
+    if shape.is_outproj_norm && tier == HeadTier::Block && !shape.headdim.is_power_of_two() {
+        return Err(format!(
+            "is_outproj_norm on the GPU needs a power-of-two headdim, got {}: the fused \
+             gated norm's per-head reduction tree assumes one",
+            shape.headdim
         ));
     }
     if purpose == RoutePurpose::Training && shape.chunked_training {
@@ -124,10 +167,11 @@ mod tests {
     use super::*;
     use crate::config::ScanMode;
 
-    /// The official checkpoint shape is a valid model the GPU kernels do
-    /// not run yet, and the refusal says why.
+    /// The official checkpoint shape runs inference on the block tier,
+    /// and its GPU training is refused until the block tier has training
+    /// kernels, with the reason.
     #[test]
-    fn official_shape_is_a_model_the_warp_kernels_refuse() {
+    fn official_shape_runs_inference_on_the_block_tier() {
         let cfg = Mamba3Config {
             d_model: 768,
             headdim: 64,
@@ -135,8 +179,26 @@ mod tests {
             ..Mamba3Config::default()
         };
         cfg.validate().unwrap();
-        let err = check_config(&cfg, RoutePurpose::Inference).unwrap_err();
+        assert_eq!(head_tier(cfg.headdim), Ok(HeadTier::Block));
+        check_config(&cfg, RoutePurpose::Inference).unwrap();
+        let err = check_config(&cfg, RoutePurpose::Training).unwrap_err();
         assert!(err.contains("headdim"), "{err}");
+    }
+
+    /// Every width the warp kernels serve stays on them; other widths take
+    /// the block tier up to the GPU ceiling, and wider heads are refused.
+    #[test]
+    fn head_tier_keeps_every_warp_width_on_the_warp_tier() {
+        for hd in 1..=1024usize {
+            let tier = head_tier(hd);
+            if hd <= 32 && hd.is_power_of_two() {
+                assert_eq!(tier, Ok(HeadTier::Warp), "headdim {hd}");
+            } else if hd <= GPU_HEADDIM_MAX {
+                assert_eq!(tier, Ok(HeadTier::Block), "headdim {hd}");
+            } else {
+                assert!(tier.is_err(), "headdim {hd}");
+            }
+        }
     }
 
     /// Shapes whose chunked-backward tiles exceed the opt-in budget are

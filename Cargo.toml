@@ -533,6 +533,11 @@ path = "tests/m3_bf16_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m3_block_tier_parity"
+path = "tests/m3_block_tier_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m3_chunked_fwd_unit_parity"
 path = "tests/m3_chunked_fwd_unit_parity.rs"
 required-features = ["cuda"]
@@ -550,6 +555,11 @@ required-features = ["cuda"]
 [[test]]
 name = "m3_forward_mixed_parity"
 path = "tests/m3_forward_mixed_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_gpu_mlp_parity"
+path = "tests/m3_gpu_mlp_parity.rs"
 required-features = ["cuda"]
 
 [[test]]

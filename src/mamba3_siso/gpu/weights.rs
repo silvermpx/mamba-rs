@@ -30,24 +30,34 @@ pub struct GpuMamba3LayerWeightsInf {
     pub out_proj_w: WeightSlice,       // [d_inner * d_model]
 }
 
+/// GPU inference weights of one layer's gated MLP.
+pub struct GpuGatedMlpWeightsInf {
+    pub norm_weight: WeightSlice, // [d_model]
+    pub fc1_w: WeightSlice,       // [d_model * 2 * hidden]
+    pub fc2_w: WeightSlice,       // [hidden * d_model]
+    pub hidden: usize,
+}
+
 /// GPU inference weights for the full Mamba-3 backbone (flat buffer).
 pub struct GpuMamba3WeightsInf {
     pub input_proj_w: WeightSlice,
     pub input_proj_b: WeightSlice,
     pub layers: Vec<GpuMamba3LayerWeightsInf>,
     pub norm_f_weight: WeightSlice,
+    /// The gated MLP of each layer; empty for a model without one.
+    pub mlp: Vec<GpuGatedMlpWeightsInf>,
     pub flat: GpuBuffer,
 }
 
-/// The GPU engines and trainers do not run the gated MLP yet: a model that
-/// has one is refused here rather than run without it.
+/// The GPU trainers do not run the gated MLP yet: a model that has one is
+/// refused here rather than trained without it.
 fn refuse_mlp(cpu: &crate::mamba3_siso::weights::Mamba3Weights) -> Result<(), String> {
     if cpu.mlp.is_empty() {
         Ok(())
     } else {
         Err(
-            "the gated MLP (d_intermediate > 0) does not run on the GPU yet; \
-             the CPU runs this model"
+            "the gated MLP (d_intermediate > 0) does not train on the GPU yet; \
+             the GPU inference engines and the CPU run this model"
                 .into(),
         )
     }
@@ -60,7 +70,6 @@ impl GpuMamba3WeightsInf {
         cpu: &crate::mamba3_siso::weights::Mamba3Weights,
         _input_dim: usize,
     ) -> Result<Self, String> {
-        refuse_mlp(cpu)?;
         // Concatenate all weights into a flat Vec
         let mut flat_data = Vec::new();
         flat_data.extend_from_slice(&cpu.input_proj_w);
@@ -78,6 +87,13 @@ impl GpuMamba3WeightsInf {
             flat_data.extend_from_slice(&lw.out_proj_w);
         }
         flat_data.extend_from_slice(&cpu.norm_f_weight);
+        // The MLP goes after every mixer weight, so the slices above keep
+        // their offsets.
+        for m in &cpu.mlp {
+            flat_data.extend_from_slice(&m.norm_weight);
+            flat_data.extend_from_slice(&m.fc1_w);
+            flat_data.extend_from_slice(&m.fc2_w);
+        }
 
         let flat = GpuBuffer::from_cpu(stream, &flat_data)?;
         let base = flat.cached_ptr();
@@ -108,12 +124,23 @@ impl GpuMamba3WeightsInf {
             });
         }
         let norm_f_weight = slice(cpu.norm_f_weight.len());
+        let mlp = cpu
+            .mlp
+            .iter()
+            .map(|m| GpuGatedMlpWeightsInf {
+                norm_weight: slice(m.norm_weight.len()),
+                fc1_w: slice(m.fc1_w.len()),
+                fc2_w: slice(m.fc2_w.len()),
+                hidden: m.hidden(),
+            })
+            .collect();
 
         Ok(Self {
             input_proj_w,
             input_proj_b,
             layers,
             norm_f_weight,
+            mlp,
             flat,
         })
     }
@@ -142,6 +169,14 @@ pub struct GpuMamba3MixedLayerWeights {
     pub out_proj_w: WeightSliceDyn,       // bulk
 }
 
+/// One layer's gated MLP in the mixed container: bulk projections, f32 norm.
+pub struct GpuMamba3MixedMlpWeights {
+    pub norm_weight: WeightSliceDyn, // f32
+    pub fc1_w: WeightSliceDyn,       // bulk
+    pub fc2_w: WeightSliceDyn,       // bulk
+    pub hidden: usize,
+}
+
 pub struct GpuMamba3MixedWeights {
     pub bulk_arena: GpuByteBuffer,
     pub f32_arena: GpuByteBuffer,
@@ -150,6 +185,8 @@ pub struct GpuMamba3MixedWeights {
     pub input_proj_b: WeightSliceDyn, // f32
     pub layers: Vec<GpuMamba3MixedLayerWeights>,
     pub norm_f_weight: WeightSliceDyn, // f32
+    /// The gated MLP of each layer; empty for a model without one.
+    pub mlp: Vec<GpuMamba3MixedMlpWeights>,
 }
 
 impl GpuMamba3MixedWeights {
@@ -158,7 +195,6 @@ impl GpuMamba3MixedWeights {
         cpu: &crate::mamba3_siso::weights::Mamba3Weights,
         bulk_dtype: WeightDtype,
     ) -> Result<Self, String> {
-        refuse_mlp(cpu)?;
         // Compute arena sizes (in elements)
         let bulk_elems: usize = std::iter::once(cpu.input_proj_w.len())
             .chain(
@@ -166,6 +202,7 @@ impl GpuMamba3MixedWeights {
                     .iter()
                     .flat_map(|lw| [lw.in_proj_w.len(), lw.out_proj_w.len()]),
             )
+            .chain(cpu.mlp.iter().flat_map(|m| [m.fc1_w.len(), m.fc2_w.len()]))
             .sum();
 
         let f32_elems: usize = cpu.input_proj_b.len()
@@ -183,7 +220,8 @@ impl GpuMamba3MixedWeights {
                         + lw.d_param.len()
                         + lw.norm_gate_weight.len()
                 })
-                .sum::<usize>();
+                .sum::<usize>()
+            + cpu.mlp.iter().map(|m| m.norm_weight.len()).sum::<usize>();
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
@@ -240,6 +278,17 @@ impl GpuMamba3MixedWeights {
         }
 
         let norm_f_weight = alloc_f32(&cpu.norm_f_weight)?;
+        // The MLP goes after every mixer weight, so the slices above keep
+        // their offsets.
+        let mut mlp = Vec::with_capacity(cpu.mlp.len());
+        for m in &cpu.mlp {
+            mlp.push(GpuMamba3MixedMlpWeights {
+                norm_weight: alloc_f32(&m.norm_weight)?,
+                fc1_w: alloc_bulk(&m.fc1_w)?,
+                fc2_w: alloc_bulk(&m.fc2_w)?,
+                hidden: m.hidden(),
+            });
+        }
 
         debug_assert_eq!(bulk_off, bulk_elems * bulk_dtype.size_bytes());
         debug_assert_eq!(f32_off, f32_elems * 4);
@@ -252,6 +301,7 @@ impl GpuMamba3MixedWeights {
             input_proj_b,
             layers,
             norm_f_weight,
+            mlp,
         })
     }
 }
@@ -452,6 +502,15 @@ pub struct Mamba3LayerWeightPtrs {
     pub out_proj_w: u64,
 }
 
+/// Device pointers of one layer's gated MLP, in the container's bulk
+/// dtype for the projections and f32 for the norm.
+pub struct GatedMlpWeightPtrs {
+    pub norm_weight: u64,
+    pub fc1_w: u64,
+    pub fc2_w: u64,
+    pub hidden: usize,
+}
+
 /// The prefill's weight surface, implemented by the f32 inference
 /// container and the mixed (typed-bulk) container alike. The prefill
 /// branches its GEMM/kernel dtypes on `bulk_dtype()`; the pointer
@@ -468,6 +527,8 @@ pub trait Mamba3WeightsView {
     fn n_layers(&self) -> usize;
     fn layer(&self, l: usize) -> Mamba3LayerWeightPtrs;
     fn norm_f(&self) -> u64;
+    /// Layer `l`'s gated MLP, `None` for a model without one.
+    fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs>;
     /// Identity of the underlying device allocations, for the CUDA-graph
     /// replay guards: a captured graph baked every weight pointer in, so
     /// a replay against a different container (or dtype) must refuse
@@ -506,6 +567,14 @@ impl Mamba3WeightsView for GpuMamba3WeightsInf {
     fn norm_f(&self) -> u64 {
         self.norm_f_weight.ptr()
     }
+    fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs> {
+        self.mlp.get(l).map(|m| GatedMlpWeightPtrs {
+            norm_weight: m.norm_weight.ptr(),
+            fc1_w: m.fc1_w.ptr(),
+            fc2_w: m.fc2_w.ptr(),
+            hidden: m.hidden,
+        })
+    }
 }
 
 impl Mamba3WeightsView for GpuMamba3MixedWeights {
@@ -538,5 +607,13 @@ impl Mamba3WeightsView for GpuMamba3MixedWeights {
     }
     fn norm_f(&self) -> u64 {
         self.norm_f_weight.ptr()
+    }
+    fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs> {
+        self.mlp.get(l).map(|m| GatedMlpWeightPtrs {
+            norm_weight: m.norm_weight.ptr(),
+            fc1_w: m.fc1_w.ptr(),
+            fc2_w: m.fc2_w.ptr(),
+            hidden: m.hidden,
+        })
     }
 }
