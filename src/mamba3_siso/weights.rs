@@ -45,6 +45,9 @@ pub struct Mamba3Weights {
     pub layers: Vec<Mamba3LayerWeights>,
     /// Final RMSNorm after all layers: `[d_model]`.
     pub norm_f_weight: Vec<f32>,
+    /// The gated MLP of each layer, after its mixer; empty when the config
+    /// has `d_intermediate == 0`.
+    pub mlp: Vec<crate::mlp::GatedMlpLayerWeights>,
 }
 
 /// Simple xorshift64 RNG for weight initialization (deterministic, no deps).
@@ -116,6 +119,12 @@ impl Mamba3Weights {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d],
+            mlp: match cfg.mlp_hidden() {
+                0 => Vec::new(),
+                hidden => (0..cfg.n_layers)
+                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden))
+                    .collect(),
+            },
         }
     }
 
@@ -123,10 +132,11 @@ impl Mamba3Weights {
     ///
     /// - Linear layers: the PyTorch `nn.Linear` default uniform (the
     ///   shipped reference init — see `linear_default_uniform`)
-    /// - out_proj additionally carries the GPT-2 prenorm-residual rescale
-    ///   (divide by sqrt(n_residuals_per_layer * n_layers); one residual
-    ///   per layer in this pure-Mamba stack) per the official
-    ///   `mixer_seq_simple.py` `_init_weights`
+    /// - out_proj (and the MLP's fc2) additionally carries the GPT-2
+    ///   prenorm-residual rescale, dividing by
+    ///   sqrt(n_residuals_per_layer * n_layers) per the official
+    ///   `mixer_seq_simple.py` `_init_weights`: one residual per layer in a
+    ///   pure-Mamba stack, two with an MLP
     /// - dt_bias: inverse softplus of log-uniform(0.001, 0.1)
     /// - D, norm weights: ones
     /// - B/C biases: ones (per state-spaces/mamba `mamba3.py`:
@@ -137,7 +147,8 @@ impl Mamba3Weights {
         let mut rng = SimpleRng::new(seed);
         let d = cfg.d_model;
         let di = cfg.d_inner();
-        let residual_rescale = 1.0 / (cfg.n_layers as f64).sqrt() as f32;
+        let residuals_per_layer = if w.mlp.is_empty() { 1 } else { 2 };
+        let residual_rescale = 1.0 / ((residuals_per_layer * cfg.n_layers) as f64).sqrt() as f32;
 
         linear_default_uniform(&mut w.input_proj_w, input_dim, &mut rng);
 
@@ -167,6 +178,17 @@ impl Mamba3Weights {
             // above (zeros() initializes these to 1.0 per reference).
         }
 
+        // The MLP draws after every mixer weight, so a model without one
+        // keeps the stream it always had.
+        let hidden = cfg.mlp_hidden();
+        for m in &mut w.mlp {
+            linear_default_uniform(&mut m.fc1_w, d, &mut rng);
+            linear_default_uniform(&mut m.fc2_w, hidden, &mut rng);
+            for v in &mut m.fc2_w {
+                *v *= residual_rescale;
+            }
+        }
+
         w
     }
 
@@ -186,8 +208,15 @@ impl Mamba3Weights {
             }
         };
 
-        ck("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
-        ck("input_proj_b", self.input_proj_b.len(), d)?;
+        // An empty input projection is the identity: the input is already
+        // d_model wide (an HF language model feeds its embedding straight
+        // in), and both the CPU step and the GPU engines skip the GEMM.
+        if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
+            ck("identity input width", input_dim, d)?;
+        } else {
+            ck("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
+            ck("input_proj_b", self.input_proj_b.len(), d)?;
+        }
         ck("norm_f_weight", self.norm_f_weight.len(), d)?;
         ck("n_layers", self.layers.len(), cfg.n_layers)?;
 
@@ -203,6 +232,15 @@ impl Mamba3Weights {
             ck(&p("d_param"), lw.d_param.len(), nh)?;
             ck(&p("norm_gate_weight"), lw.norm_gate_weight.len(), di)?;
             ck(&p("out_proj_w"), lw.out_proj_w.len(), di * d)?;
+        }
+        match cfg.mlp_hidden() {
+            0 => ck("mlp layers", self.mlp.len(), 0)?,
+            hidden => {
+                ck("mlp layers", self.mlp.len(), cfg.n_layers)?;
+                for (i, m) in self.mlp.iter().enumerate() {
+                    m.validate(d, hidden, &format!("mlp[{i}]"))?;
+                }
+            }
         }
         Ok(())
     }

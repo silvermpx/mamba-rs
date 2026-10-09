@@ -10,6 +10,8 @@
 //! - `layers.{i}.D`
 //! - `layers.{i}.norm_gate.weight`
 //! - `layers.{i}.out_proj.weight`
+//! - `layers.{i}.norm2.weight`, `layers.{i}.mlp.fc1.weight`,
+//!   `layers.{i}.mlp.fc2.weight` (models with a gated MLP)
 //! - `norm_f.weight`
 
 use super::config::Mamba3Config;
@@ -67,6 +69,16 @@ pub fn save_mamba3(
         ]);
     }
 
+    let hidden = cfg.mlp_hidden();
+    for (i, m) in weights.mlp.iter().enumerate() {
+        let p = |n: &str| format!("layers.{i}.{n}");
+        tensors.extend([
+            t!(p("norm2.weight"), &m.norm_weight, &[dm]),
+            t!(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden]),
+            t!(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm]),
+        ]);
+    }
+
     tensors.push(t!("norm_f.weight", &weights.norm_f_weight, &[dm]));
 
     let meta = HashMap::from([
@@ -86,6 +98,9 @@ pub fn save_mamba3(
             cfg.is_outproj_norm.to_string(),
         ),
         ("rms_norm_eps".to_string(), cfg.rms_norm_eps.to_string()),
+        // Identity-critical too: without it a model with an MLP would load
+        // as one without.
+        ("d_intermediate".to_string(), cfg.d_intermediate.to_string()),
         ("scan_mode".to_string(), format!("{:?}", cfg.scan_mode)),
         ("mamba_version".to_string(), "3".to_string()),
     ]);
@@ -133,6 +148,19 @@ pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, us
                 cfg.rms_norm_eps
             ));
         }
+    }
+    let stored_mlp: usize = match meta_map.get("d_intermediate") {
+        Some(v) => v
+            .parse()
+            .map_err(|e| format!("parse d_intermediate: {e}"))?,
+        None => 0,
+    };
+    if stored_mlp != cfg.d_intermediate {
+        return Err(format!(
+            "checkpoint identity mismatch: file has d_intermediate={stored_mlp}, \
+             caller config says {} — the MLP differs",
+            cfg.d_intermediate
+        ));
     }
 
     let st = SafeTensors::deserialize(&data).map_err(|e| format!("deserialize: {e:?}"))?;
@@ -182,11 +210,27 @@ pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, us
         });
     }
 
+    let mlp = if cfg.mlp_hidden() == 0 {
+        Vec::new()
+    } else {
+        (0..cfg.n_layers)
+            .map(|i| {
+                let p = |n: &str| format!("layers.{i}.{n}");
+                Ok(crate::mlp::GatedMlpLayerWeights {
+                    norm_weight: get(&p("norm2.weight"))?,
+                    fc1_w: get(&p("mlp.fc1.weight"))?,
+                    fc2_w: get(&p("mlp.fc2.weight"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
+
     let w = Mamba3Weights {
         input_proj_w: get("input_proj.weight")?,
         input_proj_b: get("input_proj.bias")?,
         layers,
         norm_f_weight: get("norm_f.weight")?,
+        mlp,
     };
 
     w.validate(cfg, input_dim)?;
@@ -252,6 +296,13 @@ pub fn load_mamba3_auto(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usi
             None => 1e-5,
         },
         scan_mode,
+        // Checkpoints from before the MLP carry no MLP.
+        d_intermediate: match meta_map.get("d_intermediate") {
+            Some(v) => v
+                .parse()
+                .map_err(|e| format!("parse d_intermediate: {e}"))?,
+            None => 0,
+        },
     };
     cfg.validate()?;
 
@@ -311,6 +362,38 @@ mod tests {
         };
         let err = load_mamba3(&tmp, &wrong_eps).err().unwrap();
         assert!(err.contains("rms_norm_eps"), "{err}");
+
+        std::fs::remove_file(tmp).ok();
+    }
+
+    /// A model with a gated MLP saves its MLP tensors and its width, the
+    /// auto loader rebuilds both, and a config without the MLP is refused
+    /// rather than loading the mixers alone.
+    #[test]
+    fn test_mlp_checkpoint_roundtrip() {
+        let cfg = Mamba3Config {
+            d_intermediate: 200,
+            ..Mamba3Config::default()
+        };
+        let w = Mamba3Weights::init(&cfg, 64, 11);
+        assert_eq!(w.mlp.len(), cfg.n_layers);
+        let tmp = std::env::temp_dir().join("mamba3_test_mlp.safetensors");
+        save_mamba3(&tmp, &w, &cfg, 64).unwrap();
+
+        let (w2, cfg2, _) = load_mamba3_auto(&tmp).unwrap();
+        assert_eq!(cfg2, cfg);
+        for (a, b) in w.mlp.iter().zip(&w2.mlp) {
+            assert_eq!(a.norm_weight, b.norm_weight);
+            assert_eq!(a.fc1_w, b.fc1_w);
+            assert_eq!(a.fc2_w, b.fc2_w);
+        }
+
+        let no_mlp = Mamba3Config {
+            d_intermediate: 0,
+            ..cfg
+        };
+        let err = load_mamba3(&tmp, &no_mlp).err().unwrap();
+        assert!(err.contains("d_intermediate"), "{err}");
 
         std::fs::remove_file(tmp).ok();
     }

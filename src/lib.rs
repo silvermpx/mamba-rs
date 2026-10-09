@@ -73,6 +73,7 @@ pub mod dist;
 pub mod hf;
 pub mod mamba3_siso;
 pub mod mamba_ssm;
+pub mod mlp;
 pub mod module;
 pub mod ops;
 pub mod serialize;

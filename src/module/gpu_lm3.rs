@@ -729,6 +729,7 @@ mod tied_head_capture_tests {
             is_outproj_norm: false,
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            d_intermediate: 0,
         };
         let mut weights = Mamba3Weights::init(&cfg, D_MODEL, 0x9033);
         weights.input_proj_w.clear();

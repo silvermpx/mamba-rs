@@ -91,6 +91,8 @@ pub struct Mamba3PrefillScratch {
     y_rm: Vec<f32>,
     gated: Vec<f32>,
     out: Vec<f32>,
+    /// The gated MLP's window buffers, grown on first use.
+    mlp: crate::mlp::cpu::GatedMlpRowsScratch,
 }
 
 impl Mamba3PrefillScratch {
@@ -114,6 +116,7 @@ impl Mamba3PrefillScratch {
             y_rm: vec![0.0; t * di],
             gated: vec![0.0; t * di],
             out: vec![0.0; t * dims.d_model],
+            mlp: crate::mlp::cpu::GatedMlpRowsScratch::default(),
         }
     }
 
@@ -579,6 +582,24 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 }
             },
         );
+
+        // The MLP branch of a model that has one, over every row.
+        if let Some(mlp) = w.mlp.get(layer_idx) {
+            crate::mlp::cpu::gated_mlp_rows(
+                &mut temporal_out[..t_dm],
+                t_len,
+                mlp,
+                &mut scratch.mlp,
+                gemm,
+                |dst, src| {
+                    zip_rows(mode, (dst, dm), (src, dm), |d_row, s_row| {
+                        let sum_sq = simd_sum_sq(s_row);
+                        let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
+                        simd_rms_scale(d_row, s_row, &mlp.norm_weight[..dm], inv_rms);
+                    });
+                },
+            );
+        }
     }
 
     // norm_f at EVERY position, via the public in-place RMSNorm (the anchor

@@ -32,6 +32,8 @@ pub struct Mamba3StepScratch {
     pub norm_buf: Vec<f32>,   // [d_model]
     pub residual: Vec<f32>,   // [d_model]
     pub bc_inv_rms: Vec<f32>, // [ngroups] (BCNorm inv_rms scratch)
+    /// The gated MLP's buffers (zero-sized when the model has none).
+    pub mlp: crate::mlp::cpu::GatedMlpStepScratch,
 }
 
 impl Mamba3StepScratch {
@@ -55,6 +57,7 @@ impl Mamba3StepScratch {
             norm_buf: vec![0.0; dm],
             residual: vec![0.0; dm],
             bc_inv_rms: vec![0.0; ng],
+            mlp: crate::mlp::cpu::GatedMlpStepScratch::new(dm, cfg.mlp_hidden()),
         }
     }
 }
@@ -312,9 +315,18 @@ pub fn mamba3_step(
         );
     }
 
-    // Process each layer
+    // Process each layer: the mixer branch, then the MLP branch when the
+    // model has one.
     for (layer_idx, lw) in weights.layers.iter().enumerate() {
         mamba3_layer_step(temporal, scratch, lw, &mut states[layer_idx], cfg);
+        if let Some(mlp) = weights.mlp.get(layer_idx) {
+            crate::mlp::cpu::gated_mlp_step(
+                &mut temporal[..dm],
+                mlp,
+                &mut scratch.mlp,
+                cfg.rms_norm_eps,
+            );
+        }
     }
 
     // Final RMSNorm (reuse scratch.norm_buf to avoid heap allocation)

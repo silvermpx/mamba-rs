@@ -39,6 +39,20 @@ pub struct GpuMamba3WeightsInf {
     pub flat: GpuBuffer,
 }
 
+/// The GPU engines and trainers do not run the gated MLP yet: a model that
+/// has one is refused here rather than run without it.
+fn refuse_mlp(cpu: &crate::mamba3_siso::weights::Mamba3Weights) -> Result<(), String> {
+    if cpu.mlp.is_empty() {
+        Ok(())
+    } else {
+        Err(
+            "the gated MLP (d_intermediate > 0) does not run on the GPU yet; \
+             the CPU runs this model"
+                .into(),
+        )
+    }
+}
+
 impl GpuMamba3WeightsInf {
     /// Upload CPU weights into a single flat GPU buffer with WeightSlice views.
     pub fn from_cpu(
@@ -46,6 +60,7 @@ impl GpuMamba3WeightsInf {
         cpu: &crate::mamba3_siso::weights::Mamba3Weights,
         _input_dim: usize,
     ) -> Result<Self, String> {
+        refuse_mlp(cpu)?;
         // Concatenate all weights into a flat Vec
         let mut flat_data = Vec::new();
         flat_data.extend_from_slice(&cpu.input_proj_w);
@@ -143,6 +158,7 @@ impl GpuMamba3MixedWeights {
         cpu: &crate::mamba3_siso::weights::Mamba3Weights,
         bulk_dtype: WeightDtype,
     ) -> Result<Self, String> {
+        refuse_mlp(cpu)?;
         // Compute arena sizes (in elements)
         let bulk_elems: usize = std::iter::once(cpu.input_proj_w.len())
             .chain(
@@ -312,6 +328,7 @@ impl GpuMamba3Weights {
         cfg: &Mamba3Config,
         _input_dim: usize,
     ) -> Result<Self, String> {
+        refuse_mlp(cpu)?;
         Ok(Self {
             input_proj_w: GpuBuffer::from_cpu(stream, &cpu.input_proj_w)?,
             input_proj_b: GpuBuffer::from_cpu(stream, &cpu.input_proj_b)?,

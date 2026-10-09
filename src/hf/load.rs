@@ -209,7 +209,7 @@ fn discover_shards(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     }
 }
 
-fn tensor_to_f32(data: &[u8], dtype: safetensors::Dtype) -> Result<Vec<f32>, String> {
+pub(super) fn tensor_to_f32(data: &[u8], dtype: safetensors::Dtype) -> Result<Vec<f32>, String> {
     match dtype {
         safetensors::Dtype::F32 => {
             let floats: &[f32] = bytemuck::cast_slice(data);

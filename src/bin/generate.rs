@@ -24,6 +24,11 @@ struct Args {
     #[arg(long)]
     model_dir: Option<PathBuf>,
 
+    /// Tokenizer file (tokenizer.json). The official Mamba-3 repositories
+    /// ship none; they use the Llama-3.1 tokenizer.
+    #[arg(long)]
+    tokenizer: Option<PathBuf>,
+
     /// Prompt text
     prompt: String,
 
@@ -78,6 +83,7 @@ fn main() {
     };
 
     let tokenizer = load_tokenizer(&model_dir, &args);
+    let mamba3 = is_mamba3_checkpoint(&model_dir);
 
     let encoding = tokenizer
         .encode(args.prompt.as_str(), false)
@@ -85,7 +91,12 @@ fn main() {
             eprintln!("error: tokenization failed: {e}");
             std::process::exit(1);
         });
-    let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
+    let mut prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
+    // The official Mamba-3 checkpoints were trained on Llama-3.1 token
+    // streams that open with <|begin_of_text|>.
+    if mamba3 && let Some(bos) = tokenizer.token_to_id("<|begin_of_text|>") {
+        prompt_ids.insert(0, bos);
+    }
     let n_prompt = prompt_ids.len();
 
     let params = SampleParams {
@@ -137,7 +148,12 @@ fn run_cpu(
     tokenizer: &Tokenizer,
 ) {
     let t_load = Instant::now();
-    let mut lm = mamba_rs::module::lm::MambaLM::from_hf(model_dir).unwrap_or_else(|e| {
+    let loaded = if is_mamba3_checkpoint(model_dir) {
+        load_mamba3_cpu(model_dir)
+    } else {
+        mamba_rs::module::lm::MambaLM::from_hf(model_dir)
+    };
+    let mut lm = loaded.unwrap_or_else(|e| {
         eprintln!("error: failed to load model: {e}");
         std::process::exit(1);
     });
@@ -169,6 +185,21 @@ fn run_cpu(
     print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
 }
 
+/// A checkpoint in the original mamba_ssm format whose mixer is Mamba-3.
+fn is_mamba3_checkpoint(model_dir: &Path) -> bool {
+    std::fs::read(model_dir.join("config.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|c| c["ssm_cfg"]["layer"].as_str() == Some("Mamba3"))
+}
+
+fn load_mamba3_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
+    let m = mamba_rs::hf::load_mamba3::load_hf_mamba3(model_dir)?;
+    let d = m.cfg.d_model;
+    let backbone = mamba_rs::module::Mamba3Backbone::from_weights(m.weights, m.cfg, d)?;
+    mamba_rs::module::lm::MambaLM::from_mamba3(backbone, m.embed, None, m.vocab_size)
+}
+
 #[cfg(feature = "cuda")]
 fn parse_dtype(s: &str) -> mamba_rs::mamba_ssm::gpu::dtype::WeightDtype {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -194,6 +225,10 @@ fn run_gpu(
     tokenizer: &Tokenizer,
 ) {
     let dtype = parse_dtype(&args.dtype);
+    if is_mamba3_checkpoint(model_dir) {
+        run_gpu_mamba3(model_dir, args, prompt_ids, n_prompt, params, tokenizer);
+        return;
+    }
     let t_load = Instant::now();
     let mut lm =
         mamba_rs::module::gpu_lm::GpuMambaLM::from_hf_with_dtype(model_dir, args.gpu_device, dtype)
@@ -237,6 +272,68 @@ fn run_gpu(
         std::process::exit(1);
     });
 
+    print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
+}
+
+#[cfg(feature = "cuda")]
+fn run_gpu_mamba3(
+    model_dir: &Path,
+    args: &Args,
+    prompt_ids: &[u32],
+    n_prompt: usize,
+    params: &SampleParams,
+    tokenizer: &Tokenizer,
+) {
+    let dtype = parse_dtype(&args.dtype);
+    let t_load = Instant::now();
+    let loaded = mamba_rs::hf::load_mamba3::load_hf_mamba3(model_dir).and_then(|m| {
+        mamba_rs::module::gpu_lm3::GpuMamba3LM::from_weights_with_dtype(
+            &m.weights,
+            m.cfg,
+            m.embed,
+            None,
+            m.vocab_size,
+            args.gpu_device,
+            dtype,
+        )
+    });
+    let mut lm = loaded.unwrap_or_else(|e| {
+        eprintln!("error: failed to load GPU model: {e}");
+        std::process::exit(1);
+    });
+    lm.capture_graph().unwrap_or_else(|e| {
+        eprintln!("warning: CUDA Graph capture failed ({e}), running without graph");
+    });
+    let load_ms = t_load.elapsed().as_millis();
+    eprintln!(
+        "model: {} (GPU:{} {}, Mamba-3) | d_model={} vocab={} | loaded in {load_ms}ms",
+        args.model_id,
+        args.gpu_device,
+        dtype.as_str(),
+        lm.d_model,
+        lm.vocab_size
+    );
+    eprintln!("prompt: {n_prompt} tokens");
+
+    let mut stdout = std::io::stdout().lock();
+    let mut n_generated = 0u64;
+    let mut byte_buf = Vec::new();
+    let t_start = Instant::now();
+    let mut ttft: Option<u128> = None;
+    lm.generate_streaming(prompt_ids, params, |token_id, _| {
+        if ttft.is_none() {
+            ttft = Some(t_start.elapsed().as_millis());
+        }
+        n_generated += 1;
+        if let Some(piece) = decode_token(tokenizer, token_id, &mut byte_buf) {
+            let _ = stdout.write_all(piece.as_bytes());
+            let _ = stdout.flush();
+        }
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("\nerror: generation failed: {e}");
+        std::process::exit(1);
+    });
     print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
 }
 
@@ -302,8 +399,10 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
                     });
                 }
             }
-        } else {
-            get("model.safetensors").unwrap_or_else(|e| {
+        } else if get("model.safetensors").is_err() {
+            // The original mamba_ssm repositories (the official Mamba-3
+            // checkpoints among them) ship a torch archive instead.
+            get("pytorch_model.bin").unwrap_or_else(|e| {
                 eprintln!("error: cannot download model weights: {e}");
                 std::process::exit(1);
             });
@@ -318,6 +417,12 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
 }
 
 fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
+    if let Some(path) = &args.tokenizer {
+        return Tokenizer::from_file(path).unwrap_or_else(|e| {
+            eprintln!("error: cannot load {}: {e}", path.display());
+            std::process::exit(1);
+        });
+    }
     let tok_path = model_dir.join("tokenizer.json");
     if tok_path.exists() {
         Tokenizer::from_file(&tok_path).unwrap_or_else(|e| {
@@ -325,6 +430,13 @@ fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
             std::process::exit(1);
         })
     } else {
+        if is_mamba3_checkpoint(model_dir) {
+            eprintln!(
+                "error: the official Mamba-3 repositories ship no tokenizer; pass \
+                 --tokenizer with the Llama-3.1 tokenizer.json"
+            );
+            std::process::exit(1);
+        }
         eprintln!("warning: tokenizer.json not found, trying HF download...");
         let client = HFClientSync::new().unwrap();
         let (owner, name) = split_id(&args.model_id);

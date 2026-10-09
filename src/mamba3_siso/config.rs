@@ -36,9 +36,18 @@ pub struct Mamba3Config {
     /// trained with a different eps loads a DIFFERENT model — the value
     /// rides checkpoint metadata (see `serialize.rs`).
     pub rms_norm_eps: f32,
+    /// The gated MLP after the mixer in every layer (`d_intermediate` in
+    /// the reference config); 0 means no MLP. The hidden width is this
+    /// value rounded up to a multiple of 128 (see [`Self::mlp_hidden`]).
+    pub d_intermediate: usize,
 }
 
 impl Mamba3Config {
+    /// The gated MLP's hidden width, 0 when the model has none.
+    pub fn mlp_hidden(&self) -> usize {
+        crate::mlp::mlp_hidden(self.d_intermediate)
+    }
+
     /// Inner dimension: d_model * expand.
     pub fn d_inner(&self) -> usize {
         self.d_model * self.expand
@@ -139,6 +148,12 @@ impl Mamba3Config {
         if self.expand < 1 {
             return Err("expand must be >= 1".into());
         }
+        if self.d_intermediate > (1 << 20) {
+            return Err(format!(
+                "d_intermediate ({}) must be <= 2^20",
+                self.d_intermediate
+            ));
+        }
         if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
             return Err(format!(
                 "rms_norm_eps must be positive, got {}",
@@ -182,6 +197,7 @@ impl Default for Mamba3Config {
             // Reference default (state-spaces/mamba RMSNorm eps). Rides
             // checkpoint metadata; changing it re-defines the model.
             rms_norm_eps: 1e-5,
+            d_intermediate: 0,
         }
     }
 }
