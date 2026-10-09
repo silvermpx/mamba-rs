@@ -33,12 +33,24 @@ fn m1_mixed_graph_max_dim(dims: &super::forward::GpuMambaDims) -> usize {
         .max(dims.mamba_input_dim)
 }
 
+// An explicit compare-exchange loop: `fetch_update` is deprecated from
+// Rust 1.99 under a new name that the crate's minimum toolchain lacks.
 fn next_gpu_ctx_token() -> Result<u64, String> {
-    NEXT_GPU_CTX_TOKEN
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
-            token.checked_add(1)
-        })
-        .map_err(|_| "GpuCtx instance token space exhausted".to_string())
+    let mut token = NEXT_GPU_CTX_TOKEN.load(Ordering::Relaxed);
+    loop {
+        let next = token
+            .checked_add(1)
+            .ok_or_else(|| "GpuCtx instance token space exhausted".to_string())?;
+        match NEXT_GPU_CTX_TOKEN.compare_exchange_weak(
+            token,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(previous) => return Ok(previous),
+            Err(current) => token = current,
+        }
+    }
 }
 
 struct GemmEnvValues {

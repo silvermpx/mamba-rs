@@ -50,12 +50,19 @@ struct ManagedAllocationRegistry {
     domains: HashMap<usize, ManagedAllocationDomain>,
 }
 
+// An explicit compare-exchange loop: `fetch_update` is deprecated from
+// Rust 1.99 under a new name that the crate's minimum toolchain lacks.
 fn advance_counter(counter: &AtomicU64, label: &str) -> Result<u64, String> {
-    counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            value.checked_add(1)
-        })
-        .map_err(|_| format!("{label} exhausted"))
+    let mut value = counter.load(Ordering::Acquire);
+    loop {
+        let next = value
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} exhausted"))?;
+        match counter.compare_exchange_weak(value, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(previous) => return Ok(previous),
+            Err(current) => value = current,
+        }
+    }
 }
 
 pub(crate) fn register_managed_allocation_range(
