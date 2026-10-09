@@ -297,7 +297,6 @@ pub struct GpuMamba3Scratch {
 
     // Chunked parallel scan buffers
     pub da_cs_sum: GpuBuffer, // [B * nheads * n_chunks] -- per-chunk decay sum
-    pub final_states: GpuBuffer, // [B * nheads * headdim * d_state]
     /// Per-chunk B terms of the reverse d_state recurrence
     /// (m3_dqkv_state_terms output). [B * n_chunks * nh * hd * ds]
     pub dstate_terms: GpuBuffer,
@@ -531,7 +530,6 @@ impl GpuMamba3Scratch {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nh * nc)?
             },
-            final_states: GpuBuffer::zeros(stream, b * nh * hd * ds)?,
             dstate_terms: {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?

@@ -5,10 +5,13 @@
 //! The fused preprocess/state path also has exact same-dtype comparisons
 //! against the unfused pair, including its intermediate outputs.
 //!
-//! The 2 scan-state kernels (`m3_dA_cumsum`, `m3_state_passing_fwd`) stay
+//! The fused state pass is held bit for bit to the entering fold, the
+//! inter-chunk pass and the writeback it replaces, in every dtype.
+//!
+//! The scan-state arithmetic (`m3_dA_cumsum`, the inter-chunk pass) stays
 //! pure-f32 per the Tri Dao invariant (compounding O(T) prefix arithmetic
-//! must not be stored in half precision) — they are NOT tested here because
-//! there is no typed variant to validate.
+//! must not be stored in half precision); only the K and V inputs of the
+//! writeback are typed.
 
 #![cfg(feature = "cuda")]
 
@@ -21,7 +24,9 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::kernels::state_capacity;
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg};
+use mamba_rs::mamba3_siso::gpu::kernels::{
+    Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg, state_pass_fused_cfg,
+};
 
 // Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
 // Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
@@ -579,6 +584,229 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 "{label}: {name}[{i}] save_scale={save_scale} save_gamma={save_gamma}"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── m3_state_pass_fused ───────────────────────────────────────────────
+
+/// The fused state pass against the three launches it replaces: the
+/// entering fold, the inter-chunk pass and the window-final writeback.
+/// Both arms take the same dtype, so every output must agree bit for bit:
+/// the entering state of every chunk, the exit SSM state and the K and V
+/// boundaries. The seeded arm passes the persistent states as their own
+/// seed, as a continued prefill does, so a write racing a read shows up.
+#[test]
+fn m3_state_pass_fused_matches_separate_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+    // (batch, t, nh, hd, ds, cs): a partial last chunk, a single partial
+    // chunk, the classifier head, a state wider than one 1024-thread pass,
+    // and a state that is not a whole number of warps.
+    let shapes: [(usize, usize, usize, usize, usize, usize); 5] = [
+        (2, 10, 2, 4, 4, 4),
+        (1, 3, 3, 16, 16, 64),
+        (2, 64, 2, 16, 16, 64),
+        (2, 129, 2, 32, 64, 32),
+        (1, 70, 3, 5, 7, 16),
+    ];
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        for (batch, t, nh, hd, ds, cs) in shapes {
+            let nc = t.div_ceil(cs);
+            let dim = hd * ds;
+            let th_n = batch * t * nh;
+            let states_n = batch * nc * nh * dim;
+            let ssm_n = batch * nh * dim;
+            let contrib = det_rand(states_n, 0x5A01);
+            // Negative decay increments, so the chunk decays stay in (0, 1].
+            let da_vals: Vec<f32> = det_rand(batch * nc * nh * cs, 0x5A02)
+                .into_iter()
+                .map(|v| -v.abs() * 2.0)
+                .collect();
+            let dt_vals: Vec<f32> = det_rand(th_n, 0x5A03)
+                .into_iter()
+                .map(|v| 0.01 + v.abs() * 0.4)
+                .collect();
+            let trap_vals: Vec<f32> = det_rand(th_n, 0x5A04)
+                .into_iter()
+                .map(|v| 0.5 + v * 0.9)
+                .collect();
+            let ssm0 = det_rand(ssm_n, 0x5A05);
+            let k0 = det_rand(batch * nh * ds, 0x5A06);
+            let v0 = det_rand(batch * nh * hd, 0x5A07);
+            let da = upload_f32(&ctx, &da_vals);
+            let dt = upload_f32(&ctx, &dt_vals);
+            let trap = upload_f32(&ctx, &trap_vals);
+            let k_flat = upload_typed(&ctx, &det_rand(th_n * ds, 0x5A08), dtype);
+            let x_flat = upload_typed(&ctx, &det_rand(th_n * hd, 0x5A09), dtype);
+            let (bi, nci, nhi, hdi, dsi, csi, ti) = (
+                batch as i32,
+                nc as i32,
+                nh as i32,
+                hd as i32,
+                ds as i32,
+                cs as i32,
+                t as i32,
+            );
+            for seeded in [false, true] {
+                let label = format!(
+                    "{dtype:?} B={batch} T={t} nh={nh} hd={hd} ds={ds} cs={cs} seeded={seeded}"
+                );
+                // The three launches: the fold into a copy of the SSM state,
+                // the pass, then the writeback from the pass's final states.
+                let states_a = upload_f32(&ctx, &contrib);
+                let final_a = upload_f32(&ctx, &vec![f32::NAN; ssm_n]);
+                let ssm_a = upload_f32(&ctx, &ssm0);
+                let k_a = upload_f32(&ctx, &k0);
+                let v_a = upload_f32(&ctx, &v0);
+                let init = upload_f32(&ctx, &ssm0);
+                let init_ptr = if seeded {
+                    let block_x = dim.min(256) as u32;
+                    let cfg = LaunchConfig {
+                        grid_dim: (
+                            batch as u32,
+                            nh as u32,
+                            dim.div_ceil(block_x as usize) as u32,
+                        ),
+                        block_dim: (block_x, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let ptrs = [
+                        init.cached_ptr(),
+                        k_a.cached_ptr(),
+                        v_a.cached_ptr(),
+                        dt.cached_ptr(),
+                        trap.cached_ptr(),
+                    ];
+                    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state);
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
+                    }
+                    for arg in [&bi, &nhi, &hdi, &dsi, &ti] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
+                    init.cached_ptr()
+                } else {
+                    0
+                };
+                {
+                    let block_x = dim.min(256) as u32;
+                    let cfg = LaunchConfig {
+                        grid_dim: (
+                            batch as u32,
+                            nh as u32,
+                            dim.div_ceil(block_x as usize) as u32,
+                        ),
+                        block_dim: (block_x, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let ptrs = [
+                        states_a.cached_ptr(),
+                        final_a.cached_ptr(),
+                        da.cached_ptr(),
+                        init_ptr,
+                    ];
+                    let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
+                    }
+                    for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
+                }
+                {
+                    let cfg = LaunchConfig {
+                        grid_dim: (batch as u32, nh as u32, 1),
+                        block_dim: (hd.max(ds) as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let ptrs = [
+                        ssm_a.cached_ptr(),
+                        k_a.cached_ptr(),
+                        v_a.cached_ptr(),
+                        final_a.cached_ptr(),
+                        k_flat.cached_ptr(),
+                        x_flat.cached_ptr(),
+                    ];
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(m3k.m3_writeback_parallel_states_typed.get(dtype));
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
+                    }
+                    for arg in [&bi, &ti, &nhi, &hdi, &dsi] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
+                }
+                // The fused launch, its seed the persistent states themselves.
+                let states_b = upload_f32(&ctx, &contrib);
+                let ssm_b = upload_f32(&ctx, &ssm0);
+                let k_b = upload_f32(&ctx, &k0);
+                let v_b = upload_f32(&ctx, &v0);
+                {
+                    let seed = if seeded { ssm_b.cached_ptr() } else { 0 };
+                    let ptrs = [
+                        states_b.cached_ptr(),
+                        ssm_b.cached_ptr(),
+                        k_b.cached_ptr(),
+                        v_b.cached_ptr(),
+                        seed,
+                        k_b.cached_ptr(),
+                        v_b.cached_ptr(),
+                        dt.cached_ptr(),
+                        trap.cached_ptr(),
+                        da.cached_ptr(),
+                        k_flat.cached_ptr(),
+                        x_flat.cached_ptr(),
+                    ];
+                    let cfg = state_pass_fused_cfg(batch, nh, hd, ds);
+                    let (bx, by, bz) = cfg.block_dim;
+                    assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(m3k.m3_state_pass_fused_typed.get(dtype));
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
+                    }
+                    for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
+                }
+                ctx.stream.synchronize().unwrap();
+                let pairs = [
+                    (
+                        "entering states",
+                        download_f32(&ctx, &states_a, states_n),
+                        download_f32(&ctx, &states_b, states_n),
+                    ),
+                    (
+                        "ssm_state",
+                        download_f32(&ctx, &ssm_a, ssm_n),
+                        download_f32(&ctx, &ssm_b, ssm_n),
+                    ),
+                    (
+                        "k_state",
+                        download_f32(&ctx, &k_a, batch * nh * ds),
+                        download_f32(&ctx, &k_b, batch * nh * ds),
+                    ),
+                    (
+                        "v_state",
+                        download_f32(&ctx, &v_a, batch * nh * hd),
+                        download_f32(&ctx, &v_b, batch * nh * hd),
+                    ),
+                ];
+                for (name, want, got) in &pairs {
+                    for (i, (w, g)) in want.iter().zip(got).enumerate() {
+                        assert!(w.is_finite(), "{label}: {name}[{i}] oracle nonfinite");
+                        assert_eq!(g.to_bits(), w.to_bits(), "{label}: {name}[{i}]");
                     }
                 }
             }

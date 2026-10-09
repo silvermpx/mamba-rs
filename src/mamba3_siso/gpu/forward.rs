@@ -626,24 +626,30 @@ pub fn gpu_forward_mamba3_layer(
                     .map_err(|e| format!("m3_chunk_state_fwd F6 K3: {:?}", e))?;
             }
         }
+        // K4: the inter-chunk state pass and the window-final writeback in
+        // one launch: the entering states land in place in the saved chunk
+        // states, the exit states in the persistent ssm/k/v buffers.
+        // Training forward: stateless window, chunk 0 enters at zero. A
+        // state-carrying prefill passes its persistent states as the seed.
         {
-            let dim = hd * ds;
-            let block_x = dim.min(256) as u32;
-            let grid_z = dim.div_ceil(block_x as usize) as u32;
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (dims.batch as u32, nh as u32, grid_z),
-                block_dim: (block_x, 1, 1),
-                shared_mem_bytes: 0,
-            };
             let nc_i = nc as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+            let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
+            let mut builder = ctx
+                .stream
+                .launch_builder(&m3k.m3_state_pass_fused_typed.f32);
+            let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
             builder.arg(acts.chunk_states_saved.inner_mut());
-            builder.arg(scratch.final_states.inner_mut());
+            builder.arg(&layer_ptrs.ssm_state);
+            builder.arg(&layer_ptrs.k_state);
+            builder.arg(&layer_ptrs.v_state);
+            builder.arg(&seed_null);
+            builder.arg(&layer_ptrs.k_state);
+            builder.arg(&layer_ptrs.v_state);
+            builder.arg(acts.dt.inner());
+            builder.arg(acts.trap.inner());
             builder.arg(acts.da_cumsum_saved.inner());
-            // Training forward: stateless window — chunk 0 enters at zero.
-            // A state-carrying prefill passes the folded entering state.
-            let init_states_null: crate::mamba3_siso::gpu::state::CUptr = 0;
-            builder.arg(&init_states_null);
+            builder.arg(acts.k.inner());
+            builder.arg(acts.x.inner());
             builder.arg(&b_i);
             builder.arg(&nc_i);
             builder.arg(&nh_i);
@@ -652,7 +658,7 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&cs);
             builder.arg(&t_i);
             unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_state_passing_fwd F6 K4: {:?}", e))?;
+                .map_err(|e| format!("m3_state_pass_fused F6 K4: {:?}", e))?;
         }
         {
             let (coop, cfg) =
@@ -683,29 +689,6 @@ pub fn gpu_forward_mamba3_layer(
 
         // The chunked kernels above wrote their saves straight into the
         // layer acts; the backward reads them from there.
-
-        {
-            let block_x = hd.max(ds) as u32;
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (dims.batch as u32, nh as u32, 1),
-                block_dim: (block_x, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_writeback_parallel_states);
-            builder.arg(&layer_ptrs.ssm_state);
-            builder.arg(&layer_ptrs.k_state);
-            builder.arg(&layer_ptrs.v_state);
-            builder.arg(scratch.final_states.inner());
-            builder.arg(acts.k.inner());
-            builder.arg(acts.x.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&hd_i);
-            builder.arg(&ds_i);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_writeback_parallel_states F6: {:?}", e))?;
-        }
     } else {
         let dp_ptr = lw.d_param.raw_ptr(&ctx.stream);
         let b_i = dims.batch as i32;
@@ -807,15 +790,15 @@ pub fn gpu_forward_mamba3_layer(
 /// Mamba-3 SISO full backbone forward (input proj + N layers + norm_f).
 ///
 /// State semantics: with `dims.use_parallel_scan` the window is STATELESS —
-/// this TRAINING forward runs stateless windows: it passes a null entering
-/// state to `m3_state_passing_fwd` (chunk 0 starts from zero) and zeroes
-/// all four state buffers (including the RoPE angle accumulator) up front
-/// to keep the semantics consistent. Final window states are still written
-/// back for inspection. The chunked kernels themselves DO support an
-/// entering state (nullable `init_states` + the `m3_chunk_entering_state`
-/// trapezoidal boundary fold) — that route belongs to the state-carrying
-/// prefill; within training, cross-call continuity remains the sequential
-/// path's job (`use_parallel_scan = false`, `m3_burnin_fwd`).
+/// this TRAINING forward runs stateless windows: it passes a null seed to
+/// `m3_state_pass_fused` (chunk 0 starts from zero) and zeroes all four
+/// state buffers (including the RoPE angle accumulator) up front to keep
+/// the semantics consistent. Final window states are still written back
+/// for inspection. The chunked kernels themselves DO support an entering
+/// state (a non-null seed, folded with the trapezoidal boundary term) —
+/// that route belongs to the state-carrying prefill; within training,
+/// cross-call continuity remains the sequential path's job
+/// (`use_parallel_scan = false`, `m3_burnin_fwd`).
 pub fn gpu_forward_mamba3_backbone(
     exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,

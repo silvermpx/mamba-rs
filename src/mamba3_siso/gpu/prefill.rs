@@ -54,10 +54,6 @@ pub struct Mamba3PrefillChunkScratch {
     da_cumsum: GpuBuffer, // [B*n_chunks*nh*chunk_size]
     /// Chunk contributions, then (in-place) entering states per chunk.
     chunk_states: GpuBuffer, // [B*n_chunks*nh*hd*ds]
-    /// State exiting the window per (b,h).
-    final_states: GpuBuffer, // [B*nh*hd*ds]
-    /// Entering SSM state incl. the trapezoidal boundary fold.
-    init_state: GpuBuffer,
     /// fp64 staging for the chunk-parallel angle accumulation.
     angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
     angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
@@ -80,8 +76,6 @@ impl Mamba3PrefillChunkScratch {
             qk_dot: GpuBuffer::zeros(stream, bt * nh)?,
             da_cumsum: GpuBuffer::zeros(stream, dims.batch * nc * nh * cs)?,
             chunk_states: GpuBuffer::zeros(stream, dims.batch * nc * nh * hd * ds)?,
-            final_states: GpuBuffer::zeros(stream, dims.batch * nh * hd * ds)?,
-            init_state: GpuBuffer::zeros(stream, dims.batch * nh * hd * ds)?,
             angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 dims.batch * nc * dims.nheads * dims.n_angles.max(1) * std::mem::size_of::<f64>(),
@@ -150,31 +144,6 @@ pub struct Mamba3PrefillRun<'a> {
     /// `false` = stateless window (zero all four states first);
     /// `true` = continue from the persistent state across the seam.
     pub carry_state: bool,
-}
-
-/// Async D2D region copy between raw device pointers (stream-ordered, no
-/// sync — the same primitive `GpuBuffer::copy_from_raw` uses, needed here
-/// for per-layer slices of the persistent state buffers).
-fn dtod_region(
-    dst: CUptr,
-    src: CUptr,
-    floats: usize,
-    stream: &Arc<cudarc::driver::CudaStream>,
-) -> Result<(), String> {
-    let result = unsafe {
-        cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-            dst,
-            src,
-            floats * std::mem::size_of::<f32>(),
-            stream.cu_stream(),
-        )
-    };
-    if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!(
-            "prefill D2D region copy ({floats} floats): {result:?}"
-        ));
-    }
-    Ok(())
 }
 
 impl Mamba3Prefill {
@@ -879,56 +848,42 @@ impl Mamba3Prefill {
                     }
                 }
             }
-            // Entering state: continued windows seed the inter-chunk scan
-            // from the persistent SSM state plus the trapezoidal boundary
-            // fold; stateless windows scan from zero (null pointer).
-            let init_ptr: CUptr = if carry_state {
-                dtod_region(
-                    ck.init_state.cached_ptr(),
-                    ssm_ptr,
-                    dims.batch * nh * hd * ds,
-                    &ctx.stream,
-                )?;
-                let dim = hd * ds;
-                let block_x = dim.min(256) as u32;
-                let grid_z = dim.div_ceil(block_x as usize) as u32;
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: (dims.batch as u32, nh as u32, grid_z),
-                    block_dim: (block_x, 1, 1),
-                    shared_mem_bytes: 0,
+            // The entering fold, the inter-chunk state pass and the exit
+            // states in one launch. A continued window seeds the pass from
+            // the persistent SSM, K and V states with the trapezoidal
+            // boundary fold; a stateless window enters at zero. The exit
+            // states (SSM from the pass, K post-RoPE, V = x at the window's
+            // last timestep) go straight to the persistent buffers: nothing
+            // later in this layer reads them.
+            {
+                let nc_i = nc as i32;
+                let seed: CUptr = if carry_state { ssm_ptr } else { 0 };
+                let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
+                let (kern, kp, xp) = match typed.as_deref_mut() {
+                    Some(ts) => (
+                        m3k.m3_state_pass_fused_typed.get(dtype),
+                        ts.k.cached_ptr(),
+                        ts.x.cached_ptr(),
+                    ),
+                    None => (
+                        &m3k.m3_state_pass_fused_typed.f32,
+                        tgt.k.cached_ptr(),
+                        tgt.x.cached_ptr(),
+                    ),
                 };
-                let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state);
-                b.arg(ck.init_state.inner_mut());
+                let mut b = ctx.stream.launch_builder(kern);
+                b.arg(ck.chunk_states.inner_mut());
+                b.arg(&ssm_ptr);
+                b.arg(&k_ptr);
+                b.arg(&v_ptr);
+                b.arg(&seed);
                 b.arg(&k_ptr);
                 b.arg(&v_ptr);
                 b.arg(tgt.dt.inner());
                 b.arg(tgt.trap.inner());
-                b.arg(&b_i);
-                b.arg(&nh_i);
-                b.arg(&hd_i);
-                b.arg(&ds_i);
-                b.arg(&t_i);
-                unsafe { b.launch(cfg) }
-                    .map_err(|e| format!("prefill entering_state L{l}: {e:?}"))?;
-                ck.init_state.cached_ptr()
-            } else {
-                0
-            };
-            {
-                let dim = hd * ds;
-                let block_x = dim.min(256) as u32;
-                let grid_z = dim.div_ceil(block_x as usize) as u32;
-                let nc_i = nc as i32;
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: (dims.batch as u32, nh as u32, grid_z),
-                    block_dim: (block_x, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
-                b.arg(ck.chunk_states.inner_mut());
-                b.arg(ck.final_states.inner_mut());
                 b.arg(ck.da_cumsum.inner());
-                b.arg(&init_ptr);
+                b.arg(&kp);
+                b.arg(&xp);
                 b.arg(&b_i);
                 b.arg(&nc_i);
                 b.arg(&nh_i);
@@ -936,8 +891,7 @@ impl Mamba3Prefill {
                 b.arg(&ds_i);
                 b.arg(&cs);
                 b.arg(&t_i);
-                unsafe { b.launch(cfg) }
-                    .map_err(|e| format!("prefill state_passing L{l}: {e:?}"))?;
+                unsafe { b.launch(cfg) }.map_err(|e| format!("prefill state_pass L{l}: {e:?}"))?;
             }
             {
                 let dp = lw.d_param;
@@ -993,51 +947,6 @@ impl Mamba3Prefill {
                     b.arg(&cs);
                     unsafe { b.launch(cfg) }
                         .map_err(|e| format!("prefill chunk_scan L{l}: {e:?}"))?;
-                }
-            }
-            // Exit states -> persistent buffers (SSM from the scan, final K
-            // post-RoPE, final V = x at the window's last timestep).
-            {
-                let block_x = hd.max(ds) as u32;
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: (dims.batch as u32, nh as u32, 1),
-                    block_dim: (block_x, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                if let Some(ts) = typed.as_deref_mut() {
-                    let kp = ts.k.cached_ptr();
-                    let xp = ts.x.cached_ptr();
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.m3_writeback_parallel_states_typed.get(dtype));
-                    b.arg(&ssm_ptr);
-                    b.arg(&k_ptr);
-                    b.arg(&v_ptr);
-                    b.arg(ck.final_states.inner());
-                    b.arg(&kp);
-                    b.arg(&xp);
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&hd_i);
-                    b.arg(&ds_i);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill writeback typed L{l}: {e:?}"))?;
-                } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_writeback_parallel_states);
-                    b.arg(&ssm_ptr);
-                    b.arg(&k_ptr);
-                    b.arg(&v_ptr);
-                    b.arg(ck.final_states.inner());
-                    b.arg(tgt.k.inner());
-                    b.arg(tgt.x.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&hd_i);
-                    b.arg(&ds_i);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill writeback L{l}: {e:?}"))?;
                 }
             }
             // Output gate + out_proj + residual.

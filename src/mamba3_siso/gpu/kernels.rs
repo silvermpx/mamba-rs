@@ -199,6 +199,12 @@ pub struct Mamba3Kernels {
     /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
     /// buffers). Typed inputs k_flat/x_flat.
     pub m3_writeback_parallel_states_typed: TypedKernel,
+    /// The entering fold, the inter-chunk state pass and the window-final
+    /// writeback in one launch, one CTA per (b, h): the three kernels'
+    /// expressions in their order, the folded seed and the final state in
+    /// registers. Typed inputs k_flat/x_flat; every state f32. Launched with
+    /// `state_pass_fused_cfg`.
+    pub m3_state_pass_fused_typed: TypedKernel,
     /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
     /// prev_states/D.
     pub m3_chunk_scan_fwd_typed: TypedKernel,
@@ -689,6 +695,11 @@ impl Mamba3Kernels {
                 bf16: get("m3_writeback_parallel_states_bf16")?,
                 f16: get("m3_writeback_parallel_states_f16")?,
             },
+            m3_state_pass_fused_typed: TypedKernel {
+                f32: get("m3_state_pass_fused_f32")?,
+                bf16: get("m3_state_pass_fused_bf16")?,
+                f16: get("m3_state_pass_fused_f16")?,
+            },
             m3_chunk_scan_fwd_coop_typed: TypedKernel {
                 f32: get("m3_chunk_scan_fwd_coop")?,
                 bf16: get("m3_chunk_scan_fwd_coop_bf16")?,
@@ -819,6 +830,24 @@ pub fn chunk_state_cfg(
             block_dim: (hd as u32, 2, 1),
             shared_mem_bytes: 0,
         }
+    }
+}
+
+/// Launch geometry for `m3_state_pass_fused`: one CTA per (b, h), its
+/// threads over the head's hd*ds state elements, rounded up to whole warps
+/// and capped at the 1024-thread block (an element loop covers the rest).
+/// The thread count changes no bits: every element is one thread's chain.
+pub fn state_pass_fused_cfg(
+    batch: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+) -> cudarc::driver::LaunchConfig {
+    let threads = (hd * ds).next_multiple_of(32).min(1024);
+    cudarc::driver::LaunchConfig {
+        grid_dim: (batch as u32, nh as u32, 1),
+        block_dim: (threads as u32, 1, 1),
+        shared_mem_bytes: 0,
     }
 }
 

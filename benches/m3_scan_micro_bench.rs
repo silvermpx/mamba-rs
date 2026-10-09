@@ -546,6 +546,86 @@ fn scan_trio_time_and_hash() {
     evidence_digest::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
         .expect("acceptance evidence");
     println!("state_pass  {:8.1} us", time(&state_passing));
+
+    // The fused state pass takes the pass and the window-final writeback
+    // in one launch: its entering and exit states must carry the pass's
+    // bits, and its time is set against the two launches it replaces.
+    let ssm_out = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
+    let k_out = GpuBuffer::zeros(st, batch * nh * ds).unwrap();
+    let v_out = GpuBuffer::zeros(st, batch * nh * hd).unwrap();
+    let writeback = || {
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (batch as u32, nh as u32, 1),
+            block_dim: (hd.max(ds) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = ctx.stream.launch_builder(&m3k.m3_writeback_parallel_states);
+        b.arg(ssm_out.inner());
+        b.arg(k_out.inner());
+        b.arg(v_out.inner());
+        b.arg(final_states.inner());
+        b.arg(k.inner());
+        b.arg(x.inner());
+        b.arg(&b_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
+    let state_pass_fused = || {
+        let cfg = mamba_rs::mamba3_siso::gpu::kernels::state_pass_fused_cfg(batch, nh, hd, ds);
+        let nc_i = nc as i32;
+        let seed_null: u64 = 0;
+        let mut b = ctx
+            .stream
+            .launch_builder(&m3k.m3_state_pass_fused_typed.f32);
+        b.arg(states_fp.inner());
+        b.arg(ssm_out.inner());
+        b.arg(k_out.inner());
+        b.arg(v_out.inner());
+        b.arg(&seed_null);
+        b.arg(k_out.inner());
+        b.arg(v_out.inner());
+        b.arg(dt_b.inner());
+        b.arg(trap.inner());
+        b.arg(da_cumsum.inner());
+        b.arg(k.inner());
+        b.arg(x.inner());
+        b.arg(&b_i);
+        b.arg(&nc_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        b.arg(&cs_i);
+        b.arg(&t_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    state_pass_fused();
+    ctx.stream.synchronize().unwrap();
+    let mut spf_h = vec![0.0f32; batch * nc * nh * hd * ds];
+    states_fp.download(st, &mut spf_h).unwrap();
+    let mut ssm_h = vec![0.0f32; batch * nh * hd * ds];
+    ssm_out.download(st, &mut ssm_h).unwrap();
+    assert_eq!(
+        fnv(&spf_h),
+        fnv(&sp_h),
+        "fused state pass entering states diverged from the pass"
+    );
+    assert_eq!(
+        fnv(&ssm_h),
+        fnv(&fs_h),
+        "fused state pass exit state diverged from the pass"
+    );
+    println!(
+        "pass+writeback {:8.1} us",
+        time(&|| {
+            state_passing();
+            writeback();
+        })
+    );
+    println!("state_pass_fused {:8.1} us", time(&state_pass_fused));
 }
 
 /// The coefficient chain at the serve shape: split -> bcnorm -> angle

@@ -714,6 +714,110 @@ extern "C" __global__ void m3_writeback_parallel_states(
 }
 
 // ============================================================================
+// 4c. m3_state_pass_fused -- the entering fold, the inter-chunk pass and the
+//     window-final writeback in one launch
+// ============================================================================
+//
+// One CTA per (b, h), its threads over the hd*ds state elements. Each
+// element folds its seed as m3_chunk_entering_state does, carries it across
+// the chunks as m3_state_passing_fwd does, and stores the final state where
+// m3_writeback_parallel_states copied it: the same expressions in the same
+// order, with the folded seed and the final state held in registers instead
+// of the round trips through global memory that the three launches took.
+//
+// The seed and the persistent state may be one buffer (a carried prefill
+// passes the layer's own SSM, K and V states as both): an element is read
+// before its own thread writes it, and the K and V boundary states, which
+// every element's fold reads, are rewritten only after a block barrier.
+// That barrier is why one CTA holds a head's whole state. A null seed is a
+// window that enters at zero.
+//
+// Grid: (B, nh). Block: hd*ds rounded up to whole warps, at most 1024; an
+// element loop covers larger states.
+#define DEFINE_M3_STATE_PASS_FUSED(SUFFIX, T_ACT)                             \
+extern "C" __global__ void                                                    \
+m3_state_pass_fused_##SUFFIX(                                                 \
+    float* __restrict__ states,          /* [B*nc*nh*hd*ds] in/out */         \
+    float* ssm_state,                    /* [B*nh*hd*ds] out */               \
+    float* k_state,                      /* [B*nh*ds] out */                  \
+    float* v_state,                      /* [B*nh*hd] out */                  \
+    const float* ssm_seed,               /* [B*nh*hd*ds] or nullptr */        \
+    const float* k_seed,                 /* [B*nh*ds] */                      \
+    const float* v_seed,                 /* [B*nh*hd] */                      \
+    const float* __restrict__ dt,        /* [B*T*nh] post-softplus */         \
+    const float* __restrict__ trap,      /* [B*T*nh] post-sigmoid */          \
+    const float* __restrict__ dA_cumsum, /* [B*nc*nh*chunk_size] */           \
+    const T_ACT* __restrict__ k_flat,    /* [B*T*nh*ds] */                    \
+    const T_ACT* __restrict__ x_flat,    /* [B*T*d_inner] */                  \
+    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T    \
+) {                                                                           \
+    int b = blockIdx.x;                                                       \
+    int h = blockIdx.y;                                                       \
+    /* Uniform across the block, so no thread skips the barrier below. */     \
+    if (b >= batch || h >= nh) return;                                        \
+    int dim = hd * ds;                                                        \
+    for (int pd = threadIdx.x; pd < dim; pd += blockDim.x) {                  \
+        int hi = (b * nh + h) * dim + pd;                                     \
+        float state = 0.0f;                                                   \
+        if (ssm_seed != nullptr) {                                            \
+            int p = pd / ds;                                                  \
+            int n = pd % ds;                                                  \
+            float dt0 = dt[b * T * nh + h];                                   \
+            float trap0 = trap[b * T * nh + h];                               \
+            float v = v_seed[(b * nh + h) * hd + p];                          \
+            float k = k_seed[(b * nh + h) * ds + n];                          \
+            state = ssm_seed[hi];                                             \
+            state += v * k * dt0 * (1.0f - trap0);                            \
+        }                                                                     \
+        /* The pass of m3_state_passing_fwd: the next chunk's loads go */     \
+        /* out ahead of the dependent chain, the arithmetic unchanged. */     \
+        /* states is read with plain loads: this kernel also writes it, */   \
+        /* and the read-only cache path would let the compiler move a */      \
+        /* load past the store that overwrites the same element. */           \
+        int state_idx = b * n_chunks * nh * dim + h * dim + pd;               \
+        int cs_idx = b * n_chunks * nh + h;                                   \
+        float contrib = states[state_idx];                                    \
+        int chunk_end_0 = chunk_size > T ? T : chunk_size;                    \
+        float decay =                                                         \
+            FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1])); \
+        for (int c = 0; c < n_chunks; c++) {                                  \
+            float next_contrib = 0.0f;                                        \
+            float next_decay = 0.0f;                                          \
+            if (c + 1 < n_chunks) {                                           \
+                next_contrib = states[state_idx + nh * dim];                  \
+                int chunk_start_n = (c + 1) * chunk_size;                     \
+                int chunk_end_n = chunk_start_n + chunk_size;                 \
+                if (chunk_end_n > T) chunk_end_n = T;                         \
+                int last_elem_n = chunk_end_n - chunk_start_n - 1;            \
+                next_decay = FAST_EXP(                                        \
+                    __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n])); \
+            }                                                                 \
+            states[state_idx] = state;                                        \
+            state = decay * state + contrib;                                  \
+            contrib = next_contrib;                                           \
+            decay = next_decay;                                               \
+            state_idx += nh * dim;                                            \
+            cs_idx += nh;                                                     \
+        }                                                                     \
+        ssm_state[hi] = state;                                                \
+    }                                                                         \
+    __syncthreads();                                                          \
+    int d_inner = nh * hd;                                                    \
+    for (int n = threadIdx.x; n < ds; n += blockDim.x) {                      \
+        k_state[(b * nh + h) * ds + n] =                                      \
+            to_f(k_flat[(b * T + (T - 1)) * nh * ds + h * ds + n]);           \
+    }                                                                         \
+    for (int p = threadIdx.x; p < hd; p += blockDim.x) {                      \
+        v_state[(b * nh + h) * hd + p] =                                      \
+            to_f(x_flat[(b * T + (T - 1)) * d_inner + h * hd + p]);           \
+    }                                                                         \
+}
+
+DEFINE_M3_STATE_PASS_FUSED(f32,  float)
+DEFINE_M3_STATE_PASS_FUSED(bf16, __nv_bfloat16)
+DEFINE_M3_STATE_PASS_FUSED(f16,  __half)
+
+// ============================================================================
 // 5. m3_chunk_scan_fwd -- Intra-chunk output computation
 // ============================================================================
 //
