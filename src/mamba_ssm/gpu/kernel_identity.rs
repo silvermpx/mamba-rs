@@ -626,6 +626,9 @@ pub enum ModuleKind {
     /// own artifact, never the Fixed module's frozen identities. Cells are
     /// admitted by symbol, not by digest.
     InferenceSm89Cells = 13,
+    /// The Mamba-2 kernels, in their own module so adding them moves no
+    /// identity of the Fixed or Mamba-3 modules.
+    Mamba2Combined = 14,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

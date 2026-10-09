@@ -4,7 +4,8 @@
 //! numpy, transcribed from the reference's step (state-spaces/mamba
 //! e9594ce), and writes the logits of every prompt position and a greedy
 //! continuation. This test loads the same checkpoint through
-//! `hf::load_mamba2` and holds the CPU decode and prefill to those goldens.
+//! `hf::load_mamba2` and holds the CPU decode and prefill to those goldens,
+//! and with `cuda` the GPU prefill and decode.
 //!
 //! `#[ignore]`: it needs the downloaded checkpoint and its goldens, under
 //! `$HOME/.cache/mamba2-official` or the directory `MAMBA2_OFFICIAL_DIR`
@@ -144,4 +145,91 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
     } else {
         assert_eq!(last, &last_hidden[..], "prefill last row bits");
     }
+}
+
+/// The f32 GPU engine against the oracle: the prompt prefilled in one
+/// chunked pass, then the greedy continuation decoded, both on the GPU.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mamba2_130m_gpu_matches_the_f64_oracle() {
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba2::gpu::Mamba2GpuInferenceEngine;
+
+    let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
+    let golden = load_golden(&root.join("goldens/mamba2-130m"));
+    let model = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let cfg = model.cfg;
+    let d = cfg.d_model;
+    let vocab = model.vocab_size;
+    let vocab_padded = model.embed.len() / d;
+    let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
+    let device = GpuDevice::new(0).unwrap();
+    let engine = Mamba2GpuInferenceEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
+    let mut state = engine.alloc_state().unwrap();
+    let mut scratch = engine.alloc_scratch().unwrap();
+    let t_len = golden.ids.len();
+    let mut pf = engine.alloc_prefill(t_len).unwrap();
+    let prompt: Vec<f32> = golden
+        .ids
+        .iter()
+        .flat_map(|&tok| embed(tok).iter().copied())
+        .collect();
+    let mut rows = vec![0f32; t_len * d];
+    engine
+        .prefill(&prompt, &mut rows, &mut state, &mut pf)
+        .unwrap();
+    let mut logits = vec![0f32; vocab];
+    let mut head_scratch = vec![0f32; vocab_padded];
+    let mut worst = 0f64;
+    for t in golden.last_rows_from..t_len {
+        lm_head_logits(
+            &mut logits,
+            &rows[t * d..(t + 1) * d],
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        let r = t - golden.last_rows_from;
+        let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
+        let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
+        let diff = logits
+            .iter()
+            .zip(want)
+            .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
+        worst = worst.max(diff / scale);
+        assert_eq!(argmax(&logits), golden.top_ids[t][0], "top-1 at {t}");
+    }
+    eprintln!("mamba2-130m GPU prefill vs f64: max|dlogit|/max|logit| = {worst:.3e}");
+    assert!(worst < 2e-3, "GPU logits rel {worst:.3e}");
+    let mut hidden = vec![0f32; d];
+    let mut next = argmax(&logits);
+    let mut produced = 0usize;
+    for (i, &want) in golden.greedy.iter().enumerate() {
+        if next != want {
+            assert!(
+                golden.greedy_margin[i] < 1e-2,
+                "greedy token {i}: {next} vs {want}"
+            );
+            eprintln!("greedy token {i}: within the margin, stopping");
+            break;
+        }
+        produced += 1;
+        engine
+            .step(embed(next), &mut hidden, &mut state, &mut scratch)
+            .unwrap();
+        lm_head_logits(
+            &mut logits,
+            &hidden,
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        next = argmax(&logits);
+    }
+    eprintln!("mamba2-130m GPU greedy: {produced} tokens match the oracle");
 }

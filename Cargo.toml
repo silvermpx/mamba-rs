@@ -602,6 +602,11 @@ name = "m2_grad_oracle"
 path = "tests/m2_grad_oracle.rs"
 
 [[test]]
+name = "m2_gpu_parity"
+path = "tests/m2_gpu_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m2_test_correctness"
 path = "tests/m2_test_correctness.rs"
 

@@ -143,6 +143,7 @@
 "m1_state_capacity_bench" = "bench"
 "m1_test_correctness" = "gate"
 "m2_grad_oracle" = "host"
+"m2_gpu_parity" = "gate"
 "m2_test_correctness" = "host"
 "m3_backward_mixed_parity" = "gate"
 "m3_bcnorm_exact" = "gate"

@@ -10,6 +10,8 @@
 
 pub mod config;
 pub mod cpu;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod state;
 pub mod weights;
 
