@@ -34,16 +34,30 @@ pub fn lm_head_logits(
     d_model: usize,
     scratch: &mut [f32],
 ) {
+    use rayon::prelude::*;
     debug_assert!(scratch.len() >= vocab_size_padded);
-    sgemm_forward(
-        &mut scratch[..vocab_size_padded],
-        embed,
-        hidden,
-        None,
-        vocab_size_padded,
-        d_model,
-        1,
-    );
+    // Every logit is one row's dot product, its terms added in ascending k
+    // whatever rows share a call, so blocks of rows on the pool give the
+    // single call's bits; the block is a fixed constant, never derived from
+    // the thread count. One token's head reads the whole embedding, the
+    // largest single read of a decode step.
+    const ROWS_PER_TASK: usize = 2048;
+    scratch[..vocab_size_padded]
+        .par_chunks_mut(ROWS_PER_TASK)
+        .enumerate()
+        .for_each(|(i, out)| {
+            let r0 = i * ROWS_PER_TASK;
+            let rows = out.len();
+            sgemm_forward(
+                out,
+                &embed[r0 * d_model..(r0 + rows) * d_model],
+                hidden,
+                None,
+                rows,
+                d_model,
+                1,
+            );
+        });
     logits[..vocab_size].copy_from_slice(&scratch[..vocab_size]);
 }
 
@@ -60,4 +74,31 @@ pub fn lm_head_logits_untied(
     d_model: usize,
 ) {
     matvec_forward(logits, hidden, lm_head_w, None, d_model, vocab_size);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The blocked head gives one serial GEMM's bits.
+    #[test]
+    fn blocked_head_matches_one_gemm_bitwise() {
+        let (vocab, padded, d) = (5003usize, 5008usize, 96usize);
+        let mut s = 0x9E37_79B9u32;
+        let mut draw = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s & 0xFFFF) as f32 / 32768.0 - 1.0
+        };
+        let embed: Vec<f32> = (0..padded * d).map(|_| draw()).collect();
+        let hidden: Vec<f32> = (0..d).map(|_| draw()).collect();
+        let mut want = vec![0f32; padded];
+        sgemm_forward(&mut want, &embed, &hidden, None, padded, d, 1);
+        let mut logits = vec![0f32; vocab];
+        let mut scratch = vec![0f32; padded];
+        lm_head_logits(&mut logits, &hidden, &embed, vocab, padded, d, &mut scratch);
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&logits), bits(&want[..vocab]));
+    }
 }
