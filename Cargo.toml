@@ -606,6 +606,10 @@ name = "m2_test_correctness"
 path = "tests/m2_test_correctness.rs"
 
 [[test]]
+name = "m3_mimo_grad_oracle"
+path = "tests/m3_mimo_grad_oracle.rs"
+
+[[test]]
 name = "m3_mimo_test_correctness"
 path = "tests/m3_mimo_test_correctness.rs"
 
