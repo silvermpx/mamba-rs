@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Float64 oracle for the official Mamba-3 SISO checkpoints.
+"""Float64 oracle for the official Mamba-3 checkpoints, SISO and MIMO.
 
-Runs a state-spaces/mamba3-siso-* checkpoint in float64 on the CPU with
-numpy and writes the goldens the Rust parity tests compare against. The
-math is transcribed from the reference, not from mamba-rs:
+Runs a state-spaces/mamba3-{siso,mimo}-* checkpoint in float64 on the CPU
+with numpy and writes the goldens the Rust parity tests compare against.
+The math is transcribed from the reference, not from mamba-rs:
 
-- the mixer from `mamba3_siso_step_ref` (tests/ops/triton/test_mamba3_siso.py)
-  and `Mamba3.forward` (mamba_ssm/modules/mamba3.py) at state-spaces/mamba
-  e9594ce;
+- the SISO mixer from `mamba3_siso_step_ref` (tests/ops/triton/
+  test_mamba3_siso.py) and `Mamba3.forward` (mamba_ssm/modules/mamba3.py)
+  at state-spaces/mamba e9594ce;
+- the MIMO mixer from `mamba3_MIMO_step_ref` (tests/ops/tilelang/
+  test_mamba3_mimo.py) and `Mamba3.step`, with the rotation the module
+  applies to MIMO: pairs (a, a + N/2), as `rotate_pairwise = not is_mimo`
+  selects in `apply_rotary_qk_inference_fwd`
+  (ops/triton/mamba3/mamba3_mimo_rotary_step.py) and as the chunked
+  kernel permutes its rotation;
 - the block from mamba_ssm/modules/block.py and the gated MLP from
   mamba_ssm/modules/mlp.py;
 - the model from mamba_ssm/models/mixer_seq_simple.py.
@@ -23,6 +29,7 @@ the archive's `data/<key>` entries.
 Usage:
     m3_oracle.py --model DIR --tokenizer tokenizer.json --out GOLDEN_DIR
                  [--prompt TEXT] [--greedy N] [--a-activation heavy_tail|softplus]
+                 [--mimo-rotation half|interleaved]
 """
 
 import argparse
@@ -157,13 +164,28 @@ def rotate_interleaved(t, cos, sin):
     return out
 
 
-class Mamba3Siso:
-    def __init__(self, model_dir, a_activation):
+def rotate_half(t, cos, sin):
+    """Rotate pairs (a, a + N/2) for a < len(cos); the rest pass through."""
+    out = t.copy()
+    na = cos.shape[-1]
+    half = t.shape[-1] // 2
+    t0 = t[..., 0:na]
+    t1 = t[..., half:half + na]
+    out[..., 0:na] = t0 * cos - t1 * sin
+    out[..., half:half + na] = t0 * sin + t1 * cos
+    return out
+
+
+class Mamba3:
+    def __init__(self, model_dir, a_activation, mimo_rotation="half"):
         with open(os.path.join(model_dir, "config.json")) as f:
             cfg = json.load(f)
         ssm = cfg["ssm_cfg"]
-        if ssm.get("layer") != "Mamba3" or ssm.get("is_mimo"):
-            raise ValueError("this oracle runs Mamba-3 SISO checkpoints")
+        if ssm.get("layer") != "Mamba3":
+            raise ValueError("this oracle runs Mamba-3 checkpoints")
+        self.is_mimo = bool(ssm.get("is_mimo", False))
+        self.rank = ssm.get("mimo_rank", 4) if self.is_mimo else 1
+        self.mimo_rotation = mimo_rotation
         if cfg.get("attn_layer_idx"):
             raise ValueError("hybrid attention layers are not modelled")
         self.cfg = cfg
@@ -200,11 +222,12 @@ class Mamba3Siso:
 
     def init_state(self):
         H, P, N = self.nheads, self.headdim, self.d_state
+        k_shape = (H, self.rank, N) if self.is_mimo else (H, N)
         return [
             {
                 "angle": np.zeros((H, self.n_angles)),
                 "ssm": np.zeros((H, P, N)),
-                "k": np.zeros((H, N)),
+                "k": np.zeros(k_shape),
                 "v": np.zeros((H, P)),
             }
             for _ in range(self.n_layer)
@@ -261,6 +284,69 @@ class Mamba3Siso:
         st["ssm"], st["k"], st["v"] = ssm, k_rot, x
         return y.reshape(di) @ L["mixer.out_proj.weight"].T
 
+    def mimo_mixer_step(self, L, u, st):
+        """One token through one Mamba-3 MIMO mixer (the step reference)."""
+        di, H, P, N, G, R = (
+            self.d_inner, self.nheads, self.headdim, self.d_state, self.ngroups, self.rank,
+        )
+        proj = u @ L["mixer.in_proj.weight"].T
+        o = 0
+        z = proj[o:o + di].reshape(H, P); o += di
+        x = proj[o:o + di].reshape(H, P); o += di
+        # B and C are laid out (r g n): the rank is the outermost index.
+        B = proj[o:o + R * G * N].reshape(R, G, N); o += R * G * N
+        C = proj[o:o + R * G * N].reshape(R, G, N); o += R * G * N
+        dd_dt = proj[o:o + H]; o += H
+        dd_a = proj[o:o + H]; o += H
+        trap_raw = proj[o:o + H]; o += H
+        ang_raw = proj[o:o + self.n_angles]; o += self.n_angles
+        assert o == proj.shape[0]
+
+        if self.a_activation == "heavy_tail":
+            a = -heavy_tail(dd_a)
+        else:
+            a = -softplus(dd_a)
+        a = np.minimum(a, -self.a_floor)
+        dt = softplus(dd_dt + L["mixer.dt_bias"])
+        adt = a * dt
+
+        # RMSNorm over N for every (r, g) row, one weight for all of them.
+        B = rms_norm(B, L["mixer.B_norm.weight"], 1e-5)
+        C = rms_norm(C, L["mixer.C_norm.weight"], 1e-5)
+        rep = H // G
+        Bh = np.repeat(B, rep, axis=1).transpose(1, 0, 2)  # (H, R, N)
+        Ch = np.repeat(C, rep, axis=1).transpose(1, 0, 2)
+        q = Ch + L["mixer.C_bias"]
+        k = Bh + L["mixer.B_bias"]
+
+        angles = np.tanh(ang_raw) * math.pi
+        st["angle"] = st["angle"] + angles[None, :] * dt[:, None]
+        st["angle"] = st["angle"] - 2 * math.pi * np.floor(st["angle"] / (2 * math.pi))
+        cos = np.cos(st["angle"])[:, None, :]
+        sin = np.sin(st["angle"])[:, None, :]
+        rotate = rotate_half if self.mimo_rotation == "half" else rotate_interleaved
+        q_rot = rotate(q, cos, sin)
+        k_rot = rotate(k, cos, sin)
+
+        trap = 1.0 / (1.0 + np.exp(-trap_raw))
+        alpha = np.exp(adt)
+        beta = (1.0 - trap) * dt * alpha
+        gamma = trap * dt
+        mimo_x = L["mixer.mimo_x"]  # (H, R, P)
+        u_cur = x[:, None, :] * mimo_x
+        u_prev = st["v"][:, None, :] * mimo_x
+        prev_kv = np.einsum("hrn,hrp->hpn", st["k"], u_prev)
+        curr_kv = np.einsum("hrn,hrp->hpn", k_rot, u_cur)
+        ssm = alpha[:, None, None] * st["ssm"]
+        ssm = ssm + beta[:, None, None] * prev_kv
+        ssm = ssm + gamma[:, None, None] * curr_kv
+        y = np.einsum("hpn,hrn->hrp", ssm, q_rot)
+        y = y + L["mixer.D"][:, None, None] * u_cur
+        y = y * silu(z[:, None, :] * L["mixer.mimo_z"])
+        y = np.einsum("hrp,hrp->hp", y, L["mixer.mimo_o"])
+        st["ssm"], st["k"], st["v"] = ssm, k_rot, x
+        return y.reshape(di) @ L["mixer.out_proj.weight"].T
+
     def mlp(self, L, h):
         up = h @ L["mlp.fc1.weight"].T
         hidden = up.shape[0] // 2
@@ -271,7 +357,8 @@ class Mamba3Siso:
         """One token through the whole model; returns the logits."""
         x = self.emb[token].copy()
         for L, st in zip(self.layers, state):
-            x = x + self.mixer_step(L, rms_norm(x, L["norm.weight"], self.eps), st)
+            mixer = self.mimo_mixer_step if self.is_mimo else self.mixer_step
+            x = x + mixer(L, rms_norm(x, L["norm.weight"], self.eps), st)
             if "mlp.fc1.weight" in L:
                 x = x + self.mlp(L, rms_norm(x, L["norm2.weight"], self.eps))
         hidden = rms_norm(x, self.norm_f, self.eps)
@@ -301,6 +388,7 @@ def main():
     ap.add_argument("--greedy", type=int, default=32)
     ap.add_argument("--a-activation", choices=["heavy_tail", "softplus"], default="heavy_tail")
     ap.add_argument("--full-rows", type=int, default=16)
+    ap.add_argument("--mimo-rotation", choices=["half", "interleaved"], default="half")
     args = ap.parse_args()
 
     from tokenizers import Tokenizer
@@ -310,7 +398,7 @@ def main():
         with open(args.prompt_file) as f:
             args.prompt = f.read()
     ids = [128000] + tok.encode(args.prompt, add_special_tokens=False).ids
-    model = Mamba3Siso(args.model, args.a_activation)
+    model = Mamba3(args.model, args.a_activation, args.mimo_rotation)
     state = model.init_state()
 
     T = len(ids)
@@ -345,6 +433,7 @@ def main():
         "numpy": np.__version__,
         "prompt": args.prompt,
         "a_activation": args.a_activation,
+        "mimo_rotation": args.mimo_rotation if model.is_mimo else None,
         "reference": "state-spaces/mamba e9594ce",
     }
     # A directory of plain files the Rust tests read without a numpy

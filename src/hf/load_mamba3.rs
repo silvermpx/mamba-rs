@@ -16,6 +16,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::mamba3_mimo::config::Mamba3MimoConfig;
+use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::mlp::GatedMlpLayerWeights;
@@ -29,6 +31,17 @@ pub struct HfMamba3Model {
     pub cfg: Mamba3Config,
     /// Layer weights with an empty (identity) input projection.
     pub weights: Mamba3Weights,
+    /// The embedding `[vocab_padded, d_model]`, also the tied head.
+    pub embed: Vec<f32>,
+    /// The tokenizer's vocabulary size; rows past it are padding.
+    pub vocab_size: usize,
+}
+
+/// An official Mamba-3 MIMO checkpoint, ready for the MIMO decode.
+pub struct HfMamba3MimoModel {
+    pub cfg: Mamba3MimoConfig,
+    /// Layer weights with an empty (identity) input projection.
+    pub weights: Mamba3MimoWeights,
     /// The embedding `[vocab_padded, d_model]`, also the tied head.
     pub embed: Vec<f32>,
     /// The tokenizer's vocabulary size; rows past it are padding.
@@ -150,6 +163,34 @@ pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
     })
 }
 
+impl HfMamba3Config {
+    /// The MIMO model this config describes, `None` for a SISO checkpoint.
+    pub fn mimo_config(&self) -> Result<Option<Mamba3MimoConfig>, String> {
+        let Some(mimo_rank) = self.mimo_rank else {
+            return Ok(None);
+        };
+        let c = self.cfg;
+        let cfg = Mamba3MimoConfig {
+            d_model: c.d_model,
+            d_state: c.d_state,
+            expand: c.expand,
+            headdim: c.headdim,
+            ngroups: c.ngroups,
+            n_layers: c.n_layers,
+            mimo_rank,
+            rope_fraction: c.rope_fraction,
+            a_floor: c.a_floor,
+            is_outproj_norm: c.is_outproj_norm,
+            rms_norm_eps: c.rms_norm_eps,
+            // The reference fixes the mixer's norms at 1e-5.
+            ssm_norm_eps: 1e-5,
+            d_intermediate: c.d_intermediate,
+        };
+        cfg.validate()?;
+        Ok(Some(cfg))
+    }
+}
+
 /// Tensors by name from either weight format the official repositories
 /// carry.
 enum Source {
@@ -221,57 +262,26 @@ fn transpose(src: &[f32], out: usize, inp: usize) -> Vec<f32> {
     dst
 }
 
-/// Load an official Mamba-3 SISO checkpoint directory.
-pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
-    let config_path = dir.join("config.json");
-    let json = std::fs::read(&config_path).map_err(|e| format!("cannot read config.json: {e}"))?;
-    let hf = parse_mamba3_config(&json)?;
-    if let Some(rank) = hf.mimo_rank {
-        return Err(format!(
-            "Mamba-3 MIMO (rank {rank}) checkpoints do not load yet; SISO ones do"
-        ));
-    }
-    let cfg = hf.cfg;
-    let (d, di, ds, nh, ip) = (
-        cfg.d_model,
-        cfg.d_inner(),
-        cfg.d_state,
-        cfg.nheads(),
-        cfg.in_proj_out_dim(),
-    );
-    let hidden = cfg.mlp_hidden();
-    let mut src = Source::open(dir)?;
+/// Read and parse a checkpoint directory's `config.json`.
+pub fn read_mamba3_config(dir: &Path) -> Result<HfMamba3Config, String> {
+    let json = std::fs::read(dir.join("config.json"))
+        .map_err(|e| format!("cannot read config.json: {e}"))?;
+    parse_mamba3_config(&json)
+}
 
-    // The expected tensors and their reference shapes.
-    let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
-    expect.insert("backbone.embedding.weight".into(), vec![hf.vocab_padded, d]);
-    expect.insert("backbone.norm_f.weight".into(), vec![d]);
-    for i in 0..cfg.n_layers {
-        let p = |n: &str| format!("backbone.layers.{i}.{n}");
-        expect.insert(p("norm.weight"), vec![d]);
-        expect.insert(p("mixer.in_proj.weight"), vec![ip, d]);
-        expect.insert(p("mixer.dt_bias"), vec![nh]);
-        expect.insert(p("mixer.B_bias"), vec![nh, 1, ds]);
-        expect.insert(p("mixer.C_bias"), vec![nh, 1, ds]);
-        expect.insert(p("mixer.D"), vec![nh]);
-        expect.insert(p("mixer.B_norm.weight"), vec![ds]);
-        expect.insert(p("mixer.C_norm.weight"), vec![ds]);
-        expect.insert(p("mixer.out_proj.weight"), vec![d, di]);
-        if cfg.is_outproj_norm {
-            expect.insert(p("mixer.norm.weight"), vec![di]);
-        }
-        if hidden > 0 {
-            expect.insert(p("norm2.weight"), vec![d]);
-            expect.insert(p("mlp.fc1.weight"), vec![2 * hidden, d]);
-            expect.insert(p("mlp.fc2.weight"), vec![d, hidden]);
-        }
-    }
+/// Check the checkpoint's tensors against the expected names and shapes:
+/// nothing missing, nothing extra, every shape exact.
+fn check_tensors(
+    src: &Source,
+    expect: &HashMap<String, Vec<usize>>,
+    tie_embeddings: bool,
+) -> Result<(), String> {
     let mut seen = 0usize;
     for (name, shape) in src.shapes()? {
         if name == "lm_head.weight" {
             // A tied head is the embedding again; an untied one is a
             // different model this loader does not build.
-            if !hf.tie_embeddings {
+            if !tie_embeddings {
                 return Err("untied lm_head checkpoints are not supported".into());
             }
             continue;
@@ -293,6 +303,162 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
             missing[0]
         ));
     }
+    Ok(())
+}
+
+/// The tensors every Mamba-3 layer and the model around them carry, whatever
+/// the mixer: embedding, final norm, the block norms and the MLP.
+fn expect_common(
+    expect: &mut HashMap<String, Vec<usize>>,
+    (n_layers, d, hidden, vocab_padded): (usize, usize, usize, usize),
+) {
+    expect.insert("backbone.embedding.weight".into(), vec![vocab_padded, d]);
+    expect.insert("backbone.norm_f.weight".into(), vec![d]);
+    for i in 0..n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        expect.insert(p("norm.weight"), vec![d]);
+        if hidden > 0 {
+            expect.insert(p("norm2.weight"), vec![d]);
+            expect.insert(p("mlp.fc1.weight"), vec![2 * hidden, d]);
+            expect.insert(p("mlp.fc2.weight"), vec![d, hidden]);
+        }
+    }
+}
+
+fn read_mlp(
+    src: &mut Source,
+    i: usize,
+    d: usize,
+    hidden: usize,
+) -> Result<GatedMlpLayerWeights, String> {
+    let p = |n: &str| format!("backbone.layers.{i}.{n}");
+    Ok(GatedMlpLayerWeights {
+        norm_weight: src.read(&p("norm2.weight"))?,
+        fc1_w: transpose(&src.read(&p("mlp.fc1.weight"))?, 2 * hidden, d),
+        fc2_w: transpose(&src.read(&p("mlp.fc2.weight"))?, d, hidden),
+    })
+}
+
+/// Load an official Mamba-3 MIMO checkpoint directory.
+pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
+    let hf = read_mamba3_config(dir)?;
+    let Some(cfg) = hf.mimo_config()? else {
+        return Err("a Mamba-3 SISO checkpoint: load it with load_hf_mamba3".into());
+    };
+    let (d, di, ds, nh, r, p_len, ip) = (
+        cfg.d_model,
+        cfg.d_inner(),
+        cfg.d_state,
+        cfg.nheads(),
+        cfg.mimo_rank,
+        cfg.headdim,
+        cfg.in_proj_out_dim(),
+    );
+    let hidden = cfg.mlp_hidden();
+    let mut src = Source::open(dir)?;
+
+    let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
+    expect_common(&mut expect, (cfg.n_layers, d, hidden, hf.vocab_padded));
+    for i in 0..cfg.n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
+        expect.insert(p("in_proj.weight"), vec![ip, d]);
+        expect.insert(p("dt_bias"), vec![nh]);
+        expect.insert(p("B_bias"), vec![nh, r, ds]);
+        expect.insert(p("C_bias"), vec![nh, r, ds]);
+        expect.insert(p("D"), vec![nh]);
+        expect.insert(p("B_norm.weight"), vec![ds]);
+        expect.insert(p("C_norm.weight"), vec![ds]);
+        expect.insert(p("mimo_x"), vec![nh, r, p_len]);
+        expect.insert(p("mimo_z"), vec![nh, r, p_len]);
+        expect.insert(p("mimo_o"), vec![nh, r, p_len]);
+        expect.insert(p("out_proj.weight"), vec![d, di]);
+        if cfg.is_outproj_norm {
+            expect.insert(p("norm.weight"), vec![di]);
+        }
+    }
+    check_tensors(&src, &expect, hf.tie_embeddings)?;
+
+    let mut layers = Vec::with_capacity(cfg.n_layers);
+    let mut mlp = Vec::new();
+    for i in 0..cfg.n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        layers.push(Mamba3MimoLayerWeights {
+            norm_weight: src.read(&p("norm.weight"))?,
+            in_proj_w: transpose(&src.read(&p("mixer.in_proj.weight"))?, ip, d),
+            dt_bias: src.read(&p("mixer.dt_bias"))?,
+            b_norm_weight: src.read(&p("mixer.B_norm.weight"))?,
+            c_norm_weight: src.read(&p("mixer.C_norm.weight"))?,
+            b_bias: src.read(&p("mixer.B_bias"))?,
+            c_bias: src.read(&p("mixer.C_bias"))?,
+            d_param: src.read(&p("mixer.D"))?,
+            mimo_x: src.read(&p("mixer.mimo_x"))?,
+            mimo_z: src.read(&p("mixer.mimo_z"))?,
+            mimo_o: src.read(&p("mixer.mimo_o"))?,
+            norm_gate_weight: if cfg.is_outproj_norm {
+                src.read(&p("mixer.norm.weight"))?
+            } else {
+                vec![1.0; di]
+            },
+            out_proj_w: transpose(&src.read(&p("mixer.out_proj.weight"))?, d, di),
+        });
+        if hidden > 0 {
+            mlp.push(read_mlp(&mut src, i, d, hidden)?);
+        }
+    }
+    let weights = Mamba3MimoWeights {
+        input_proj_w: Vec::new(),
+        input_proj_b: Vec::new(),
+        layers,
+        norm_f_weight: src.read("backbone.norm_f.weight")?,
+        mlp,
+    };
+    weights.validate(&cfg, d)?;
+    let embed = src.read("backbone.embedding.weight")?;
+    Ok(HfMamba3MimoModel {
+        cfg,
+        weights,
+        embed,
+        vocab_size: hf.vocab_size,
+    })
+}
+
+/// Load an official Mamba-3 SISO checkpoint directory.
+pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
+    let hf = read_mamba3_config(dir)?;
+    if let Some(rank) = hf.mimo_rank {
+        return Err(format!(
+            "a Mamba-3 MIMO (rank {rank}) checkpoint: load it with load_hf_mamba3_mimo"
+        ));
+    }
+    let cfg = hf.cfg;
+    let (d, di, ds, nh, ip) = (
+        cfg.d_model,
+        cfg.d_inner(),
+        cfg.d_state,
+        cfg.nheads(),
+        cfg.in_proj_out_dim(),
+    );
+    let hidden = cfg.mlp_hidden();
+    let mut src = Source::open(dir)?;
+
+    // The expected tensors and their reference shapes.
+    let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
+    expect_common(&mut expect, (cfg.n_layers, d, hidden, hf.vocab_padded));
+    for i in 0..cfg.n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        expect.insert(p("mixer.in_proj.weight"), vec![ip, d]);
+        expect.insert(p("mixer.dt_bias"), vec![nh]);
+        expect.insert(p("mixer.B_bias"), vec![nh, 1, ds]);
+        expect.insert(p("mixer.C_bias"), vec![nh, 1, ds]);
+        expect.insert(p("mixer.D"), vec![nh]);
+        expect.insert(p("mixer.B_norm.weight"), vec![ds]);
+        expect.insert(p("mixer.C_norm.weight"), vec![ds]);
+        expect.insert(p("mixer.out_proj.weight"), vec![d, di]);
+        if cfg.is_outproj_norm {
+            expect.insert(p("mixer.norm.weight"), vec![di]);
+        }
+    }
+    check_tensors(&src, &expect, hf.tie_embeddings)?;
 
     let mut layers = Vec::with_capacity(cfg.n_layers);
     let mut mlp = Vec::new();
@@ -315,11 +481,7 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
             out_proj_w: transpose(&src.read(&p("mixer.out_proj.weight"))?, d, di),
         });
         if hidden > 0 {
-            mlp.push(GatedMlpLayerWeights {
-                norm_weight: src.read(&p("norm2.weight"))?,
-                fc1_w: transpose(&src.read(&p("mlp.fc1.weight"))?, 2 * hidden, d),
-                fc2_w: transpose(&src.read(&p("mlp.fc2.weight"))?, d, hidden),
-            });
+            mlp.push(read_mlp(&mut src, i, d, hidden)?);
         }
     }
     let weights = Mamba3Weights {

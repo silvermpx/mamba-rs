@@ -3,12 +3,14 @@
 use std::path::Path;
 
 use crate::mamba_ssm::cpu::inference::MambaStepScratch;
+use crate::mamba3_mimo::state::Mamba3MimoState;
 use crate::mamba3_siso::cpu::inference::Mamba3StepScratch;
 use crate::mamba3_siso::state::Mamba3State;
 use crate::state::MambaState;
 
 use super::backbone::MambaBackbone;
 use super::backbone3::Mamba3Backbone;
+use super::backbone3_mimo::{Mamba3MimoBackbone, Mamba3MimoScratch};
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
 
 use crate::hf::embed::{embed_lookup, lm_head_logits, lm_head_logits_untied};
@@ -21,12 +23,14 @@ use crate::hf::load::{HfModel, load_hf};
 pub enum AnyBackbone {
     M1(MambaBackbone),
     M3(Mamba3Backbone),
+    M3Mimo(Mamba3MimoBackbone),
 }
 
 #[derive(Clone)]
 pub enum AnyState {
     M1(MambaState),
     M3(Mamba3State),
+    M3Mimo(Mamba3MimoState),
 }
 
 impl AnyState {
@@ -34,6 +38,7 @@ impl AnyState {
         match self {
             Self::M1(s) => s.reset(),
             Self::M3(s) => s.reset(),
+            Self::M3Mimo(s) => s.reset(),
         }
     }
 }
@@ -41,6 +46,7 @@ impl AnyState {
 pub enum AnyScratch {
     M1(MambaStepScratch),
     M3(Mamba3StepScratch),
+    M3Mimo(Box<Mamba3MimoScratch>),
 }
 
 impl AnyBackbone {
@@ -58,6 +64,9 @@ impl AnyBackbone {
             (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
                 bb.forward_step(input, output, sc, &mut st.layers);
             }
+            (Self::M3Mimo(bb), AnyState::M3Mimo(st), AnyScratch::M3Mimo(sc)) => {
+                bb.forward_step(input, output, &mut sc.step, &mut st.layers);
+            }
             _ => panic!("backbone/state/scratch type mismatch"),
         }
     }
@@ -66,6 +75,7 @@ impl AnyBackbone {
         match self {
             Self::M1(bb) => bb.config().d_model,
             Self::M3(bb) => bb.d_model(),
+            Self::M3Mimo(bb) => bb.d_model(),
         }
     }
 
@@ -73,6 +83,7 @@ impl AnyBackbone {
         match self {
             Self::M1(bb) => AnyState::M1(bb.alloc_state()),
             Self::M3(bb) => AnyState::M3(bb.alloc_state()),
+            Self::M3Mimo(bb) => AnyState::M3Mimo(bb.alloc_state()),
         }
     }
 
@@ -80,6 +91,7 @@ impl AnyBackbone {
         match self {
             Self::M1(bb) => AnyScratch::M1(bb.alloc_scratch()),
             Self::M3(bb) => AnyScratch::M3(bb.alloc_scratch()),
+            Self::M3Mimo(bb) => AnyScratch::M3Mimo(Box::new(bb.alloc_scratch())),
         }
     }
 
@@ -102,6 +114,9 @@ impl AnyBackbone {
                     let out = &mut outputs[t * dm..(t + 1) * dm];
                     bb.forward_step(inp, out, sc, &mut st.layers);
                 }
+            }
+            (Self::M3Mimo(bb), AnyState::M3Mimo(st), AnyScratch::M3Mimo(sc)) => {
+                bb.forward_sequence((inputs, outputs, seq_len), &mut sc.prefill, &mut st.layers);
             }
             _ => panic!("backbone/state/scratch type mismatch"),
         }
@@ -168,9 +183,10 @@ impl MambaLM {
     /// beyond `vocab_size`) and an optional untied lm_head (flat
     /// `[d_model, vocab_size]`, see [`crate::hf::embed::lm_head_logits_untied`]).
     ///
-    /// There is no public Mamba-3 HF checkpoint, so unlike [`Self::from_hf`]
-    /// the weights come from local training (`Mamba3Trainer::snapshot_master`)
-    /// or `mamba3_siso::serialize::load_mamba3` +
+    /// The weights come from an official checkpoint
+    /// (`hf::load_mamba3::load_hf_mamba3`), local training
+    /// (`Mamba3Trainer::snapshot_master`) or
+    /// `mamba3_siso::serialize::load_mamba3`, through
     /// [`Mamba3Backbone::from_weights`].
     pub fn from_mamba3(
         backbone: Mamba3Backbone,
@@ -178,7 +194,27 @@ impl MambaLM {
         lm_head: Option<Vec<f32>>,
         vocab_size: usize,
     ) -> Result<Self, String> {
-        let d_model = backbone.d_model();
+        Self::from_backbone(AnyBackbone::M3(backbone), embed, lm_head, vocab_size)
+    }
+
+    /// Wrap a Mamba-3 MIMO backbone, e.g. an official checkpoint from
+    /// `hf::load_mamba3::load_hf_mamba3_mimo`, with its embedding.
+    pub fn from_mamba3_mimo(
+        backbone: Mamba3MimoBackbone,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+    ) -> Result<Self, String> {
+        Self::from_backbone(AnyBackbone::M3Mimo(backbone), embed, lm_head, vocab_size)
+    }
+
+    fn from_backbone(
+        any: AnyBackbone,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+    ) -> Result<Self, String> {
+        let d_model = any.d_model();
         if d_model == 0 || !embed.len().is_multiple_of(d_model) {
             return Err(format!(
                 "embed length {} is not a multiple of d_model {d_model}",
@@ -201,7 +237,6 @@ impl MambaLM {
             ));
         }
 
-        let any = AnyBackbone::M3(backbone);
         let state = any.alloc_state();
         let scratch = any.alloc_scratch();
         Ok(Self {

@@ -439,6 +439,11 @@ path = "tests/hf_m3_checkpoint_parity.rs"
 required-features = ["hf"]
 
 [[test]]
+name = "hf_m3_mimo_checkpoint_parity"
+path = "tests/hf_m3_mimo_checkpoint_parity.rs"
+required-features = ["hf"]
+
+[[test]]
 name = "hf_batch_parity"
 path = "tests/hf_batch_parity.rs"
 required-features = ["cuda", "hf"]
@@ -586,6 +591,10 @@ required-features = ["cuda"]
 name = "m3_prefill_typed_parity"
 path = "tests/m3_prefill_typed_parity.rs"
 required-features = ["cuda"]
+
+[[test]]
+name = "m3_mimo_test_correctness"
+path = "tests/m3_mimo_test_correctness.rs"
 
 [[test]]
 name = "m3_test_correctness"

@@ -194,10 +194,18 @@ fn is_mamba3_checkpoint(model_dir: &Path) -> bool {
 }
 
 fn load_mamba3_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
-    let m = mamba_rs::hf::load_mamba3::load_hf_mamba3(model_dir)?;
+    use mamba_rs::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo, read_mamba3_config};
+    use mamba_rs::module::lm::MambaLM;
+    if read_mamba3_config(model_dir)?.mimo_rank.is_some() {
+        let m = load_hf_mamba3_mimo(model_dir)?;
+        let d = m.cfg.d_model;
+        let backbone = mamba_rs::module::Mamba3MimoBackbone::from_weights(m.weights, m.cfg, d)?;
+        return MambaLM::from_mamba3_mimo(backbone, m.embed, None, m.vocab_size);
+    }
+    let m = load_hf_mamba3(model_dir)?;
     let d = m.cfg.d_model;
     let backbone = mamba_rs::module::Mamba3Backbone::from_weights(m.weights, m.cfg, d)?;
-    mamba_rs::module::lm::MambaLM::from_mamba3(backbone, m.embed, None, m.vocab_size)
+    MambaLM::from_mamba3(backbone, m.embed, None, m.vocab_size)
 }
 
 #[cfg(feature = "cuda")]
@@ -226,6 +234,12 @@ fn run_gpu(
 ) {
     let dtype = parse_dtype(&args.dtype);
     if is_mamba3_checkpoint(model_dir) {
+        let mimo = mamba_rs::hf::load_mamba3::read_mamba3_config(model_dir)
+            .is_ok_and(|c| c.mimo_rank.is_some());
+        if mimo {
+            eprintln!("error: Mamba-3 MIMO checkpoints run on the CPU for now (drop --gpu)");
+            std::process::exit(1);
+        }
         run_gpu_mamba3(model_dir, args, prompt_ids, n_prompt, params, tokenizer);
         return;
     }
