@@ -172,6 +172,15 @@ pub(crate) fn heavy_tail(x: f32) -> f32 {
     if x >= 0.0 { 1.0 + x } else { 1.0 / (1.0 - x) }
 }
 
+/// A capped at `-a_floor`, the reference's `clamp(max = -a_floor)`. A NaN
+/// stays NaN, as `torch.clamp` leaves it: `f32::min` would return the floor
+/// and hide a corrupt input behind a finite decay. Finite values get the
+/// same result as `min`.
+#[inline(always)]
+pub(crate) fn clamp_a(a: f32, a_floor: f32) -> f32 {
+    if a > -a_floor { -a_floor } else { a }
+}
+
 /// d/dx of [`heavy_tail`]: `1` for x >= 0, `1/(1-x)^2` for x < 0.
 pub(crate) fn heavy_tail_deriv(x: f32) -> f32 {
     if x >= 0.0 {
@@ -364,7 +373,7 @@ pub fn forward_mamba3_layer_batched(
             let g = h / (nh / ng);
 
             // A = -heavy_tail(dd_A), clamp (reference activation)
-            let a_val = (-heavy_tail(acts.data[base_t + o.dd_a_raw + h])).min(-a_floor);
+            let a_val = clamp_a(-heavy_tail(acts.data[base_t + o.dd_a_raw + h]), a_floor);
             let dt_val = softplus(acts.data[base_t + o.dd_dt_raw + h] + layer_w.dt_bias[h]);
             acts.data[base_t + o.a_val + h] = a_val;
             acts.data[base_t + o.dt_val + h] = dt_val;

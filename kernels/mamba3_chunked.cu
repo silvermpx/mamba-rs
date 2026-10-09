@@ -13,7 +13,7 @@
 //
 // Then: Y = Q @ K_scaled^T * causal_decay @ V + state_contrib + (D + qk_dot) * V
 //
-// Paper: Lahoti et al. "Mamba-3: SISO" (ICLR 2026)
+// Paper: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569)
 //
 // Thread/grid conventions follow mamba3_siso.cu.
 // All kernels handle partial last chunk (T not multiple of chunk_size).
@@ -34,6 +34,14 @@
 #ifndef FAST_EXP
 #define FAST_EXP(x) exp2f((x) * LOG2E)
 #endif
+
+// A decay exponent capped at zero, the reference's guard against
+// float-noise positives (a decay above one). A NaN exponent stays NaN:
+// fminf would return the zero and turn a corrupt step into a decay of
+// exactly one, hiding it. Finite values get fminf's bits.
+__device__ __forceinline__ float m3_nonpos(float x) {
+    return x > 0.0f ? 0.0f : x;
+}
 
 // ============================================================================
 // 1. m3_preprocess_chunks -- Compute shifted_gamma, scale, qk_dot, K prescaling
@@ -305,7 +313,7 @@ extern "C" __global__ void m3_chunk_state_fwd(
             float dA_end_s = sdah[chunk_len - 1];
             for (int t_local = 0; t_local < chunk_len; t_local++) {
                 float dA_t = sdah[t_local];
-                float decay = FAST_EXP(fminf(dA_end_s - dA_t, 0.0f));
+                float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));
                 float v_t = sxh[t_local * hd + p];
                 const float4* k4 = reinterpret_cast<const float4*>(skh + t_local * ds);
                 for (int n4 = n_lo / 4; n4 < n_hi / 4; n4++) {
@@ -321,7 +329,7 @@ extern "C" __global__ void m3_chunk_state_fwd(
         for (int t = chunk_start; t < chunk_end; t++) {
             int t_local = t - chunk_start;
             float dA_t = dA_cumsum[cs_base + t_local];
-            float decay = FAST_EXP(fminf(dA_end - dA_t, 0.0f)); // The cumsum diff is <=0 mathematically; fminf restores the reference safety net against float-noise positives (decay>1).
+            float decay = FAST_EXP(m3_nonpos(dA_end - dA_t)); // The cumsum diff is <=0 mathematically; the cap restores the reference safety net against float-noise positives (decay>1).
             float v_t = x[(b * T + t) * d_inner + h * hd + p];
             int ks_base = (b * T + t) * nh * ds + h * ds;
             for (int n = n_lo; n < n_hi; n++) {
@@ -481,7 +489,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
             }
         }
         qk_dot[th] = dot * gamma_val;
-        sm_dec[t_local] = FAST_EXP(fminf(dA_end - da_chunk[t_local], 0.0f));
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));
     }
     if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 15) == 0) {
         // Whole float4s when every row starts on 16 bytes: a quarter of
@@ -613,13 +621,13 @@ extern "C" __global__ void m3_state_passing_fwd(
     // iteration issues the NEXT chunk's contribution and decay before
     // touching the dependent chain, so the per-chunk memory latency
     // pipelines behind the FMA chain instead of serializing on it. The
-    // arithmetic and its order are untouched. Every location read here
-    // is either read-only in this kernel or read strictly before this
-    // thread's own write to it, and threads never share locations, so
-    // the non-coherent load path is safe.
+    // arithmetic and its order are untouched. states is read with plain
+    // loads: this kernel also writes it, and the read-only cache path
+    // would let the compiler move a load past the store that overwrites
+    // the same element. dA_cumsum is read-only here and takes that path.
     int state_idx = b * n_chunks * nh * dim + h * dim + pd;
     int cs_idx = b * n_chunks * nh + h;
-    float contrib = __ldg(&states[state_idx]);
+    float contrib = states[state_idx];
     int chunk_end_0 = chunk_size > T ? T : chunk_size;
     float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1]));
 
@@ -627,7 +635,7 @@ extern "C" __global__ void m3_state_passing_fwd(
         float next_contrib = 0.0f;
         float next_decay = 0.0f;
         if (c + 1 < n_chunks) {
-            next_contrib = __ldg(&states[state_idx + nh * dim]);
+            next_contrib = states[state_idx + nh * dim];
             int chunk_start_n = (c + 1) * chunk_size;
             int chunk_end_n = chunk_start_n + chunk_size;
             if (chunk_end_n > T) chunk_end_n = T;
@@ -888,7 +896,7 @@ extern "C" __global__ void m3_chunk_scan_fwd(
             for (int s_local = 0; s_local < t_local; s_local++) {
                 int s = chunk_start + s_local;
                 float dA_s = dA_cumsum[cs_base + s_local];
-                float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f)); // Same float-noise safety net as the state-passing kernel above.
+                float decay = FAST_EXP(m3_nonpos(dA_t - dA_s)); // Same float-noise safety net as the state-passing kernel above.
                 float qk_val = 0.0f;
                 int ks_base = (b * T + s) * nh * ds + h * ds;
                 for (int n = 0; n < ds; n++) {
@@ -1051,7 +1059,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
         while (t_local * (t_local - 1) / 2 > e) t_local--;
         while ((t_local + 1) * t_local / 2 <= e) t_local++;
         int s_local = e - t_local * (t_local - 1) / 2;
-        float decay = FAST_EXP(fminf(sm_da[t_local] - sm_da[s_local], 0.0f));
+        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));
         float qk_val = 0.0f;
         if (wide) {
             const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);
@@ -2301,7 +2309,7 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
             float dA_end_s = sdah[chunk_len - 1];                             \
             for (int t_local = 0; t_local < chunk_len; t_local++) {           \
                 float dA_t = sdah[t_local];                                   \
-                float decay = FAST_EXP(fminf(dA_end_s - dA_t, 0.0f));         \
+                float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));           \
                 float v_t = sxh[t_local * hd + p];                            \
                 const float4* k4 =                                            \
                     reinterpret_cast<const float4*>(skh + t_local * ds);      \
@@ -2318,7 +2326,7 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
         for (int t = chunk_start; t < chunk_end; t++) {                       \
             int t_local = t - chunk_start;                                    \
             float dA_t = dA_cumsum[cs_base + t_local];                        \
-            float decay = FAST_EXP(fminf(dA_end - dA_t, 0.0f));               \
+            float decay = FAST_EXP(m3_nonpos(dA_end - dA_t));                 \
             float v_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);          \
             int ks_base = (b * T + t) * nh * ds + h * ds;                     \
             for (int n = n_lo; n < n_hi; n++) {                               \
@@ -2437,7 +2445,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             }                                                                 \
         }                                                                     \
         qk_dot[th] = dot * gamma_val;                                         \
-        sm_dec[t_local] = FAST_EXP(fminf(dA_end - da_chunk[t_local], 0.0f));  \
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));    \
     }                                                                         \
     if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 7) == 0) {  \
         /* Four elements a load when every row starts on 8 bytes, each */     \
@@ -2581,7 +2589,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
         for (int s_local = 0; s_local < t_local; s_local++) {                 \
             int s = chunk_start + s_local;                                    \
             float dA_s = dA_cumsum[cs_base + s_local];                        \
-            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f));                 \
+            float decay = FAST_EXP(m3_nonpos(dA_t - dA_s));                   \
             float qk_val = 0.0f;                                              \
             int ks_base = (b * T + s) * nh * ds + h * ds;                     \
             for (int n = 0; n < ds; n++) {                                    \
@@ -2694,7 +2702,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
         while (t_local * (t_local - 1) / 2 > e) t_local--;                    \
         while ((t_local + 1) * t_local / 2 <= e) t_local++;                   \
         int s_local = e - t_local * (t_local - 1) / 2;                        \
-        float decay = FAST_EXP(fminf(sm_da[t_local] - sm_da[s_local], 0.0f)); \
+        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));   \
         float qk_val = 0.0f;                                                  \
         if (wide) {                                                           \
             const float4* q4 =                                                \

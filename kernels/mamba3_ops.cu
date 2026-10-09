@@ -5,7 +5,7 @@
 //
 // CPU reference: mamba3_siso/cpu/forward.rs (phases F3-F5)
 // T=1 step: mamba3_siso/cpu/inference.rs
-// Paper: Lahoti et al., "Mamba-3: SISO" (ICLR 2026)
+// Paper: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569)
 
 #include "_typed_prelude.cuh"
 
@@ -128,7 +128,9 @@ extern "C" __global__ void m3_split(
         int a_idx = sample * nh + h;
         if (dd_a_raw) dd_a_raw[a_idx] = val;
         float a = -m3_heavy_tail(val);
-        a_val[a_idx] = fminf(a, -a_floor);
+        // A NaN stays NaN, as the reference's clamp leaves it; fminf would
+        // return the floor and hide a corrupt input behind a finite decay.
+        a_val[a_idx] = (a > -a_floor) ? -a_floor : a;
     } else if (col < off6) {
         // trap: save raw, apply sigmoid
         int h = col - off5;
@@ -1118,7 +1120,7 @@ extern "C" __global__ void m3_split_##SUFFIX(                                  \
         int a_idx = sample * nh + h;                                            \
         if (dd_a_raw) dd_a_raw[a_idx] = val;                                    \
         float a = -m3_heavy_tail(val);                                          \
-        a_val[a_idx] = fminf(a, -a_floor);                                      \
+        a_val[a_idx] = (a > -a_floor) ? -a_floor : a; /* NaN stays NaN */       \
     } else if (col < off6) {                                                    \
         int h = col - off5;                                                     \
         int t_idx = sample * nh + h;                                            \

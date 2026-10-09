@@ -26,7 +26,7 @@ use crate::mamba_ssm::cpu::prefill::{
 };
 use crate::mamba3_siso::cpu::dims::Mamba3Dims;
 use crate::mamba3_siso::cpu::forward::{
-    SsmHeadStep, heavy_tail, simd_rms_scale, simd_ssm_head, simd_sum_sq, softplus,
+    SsmHeadStep, clamp_a, heavy_tail, simd_rms_scale, simd_ssm_head, simd_sum_sq, softplus,
 };
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
@@ -191,7 +191,7 @@ fn ssm_head(
     let c_bias = &lw.c_bias[h * ds..h * ds + ds];
 
     for t in 0..t_len {
-        let a_val = (-heavy_tail(dd_a_col[t])).min(-a_floor);
+        let a_val = clamp_a(-heavy_tail(dd_a_col[t]), a_floor);
         let dt_val = softplus(dd_dt_col[t] + lw.dt_bias[h]);
 
         let b_row = t * ng * ds + gs;

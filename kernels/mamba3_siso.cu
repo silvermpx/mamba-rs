@@ -22,7 +22,7 @@
 // - No ngroups indexing -- B/C already expanded to per-head by bias+RoPE ops
 // - No delta: discretization absorbed into alpha/beta/gamma
 //
-// Paper: Lahoti et al. "Mamba-3: SISO" (ICLR 2026)
+// Paper: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569)
 //
 // O1 Warp Shuffle Optimization (sm_30+):
 //   Within each head, all headdim threads read identical alpha, beta, gamma, D,

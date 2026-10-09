@@ -427,6 +427,45 @@ fn m3_decode_step_runs_at_the_reference_default_d_state() {
 // Serialization
 // =========================================================================
 
+/// A NaN reaching dd_A must reach the state and the output, as the
+/// reference's clamp lets it: a clamp that returned the floor for a NaN
+/// would hide a corrupt projection behind a finite decay.
+#[test]
+fn m3_nan_decay_input_reaches_the_state() {
+    let cfg = test_cfg();
+    let mut w = Mamba3Weights::init(&cfg, cfg.d_model, 7);
+    let (di, ng, ds, nh) = (cfg.d_inner(), cfg.ngroups, cfg.d_state, cfg.nheads());
+    let ip = cfg.in_proj_out_dim();
+    // The dd_A column of head 0: after z, x, B, C and dd_dt.
+    let dd_a_col = 2 * di + 2 * ng * ds + nh;
+    for row in 0..cfg.d_model {
+        w.layers[0].in_proj_w[row * ip + dd_a_col] = f32::NAN;
+    }
+    let mut state = Mamba3State::zeros(&cfg);
+    let mut scratch = Mamba3StepScratch::new(&cfg);
+    let mut temporal = vec![0.0_f32; cfg.d_model];
+    let input = vec![0.25_f32; cfg.d_model];
+    mamba3_step(
+        &mut temporal,
+        &input,
+        &mut scratch,
+        &w,
+        &mut state.layers,
+        &cfg,
+    );
+    let hd = cfg.headdim;
+    assert!(
+        state.layers[0].ssm_state[..hd * ds]
+            .iter()
+            .any(|v| v.is_nan()),
+        "a NaN dd_A must reach head 0's state"
+    );
+    assert!(
+        temporal.iter().any(|v| v.is_nan()),
+        "a NaN dd_A must reach the output"
+    );
+}
+
 #[test]
 fn test_m3_serialize_roundtrip() {
     let cfg = Mamba3Config::default();
