@@ -6,12 +6,13 @@
 //!   peer wrapper for Mamba-3 SISO, inference-only (training goes
 //!   through `crate::mamba3_siso::cpu`).
 //! - `Mamba3MimoBackbone` (submodule `backbone3_mimo`) — the same for
-//!   Mamba-3 MIMO.
+//!   Mamba-3 MIMO, and `Mamba2Backbone` (`backbone2`) for Mamba-2.
 //! - `gpu_lm` / `gpu_lm3` (under `cuda` + `hf` features) — LM-style
 //!   generation (`generate`, `generate_streaming`, `generate_batch`) with
 //!   sampling on top of the GPU backbones.
 
 mod backbone;
+pub mod backbone2;
 // backbone3 and sample have no HF dependency — a default-feature build
 // gets both CPU backbones and the sampling utilities.
 pub mod backbone3;
@@ -25,5 +26,6 @@ pub mod lm;
 pub mod sample;
 
 pub use backbone::MambaBackbone;
+pub use backbone2::Mamba2Backbone;
 pub use backbone3::Mamba3Backbone;
 pub use backbone3_mimo::Mamba3MimoBackbone;

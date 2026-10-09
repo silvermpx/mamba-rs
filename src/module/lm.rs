@@ -3,12 +3,14 @@
 use std::path::Path;
 
 use crate::mamba_ssm::cpu::inference::MambaStepScratch;
+use crate::mamba2::state::Mamba2State;
 use crate::mamba3_mimo::state::Mamba3MimoState;
 use crate::mamba3_siso::cpu::inference::Mamba3StepScratch;
 use crate::mamba3_siso::state::Mamba3State;
 use crate::state::MambaState;
 
 use super::backbone::MambaBackbone;
+use super::backbone2::{Mamba2Backbone, Mamba2Scratch};
 use super::backbone3::Mamba3Backbone;
 use super::backbone3_mimo::{Mamba3MimoBackbone, Mamba3MimoScratch};
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
@@ -22,6 +24,7 @@ use crate::hf::load::{HfModel, load_hf};
 
 pub enum AnyBackbone {
     M1(MambaBackbone),
+    M2(Mamba2Backbone),
     M3(Mamba3Backbone),
     M3Mimo(Mamba3MimoBackbone),
 }
@@ -29,6 +32,7 @@ pub enum AnyBackbone {
 #[derive(Clone)]
 pub enum AnyState {
     M1(MambaState),
+    M2(Mamba2State),
     M3(Mamba3State),
     M3Mimo(Mamba3MimoState),
 }
@@ -37,6 +41,7 @@ impl AnyState {
     pub fn reset(&mut self) {
         match self {
             Self::M1(s) => s.reset(),
+            Self::M2(s) => s.reset(),
             Self::M3(s) => s.reset(),
             Self::M3Mimo(s) => s.reset(),
         }
@@ -45,6 +50,7 @@ impl AnyState {
 
 pub enum AnyScratch {
     M1(MambaStepScratch),
+    M2(Box<Mamba2Scratch>),
     M3(Mamba3StepScratch),
     M3Mimo(Box<Mamba3MimoScratch>),
 }
@@ -61,6 +67,9 @@ impl AnyBackbone {
             (Self::M1(bb), AnyState::M1(st), AnyScratch::M1(sc)) => {
                 bb.forward_step(input, output, st, sc);
             }
+            (Self::M2(bb), AnyState::M2(st), AnyScratch::M2(sc)) => {
+                bb.forward_step(input, output, &mut sc.step, &mut st.layers);
+            }
             (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
                 bb.forward_step(input, output, sc, &mut st.layers);
             }
@@ -74,6 +83,7 @@ impl AnyBackbone {
     pub fn d_model(&self) -> usize {
         match self {
             Self::M1(bb) => bb.config().d_model,
+            Self::M2(bb) => bb.d_model(),
             Self::M3(bb) => bb.d_model(),
             Self::M3Mimo(bb) => bb.d_model(),
         }
@@ -82,6 +92,7 @@ impl AnyBackbone {
     pub fn alloc_state(&self) -> AnyState {
         match self {
             Self::M1(bb) => AnyState::M1(bb.alloc_state()),
+            Self::M2(bb) => AnyState::M2(bb.alloc_state()),
             Self::M3(bb) => AnyState::M3(bb.alloc_state()),
             Self::M3Mimo(bb) => AnyState::M3Mimo(bb.alloc_state()),
         }
@@ -90,6 +101,7 @@ impl AnyBackbone {
     pub fn alloc_scratch(&self) -> AnyScratch {
         match self {
             Self::M1(bb) => AnyScratch::M1(bb.alloc_scratch()),
+            Self::M2(bb) => AnyScratch::M2(Box::new(bb.alloc_scratch())),
             Self::M3(bb) => AnyScratch::M3(bb.alloc_scratch()),
             Self::M3Mimo(bb) => AnyScratch::M3Mimo(Box::new(bb.alloc_scratch())),
         }
@@ -106,6 +118,9 @@ impl AnyBackbone {
         match (self, state, scratch) {
             (Self::M1(bb), AnyState::M1(st), AnyScratch::M1(sc)) => {
                 bb.forward_sequence(inputs, outputs, st, sc, seq_len);
+            }
+            (Self::M2(bb), AnyState::M2(st), AnyScratch::M2(sc)) => {
+                bb.forward_sequence((inputs, outputs, seq_len), &mut sc.prefill, &mut st.layers);
             }
             (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
                 let dm = bb.d_model();
@@ -195,6 +210,17 @@ impl MambaLM {
         vocab_size: usize,
     ) -> Result<Self, String> {
         Self::from_backbone(AnyBackbone::M3(backbone), embed, lm_head, vocab_size)
+    }
+
+    /// Wrap a Mamba-2 backbone, e.g. an official checkpoint from
+    /// `hf::load_mamba2::load_hf_mamba2`, with its embedding.
+    pub fn from_mamba2(
+        backbone: Mamba2Backbone,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+    ) -> Result<Self, String> {
+        Self::from_backbone(AnyBackbone::M2(backbone), embed, lm_head, vocab_size)
     }
 
     /// Wrap a Mamba-3 MIMO backbone, e.g. an official checkpoint from

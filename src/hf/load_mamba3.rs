@@ -60,11 +60,11 @@ pub struct HfMamba3Config {
     pub mimo_rank: Option<usize>,
 }
 
-fn field<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
+pub(super) fn field<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
     obj.get(key).filter(|v| !v.is_null())
 }
 
-fn usize_or(obj: &Value, key: &str, default: usize) -> Result<usize, String> {
+pub(super) fn usize_or(obj: &Value, key: &str, default: usize) -> Result<usize, String> {
     match field(obj, key) {
         None => Ok(default),
         Some(v) => v
@@ -74,7 +74,7 @@ fn usize_or(obj: &Value, key: &str, default: usize) -> Result<usize, String> {
     }
 }
 
-fn f32_or(obj: &Value, key: &str, default: f32) -> Result<f32, String> {
+pub(super) fn f32_or(obj: &Value, key: &str, default: f32) -> Result<f32, String> {
     match field(obj, key) {
         None => Ok(default),
         Some(v) => v
@@ -84,7 +84,7 @@ fn f32_or(obj: &Value, key: &str, default: f32) -> Result<f32, String> {
     }
 }
 
-fn bool_or(obj: &Value, key: &str, default: bool) -> Result<bool, String> {
+pub(super) fn bool_or(obj: &Value, key: &str, default: bool) -> Result<bool, String> {
     match field(obj, key) {
         None => Ok(default),
         Some(v) => v
@@ -193,13 +193,13 @@ impl HfMamba3Config {
 
 /// Tensors by name from either weight format the official repositories
 /// carry.
-enum Source {
+pub(super) enum Source {
     TorchBin(TorchBin, HashMap<String, TensorRef>),
     Safetensors(Vec<u8>),
 }
 
 impl Source {
-    fn open(dir: &Path) -> Result<Self, String> {
+    pub(super) fn open(dir: &Path) -> Result<Self, String> {
         let st = dir.join("model.safetensors");
         if st.exists() {
             let bytes =
@@ -232,7 +232,7 @@ impl Source {
         }
     }
 
-    fn read(&mut self, name: &str) -> Result<Vec<f32>, String> {
+    pub(super) fn read(&mut self, name: &str) -> Result<Vec<f32>, String> {
         match self {
             Self::TorchBin(archive, by_name) => {
                 let t = by_name
@@ -252,7 +252,7 @@ impl Source {
 }
 
 /// Transpose a PyTorch `[out, in]` weight to this crate's `[in, out]`.
-fn transpose(src: &[f32], out: usize, inp: usize) -> Vec<f32> {
+pub(super) fn transpose(src: &[f32], out: usize, inp: usize) -> Vec<f32> {
     let mut dst = vec![0.0f32; src.len()];
     for (o, row) in src.chunks_exact(inp).enumerate() {
         for (i, &v) in row.iter().enumerate() {
@@ -271,7 +271,7 @@ pub fn read_mamba3_config(dir: &Path) -> Result<HfMamba3Config, String> {
 
 /// Check the checkpoint's tensors against the expected names and shapes:
 /// nothing missing, nothing extra, every shape exact.
-fn check_tensors(
+pub(super) fn check_tensors(
     src: &Source,
     expect: &HashMap<String, Vec<usize>>,
     tie_embeddings: bool,
@@ -308,7 +308,7 @@ fn check_tensors(
 
 /// The tensors every Mamba-3 layer and the model around them carry, whatever
 /// the mixer: embedding, final norm, the block norms and the MLP.
-fn expect_common(
+pub(super) fn expect_common(
     expect: &mut HashMap<String, Vec<usize>>,
     (n_layers, d, hidden, vocab_padded): (usize, usize, usize, usize),
 ) {
@@ -325,7 +325,7 @@ fn expect_common(
     }
 }
 
-fn read_mlp(
+pub(super) fn read_mlp(
     src: &mut Source,
     i: usize,
     d: usize,

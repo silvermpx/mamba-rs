@@ -34,7 +34,8 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
 
     if hf_cfg.family != ModelFamily::Mamba1 {
         return Err(format!(
-            "only Mamba SSM supported by this loader, got {:?}",
+            "this loader reads Mamba-1 checkpoints, got {:?} (Mamba-2 and Mamba-3 \
+             load through hf::load_mamba2 and hf::load_mamba3)",
             hf_cfg.family
         ));
     }

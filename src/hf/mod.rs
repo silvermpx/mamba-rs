@@ -9,6 +9,7 @@ pub mod config_json;
 pub mod embed;
 pub mod keys;
 pub mod load;
+pub mod load_mamba2;
 pub mod load_mamba3;
 pub mod pickle;
 pub mod torch_zip;

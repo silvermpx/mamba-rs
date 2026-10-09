@@ -47,6 +47,14 @@ struct RawConfig {
     // architecture's scale. Name mirrors the HF field.
     rms_norm_eps: Option<f32>,
     layer_norm_epsilon: Option<f32>,
+    // The original format names the mixer under `ssm_cfg.layer`; a config
+    // without it is Mamba-1.
+    ssm_cfg: Option<RawSsmCfg>,
+}
+
+#[derive(Deserialize)]
+struct RawSsmCfg {
+    layer: Option<String>,
 }
 
 /// Parsed and validated Mamba config for HF loading.
@@ -133,7 +141,12 @@ fn detect_family(raw: &RawConfig) -> Result<ModelFamily, String> {
             other => Err(format!("unsupported model_type: {other}")),
         }
     } else if raw.d_model.is_some() {
-        Ok(ModelFamily::Mamba1)
+        match raw.ssm_cfg.as_ref().and_then(|c| c.layer.as_deref()) {
+            None | Some("Mamba1") => Ok(ModelFamily::Mamba1),
+            Some("Mamba2") => Ok(ModelFamily::Mamba2),
+            Some("Mamba3") => Ok(ModelFamily::Mamba3),
+            Some(other) => Err(format!("unsupported ssm_cfg.layer: {other}")),
+        }
     } else {
         Err("cannot detect model family: no model_type or d_model field".into())
     }
@@ -160,6 +173,19 @@ fn extract_dims(raw: &RawConfig) -> Result<(usize, usize, usize, usize), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An original-format config names its mixer under ssm_cfg; a Mamba-2
+    /// or Mamba-3 one is not read as Mamba-1.
+    #[test]
+    fn original_format_mixer_is_detected() {
+        let m2 = br#"{"d_model":768,"n_layer":24,"vocab_size":50277,"ssm_cfg":{"layer":"Mamba2"}}"#;
+        assert_eq!(parse_config_json(m2).unwrap().family, ModelFamily::Mamba2);
+        let m3 =
+            br#"{"d_model":768,"n_layer":12,"vocab_size":128256,"ssm_cfg":{"layer":"Mamba3"}}"#;
+        assert_eq!(parse_config_json(m3).unwrap().family, ModelFamily::Mamba3);
+        let m1 = br#"{"d_model":768,"n_layer":24,"vocab_size":50277,"ssm_cfg":{}}"#;
+        assert_eq!(parse_config_json(m1).unwrap().family, ModelFamily::Mamba1);
+    }
 
     #[test]
     fn original_format_tie_embeddings_is_honoured() {

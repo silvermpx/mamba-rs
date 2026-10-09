@@ -71,6 +71,7 @@ pub mod config;
 pub mod dist;
 #[cfg(feature = "hf")]
 pub mod hf;
+pub mod mamba2;
 pub mod mamba3_mimo;
 pub mod mamba3_siso;
 pub mod mamba_ssm;

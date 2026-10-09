@@ -148,7 +148,9 @@ fn run_cpu(
     tokenizer: &Tokenizer,
 ) {
     let t_load = Instant::now();
-    let loaded = if is_mamba3_checkpoint(model_dir) {
+    let loaded = if is_mamba2_checkpoint(model_dir) {
+        load_mamba2_cpu(model_dir)
+    } else if is_mamba3_checkpoint(model_dir) {
         load_mamba3_cpu(model_dir)
     } else {
         mamba_rs::module::lm::MambaLM::from_hf(model_dir)
@@ -193,6 +195,19 @@ fn is_mamba3_checkpoint(model_dir: &Path) -> bool {
         .is_some_and(|c| c["ssm_cfg"]["layer"].as_str() == Some("Mamba3"))
 }
 
+/// A checkpoint in the original mamba_ssm format whose mixer is Mamba-2.
+fn is_mamba2_checkpoint(model_dir: &Path) -> bool {
+    std::fs::read(model_dir.join("config.json"))
+        .is_ok_and(|b| mamba_rs::hf::load_mamba2::is_mamba2_config(&b))
+}
+
+fn load_mamba2_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
+    let m = mamba_rs::hf::load_mamba2::load_hf_mamba2(model_dir)?;
+    let d = m.cfg.d_model;
+    let backbone = mamba_rs::module::Mamba2Backbone::from_weights(m.weights, m.cfg, d)?;
+    mamba_rs::module::lm::MambaLM::from_mamba2(backbone, m.embed, None, m.vocab_size)
+}
+
 fn load_mamba3_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
     use mamba_rs::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo, read_mamba3_config};
     use mamba_rs::module::lm::MambaLM;
@@ -233,6 +248,10 @@ fn run_gpu(
     tokenizer: &Tokenizer,
 ) {
     let dtype = parse_dtype(&args.dtype);
+    if is_mamba2_checkpoint(model_dir) {
+        eprintln!("error: Mamba-2 checkpoints run on the CPU for now (drop --gpu)");
+        std::process::exit(1);
+    }
     if is_mamba3_checkpoint(model_dir) {
         let mimo = mamba_rs::hf::load_mamba3::read_mamba3_config(model_dir)
             .is_ok_and(|c| c.mimo_rank.is_some());
@@ -448,6 +467,13 @@ fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
             eprintln!(
                 "error: the official Mamba-3 repositories ship no tokenizer; pass \
                  --tokenizer with the Llama-3.1 tokenizer.json"
+            );
+            std::process::exit(1);
+        }
+        if is_mamba2_checkpoint(model_dir) {
+            eprintln!(
+                "error: the official Mamba-2 repositories ship no tokenizer; pass \
+                 --tokenizer with the GPT-NeoX (EleutherAI/gpt-neox-20b) tokenizer.json"
             );
             std::process::exit(1);
         }

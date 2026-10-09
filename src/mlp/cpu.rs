@@ -99,6 +99,120 @@ pub fn gated_mlp_rows(
     }
 }
 
+/// Buffers for [`gated_mlp_rows_backward`], grown on demand.
+#[derive(Default)]
+pub struct GatedMlpBackwardScratch {
+    inv: Vec<f32>,
+    norm: Vec<f32>,
+    up: Vec<f32>,
+    act: Vec<f32>,
+    d_act: Vec<f32>,
+    d_up: Vec<f32>,
+    d_norm: Vec<f32>,
+}
+
+/// The backward of one MLP branch over `rows` tokens. `x_in` are the rows
+/// before the branch; `d_temporal` holds d loss / d (the rows after it) and
+/// leaves holding d loss / d (the rows before it), the residual included.
+/// The weight gradients accumulate into `g`. The norm is
+/// [`rms_norm_weighted`], `(x * inv_rms) * w`, as both forward paths apply.
+pub fn gated_mlp_rows_backward(
+    d_temporal: &mut [f32],
+    x_in: &[f32],
+    rows: usize,
+    (w, g): (&GatedMlpLayerWeights, &mut GatedMlpLayerWeights),
+    s: &mut GatedMlpBackwardScratch,
+    eps: f32,
+) {
+    use crate::ops::blas::{sgemm_backward, sgemm_forward};
+    let d = w.norm_weight.len();
+    let h = w.hidden();
+    s.inv.resize(rows, 0.0);
+    s.norm.resize(rows * d, 0.0);
+    s.up.resize(rows * 2 * h, 0.0);
+    s.act.resize(rows * h, 0.0);
+    s.d_act.resize(rows * h, 0.0);
+    s.d_up.resize(rows * 2 * h, 0.0);
+    s.d_norm.resize(rows * d, 0.0);
+
+    // The forward again: norm, up projection, gate.
+    for ((inv, n), x) in s
+        .inv
+        .iter_mut()
+        .zip(s.norm.chunks_exact_mut(d))
+        .zip(x_in.chunks_exact(d))
+    {
+        *inv = rms_norm_weighted(n, x, &w.norm_weight, eps);
+    }
+    sgemm_forward(&mut s.up, &s.norm, &w.fc1_w, None, rows, d, 2 * h);
+    for (act_row, up_row) in s.act.chunks_exact_mut(h).zip(s.up.chunks_exact(2 * h)) {
+        let (val, gate) = up_row.split_at(h);
+        for ((a, &v), &gt) in act_row.iter_mut().zip(val).zip(gate) {
+            *a = gated(v, gt);
+        }
+    }
+
+    // Down projection, gate, up projection.
+    sgemm_backward(
+        &mut s.d_act,
+        &mut g.fc2_w,
+        None,
+        &d_temporal[..rows * d],
+        &s.act,
+        &w.fc2_w,
+        (rows, h, d),
+    );
+    for ((d_up_row, up_row), d_act_row) in s
+        .d_up
+        .chunks_exact_mut(2 * h)
+        .zip(s.up.chunks_exact(2 * h))
+        .zip(s.d_act.chunks_exact(h))
+    {
+        let (val, gate) = up_row.split_at(h);
+        let (d_val, d_gate) = d_up_row.split_at_mut(h);
+        for j in 0..h {
+            let sg = 1.0 / (1.0 + fast_exp_scalar(-gate[j]));
+            let silu = gate[j] * sg;
+            d_val[j] = d_act_row[j] * silu;
+            d_gate[j] = d_act_row[j] * val[j] * (sg * (1.0 + gate[j] * (1.0 - sg)));
+        }
+    }
+    sgemm_backward(
+        &mut s.d_norm,
+        &mut g.fc1_w,
+        None,
+        &s.d_up,
+        &s.norm,
+        &w.fc1_w,
+        (rows, d, 2 * h),
+    );
+
+    // The norm: xh = x * inv, n = xh * w.
+    for (((dt_row, x), dn), &inv) in d_temporal[..rows * d]
+        .chunks_exact_mut(d)
+        .zip(x_in.chunks_exact(d))
+        .zip(s.d_norm.chunks_exact(d))
+        .zip(&s.inv)
+    {
+        let mut c = 0.0f32;
+        for ((gw, &xv), (&dnv, &wv)) in g
+            .norm_weight
+            .iter_mut()
+            .zip(x)
+            .zip(dn.iter().zip(&w.norm_weight))
+        {
+            let xh = xv * inv;
+            *gw += dnv * xh;
+            c += (dnv * wv) * xh;
+        }
+        let c = c / d as f32;
+        for ((dtv, &xv), (&dnv, &wv)) in dt_row.iter_mut().zip(x).zip(dn.iter().zip(&w.norm_weight))
+        {
+            *dtv += inv * (dnv * wv - (xv * inv) * c);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
