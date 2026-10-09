@@ -1,18 +1,23 @@
-//! Mamba-2 decode on the GPU, f32 storage.
+//! Mamba-2 decode and prefill on the GPU, in f32, tf32, bf16 or f16
+//! storage.
 //!
 //! Per layer: RMSNorm, the in_proj GEMM, the conv step with its SiLU
 //! (reading the xBC columns of the projection in place), the Mamba-2 step
-//! kernel, the gated norm (or the bare gate) and the inner MLP
-//! gate into one row, the out_proj GEMM and the residual add; then the
-//! final norm.
+//! kernel, the gated norm (or the bare gate) and the inner MLP gate into
+//! one row, the out_proj GEMM and the residual add; then the final norm.
+//! The projections and the activation rows between them take the storage
+//! dtype; the residual stream, the scan output, the states and every small
+//! weight stay f32.
 
 use cudarc::driver::PushKernelArg;
 
 use cudarc::driver::LaunchConfig;
 
 use super::kernels::{CHUNK, Mamba2Kernels, gated_norm_cfg, step_cfg};
-use crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::blas::{
+    TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
+};
+use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -24,7 +29,8 @@ use crate::ops::portable_math::exp_portable;
 /// One layer's weights on the device.
 struct GpuMamba2Layer {
     norm_weight: GpuBuffer,
-    in_proj_w: GpuBuffer,
+    /// The projections, in the activation dtype.
+    in_proj_w: DtypedBuf,
     in_proj_b: Option<GpuBuffer>,
     /// `[conv_dim, d_conv]`, the layout the conv step reads.
     conv_w: GpuBuffer,
@@ -36,7 +42,7 @@ struct GpuMamba2Layer {
     a_neg: GpuBuffer,
     d_param: GpuBuffer,
     gate_norm_weight: Option<GpuBuffer>,
-    out_proj_w: GpuBuffer,
+    out_proj_w: DtypedBuf,
     out_proj_b: Option<GpuBuffer>,
 }
 
@@ -44,9 +50,14 @@ impl GpuMamba2Layer {
     fn upload(
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
         lw: &Mamba2LayerWeights,
-        cfg: &Mamba2Config,
+        (cfg, act): (&Mamba2Config, WeightDtype),
     ) -> Result<Self, String> {
         let up = |v: &[f32]| GpuBuffer::from_cpu(stream, v);
+        let typed = |v: &[f32]| -> Result<DtypedBuf, String> {
+            let buf = DtypedBuf::zeros(stream, v.len(), act)?;
+            buf.upload_f32(stream, v)?;
+            Ok(buf)
+        };
         let opt = |v: &[f32]| -> Result<Option<GpuBuffer>, String> {
             if v.is_empty() {
                 Ok(None)
@@ -62,7 +73,7 @@ impl GpuMamba2Layer {
         let a_neg: Vec<f32> = lw.a_log.iter().map(|&a| -exp_portable(a)).collect();
         Ok(Self {
             norm_weight: up(&lw.norm_weight)?,
-            in_proj_w: up(&lw.in_proj_w)?,
+            in_proj_w: typed(&lw.in_proj_w)?,
             in_proj_b: opt(&lw.in_proj_b)?,
             conv_w: up(&lw.conv_w)?,
             conv_b,
@@ -70,7 +81,7 @@ impl GpuMamba2Layer {
             a_neg: up(&a_neg)?,
             d_param: up(&lw.d_param)?,
             gate_norm_weight: opt(&lw.gate_norm_weight)?,
-            out_proj_w: up(&lw.out_proj_w)?,
+            out_proj_w: typed(&lw.out_proj_w)?,
             out_proj_b: opt(&lw.out_proj_b)?,
         })
     }
@@ -95,22 +106,27 @@ impl Mamba2GpuState {
 pub struct Mamba2GpuScratch {
     input: GpuBuffer,
     temporal: GpuBuffer,
-    post_norm: GpuBuffer,
+    post_norm: DtypedBuf,
     rms: GpuBuffer,
-    proj: GpuBuffer,
-    xbc: GpuBuffer,
+    proj: DtypedBuf,
+    xbc: DtypedBuf,
     y: GpuBuffer,
-    gated: GpuBuffer,
-    out: GpuBuffer,
+    gated: DtypedBuf,
+    out: DtypedBuf,
+    /// The final-norm rows, f32.
+    final_out: GpuBuffer,
 }
 
-/// The f32 Mamba-2 decode engine.
+/// The Mamba-2 decode and prefill engine.
 pub struct Mamba2GpuInferenceEngine {
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
     pub cfg: Mamba2Config,
     pub batch: usize,
     pub input_dim: usize,
+    /// The activation dtype: f32 for f32 and tf32 storage, else the half
+    /// type.
+    act: WeightDtype,
     layers: Vec<GpuMamba2Layer>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
@@ -126,7 +142,7 @@ impl Mamba2GpuInferenceEngine {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
-        Self::new_inner(device, w, (cfg, input_dim, batch), None)
+        Self::new_inner(device, w, (cfg, input_dim, batch), (WeightDtype::F32, None))
     }
 
     /// [`Self::new`] with an explicit GEMM mode.
@@ -136,14 +152,30 @@ impl Mamba2GpuInferenceEngine {
         (cfg, input_dim, batch): (Mamba2Config, usize, usize),
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_inner(device, w, (cfg, input_dim, batch), Some(mode))
+        Self::new_inner(
+            device,
+            w,
+            (cfg, input_dim, batch),
+            (WeightDtype::F32, Some(mode)),
+        )
+    }
+
+    /// An engine storing its projections in `dtype`: f32, tf32 (f32 storage
+    /// with the TF32 GEMM contract), bf16 or f16.
+    pub fn new_with_dtype(
+        device: &GpuDevice,
+        w: &Mamba2Weights,
+        (cfg, input_dim, batch): (Mamba2Config, usize, usize),
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, None))
     }
 
     fn new_inner(
         device: &GpuDevice,
         w: &Mamba2Weights,
         (cfg, input_dim, batch): (Mamba2Config, usize, usize),
-        mode: Option<GemmMode>,
+        (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
         if !w.mlp.is_empty() {
@@ -159,7 +191,11 @@ impl Mamba2GpuInferenceEngine {
                 cfg.d_conv
             ));
         }
-        let role = GemmRole::inference(WeightDtype::F32);
+        let act = match dtype {
+            WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
+            half => half,
+        };
+        let role = GemmRole::inference(dtype);
         let ctx = match mode {
             Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
             None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
@@ -169,7 +205,7 @@ impl Mamba2GpuInferenceEngine {
         let layers = w
             .layers
             .iter()
-            .map(|lw| GpuMamba2Layer::upload(&ctx.stream, lw, &cfg))
+            .map(|lw| GpuMamba2Layer::upload(&ctx.stream, lw, (&cfg, act)))
             .collect::<Result<Vec<_>, _>>()?;
         let input_proj = if w.input_proj_w.is_empty() {
             None
@@ -186,6 +222,7 @@ impl Mamba2GpuInferenceEngine {
             cfg,
             batch,
             input_dim,
+            act,
             layers,
             input_proj,
             norm_f_weight,
@@ -207,16 +244,18 @@ impl Mamba2GpuInferenceEngine {
     pub fn alloc_scratch(&self) -> Result<Mamba2GpuScratch, String> {
         let (b, c) = (self.batch, &self.cfg);
         let s = &self.ctx.stream;
+        let typed = |n: usize| DtypedBuf::zeros(s, n, self.act);
         Ok(Mamba2GpuScratch {
             input: GpuBuffer::zeros(s, b * self.input_dim)?,
             temporal: GpuBuffer::zeros(s, b * c.d_model)?,
-            post_norm: GpuBuffer::zeros(s, b * c.d_model)?,
+            post_norm: typed(b * c.d_model)?,
             rms: GpuBuffer::zeros(s, b)?,
-            proj: GpuBuffer::zeros(s, b * c.in_proj_out_dim())?,
-            xbc: GpuBuffer::zeros(s, b * c.conv_dim())?,
+            proj: typed(b * c.in_proj_out_dim())?,
+            xbc: typed(b * c.conv_dim())?,
             y: GpuBuffer::zeros(s, b * c.ssm_dim())?,
-            gated: GpuBuffer::zeros(s, b * c.d_inner())?,
-            out: GpuBuffer::zeros(s, b * c.d_model)?,
+            gated: typed(b * c.d_inner())?,
+            out: typed(b * c.d_model)?,
+            final_out: GpuBuffer::zeros(s, b * c.d_model)?,
         })
     }
 
@@ -235,20 +274,28 @@ impl Mamba2GpuInferenceEngine {
             .stream
             .synchronize()
             .map_err(|e| format!("Mamba-2 step sync: {e:?}"))?;
-        scratch.temporal.download(&self.ctx.stream, output)?;
+        scratch.final_out.download(&self.ctx.stream, output)?;
         self.ctx
             .stream
             .synchronize()
             .map_err(|e| format!("Mamba-2 step sync: {e:?}"))
     }
 
-    fn rmsnorm(&self, (y, x, w, rms): (u64, u64, u64, u64), rows: usize) -> Result<(), String> {
+    /// RMSNorm of f32 rows into `y`: in the activation dtype when `typed`,
+    /// else f32.
+    fn rmsnorm(
+        &self,
+        (y, x, w, rms): (u64, u64, u64, u64),
+        (rows, typed): (usize, bool),
+    ) -> Result<(), String> {
         let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
         let eps = self.cfg.rms_norm_eps;
-        let mut bld = self
-            .ctx
-            .stream
-            .launch_builder(&self.ctx.kernels.rmsnorm_fwd);
+        let kernel = if typed && self.act != WeightDtype::F32 {
+            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
+        } else {
+            &self.ctx.kernels.rmsnorm_fwd
+        };
+        let mut bld = self.ctx.stream.launch_builder(kernel);
         bld.arg(&y);
         bld.arg(&rms);
         bld.arg(&x);
@@ -290,17 +337,22 @@ impl Mamba2GpuInferenceEngine {
         (temporal, post, rms, proj): (u64, u64, u64, u64),
         rows: usize,
     ) -> Result<(), String> {
-        self.rmsnorm((post, temporal, lw.norm_weight.cached_ptr(), rms), rows)?;
-        unsafe {
-            gpu_gemm_f32_forward_ptrs(
-                &self.ctx,
-                proj,
-                post,
-                lw.in_proj_w.cached_ptr(),
-                lw.in_proj_b.as_ref().map(GpuBuffer::cached_ptr),
-                (rows, self.cfg.d_model, self.cfg.in_proj_out_dim()),
-            )
-        }
+        self.rmsnorm(
+            (post, temporal, lw.norm_weight.cached_ptr(), rms),
+            (rows, true),
+        )?;
+        let t = |ptr| TypedPtr {
+            ptr,
+            dtype: self.act,
+        };
+        gpu_gemm_typed_forward_raw(
+            &self.ctx,
+            t(proj),
+            t(post),
+            t(lw.in_proj_w.cached_ptr()),
+            lw.in_proj_b.as_ref().map(GpuBuffer::cached_ptr),
+            (rows, self.cfg.d_model, self.cfg.in_proj_out_dim()),
+        )
     }
 
     /// The gated rows `[silu(z0) x0 | gate(y, z)]`, the out_proj GEMM and
@@ -325,7 +377,7 @@ impl Mamba2GpuInferenceEngine {
             let w = nw.cached_ptr();
             let eps = c.gated_norm_eps;
             let nbg = i32::from(c.norm_before_gate);
-            let mut bld = stream.launch_builder(&self.kernels.gated_norm_fwd.f32);
+            let mut bld = stream.launch_builder(self.kernels.gated_norm_fwd.get(self.act));
             bld.arg(&gated);
             bld.arg(&ld_out);
             bld.arg(&out_col);
@@ -343,7 +395,7 @@ impl Mamba2GpuInferenceEngine {
             unsafe { bld.launch(gated_norm_cfg(rows, d_ssm, ng, hd)) }
                 .map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
         } else {
-            let mut bld = stream.launch_builder(&self.kernels.gate_only_fwd.f32);
+            let mut bld = stream.launch_builder(self.kernels.gate_only_fwd.get(self.act));
             bld.arg(&gated);
             bld.arg(&ld_out);
             bld.arg(&out_col);
@@ -358,7 +410,7 @@ impl Mamba2GpuInferenceEngine {
         }
         if d_mlp > 0 {
             let d_mlp_i = d_mlp as i32;
-            let mut bld = stream.launch_builder(&self.kernels.mlp_gate_fwd.f32);
+            let mut bld = stream.launch_builder(self.kernels.mlp_gate_fwd.get(self.act));
             bld.arg(&gated);
             bld.arg(&ld_out);
             bld.arg(&proj);
@@ -368,19 +420,30 @@ impl Mamba2GpuInferenceEngine {
             unsafe { bld.launch(grid_1d(rows * d_mlp)) }
                 .map_err(|e| format!("Mamba-2 inner MLP: {e:?}"))?;
         }
-        unsafe {
-            gpu_gemm_f32_forward_ptrs(
-                &self.ctx,
-                out,
-                gated,
-                lw.out_proj_w.cached_ptr(),
-                lw.out_proj_b.as_ref().map(GpuBuffer::cached_ptr),
-                (rows, di, dm),
-            )
-        }?;
+        let t = |ptr| TypedPtr {
+            ptr,
+            dtype: self.act,
+        };
+        gpu_gemm_typed_forward_raw(
+            &self.ctx,
+            t(out),
+            t(gated),
+            t(lw.out_proj_w.cached_ptr()),
+            lw.out_proj_b.as_ref().map(GpuBuffer::cached_ptr),
+            (rows, di, dm),
+        )?;
         let n = (rows * dm) as i32;
-        let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
-        bld.arg(&temporal);
+        let mut bld = if self.act == WeightDtype::F32 {
+            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
+            bld.arg(&temporal);
+            bld
+        } else {
+            let mut bld =
+                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
+            bld.arg(&temporal);
+            bld.arg(&temporal);
+            bld
+        };
         bld.arg(&out);
         bld.arg(&n);
         unsafe { bld.launch(grid_1d(rows * dm)) }
@@ -437,7 +500,7 @@ impl Mamba2GpuInferenceEngine {
                 let (cw, cb) = (lw.conv_w.cached_ptr(), lw.conv_b.cached_ptr());
                 let ld_proj = ip as i64;
                 let xbc_col_i = xbc_col as i32;
-                let mut bld = stream.launch_builder(&self.kernels.conv_step.f32);
+                let mut bld = stream.launch_builder(self.kernels.conv_step.get(self.act));
                 bld.arg(&xbc);
                 bld.arg(&conv);
                 bld.arg(&proj);
@@ -459,7 +522,7 @@ impl Mamba2GpuInferenceEngine {
                     lw.a_neg.cached_ptr(),
                     lw.d_param.cached_ptr(),
                 );
-                let mut bld = stream.launch_builder(&self.kernels.step_fwd.f32);
+                let mut bld = stream.launch_builder(self.kernels.step_fwd.get(self.act));
                 bld.arg(&y);
                 bld.arg(&ssm);
                 bld.arg(&xbc);
@@ -494,8 +557,15 @@ impl Mamba2GpuInferenceEngine {
                 b,
             )?;
         }
-        self.rmsnorm((post, temporal, self.norm_f_weight.cached_ptr(), rms), b)?;
-        scratch.temporal.copy_from_raw(&scratch.post_norm, stream)
+        self.rmsnorm(
+            (
+                scratch.final_out.cached_ptr(),
+                temporal,
+                self.norm_f_weight.cached_ptr(),
+                rms,
+            ),
+            (b, false),
+        )
     }
 
     /// Buffers for prompt windows of `seq_len` tokens.
@@ -505,22 +575,24 @@ impl Mamba2GpuInferenceEngine {
         let nc = seq_len.div_ceil(CHUNK);
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
+        let typed = |n: usize| DtypedBuf::zeros(s, n.max(1), self.act);
         Ok(Mamba2GpuPrefill {
             seq_len,
             input: z(rows * self.input_dim)?,
             temporal: z(rows * c.d_model)?,
-            post: z(rows * c.d_model)?,
+            post: typed(rows * c.d_model)?,
             rms: z(rows)?,
-            proj: z(rows * c.in_proj_out_dim())?,
-            xbc: z(rows * c.conv_dim())?,
+            proj: typed(rows * c.in_proj_out_dim())?,
+            xbc: typed(rows * c.conv_dim())?,
             conv_next: z(self.batch * c.conv_dim() * c.d_conv)?,
             dt: z(self.batch * nc * c.nheads() * CHUNK)?,
             acs: z(self.batch * nc * c.nheads() * CHUNK)?,
             cb: z(self.batch * nc * c.ngroups * CHUNK * (CHUNK + 1) / 2)?,
             states: z(self.batch * nc * c.nheads() * c.headdim * c.d_state)?,
             y: z(rows * c.ssm_dim())?,
-            gated: z(rows * c.d_inner())?,
-            out: z(rows * c.d_model)?,
+            gated: typed(rows * c.d_inner())?,
+            out: typed(rows * c.d_model)?,
+            final_rows: z(rows * c.d_model)?,
         })
     }
 
@@ -541,7 +613,7 @@ impl Mamba2GpuInferenceEngine {
             .stream
             .synchronize()
             .map_err(|e| format!("Mamba-2 prefill sync: {e:?}"))?;
-        pf.post.download(&self.ctx.stream, rows_out)?;
+        pf.final_rows.download(&self.ctx.stream, rows_out)?;
         self.ctx
             .stream
             .synchronize()
@@ -607,7 +679,7 @@ impl Mamba2GpuInferenceEngine {
             let (cw, cbias) = (lw.conv_w.cached_ptr(), lw.conv_b.cached_ptr());
             let conv_next = pf.conv_next.cached_ptr();
             launch(grid_1d(rows * cd), "conv", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.conv_prefill.f32);
+                let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
                 bld.arg(&xbc);
                 bld.arg(&conv);
                 bld.arg(&proj);
@@ -622,7 +694,7 @@ impl Mamba2GpuInferenceEngine {
                 bld.launch(g).map(|_| ())
             })?;
             launch(grid_1d(b * cd), "conv state", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.conv_state.f32);
+                let mut bld = stream.launch_builder(self.kernels.conv_state.get(self.act));
                 bld.arg(&conv_next);
                 bld.arg(&conv);
                 bld.arg(&proj);
@@ -652,7 +724,7 @@ impl Mamba2GpuInferenceEngine {
                 shared_mem_bytes: 0,
             };
             launch(dt_cfg, "dt", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.dt_cumsum.f32);
+                let mut bld = stream.launch_builder(self.kernels.dt_cumsum.get(self.act));
                 bld.arg(&dt);
                 bld.arg(&acs);
                 bld.arg(&proj);
@@ -674,7 +746,7 @@ impl Mamba2GpuInferenceEngine {
                 shared_mem_bytes: 0,
             };
             launch(bmm_cfg, "bmm", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.bmm_chunk.f32);
+                let mut bld = stream.launch_builder(self.kernels.bmm_chunk.get(self.act));
                 bld.arg(&cb);
                 bld.arg(&xbc);
                 bld.arg(&ld_xbc);
@@ -692,7 +764,7 @@ impl Mamba2GpuInferenceEngine {
                 shared_mem_bytes: 0,
             };
             launch(state_cfg, "chunk state", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.chunk_state.f32);
+                let mut bld = stream.launch_builder(self.kernels.chunk_state.get(self.act));
                 bld.arg(&states);
                 bld.arg(&xbc);
                 bld.arg(&ld_xbc);
@@ -735,7 +807,7 @@ impl Mamba2GpuInferenceEngine {
                 shared_mem_bytes: 0,
             };
             launch(scan_cfg, "chunk scan", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.chunk_scan.f32);
+                let mut bld = stream.launch_builder(self.kernels.chunk_scan.get(self.act));
                 bld.arg(&y);
                 bld.arg(&states);
                 bld.arg(&cb);
@@ -766,7 +838,15 @@ impl Mamba2GpuInferenceEngine {
                 rows,
             )?;
         }
-        self.rmsnorm((post, temporal, self.norm_f_weight.cached_ptr(), rms), rows)
+        self.rmsnorm(
+            (
+                pf.final_rows.cached_ptr(),
+                temporal,
+                self.norm_f_weight.cached_ptr(),
+                rms,
+            ),
+            (rows, false),
+        )
     }
 }
 
@@ -775,16 +855,17 @@ pub struct Mamba2GpuPrefill {
     seq_len: usize,
     input: GpuBuffer,
     temporal: GpuBuffer,
-    post: GpuBuffer,
+    post: DtypedBuf,
     rms: GpuBuffer,
-    proj: GpuBuffer,
-    xbc: GpuBuffer,
+    proj: DtypedBuf,
+    xbc: DtypedBuf,
     conv_next: GpuBuffer,
     dt: GpuBuffer,
     acs: GpuBuffer,
     cb: GpuBuffer,
     states: GpuBuffer,
     y: GpuBuffer,
-    gated: GpuBuffer,
-    out: GpuBuffer,
+    gated: DtypedBuf,
+    out: DtypedBuf,
+    final_rows: GpuBuffer,
 }

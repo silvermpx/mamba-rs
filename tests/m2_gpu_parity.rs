@@ -321,3 +321,60 @@ fn m2_gpu_prefill_seams_are_bit_exact() {
         );
     }
 }
+
+/// The tf32, f16 and bf16 engines, prefill and then decode, against the
+/// CPU. Their bounds follow the storage: tf32 rounds the GEMM inputs to 10
+/// mantissa bits, f16 stores activations with 10 and bf16 with 7.
+#[test]
+fn m2_gpu_typed_lanes_track_cpu() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let seq = 70usize;
+    for (dtype, tol) in [
+        (WeightDtype::Tf32, 3e-3),
+        (WeightDtype::F16, 5e-3),
+        (WeightDtype::Bf16, 3e-2),
+    ] {
+        for (label, cfg) in cases() {
+            let w = drawn(&cfg, input_dim, 23);
+            let dm = cfg.d_model;
+            let inputs = det(seq * input_dim, 900, 1.0);
+            let mut st = Mamba2State::zeros(&cfg);
+            let mut ps = Mamba2PrefillScratch::new();
+            let mut want = vec![0f32; seq * dm];
+            forward_mamba2_backbone_prefill_mode(
+                &mut want,
+                &inputs,
+                &w,
+                &mut st.layers,
+                &mut ps,
+                (&cfg, seq, PrefillMode::Single),
+            );
+            let engine =
+                Mamba2GpuInferenceEngine::new_with_dtype(&device, &w, (cfg, input_dim, 1), dtype)
+                    .unwrap();
+            let mut gst = engine.alloc_state().unwrap();
+            let mut pf = engine.alloc_prefill(seq).unwrap();
+            let mut rows = vec![0f32; seq * dm];
+            engine
+                .prefill(&inputs, &mut rows, &mut gst, &mut pf)
+                .unwrap();
+            let mut worst = rel_l2(&rows, &want);
+            let mut gsc = engine.alloc_scratch().unwrap();
+            let mut csc = Mamba2StepScratch::new(&cfg);
+            let (mut g, mut c) = (vec![0f32; dm], vec![0f32; dm]);
+            for t in 0..6u64 {
+                let x = det(input_dim, 950 + t, 1.0);
+                engine.step(&x, &mut g, &mut gst, &mut gsc).unwrap();
+                mamba2_step(&mut c, &x, &mut csc, &w, &mut st.layers, &cfg);
+                worst = worst.max(rel_l2(&g, &c));
+            }
+            eprintln!("{dtype:?} {label}: GPU vs CPU rel_l2 {worst:.2e}");
+            assert!(
+                worst < tol,
+                "{dtype:?} {label}: rel_l2 {worst:.3e} over {tol:.0e}"
+            );
+        }
+    }
+}

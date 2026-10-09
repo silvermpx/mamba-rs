@@ -233,3 +233,105 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
     }
     eprintln!("mamba2-130m GPU greedy: {produced} tokens match the oracle");
 }
+
+/// The bf16 engine on the oracle's prompt: the mean prompt NLL within a
+/// few hundredths of a nat and the greedy continuation where the oracle's
+/// margin clears bf16 noise.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::mamba2::gpu::Mamba2GpuInferenceEngine;
+
+    let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
+    let golden = load_golden(&root.join("goldens/mamba2-130m"));
+    let model = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let cfg = model.cfg;
+    let d = cfg.d_model;
+    let vocab = model.vocab_size;
+    let vocab_padded = model.embed.len() / d;
+    let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
+    let device = GpuDevice::new(0).unwrap();
+    let engine = Mamba2GpuInferenceEngine::new_with_dtype(
+        &device,
+        &model.weights,
+        (cfg, d, 1),
+        WeightDtype::Bf16,
+    )
+    .unwrap();
+    let mut state = engine.alloc_state().unwrap();
+    let mut scratch = engine.alloc_scratch().unwrap();
+    let t_len = golden.ids.len();
+    let mut pf = engine.alloc_prefill(t_len).unwrap();
+    let prompt: Vec<f32> = golden
+        .ids
+        .iter()
+        .flat_map(|&tok| embed(tok).iter().copied())
+        .collect();
+    let mut rows = vec![0f32; t_len * d];
+    engine
+        .prefill(&prompt, &mut rows, &mut state, &mut pf)
+        .unwrap();
+    let mut logits = vec![0f32; vocab];
+    let mut head_scratch = vec![0f32; vocab_padded];
+    let (mut nll, mut nll_oracle) = (0f64, 0f64);
+    for t in 0..t_len - 1 {
+        lm_head_logits(
+            &mut logits,
+            &rows[t * d..(t + 1) * d],
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        nll -= f64::from(logits[golden.ids[t + 1] as usize]) - logsumexp(&logits);
+        nll_oracle -= golden.target_logprob[t];
+    }
+    let n = (t_len - 1) as f64;
+    let (nll, nll_oracle) = (nll / n, nll_oracle / n);
+    eprintln!("mamba2-130m GPU bf16 prefill: mean NLL {nll:.4} vs oracle {nll_oracle:.4}");
+    assert!(
+        (nll - nll_oracle).abs() < 3e-2,
+        "bf16 NLL {nll:.4} vs {nll_oracle:.4}"
+    );
+    lm_head_logits(
+        &mut logits,
+        &rows[(t_len - 1) * d..],
+        &model.embed,
+        vocab,
+        vocab_padded,
+        d,
+        &mut head_scratch,
+    );
+    let mut hidden = vec![0f32; d];
+    let mut next = argmax(&logits);
+    let mut produced = 0usize;
+    for (i, &want) in golden.greedy.iter().enumerate() {
+        if next != want {
+            assert!(
+                golden.greedy_margin[i] < 0.25,
+                "greedy token {i}: {next} vs {want}"
+            );
+            eprintln!("greedy token {i}: within the bf16 margin, stopping");
+            break;
+        }
+        produced += 1;
+        engine
+            .step(embed(next), &mut hidden, &mut state, &mut scratch)
+            .unwrap();
+        lm_head_logits(
+            &mut logits,
+            &hidden,
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        next = argmax(&logits);
+    }
+    eprintln!("mamba2-130m GPU bf16 greedy: {produced} tokens match the oracle");
+}
