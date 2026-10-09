@@ -3306,7 +3306,8 @@ pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
         | ModuleKind::TriadSm89ExactF32D128
         | ModuleKind::InferenceSm89Cells
         | ModuleKind::Mamba3Combined
-        | ModuleKind::Mamba2Combined => &[],
+        | ModuleKind::Mamba2Combined
+        | ModuleKind::Mamba3MimoCombined => &[],
     }
 }
 

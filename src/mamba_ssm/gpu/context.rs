@@ -1280,7 +1280,9 @@ impl GpuCtx {
                 .specialized
                 .filter(|artifact| artifact.module_kind == module_kind)
                 .zip(self.kernels.specialized_compiler_identity()),
-            ModuleKind::Mamba3Combined | ModuleKind::Mamba2Combined => None,
+            ModuleKind::Mamba3Combined
+            | ModuleKind::Mamba2Combined
+            | ModuleKind::Mamba3MimoCombined => None,
         }
     }
 

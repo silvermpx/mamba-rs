@@ -5,7 +5,7 @@
 //! spaces/mamba e9594ce), and writes the logits of every prompt position
 //! and a greedy continuation. This test loads the same checkpoint through
 //! `hf::load_mamba3::load_hf_mamba3_mimo` and holds the CPU decode to those
-//! goldens.
+//! goldens, and with `cuda` the GPU engine in f32 and bf16.
 //!
 //! `#[ignore]`: it needs the downloaded checkpoint and its goldens, under
 //! `$HOME/.cache/mamba3-official` or the directory `MAMBA3_OFFICIAL_DIR`
@@ -115,4 +115,128 @@ fn mimo_187m_cpu_decode_matches_the_f64_oracle() {
         next = argmax(&logits);
     }
     eprintln!("mimo-187m CPU greedy: {produced} tokens match the oracle");
+}
+
+/// The GPU engine on the oracle's prompt, one window then the greedy
+/// continuation decoded: in f32 the recorded logits rows and every top-1;
+/// in bf16 the mean prompt NLL within a few hundredths of a nat; in both
+/// the greedy tokens wherever the oracle's margin clears the lane's noise.
+#[cfg(feature = "cuda")]
+fn mimo_187m_gpu_arm(dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype) {
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuEngine;
+
+    let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
+    let golden = load_golden(&root.join("goldens/mimo-187m"));
+    let model = load_hf_mamba3_mimo(&root.join("mamba3-mimo-187m")).unwrap();
+    let cfg = model.cfg;
+    let d = cfg.d_model;
+    let vocab = model.vocab_size;
+    let vocab_padded = model.embed.len() / d;
+    let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
+    let device = GpuDevice::new(0).unwrap();
+    let engine = Mamba3MimoGpuEngine::new(&device, &model.weights, (cfg, d, 1), dtype).unwrap();
+    let mut state = engine.alloc_state().unwrap();
+    let t_len = golden.ids.len();
+    let mut win = engine.alloc_window(t_len).unwrap();
+    let prompt: Vec<f32> = golden
+        .ids
+        .iter()
+        .flat_map(|&tok| embed(tok).iter().copied())
+        .collect();
+    let mut rows = vec![0f32; t_len * d];
+    engine
+        .run(&prompt, &mut rows, &mut state, &mut win)
+        .unwrap();
+    let mut logits = vec![0f32; vocab];
+    let mut head_scratch = vec![0f32; vocab_padded];
+    let (mut worst, mut nll, mut nll_oracle) = (0f64, 0f64, 0f64);
+    for t in 0..t_len {
+        lm_head_logits(
+            &mut logits,
+            &rows[t * d..(t + 1) * d],
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        if let Some(&next) = golden.ids.get(t + 1) {
+            nll -= f64::from(logits[next as usize]) - logsumexp(&logits);
+            nll_oracle -= golden.target_logprob[t];
+        }
+        if dtype == WeightDtype::F32 {
+            assert_eq!(argmax(&logits), golden.top_ids[t][0], "top-1 at {t}");
+        }
+        if t >= golden.last_rows_from {
+            let r = t - golden.last_rows_from;
+            let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
+            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
+            let diff = logits
+                .iter()
+                .zip(want)
+                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
+            worst = worst.max(diff / scale);
+        }
+    }
+    let n = (t_len - 1) as f64;
+    let (nll, nll_oracle) = (nll / n, nll_oracle / n);
+    eprintln!(
+        "mimo-187m GPU {dtype:?} window: max|dlogit|/max|logit| = {worst:.3e}, \
+         mean NLL {nll:.4} vs oracle {nll_oracle:.4}"
+    );
+    let margin = if dtype == WeightDtype::F32 {
+        assert!(worst < 2e-3, "GPU logits rel {worst:.3e}");
+        1e-2
+    } else {
+        assert!(
+            (nll - nll_oracle).abs() < 3e-2,
+            "{dtype:?} NLL {nll:.4} vs {nll_oracle:.4}"
+        );
+        0.25
+    };
+    let mut one = engine.alloc_window(1).unwrap();
+    let mut hidden = vec![0f32; d];
+    let mut next = argmax(&logits);
+    let mut produced = 0usize;
+    for (i, &want) in golden.greedy.iter().enumerate() {
+        if next != want {
+            assert!(
+                golden.greedy_margin[i] < margin,
+                "greedy token {i}: {next} vs {want}"
+            );
+            eprintln!("greedy token {i}: within the lane's margin, stopping");
+            break;
+        }
+        produced += 1;
+        engine
+            .run(embed(next), &mut hidden, &mut state, &mut one)
+            .unwrap();
+        lm_head_logits(
+            &mut logits,
+            &hidden,
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        next = argmax(&logits);
+    }
+    eprintln!("mimo-187m GPU {dtype:?} greedy: {produced} tokens match the oracle");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mimo_187m_gpu_matches_the_f64_oracle() {
+    mimo_187m_gpu_arm(mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mimo_187m_gpu_bf16_tracks_the_f64_oracle() {
+    mimo_187m_gpu_arm(mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16);
 }

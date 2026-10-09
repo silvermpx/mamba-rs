@@ -59,6 +59,7 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::TriadSm89ExactF32D128 as u8, 12);
     assert_eq!(ModuleKind::InferenceSm89Cells as u8, 13);
     assert_eq!(ModuleKind::Mamba2Combined as u8, 14);
+    assert_eq!(ModuleKind::Mamba3MimoCombined as u8, 15);
 }
 
 #[test]

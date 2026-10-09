@@ -2963,6 +2963,7 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::InferenceSm89Cells => "inference_sm89_cells",
         ModuleKind::Mamba3Combined => "mamba3_combined",
         ModuleKind::Mamba2Combined => "mamba2_combined",
+        ModuleKind::Mamba3MimoCombined => "mamba3_mimo_combined",
     }
 }
 

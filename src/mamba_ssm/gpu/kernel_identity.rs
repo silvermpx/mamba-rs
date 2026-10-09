@@ -629,6 +629,8 @@ pub enum ModuleKind {
     /// The Mamba-2 kernels, in their own module so adding them moves no
     /// identity of the Fixed or Mamba-3 modules.
     Mamba2Combined = 14,
+    /// The Mamba-3 MIMO kernels, in their own module for the same reason.
+    Mamba3MimoCombined = 15,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

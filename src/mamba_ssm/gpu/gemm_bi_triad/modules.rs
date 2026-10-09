@@ -2433,7 +2433,9 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         ModuleKind::InferenceSm89Cells => {
             validate_fixed_sm89_cells_ptx(ModuleKind::InferenceSm89Cells, arch, ptx)
         }
-        ModuleKind::Mamba3Combined | ModuleKind::Mamba2Combined => Ok(()),
+        ModuleKind::Mamba3Combined
+        | ModuleKind::Mamba2Combined
+        | ModuleKind::Mamba3MimoCombined => Ok(()),
     }
 }
 

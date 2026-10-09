@@ -30,6 +30,7 @@ pub mod backward;
 pub mod backward_mixed;
 pub mod blas;
 pub mod buffers;
+pub(crate) mod composed;
 pub mod context;
 pub mod device;
 pub(crate) mod diagnostics;
