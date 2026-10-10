@@ -30,6 +30,7 @@
 "bench_bf16_vs_f32" = "qualification"
 "classifier_gemm_tier_bench" = "bench"
 "coverage_gaps" = "gate"
+"cpu_gemv_bench" = "bench"
 "cpu_gpu_train_parity" = "gate"
 "cublas_compute_probe" = "qualification"
 "ddp_emulated_equivalence" = "gate"

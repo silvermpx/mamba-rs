@@ -814,6 +814,11 @@ path = "benches/m3_cpu_benchmark.rs"
 harness = false
 
 [[bench]]
+name = "cpu_gemv_bench"
+path = "benches/cpu_gemv_bench.rs"
+harness = false
+
+[[bench]]
 name = "m3_gpu_benchmark"
 path = "benches/m3_gpu_benchmark.rs"
 harness = false

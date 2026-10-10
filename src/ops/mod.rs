@@ -6,6 +6,7 @@ pub mod fast_math;
 pub mod fold16;
 pub(crate) mod init;
 pub mod norms;
+pub mod packed;
 pub mod portable_math;
 
 pub use dims::{MambaDims, MambaRecurrentState};
