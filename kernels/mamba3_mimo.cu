@@ -129,18 +129,33 @@ __device__ __forceinline__ float mimo_tanh_pi(const TI* pr, int ang_col, int a) 
     return __fmul_rn(tanhf(to_f(pr[ang_col + a])), 3.14159265358979f);
 }
 
-// Advance the head's angles `theta` by tanh_pi dt (in double, wrapped into
-// [0, 2 pi)) and take their sines and cosines.
+// One angle step: theta + inc summed in double and wrapped into [0, 2 pi)
+// as acc - 2 pi floor(acc / 2 pi), rounded to float. The division only
+// matters off the common case. A float sum in (0, 6.28) means the double sum
+// lies there too, so the floor is 0 and the double sum rounds to that same
+// float (two floats summed through a double round once: 53 >= 2 * 24 + 2).
+// A float sum in (-6.28, 0) means the floor is -1, which leaves the single
+// wrap add. Zero (whose sign the full formula settles), wider sums and
+// non-finite values take the full formula.
+__device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
+    const float s = __fadd_rn(theta, inc);
+    if (s > 0.0f && s < 6.28f) return s;
+    const double two_pi = 6.283185307179586;
+    double acc = (double)theta + (double)inc;
+    if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
+    acc -= two_pi * floor(acc / two_pi);
+    return (float)acc;
+}
+
+// Advance the head's angles `theta` by tanh_pi dt (wrapped into [0, 2 pi))
+// and take their sines and cosines.
 template <typename TI>
 __device__ __forceinline__ void mimo_tok_angles(
     float* sn, float* cs, float* theta, const TI* pr, int ang_col, float dt, int na
 ) {
     for (int a = threadIdx.x; a < na; a += blockDim.x) {
         float tp = mimo_tanh_pi(pr, ang_col, a);
-        const double two_pi = 6.283185307179586;
-        double acc = (double)theta[a] + (double)__fmul_rn(tp, dt);
-        acc -= two_pi * floor(acc / two_pi);
-        float th = (float)acc;
+        float th = mimo_wrap_add(theta[a], __fmul_rn(tp, dt));
         theta[a] = th;
         sincosf(th, &sn[a], &cs[a]);
     }

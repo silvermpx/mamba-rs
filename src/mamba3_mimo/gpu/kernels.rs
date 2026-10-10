@@ -24,8 +24,10 @@ pub struct Mamba3MimoKernels {
     /// state passing, the outputs, the carried keys and input.
     pub chunk_prep: TypedKernel,
     pub chunk_state: TypedKernel,
+    pub chunk_state_tiles: TypedKernel,
     pub state_pass: CudaFunction,
     pub chunk_scan: TypedKernel,
+    pub chunk_scan_tiles: TypedKernel,
     pub chunk_writeback: TypedKernel,
     /// The MLP's gate, `value * silu(gate)`.
     pub mlp_gate: TypedKernel,
@@ -57,6 +59,10 @@ pub struct MimoChunkedBwd {
     pub chunk_dot: CudaFunction,
     pub state_terms: TypedKernel,
     pub pairs: TypedKernel,
+    /// The pair terms split by owner: dq per t-tile, then dk, du and dw per
+    /// s-tile, when [`ChunkedGeom::pairs_tiles`] fits.
+    pub pairs_dq: TypedKernel,
+    pub pairs_dk: TypedKernel,
     pub rot_bwd: CudaFunction,
     pub angles: TypedKernel,
     pub combine: CudaFunction,
@@ -78,12 +84,25 @@ pub struct ChunkedGeom {
     /// `m3m_chunk_state`: state indices per block, tokens staged per pass,
     /// bytes.
     pub state: (usize, usize, usize),
+    /// `m3m_chunk_state_tiles`: key columns per lane (1, 2 or 4; 0 when a
+    /// head of more than 128 channels leaves it to `m3m_chunk_state`),
+    /// tokens staged per pass, bytes.
+    pub state_tiles: (usize, usize, usize),
     /// `m3m_chunk_scan`: query tokens per block, key tokens per pass, bytes.
     pub scan: (usize, usize, usize),
+    /// `m3m_chunk_scan_tiles`: query tokens per block (0 when a head of
+    /// more than 128 channels or a rank past 64 leaves it to
+    /// `m3m_chunk_scan`), key tokens per tile, state indices per key pass,
+    /// bytes.
+    pub scan_tiles: (usize, usize, usize, usize),
     /// `m3mb_dsloc`: state indices per block, bytes.
     pub dsloc: (usize, usize),
     /// `m3mb_pairs`: tokens per tile, bytes.
     pub pairs: (usize, usize),
+    /// `m3mb_pairs_dq` and `m3mb_pairs_dk` at the same tile: their bytes, or
+    /// zeros when a tile of more than 64 rows, a head of more than 128
+    /// channels or more than 128 state indices leaves it to `m3mb_pairs`.
+    pub pairs_tiles: (usize, usize),
 }
 
 /// The chunked geometry of a head of `hd` channels, `ds` state indices and
@@ -106,6 +125,25 @@ pub fn chunked_geom(
             (bytes <= cap).then_some((nt, sl, bytes))
         })
     })?;
+    // The register-tile state kernel: ut [sl][R][P rounded up to 4],
+    // kt [sl][R][32 jc], wt [sl]. The largest pass that leaves room for a
+    // second block on the multiprocessor, else the largest that fits.
+    let state_tiles = if hd <= 128 {
+        let jc = match ds.div_ceil(32) {
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
+        let bytes = |sl: usize| (sl * rank * (hd.next_multiple_of(4) + 32 * jc) + sl) * 4;
+        let passes = [CHUNK, 32, 16, 8, 4, 2, 1];
+        passes
+            .into_iter()
+            .find(|&sl| bytes(sl) <= cap / 2)
+            .or_else(|| passes.into_iter().find(|&sl| bytes(sl) <= cap))
+            .map_or((0, 0, 0), |sl| (jc, sl, bytes(sl)))
+    } else {
+        (0, 0, 0)
+    };
     // The output kernel: queries [tt][R][N], keys [st][R][N + 1], their
     // block [tt R][st R], the keys' inputs [st][P].
     let scan = (1..=wide.min(CHUNK)).rev().find_map(|tt| {
@@ -115,12 +153,37 @@ pub fn chunked_geom(
             (bytes <= cap).then_some((tt, st, bytes))
         })
     })?;
+    // The register-tile output kernel: queries [N][QR + 4], keys [nk][68],
+    // inputs [64][32 jp], weighted G [64][QR + 4], weights [tq][kt] and the
+    // chunk's three scalars, QR = tq R rounded up to 8 (at most 64 rows, so
+    // at most 256 threads); the keys take the most state indices per pass
+    // that fit.
+    let scan_tiles = if hd <= 128 && rank <= CHUNK {
+        let tq = [16usize, 8, 4, 2, 1]
+            .into_iter()
+            .find(|&tq| tq * rank <= CHUNK)
+            .unwrap_or(1);
+        let kt = CHUNK / rank;
+        let qrs = (tq * rank).next_multiple_of(8) + 4;
+        let pp = 32 * hd.div_ceil(32).next_power_of_two();
+        let bytes = |nk: usize| {
+            (ds * qrs + nk * (CHUNK + 4) + CHUNK * pp + CHUNK * qrs + tq * kt + 3 * CHUNK) * 4
+        };
+        std::iter::successors(Some(ds), |&nk| (nk > 1).then(|| nk.div_ceil(2)))
+            .find(|&nk| bytes(nk) <= cap)
+            .map_or((0, 0, 0, 0), |nk| (tq, kt, nk, bytes(nk)))
+    } else {
+        (0, 0, 0, 0)
+    };
     if !training {
         return Some(ChunkedGeom {
             state,
+            state_tiles,
             scan,
+            scan_tiles,
             dsloc: (0, 0),
             pairs: (0, 0),
+            pairs_tiles: (0, 0),
         });
     }
     // The local state gradient: queries [L][R][nt], decays [L].
@@ -135,11 +198,29 @@ pub fn chunked_geom(
         let bytes = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
         (bytes <= cap).then_some((tl, bytes))
     })?;
+    // The split pair kernels: dy (transposed), u, the keys, w M (transposed)
+    // and w for dq; the keys and u (transposed), the queries and dy, G, w M
+    // and w G for dk and du. Rows padded to a float4 multiple plus 4.
+    let pairs_tiles = {
+        let tl = pairs.0;
+        let tr = tl * rank;
+        let trs = tr.next_multiple_of(4) + 4;
+        let dq = (hd * trs + tr * (hd + 1) + tr * ds + tr * trs + tl * tl) * 4;
+        let dk = (ds * trs + hd * trs + tr * (ds + 1) + tr * (hd + 1) + 3 * tr * trs) * 4;
+        if tr <= 64 && hd <= 128 && ds <= 128 && dq.max(dk) <= cap {
+            (dq, dk)
+        } else {
+            (0, 0)
+        }
+    };
     Some(ChunkedGeom {
         state,
+        state_tiles,
         scan,
+        scan_tiles,
         dsloc,
         pairs,
+        pairs_tiles,
     })
 }
 
@@ -235,8 +316,10 @@ impl Mamba3MimoKernels {
             scan: typed("mimo_scan")?,
             chunk_prep: typed("m3m_prep")?,
             chunk_state: typed("m3m_chunk_state")?,
+            chunk_state_tiles: typed("m3m_chunk_state_tiles")?,
             state_pass: get("m3m_state_pass")?,
             chunk_scan: typed("m3m_chunk_scan")?,
+            chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
             scan_ckpt: typed("mimo_scan_ckpt")?,
@@ -253,6 +336,8 @@ impl Mamba3MimoKernels {
                 chunk_dot: get("m3mb_chunk_dot")?,
                 state_terms: typed("m3mb_state_terms")?,
                 pairs: typed("m3mb_pairs")?,
+                pairs_dq: typed("m3mb_pairs_dq")?,
+                pairs_dk: typed("m3mb_pairs_dk")?,
                 rot_bwd: get("m3mb_rot_bwd")?,
                 angles: typed("m3mb_angles")?,
                 combine: get("m3mb_combine")?,
@@ -274,8 +359,12 @@ impl Mamba3MimoKernels {
                 (&kernels.scan_ckpt, "scan_ckpt"),
                 (&kernels.scan_bwd, "scan_bwd"),
                 (&kernels.chunk_state, "chunk_state"),
+                (&kernels.chunk_state_tiles, "chunk_state_tiles"),
                 (&kernels.chunk_scan, "chunk_scan"),
+                (&kernels.chunk_scan_tiles, "chunk_scan_tiles"),
                 (&kernels.cb.pairs, "pairs"),
+                (&kernels.cb.pairs_dq, "pairs dq"),
+                (&kernels.cb.pairs_dk, "pairs dk"),
                 (&kernels.cb.state_terms, "state_terms"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
@@ -300,6 +389,10 @@ mod tests {
         let cap = 99 * 1024;
         let released = chunked_geom((64, 128, 4), cap, true).unwrap();
         assert_eq!((released.state.0, released.state.1), (4, CHUNK));
+        assert_eq!((released.state_tiles.0, released.state_tiles.1), (4, 16));
+        let tiles = released.scan_tiles;
+        assert_eq!((tiles.0, tiles.1, tiles.2), (16, 16, 64));
+        assert_eq!(released.pairs_tiles, (38784, 66304));
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
         let wide = chunked_geom((16, 16, 16), cap, true).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
@@ -317,10 +410,21 @@ mod tests {
                 let Some(g) = chunked_geom(shape, cap, true) else {
                     continue;
                 };
-                for bytes in [g.state.2, g.scan.2, g.dsloc.1, g.pairs.1] {
+                let sizes = [
+                    g.state.2,
+                    g.state_tiles.2,
+                    g.scan.2,
+                    g.scan_tiles.3,
+                    g.dsloc.1,
+                    g.pairs.1,
+                    g.pairs_tiles.0,
+                    g.pairs_tiles.1,
+                ];
+                for bytes in sizes {
                     assert!(bytes <= cap, "{shape:?} at {cap}: {g:?}");
                 }
                 assert!(g.state.0 * shape.0 <= 1024 && g.scan.0 * shape.0 <= 1024);
+                assert_eq!(g.state_tiles.0 == 0, shape.0 > 128, "{shape:?}: {g:?}");
             }
         }
         assert!(chunked_geom((2048, 16, 1), 227 * 1024, true).is_none());

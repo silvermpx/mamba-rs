@@ -1663,15 +1663,39 @@ impl Mamba3MimoGpuTrainer {
             );
             let (tl, pairs_smem) = geom.pairs;
             let tl_i = tl as i32;
-            go!(
-                k.cb.pairs.get(act),
-                cfg3(b * nc, nh, 1, 256, pairs_smem),
-                "pairs",
-                [
-                    dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
-                    nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
-                ]
-            );
+            if geom.pairs_tiles.0 > 0 {
+                let (dq_smem, dk_smem) = geom.pairs_tiles;
+                let threads = 8 * (tl * rank).next_multiple_of(4);
+                let tiles = CHUNK.div_ceil(tl);
+                go!(
+                    k.cb.pairs_dq.get(act),
+                    cfg3(b * nc, nh, tiles, threads, dq_smem),
+                    "pairs dq",
+                    [
+                        dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
+                        ds_i, r_i, na_i, tl_i
+                    ]
+                );
+                go!(
+                    k.cb.pairs_dk.get(act),
+                    cfg3(b * nc, nh, tiles, threads, dk_smem),
+                    "pairs dk",
+                    [
+                        dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
+                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
+                    ]
+                );
+            } else {
+                go!(
+                    k.cb.pairs.get(act),
+                    cfg3(b * nc, nh, 1, 256, pairs_smem),
+                    "pairs",
+                    [
+                        dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x,
+                        t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
+                    ]
+                );
+            }
             let lead_threads = hd.next_multiple_of(32);
             go!(
                 &k.cb.lead,

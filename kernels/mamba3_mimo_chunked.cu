@@ -100,13 +100,28 @@ __device__ __forceinline__ void m3m_tile_product(
 }
 
 // The step scalars and angles of every token of the window, one block per
-// (sequence, head). Thread 0 walks the tokens: dt, gamma = lam dt, the
-// chunk-local Acs (a running sum from zero at each chunk start) and scale;
-// then the angle threads advance the head's angles over the window (the
-// sequential path's double-precision wrap) and record their sines and
-// cosines. coef [B, T, H, 4] = (dt, gamma, scale, Acs); sn, cs [B, T, H, na];
-// e0 [B, H] = dt_0 lam_c_0. The angle state ends advanced over the window.
-// Block max(32, na) threads.
+// (sequence, head). coef [B, T, H, 4] = (dt, gamma, scale, Acs); sn, cs
+// [B, T, H, na]; e0 [B, H] = dt_0 lam_c_0. The angle state ends advanced
+// over the window. Every value is the one a single thread walking the
+// tokens in order computes; only the work is spread:
+//   1. per token: dt, gamma = lam dt, scale = gamma + the next token's
+//      lead dt lam_c (recomputed rather than waited for) and A dt;
+//   2. per chunk: Acs, the running sum of A dt from zero at the chunk
+//      start, in token order; per (token, angle): the increment tanh_pi dt,
+//      parked in sn;
+//   3. per angle: the serial wrap chain over the window, the angles parked
+//      in sn;
+//   4. per (token, angle): the sines and cosines.
+// Block 512 threads.
+template <typename TI>
+__device__ __forceinline__ void m3m_tok_dt_lead(
+    float& dt, float& lead, const TI* pr, const float* dt_bias, int nh, int heads, int h
+) {
+    float spin = __fadd_rn(to_f(pr[heads + h]), dt_bias[h]);
+    dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
+    lead = __fmul_rn(dt, mimo_sigmoid(-to_f(pr[heads + 2 * nh + h])));
+}
+
 template <typename TI>
 __device__ __forceinline__ void m3m_prep_body(
     float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,
@@ -114,53 +129,99 @@ __device__ __forceinline__ void m3m_prep_body(
     const TI* __restrict__ proj, long long ld_proj, const float* __restrict__ dt_bias,
     int seq, int nh, int heads, int ang_col, int na, float a_floor
 ) {
+    constexpr int AB = 32;
     const int b = blockIdx.x;
     const int h = blockIdx.y;
     const long long bh = (long long)b * nh + h;
-    if (threadIdx.x == 0) {
-        float acs = 0.0f, prev_gamma = 0.0f;
-        for (int t = 0; t < seq; t++) {
-            const long long row = (long long)b * seq + t;
-            const TI* pr = proj + row * ld_proj;
-            float dd_a = to_f(pr[heads + nh + h]);
-            float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
-                                    : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
-            float a = -ht;
-            a = a > -a_floor ? -a_floor : a;
-            float spin = __fadd_rn(to_f(pr[heads + h]), dt_bias[h]);
-            float dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
-            float trap = to_f(pr[heads + 2 * nh + h]);
-            float lam = mimo_sigmoid(trap);
-            float lam_c = mimo_sigmoid(-trap);
-            float gamma = __fmul_rn(lam, dt);
-            float lead = __fmul_rn(dt, lam_c);
-            if (t % M3M_CHUNK == 0) acs = 0.0f;
-            acs = __fadd_rn(acs, __fmul_rn(a, dt));
-            float* c = coef + (row * nh + h) * 4;
-            c[0] = dt;
-            c[1] = gamma;
-            c[3] = acs;
-            if (t == 0) e0[bh] = lead;
-            else coef[((row - 1) * nh + h) * 4 + 2] = __fadd_rn(prev_gamma, lead);
-            prev_gamma = gamma;
+    const long long row0 = (long long)b * seq;
+    const long long cstr = (long long)nh * 4;
+    const long long astr = (long long)nh * na;
+    float* const c_bh = coef + (row0 * nh + h) * 4;
+    float* const sn_bh = sn + (row0 * nh + h) * na;
+    float* const cs_bh = cs + (row0 * nh + h) * na;
+    for (int t = threadIdx.x; t < seq; t += blockDim.x) {
+        const TI* pr = proj + (row0 + t) * ld_proj;
+        float dd_a = to_f(pr[heads + nh + h]);
+        float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
+                                : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
+        float a = -ht;
+        a = a > -a_floor ? -a_floor : a;
+        float dt, lead;
+        m3m_tok_dt_lead(dt, lead, pr, dt_bias, nh, heads, h);
+        float gamma = __fmul_rn(mimo_sigmoid(to_f(pr[heads + 2 * nh + h])), dt);
+        float scale = gamma;
+        if (t + 1 < seq) {
+            float dt_next, lead_next;
+            m3m_tok_dt_lead(dt_next, lead_next, pr + ld_proj, dt_bias, nh, heads, h);
+            scale = __fadd_rn(gamma, lead_next);
         }
-        coef[(((long long)b * seq + seq - 1) * nh + h) * 4 + 2] = prev_gamma;
+        float* c = c_bh + t * cstr;
+        c[0] = dt;
+        c[1] = gamma;
+        c[2] = scale;
+        c[3] = __fmul_rn(a, dt);
+        if (t == 0) e0[bh] = lead;
     }
     __syncthreads();
+    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
+    for (int ch = threadIdx.x; ch < nc; ch += blockDim.x) {
+        const int t0 = ch * M3M_CHUNK;
+        const int t1 = min(seq, t0 + M3M_CHUNK);
+        float acs = 0.0f;
+        for (int t = t0; t < t1; t += 8) {
+            float v[8];
+#pragma unroll
+            for (int i = 0; i < 8; i++) v[i] = t + i < t1 ? c_bh[(t + i) * cstr + 3] : 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+                if (t + i < t1) {
+                    acs = __fadd_rn(acs, v[i]);
+                    c_bh[(t + i) * cstr + 3] = acs;
+                }
+            }
+        }
+    }
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    for (int t = warp; t < seq; t += nw) {
+        const TI* pr = proj + (row0 + t) * ld_proj;
+        const float dt = c_bh[t * cstr];
+        for (int a = lane; a < na; a += 32)
+            sn_bh[t * astr + a] = __fmul_rn(mimo_tanh_pi(pr, ang_col, a), dt);
+    }
+    __syncthreads();
+    // The chain loads the next AB increments while it walks the current ones,
+    // so a step waits on one add, not on memory.
     for (int a = threadIdx.x; a < na; a += blockDim.x) {
         float theta = ang[bh * na + a];
-        for (int t = 0; t < seq; t++) {
-            const long long row = (long long)b * seq + t;
-            const TI* pr = proj + row * ld_proj;
-            const float dt = coef[(row * nh + h) * 4];
-            float tp = mimo_tanh_pi(pr, ang_col, a);
-            const double two_pi = 6.283185307179586;
-            double acc = (double)theta + (double)__fmul_rn(tp, dt);
-            acc -= two_pi * floor(acc / two_pi);
-            theta = (float)acc;
-            sincosf(theta, &sn[(row * nh + h) * na + a], &cs[(row * nh + h) * na + a]);
+        float* col = sn_bh + a;
+        float cur[AB], nxt[AB];
+#pragma unroll
+        for (int i = 0; i < AB; i++) cur[i] = i < seq ? col[i * astr] : 0.0f;
+        for (int t0 = 0; t0 < seq; t0 += AB) {
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                const int t = t0 + AB + i;
+                nxt[i] = t < seq ? col[t * astr] : 0.0f;
+            }
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                if (t0 + i < seq) {
+                    theta = mimo_wrap_add(theta, cur[i]);
+                    col[(t0 + i) * astr] = theta;
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < AB; i++) cur[i] = nxt[i];
         }
         ang[bh * na + a] = theta;
+    }
+    __syncthreads();
+    for (int t = warp; t < seq; t += nw) {
+        for (int a = lane; a < na; a += 32) {
+            const long long at = t * astr + a;
+            const float th = sn_bh[at];
+            sincosf(th, &sn_bh[at], &cs_bh[at]);
+        }
     }
 }
 
@@ -269,6 +330,134 @@ extern "C" __global__ void NAME(                                                
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state, float)
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state_bf16, __nv_bfloat16)
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state_f16, __half)
+
+// The same contributions as register tiles: a warp takes 4 channels p and a
+// lane the state indices lane + 32 j of the block's tile (JC of them), so a
+// step of (s, r) loads one float4 of u and JC keys for 4 JC products. The
+// block computes u = (w_s x_s[p]) Psi_r[p] and the rotated keys once and
+// stages them `sl` tokens at a time: ut [sl R][P4] (P rounded up to 4, the
+// pad zero), kt [sl R][32 JC], wt [sl]. Every output keeps the chain above,
+// acc = 0 then fma(u, k, acc) over s ascending and r ascending, across the
+// passes. Grid (B * nc, H, ceil(N / (32 JC))), block 32 ceil(P / 4)
+// threads.
+template <int JC, typename TI>
+__device__ __forceinline__ void m3m_chunk_state_tiles_body(
+    float* __restrict__ contrib,
+    const TI* __restrict__ proj, long long ld_proj,
+    const float* __restrict__ bn, const float* __restrict__ coef,
+    const float* __restrict__ sn, const float* __restrict__ cs,
+    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl
+) {
+    extern __shared__ float4 m3m_sm4[];
+    constexpr int NT = 32 * JC;
+    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
+    const long long bc = blockIdx.x;
+    const int h = blockIdx.y;
+    const int n0 = blockIdx.z * NT;
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M3M_CHUNK;
+    const int lc = min(M3M_CHUNK, seq - t0);
+    const int g = h / (nh / ng);
+    const int di = nh * hd;
+    const int rgn = rank * ng * ds;
+    const int half = ds / 2;
+    const int p4 = (hd + 3) & ~3;
+    float* ut = reinterpret_cast<float*>(m3m_sm4);  // [sl R][p4]
+    float* kt = ut + sl * rank * p4;                // [sl R][NT]
+    float* wt = kt + sl * rank * NT;                // [sl]
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5, nw = blockDim.x >> 5;
+    const int p0 = 4 * warp;
+    const float acs_last = coef[(((b * seq + t0 + lc - 1) * nh) + h) * 4 + 3];
+    float acc[4][JC];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
+    }
+    for (int s0 = 0; s0 < lc; s0 += sl) {
+        const int sn_ = min(sl, lc - s0);
+        if (s0 > 0) __syncthreads();
+        for (int s = tid; s < sn_; s += blockDim.x) {
+            const float* cf = coef + ((b * seq + t0 + s0 + s) * nh + h) * 4;
+            wt[s] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+        }
+        for (int sr = warp; sr < sn_ * rank; sr += nw) {
+            const int r = sr % rank;
+            const long long row = b * seq + t0 + s0 + sr / rank;
+            const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
+            const float* bias = b_bias + ((long long)h * rank + r) * ds;
+            const float* sr_ = sn + (row * nh + h) * na;
+            const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll 4
+            for (int ni = lane; ni < NT; ni += 32) {
+                const int n = n0 + ni;
+                kt[sr * NT + ni] = n < ds ? m3m_rot(src, bias, n, half, na, sr_, cr_) : 0.0f;
+            }
+        }
+        __syncthreads();
+        for (int sr = warp; sr < sn_ * rank; sr += nw) {
+            const int s = sr / rank, r = sr % rank;
+            const TI* xr = proj + (b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd;
+            const float* mx = mimo_x + ((long long)h * rank + r) * hd;
+            const float w = wt[s];
+#pragma unroll 4
+            for (int pp = lane; pp < p4; pp += 32)
+                ut[sr * p4 + pp] = pp < hd ? __fmul_rn(__fmul_rn(w, to_f(xr[pp])), mx[pp]) : 0.0f;
+        }
+        __syncthreads();
+        const int kd = sn_ * rank;
+        for (int k = 0; k < kd; k++) {
+            const float4 lv = *reinterpret_cast<const float4*>(ut + k * p4 + p0);
+            float rv[JC];
+#pragma unroll
+            for (int j = 0; j < JC; j++) rv[j] = kt[k * NT + lane + 32 * j];
+#pragma unroll
+            for (int j = 0; j < JC; j++) {
+                acc[0][j] = __fmaf_rn(lv.x, rv[j], acc[0][j]);
+                acc[1][j] = __fmaf_rn(lv.y, rv[j], acc[1][j]);
+                acc[2][j] = __fmaf_rn(lv.z, rv[j], acc[2][j]);
+                acc[3][j] = __fmaf_rn(lv.w, rv[j], acc[3][j]);
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const int p = p0 + i;
+        if (p >= hd) continue;
+#pragma unroll
+        for (int j = 0; j < JC; j++) {
+            const int n = n0 + lane + 32 * j;
+            if (n < ds) contrib[((bc * nh + h) * hd + p) * (long long)ds + n] = acc[i][j];
+        }
+    }
+}
+
+#define DEFINE_M3M_CHUNK_STATE_TILES(NAME, TI)                                  \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ contrib,                                                \
+    const TI* __restrict__ proj, long long ld_proj,                             \
+    const float* __restrict__ bn, const float* __restrict__ coef,               \
+    const float* __restrict__ sn, const float* __restrict__ cs,                 \
+    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,         \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl   \
+) {                                                                             \
+    if (jc == 1)                                                                \
+        m3m_chunk_state_tiles_body<1, TI>(contrib, proj, ld_proj, bn, coef, sn, \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+    else if (jc == 2)                                                           \
+        m3m_chunk_state_tiles_body<2, TI>(contrib, proj, ld_proj, bn, coef, sn, \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+    else                                                                        \
+        m3m_chunk_state_tiles_body<4, TI>(contrib, proj, ld_proj, bn, coef, sn, \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+}
+DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles, float)
+DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles_bf16, __nv_bfloat16)
+DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles_f16, __half)
 
 // The states entering the chunks: S = S_init + e0 sum_r (Psi_r v) kp_r
 // (r ascending), then per chunk enter[c] = S, S = e^Acs_last S + C_c. The
@@ -482,6 +671,302 @@ extern "C" __global__ void NAME(                                                
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan, float)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_f16, __half)
+
+// The same outputs as three register-tile products over the block's query
+// tile of `tq` tokens. Rows are (t, r), t of the tile and r ascending; a warp
+// takes 8 rows, a lane the channels p = lane + 32 j (JP of them):
+//   inter: y = sum_n q[n][row] S_enter[p][n], then y *= e^Acs_t;
+//   G:     G[row][col] = sum_n q[n][row] k[n][col] for the key tile's
+//          columns col = (s, r'), then Gw = G w(t, s);
+//   GU:    y += Gw[col][row] u[col][p], u = Psi_r' x_s, col ascending,
+//          skipping s > t;
+// then y = fma(D, u_t, y), the readouts, and the gate over r per (t, p).
+// Every output keeps the kernel above's chains: n ascending from 0 for the
+// inter term and for G, then (s, r') ascending, each term
+// fma(fmul(G, w), fmul(Psi, x), y). The keys of a tile of `kt` tokens are
+// rotated once per query tile and staged `nk` state indices at a time; the
+// inter pass streams the entering state through the same space.
+// Shared memory: q [N][QR + 4], keys [nk][68], u [64][32 JP],
+// Gw [64][QR + 4], w [tq][kt], the chunk's Acs, scale and gamma [3][64];
+// QR = tq R rounded up to 8. The heaviest query tile (the last) runs first.
+// Grid (B * nc, H, ceil(64 / tq)), block 4 QR threads.
+template <typename TI, int JP>
+__device__ __forceinline__ void m3m_chunk_scan_tiles_body(
+    TI* __restrict__ out, float* __restrict__ y_out,
+    const TI* __restrict__ proj, long long ld_proj,
+    const float* __restrict__ bn, const float* __restrict__ cn,
+    const float* __restrict__ coef,
+    const float* __restrict__ sn, const float* __restrict__ cs,
+    const float* __restrict__ enter,
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,
+    const float* __restrict__ D,
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
+    const float* __restrict__ mimo_o,
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt, int nk
+) {
+    extern __shared__ float4 m3m_sm4[];
+    constexpr int PP = 32 * JP;
+    constexpr int KC = 64;
+    constexpr int KCS = KC + 4;
+    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
+    const long long bc = blockIdx.x;
+    const int h = blockIdx.y;
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M3M_CHUNK;
+    const int lc = min(M3M_CHUNK, seq - t0);
+    const int nz = (M3M_CHUNK + tq - 1) / tq;
+    const int tile0 = (nz - 1 - (int)blockIdx.z) * tq;
+    if (tile0 >= lc) return;
+    const int tn = min(tq, lc - tile0);
+    const int g = h / (nh / ng);
+    const int di = nh * hd;
+    const int rgn = rank * ng * ds;
+    const int half = ds / 2;
+    const int rows = tn * rank;
+    const int qr = (tq * rank + 7) & ~7;
+    const int qrs = qr + 4;
+    float* qt = reinterpret_cast<float*>(m3m_sm4);  // [N][qrs]
+    float* rb = qt + ds * qrs;
+    float* kts = rb;                                 // [nk][KCS]
+    float* ut = kts + nk * KCS;                      // [KC][PP]
+    float* gw = ut + KC * PP;                        // [KC][qrs]
+    float* wts = gw + KC * qrs;                      // [tq][kt]
+    float* sc = wts + tq * kt;                       // Acs, scale, gamma [3][64]
+    const int rb_floats = nk * KCS + KC * PP + KC * qrs + tq * kt;
+    float* stg = rb;                                 // inter: [nsp][PP + 1]
+    float* yg = rb;                                  // gate: [qr][PP]
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int rw0 = 8 * (tid >> 5);
+    for (int s = tid; s < lc; s += blockDim.x) {
+        const float* cf = coef + ((b * seq + t0 + s) * nh + h) * 4;
+        sc[s] = cf[3];
+        sc[M3M_CHUNK + s] = cf[2];
+        sc[2 * M3M_CHUNK + s] = cf[1];
+    }
+    const int warp = tid >> 5, nw = blockDim.x >> 5;
+    for (int rw = warp; rw < qr; rw += nw) {
+        if (rw < rows) {
+            const int r = rw % rank;
+            const long long row = b * seq + t0 + tile0 + rw / rank;
+            const float* src = cn + row * rgn + ((long long)r * ng + g) * ds;
+            const float* bias = c_bias + ((long long)h * rank + r) * ds;
+            const float* sr_ = sn + (row * nh + h) * na;
+            const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll 4
+            for (int n = lane; n < ds; n += 32)
+                qt[n * qrs + rw] = m3m_rot(src, bias, n, half, na, sr_, cr_);
+        } else {
+            for (int n = lane; n < ds; n += 32) qt[n * qrs + rw] = 0.0f;
+        }
+    }
+    int trow[8];
+    int tmax = -1;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        const int rw = rw0 + i;
+        trow[i] = rw < rows ? tile0 + rw / rank : -1;
+        tmax = max(tmax, trow[i]);
+    }
+    float y[8][JP];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+#pragma unroll
+        for (int j = 0; j < JP; j++) y[i][j] = 0.0f;
+    }
+    // The inter term, the entering state streamed `nsp` indices at a time.
+    const float* sp = enter + (bc * nh + h) * (long long)hd * ds;
+    const int nsp = min(ds, rb_floats / (PP + 1));
+    for (int m0 = 0; m0 < ds; m0 += nsp) {
+        const int mm = min(nsp, ds - m0);
+        __syncthreads();
+        for (int p = warp; p < PP; p += nw) {
+            const float* row = sp + (long long)p * ds + m0;
+#pragma unroll 4
+            for (int n = lane; n < mm; n += 32) stg[n * (PP + 1) + p] = p < hd ? row[n] : 0.0f;
+        }
+        __syncthreads();
+        for (int n = 0; n < mm; n++) {
+            const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
+            const float4 q1 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0 + 4);
+            const float qv[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+            float sv[JP];
+#pragma unroll
+            for (int j = 0; j < JP; j++) sv[j] = stg[n * (PP + 1) + lane + 32 * j];
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+#pragma unroll
+                for (int j = 0; j < JP; j++) y[i][j] = __fmaf_rn(qv[i], sv[j], y[i][j]);
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (trow[i] < 0) continue;
+        const float ef = mimo_exp(sc[trow[i]]);
+#pragma unroll
+        for (int j = 0; j < JP; j++) y[i][j] = __fmul_rn(y[i][j], ef);
+    }
+    const int s_end = tile0 + tn;
+    for (int s0 = 0; s0 < s_end; s0 += kt) {
+        const int cols = min(kt, s_end - s0) * rank;
+        __syncthreads();
+        for (int col = warp; col < KC; col += nw) {
+            if (col < cols) {
+                const TI* xr = proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di
+                    + (long long)h * hd;
+                const float* mx = mimo_x + ((long long)h * rank + col % rank) * hd;
+#pragma unroll
+                for (int j = 0; j < JP; j++) {
+                    const int p = lane + 32 * j;
+                    ut[col * PP + p] = p < hd ? __fmul_rn(mx[p], to_f(xr[p])) : 0.0f;
+                }
+            } else {
+#pragma unroll
+                for (int j = 0; j < JP; j++) ut[col * PP + lane + 32 * j] = 0.0f;
+            }
+        }
+        for (int i = tid; i < tq * kt; i += blockDim.x) {
+            const int t = tile0 + i / kt, s = s0 + i % kt;
+            float w = 0.0f;
+            if (t < s_end && s <= t)
+                w = s < t ? __fmul_rn(mimo_exp(fminf(__fsub_rn(sc[t], sc[s]), 0.0f)),
+                                      sc[M3M_CHUNK + s])
+                          : sc[2 * M3M_CHUNK + t];
+            wts[i] = w;
+        }
+        float ga[8][2];
+#pragma unroll
+        for (int i = 0; i < 8; i++) ga[i][0] = ga[i][1] = 0.0f;
+        for (int m0 = 0; m0 < ds; m0 += nk) {
+            const int mm = min(nk, ds - m0);
+            if (m0 > 0) __syncthreads();
+            for (int col = warp; col < KC; col += nw) {
+                if (col < cols) {
+                    const int r = col % rank;
+                    const long long row = b * seq + t0 + s0 + col / rank;
+                    const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
+                    const float* bias = b_bias + ((long long)h * rank + r) * ds;
+                    const float* sr_ = sn + (row * nh + h) * na;
+                    const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll 4
+                    for (int n = lane; n < mm; n += 32)
+                        kts[n * KCS + col] = m3m_rot(src, bias, m0 + n, half, na, sr_, cr_);
+                } else {
+                    for (int n = lane; n < mm; n += 32) kts[n * KCS + col] = 0.0f;
+                }
+            }
+            __syncthreads();
+            for (int n = 0; n < mm; n++) {
+                const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
+                const float4 q1 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0 + 4);
+                const float qv[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+                const float k0 = kts[n * KCS + lane], k1 = kts[n * KCS + lane + 32];
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    ga[i][0] = __fmaf_rn(qv[i], k0, ga[i][0]);
+                    ga[i][1] = __fmaf_rn(qv[i], k1, ga[i][1]);
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+#pragma unroll
+            for (int j = 0; j < 2; j++) {
+                const int col = lane + 32 * j;
+                float v = 0.0f;
+                if (trow[i] >= 0 && col < cols)
+                    v = __fmul_rn(ga[i][j], wts[(trow[i] - tile0) * kt + col / rank]);
+                gw[col * qrs + rw0 + i] = v;
+            }
+        }
+        __syncthreads();
+        for (int k = 0; k < cols; k++) {
+            const int s = s0 + k / rank;
+            if (s > tmax) break;
+            const float4 g0 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0);
+            const float4 g1 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0 + 4);
+            const float gv[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w};
+            float uv[JP];
+#pragma unroll
+            for (int j = 0; j < JP; j++) uv[j] = ut[k * PP + lane + 32 * j];
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+                if (s <= trow[i]) {
+#pragma unroll
+                    for (int j = 0; j < JP; j++) y[i][j] = __fmaf_rn(gv[i], uv[j], y[i][j]);
+                }
+            }
+        }
+    }
+    __syncthreads();
+    const float dval = D[h];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (trow[i] < 0) continue;
+        const int rw = rw0 + i, r = rw % rank;
+        const long long row_t = b * seq + t0 + trow[i];
+#pragma unroll
+        for (int j = 0; j < JP; j++) {
+            const int p = lane + 32 * j;
+            if (p >= hd) continue;
+            const float xv = to_f(proj[row_t * ld_proj + di + (long long)h * hd + p]);
+            const float u_t = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], xv);
+            const float v = __fmaf_rn(dval, u_t, y[i][j]);
+            if (y_out != nullptr) y_out[((row_t * nh + h) * rank + r) * hd + p] = v;
+            yg[rw * PP + p] = v;
+        }
+    }
+    __syncthreads();
+    for (int e = warp * 32 + lane; e < tn * PP; e += blockDim.x) {
+        const int tl = e / PP, p = e % PP;
+        if (p >= hd) continue;
+        const long long row_t = b * seq + t0 + tile0 + tl;
+        const float z = to_f(proj[row_t * ld_proj + (long long)h * hd + p]);
+        float o = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            const float v = __fmul_rn(mimo_z[((long long)h * rank + r) * hd + p], z);
+            const float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
+            const float term = __fmul_rn(__fmul_rn(yg[(tl * rank + r) * PP + p], sg),
+                                         mimo_o[((long long)h * rank + r) * hd + p]);
+            o = r == 0 ? term : __fadd_rn(o, term);
+        }
+        mimo_put(&out[row_t * di + (long long)h * hd + p], o);
+    }
+}
+
+#define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI)                                   \
+extern "C" __global__ void NAME(                                                \
+    TI* __restrict__ out, float* __restrict__ y_out,                            \
+    const TI* __restrict__ proj, long long ld_proj,                             \
+    const float* __restrict__ bn, const float* __restrict__ cn,                 \
+    const float* __restrict__ coef,                                             \
+    const float* __restrict__ sn, const float* __restrict__ cs,                 \
+    const float* __restrict__ enter,                                            \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
+    const float* __restrict__ D,                                                \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
+    const float* __restrict__ mimo_o,                                           \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt,  \
+    int nk                                                                      \
+) {                                                                             \
+    if (hd <= 32)                                                               \
+        m3m_chunk_scan_tiles_body<TI, 1>(out, y_out, proj, ld_proj, bn, cn,     \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
+    else if (hd <= 64)                                                          \
+        m3m_chunk_scan_tiles_body<TI, 2>(out, y_out, proj, ld_proj, bn, cn,     \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
+    else                                                                        \
+        m3m_chunk_scan_tiles_body<TI, 4>(out, y_out, proj, ld_proj, bn, cn,     \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
+}
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles, float)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_bf16, __nv_bfloat16)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_f16, __half)
 
 // The carried keys and input after the window: the last token's rotated
 // biased keys and its raw input. Grid (B, H), threads striding R * N + P.
