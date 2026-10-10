@@ -4,7 +4,9 @@
 //! training steps, the sequential scan against the chunked one, in f32
 //! and bf16, at the released models' head shapes.
 //!
-//! Run: `cargo bench --bench m2_mimo_gpu_bench --features cuda`
+//! Run: `cargo bench --bench m2_mimo_gpu_bench --features cuda`; a first
+//! argument `m2` or `mimo` picks a model, a second `prefill`, `decode` or
+//! `train` one part of it.
 //!
 //! Every time is wall clock around the public call, so it includes the
 //! host upload of the input and the download of the rows; both scans pay
@@ -65,7 +67,12 @@ fn dtypes() -> [WeightDtype; 2] {
     [WeightDtype::F32, WeightDtype::Bf16]
 }
 
-fn mamba2(device: &GpuDevice) {
+/// Whether the part the command line picked (none: every part) is `name`.
+fn wants(part: &str, name: &str) -> bool {
+    part.is_empty() || part == name
+}
+
+fn mamba2(device: &GpuDevice, part: &str) {
     // mamba2-130m's mixer: 24 heads of 64 x 128, one group.
     let base = Mamba2Config {
         d_model: 768,
@@ -78,7 +85,7 @@ fn mamba2(device: &GpuDevice) {
     let w = Mamba2Weights::init(&base, input_dim, 7);
     println!("--- Mamba-2, d_model 768, 24 heads 64x128, {LAYERS} layers ---");
     println!("prompt windows (tokens/s):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "prefill")) {
         for &(b, t) in &PREFILL {
             let mut line = format!("  {dtype:?} B={b} T={t}:");
             for (mode, name) in modes() {
@@ -107,24 +114,28 @@ fn mamba2(device: &GpuDevice) {
         }
     }
     println!("decode steps (us/step):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
-            let eng =
+            let mut eng =
                 Mamba2GpuInferenceEngine::new_with_dtype(device, &w, (base, input_dim, b), dtype)
                     .unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut sc = eng.alloc_scratch().unwrap();
             let input = det(b * input_dim, 12);
             let mut out = vec![0f32; b * base.d_model];
-            let us = median_us(20, 200, || {
+            let eager = median_us(20, 200, || {
                 eng.step(&input, &mut out, &mut st, &mut sc).unwrap();
             });
-            println!("  {dtype:?} B={b}: {us:>8.1}");
+            unsafe { eng.capture_graph(&mut st, &mut sc) }.unwrap();
+            let graph = median_us(20, 200, || {
+                eng.step(&input, &mut out, &mut st, &mut sc).unwrap();
+            });
+            println!("  {dtype:?} B={b}: eager {eager:>8.1}  graph {graph:>8.1}");
         }
     }
     let (b, t) = TRAIN;
     println!("training steps, B={b} T={t}, forward + backward (ms/step):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "train")) {
         let mut line = format!("  {dtype:?}:");
         for (mode, name) in modes() {
             let cfg = Mamba2Config {
@@ -149,7 +160,7 @@ fn mamba2(device: &GpuDevice) {
     println!();
 }
 
-fn mimo(device: &GpuDevice) {
+fn mimo(device: &GpuDevice, part: &str) {
     // The released MIMO mixer: heads of 64 x 128 at rank 4.
     let base = Mamba3MimoConfig {
         d_model: 768,
@@ -163,7 +174,7 @@ fn mimo(device: &GpuDevice) {
     let w = Mamba3MimoWeights::init(&base, input_dim, 7);
     println!("--- Mamba-3 MIMO, d_model 768, 24 heads 64x128, rank 4, {LAYERS} layers ---");
     println!("prompt windows (tokens/s):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "prefill")) {
         for &(b, t) in &PREFILL {
             let mut line = format!("  {dtype:?} B={b} T={t}:");
             for (mode, name) in modes() {
@@ -186,22 +197,27 @@ fn mimo(device: &GpuDevice) {
         }
     }
     println!("decode steps (us/step):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
-            let eng = Mamba3MimoGpuEngine::new(device, &w, (base, input_dim, b), dtype).unwrap();
+            let mut eng =
+                Mamba3MimoGpuEngine::new(device, &w, (base, input_dim, b), dtype).unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut win = eng.alloc_window(1).unwrap();
             let input = det(b * input_dim, 12);
             let mut out = vec![0f32; b * base.d_model];
-            let us = median_us(20, 200, || {
+            let eager = median_us(20, 200, || {
                 eng.run(&input, &mut out, &mut st, &mut win).unwrap();
             });
-            println!("  {dtype:?} B={b}: {us:>8.1}");
+            unsafe { eng.capture_graph(&mut st, &mut win) }.unwrap();
+            let graph = median_us(20, 200, || {
+                eng.run(&input, &mut out, &mut st, &mut win).unwrap();
+            });
+            println!("  {dtype:?} B={b}: eager {eager:>8.1}  graph {graph:>8.1}");
         }
     }
     let (b, t) = TRAIN;
     println!("training steps, B={b} T={t}, forward + backward (ms/step):");
-    for dtype in dtypes() {
+    for dtype in dtypes().into_iter().filter(|_| wants(part, "train")) {
         let mut line = format!("  {dtype:?}:");
         for (mode, name) in modes() {
             let cfg = Mamba3MimoConfig {
@@ -227,15 +243,18 @@ fn mimo(device: &GpuDevice) {
 
 fn main() {
     let device = GpuDevice::new(0).unwrap();
-    // cargo bench passes `--bench`; the first other argument picks a model.
-    let only = std::env::args()
+    // cargo bench passes `--bench`; the first other argument picks a model,
+    // the second a part.
+    let picks: Vec<String> = std::env::args()
         .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .unwrap_or_default();
-    if only.is_empty() || only == "m2" {
-        mamba2(&device);
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+    let only = picks.first().map_or("", String::as_str);
+    let part = picks.get(1).map_or("", String::as_str);
+    if wants(only, "m2") {
+        mamba2(&device, part);
     }
-    if only.is_empty() || only == "mimo" {
-        mimo(&device);
+    if wants(only, "mimo") {
+        mimo(&device, part);
     }
 }

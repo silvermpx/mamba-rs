@@ -649,3 +649,68 @@ fn m3_mimo_gpu_chunked_window_continues_a_carried_state() {
         );
     }
 }
+
+/// A captured decode graph replays the eager window's bits in every
+/// precision; a prompt window and another state still run eagerly beside
+/// it, and the replay continues the state they leave.
+#[test]
+fn m3_mimo_gpu_graph_replay_is_the_eager_window() {
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let (batch, seq) = (3usize, 70usize);
+    let cfg = cases()[1].1;
+    let w = drawn(&cfg, input_dim, 31);
+    let dm = cfg.d_model;
+    let prompt = det(batch * seq * input_dim, 41, 1.0);
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
+        let eager = engine(&device, &w, (cfg, input_dim, batch), dtype);
+        let mut graphed = engine(&device, &w, (cfg, input_dim, batch), dtype);
+        let (mut est, mut gst) = (eager.alloc_state().unwrap(), graphed.alloc_state().unwrap());
+        let (mut ewin, mut gwin) = (
+            eager.alloc_window(1).unwrap(),
+            graphed.alloc_window(1).unwrap(),
+        );
+        let (mut epw, mut gpw) = (
+            eager.alloc_window(seq).unwrap(),
+            graphed.alloc_window(seq).unwrap(),
+        );
+        let (mut erows, mut grows) = (vec![0f32; batch * seq * dm], vec![0f32; batch * seq * dm]);
+        let (mut eo, mut go) = (vec![0f32; batch * dm], vec![0f32; batch * dm]);
+        assert!(
+            unsafe { graphed.capture_graph(&mut gst, &mut gwin) }.is_err(),
+            "{dtype:?}: a capture needs an eager run first"
+        );
+        eager.run(&prompt, &mut erows, &mut est, &mut epw).unwrap();
+        graphed
+            .run(&prompt, &mut grows, &mut gst, &mut gpw)
+            .unwrap();
+        for t in 0..12u64 {
+            let x = det(batch * input_dim, 500 + t, 1.0);
+            eager.run(&x, &mut eo, &mut est, &mut ewin).unwrap();
+            graphed.run(&x, &mut go, &mut gst, &mut gwin).unwrap();
+            assert_eq!(eo, go, "{dtype:?} step {t}");
+            if t == 0 {
+                unsafe { graphed.capture_graph(&mut gst, &mut gwin) }.unwrap();
+                assert!(graphed.has_graph());
+            }
+            if t == 6 {
+                eager.run(&prompt, &mut erows, &mut est, &mut epw).unwrap();
+                graphed
+                    .run(&prompt, &mut grows, &mut gst, &mut gpw)
+                    .unwrap();
+                assert_eq!(erows, grows, "{dtype:?}: prompt window between replays");
+            }
+        }
+        let x = det(batch * input_dim, 600, 1.0);
+        let (mut eother, mut gother) =
+            (eager.alloc_state().unwrap(), graphed.alloc_state().unwrap());
+        eager.run(&x, &mut eo, &mut eother, &mut ewin).unwrap();
+        graphed.run(&x, &mut go, &mut gother, &mut gwin).unwrap();
+        assert_eq!(eo, go, "{dtype:?}: another state runs eagerly");
+    }
+}

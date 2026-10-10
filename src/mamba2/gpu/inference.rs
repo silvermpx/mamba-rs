@@ -9,6 +9,8 @@
 //! dtype; the residual stream, the scan output, the states and every small
 //! weight stay f32.
 
+use std::cell::Cell;
+
 use cudarc::driver::PushKernelArg;
 
 use cudarc::driver::LaunchConfig;
@@ -23,6 +25,12 @@ use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    with_validated_gemm_graph_launch,
+};
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
@@ -630,6 +638,32 @@ pub struct Mamba2GpuInferenceEngine {
     layers: Vec<GpuMamba2Layer>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
+    /// The decode step as one CUDA graph, once [`Self::capture_graph`] ran.
+    graph: Option<(cudarc::driver::CudaGraph, CapturedStep)>,
+    /// The GEMM inventory of the last eager step: capture compares the
+    /// graph's GEMMs against it, so a capture must follow an eager step.
+    eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
+}
+
+/// What a captured decode graph baked in: the GEMM route and its resolved
+/// launches, and every device address the replay reuses.
+struct CapturedStep {
+    gemm_route: crate::mamba_ssm::gpu::context::GemmRoute,
+    gemm_plan: Option<CapturedGemmGraphPlan>,
+    /// The state's conv and SSM buffers, the scratch input row and the
+    /// final-norm rows the host reads back.
+    buffers: [u64; 4],
+    half_staging: u64,
+    bi_upcast: [u64; 3],
+}
+
+impl Drop for Mamba2GpuInferenceEngine {
+    fn drop(&mut self) {
+        // A replay may still be in flight on the stream: the graph is
+        // destroyed only after it finished.
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+    }
 }
 
 impl Mamba2GpuInferenceEngine {
@@ -727,6 +761,8 @@ impl Mamba2GpuInferenceEngine {
             layers,
             input_proj,
             norm_f_weight,
+            graph: None,
+            eager_gemm_manifest: Cell::new(None),
         })
     }
 
@@ -821,8 +857,20 @@ impl Mamba2GpuInferenceEngine {
         Self::check_host_len("step output", output.len(), b * self.cfg.d_model)?;
         Self::check_host_len("step scratch", scratch.input.len(), b * self.input_dim)?;
         self.check_state(state)?;
+        self.eager_gemm_manifest.set(None);
         scratch.input.upload(&self.ctx.stream, input)?;
-        self.step_kernels(state, scratch)?;
+        match &self.graph {
+            Some((graph, captured)) => self.replay(graph, captured, state, scratch)?,
+            None => {
+                if self.has_gemm_work() {
+                    prepare_inference_arch_rung(&self.ctx)?;
+                }
+                let manifest = self
+                    .ctx
+                    .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
+                self.eager_gemm_manifest.set(Some(manifest));
+            }
+        }
         self.ctx
             .stream
             .synchronize()
@@ -832,6 +880,112 @@ impl Mamba2GpuInferenceEngine {
             .stream
             .synchronize()
             .map_err(|e| format!("Mamba-2 step sync: {e:?}"))
+    }
+
+    /// Whether the step runs any GEMM: the input projection or a layer.
+    fn has_gemm_work(&self) -> bool {
+        self.batch != 0 && (self.input_proj.is_some() || self.cfg.n_layers != 0)
+    }
+
+    fn step_buffers(state: &Mamba2GpuState, scratch: &Mamba2GpuScratch) -> [u64; 4] {
+        [
+            state.conv.cached_ptr(),
+            state.ssm.cached_ptr(),
+            scratch.input.cached_ptr(),
+            scratch.final_out.cached_ptr(),
+        ]
+    }
+
+    /// Capture the decode step as one CUDA graph; later [`Self::step`]
+    /// calls replay it instead of launching every kernel.
+    ///
+    /// Takes the GEMM inventory of the eager step that must precede it, on
+    /// these same buffers. The replay refuses another state or scratch, a
+    /// changed GEMM route, or moved GEMM staging. After capture the
+    /// context's GEMM staging can no longer grow: run the longest prefill
+    /// window before capturing.
+    ///
+    /// # Safety
+    ///
+    /// `state` and `scratch` must stay allocated, and the engine's weights,
+    /// kernels and context unchanged, for as long as the graph replays.
+    pub unsafe fn capture_graph(
+        &mut self,
+        state: &mut Mamba2GpuState,
+        scratch: &mut Mamba2GpuScratch,
+    ) -> Result<(), String> {
+        self.check_state(state)?;
+        let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
+            "Mamba-2 graph capture needs a successful eager step first".to_string()
+        })?;
+        self.ctx.presize_bi_scratch()?;
+        let gemm_route = self.ctx.gemm_route();
+        let buffers = Self::step_buffers(state, scratch);
+        self.ctx.freeze_graph_scratch();
+        let (graph, gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(&self.ctx, manifest.route_capacity, &manifest, || {
+                self.step_kernels(state, scratch)
+            })
+        }?;
+        require_deterministic_gemm_graph_plan(
+            &self.ctx,
+            self.has_gemm_work(),
+            gemm_plan.as_ref(),
+            "Mamba-2 graph capture",
+        )?;
+        let captured = CapturedStep {
+            gemm_route,
+            gemm_plan,
+            buffers,
+            half_staging: self.ctx.half_staging_ptr(),
+            bi_upcast: self.ctx.bi_upcast_scratch_ptrs(),
+        };
+        self.graph = Some((graph, captured));
+        self.ctx.note_graph_capture();
+        Ok(())
+    }
+
+    /// Whether the decode step replays a captured graph.
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Drop the captured graph: the next step runs eagerly and can be
+    /// captured again, on other buffers too.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("Mamba-2 graph clear sync: {e:?}"))?;
+        self.graph = None;
+        Ok(())
+    }
+
+    fn replay(
+        &self,
+        graph: &cudarc::driver::CudaGraph,
+        captured: &CapturedStep,
+        state: &Mamba2GpuState,
+        scratch: &Mamba2GpuScratch,
+    ) -> Result<(), String> {
+        const LABEL: &str = "Mamba-2 graph replay";
+        if captured.gemm_route != self.ctx.gemm_route() {
+            return Err(format!("{LABEL}: the GEMM route changed since capture"));
+        }
+        if captured.buffers != Self::step_buffers(state, scratch) {
+            return Err(format!(
+                "{LABEL}: the graph runs on the state and scratch it was captured with"
+            ));
+        }
+        self.ctx
+            .ensure_graph_scratch_ptrs(captured.half_staging, captured.bi_upcast, LABEL)?;
+        with_validated_gemm_graph_launch(
+            &self.ctx,
+            self.has_gemm_work(),
+            captured.gemm_plan.as_ref(),
+            LABEL,
+            || graph.launch().map_err(|e| format!("{LABEL}: {e:?}")),
+        )
     }
 
     /// The input rows into `temporal`: a copy for the identity projection,

@@ -456,3 +456,80 @@ fn m2_gpu_sequential_prefill_is_decode_steps() {
         assert!(e < TOL, "{label}: rel_l2 {e:.3e}");
     }
 }
+
+/// A captured decode graph replays the eager step's bits in every
+/// precision, continues a prefill window run between replays, and refuses a
+/// state it was not captured with until the graph is cleared.
+#[test]
+fn m2_gpu_graph_replay_is_the_eager_step() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let (batch, seq) = (3usize, 70usize);
+    let cfg = cases()[1].1;
+    let w = drawn(&cfg, input_dim, 29);
+    let dm = cfg.d_model;
+    let prompt = det(batch * seq * input_dim, 40, 1.0);
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
+        let new = || {
+            Mamba2GpuInferenceEngine::new_with_dtype(&device, &w, (cfg, input_dim, batch), dtype)
+                .unwrap()
+        };
+        let (eager, mut graphed) = (new(), new());
+        let (mut est, mut esc) = (eager.alloc_state().unwrap(), eager.alloc_scratch().unwrap());
+        let (mut gst, mut gsc) = (
+            graphed.alloc_state().unwrap(),
+            graphed.alloc_scratch().unwrap(),
+        );
+        let mut epf = eager.alloc_prefill(seq).unwrap();
+        let mut gpf = graphed.alloc_prefill(seq).unwrap();
+        let (mut erows, mut grows) = (vec![0f32; batch * seq * dm], vec![0f32; batch * seq * dm]);
+        let (mut eo, mut go) = (vec![0f32; batch * dm], vec![0f32; batch * dm]);
+        assert!(
+            unsafe { graphed.capture_graph(&mut gst, &mut gsc) }.is_err(),
+            "{dtype:?}: a capture needs an eager step first"
+        );
+        eager
+            .prefill(&prompt, &mut erows, &mut est, &mut epf)
+            .unwrap();
+        graphed
+            .prefill(&prompt, &mut grows, &mut gst, &mut gpf)
+            .unwrap();
+        for t in 0..12u64 {
+            let x = det(batch * input_dim, 500 + t, 1.0);
+            eager.step(&x, &mut eo, &mut est, &mut esc).unwrap();
+            graphed.step(&x, &mut go, &mut gst, &mut gsc).unwrap();
+            assert_eq!(eo, go, "{dtype:?} step {t}");
+            if t == 0 {
+                unsafe { graphed.capture_graph(&mut gst, &mut gsc) }.unwrap();
+                assert!(graphed.has_graph());
+            }
+            if t == 6 {
+                eager
+                    .prefill(&prompt, &mut erows, &mut est, &mut epf)
+                    .unwrap();
+                graphed
+                    .prefill(&prompt, &mut grows, &mut gst, &mut gpf)
+                    .unwrap();
+                assert_eq!(erows, grows, "{dtype:?}: prefill between replays");
+            }
+        }
+        let x = det(batch * input_dim, 600, 1.0);
+        let mut other = graphed.alloc_state().unwrap();
+        assert!(
+            graphed.step(&x, &mut go, &mut other, &mut gsc).is_err(),
+            "{dtype:?}: a replay on another state"
+        );
+        graphed.clear_graph().unwrap();
+        assert!(!graphed.has_graph());
+        let mut fresh = eager.alloc_state().unwrap();
+        eager.step(&x, &mut eo, &mut fresh, &mut esc).unwrap();
+        graphed.step(&x, &mut go, &mut other, &mut gsc).unwrap();
+        assert_eq!(eo, go, "{dtype:?}: eager again after the clear");
+    }
+}
