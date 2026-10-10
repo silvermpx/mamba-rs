@@ -1610,25 +1610,60 @@ impl Mamba3MimoGpuTrainer {
                     rows_l, nh_i, hd_i, r_i
                 ]
             );
-            go!(
-                &k.cb.inter,
-                cfg3(b * nc, nh, CHUNK, 256, 0),
-                "inter-chunk term",
-                [
-                    dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i,
-                    na_i
-                ]
-            );
-            let (nt, dsloc_smem) = geom.dsloc;
-            let nt_i = nt as i32;
-            go!(
-                &k.cb.dsloc,
-                cfg3(b * nc, nh, ds.div_ceil(nt), nt * hd, dsloc_smem),
-                "local state gradient",
-                [
-                    dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, nt_i
-                ]
-            );
+            if geom.inter_tiles.0 > 0 {
+                let (tt, smem) = geom.inter_tiles;
+                let tt_i = tt as i32;
+                go!(
+                    &k.cb.inter_tiles,
+                    cfg3(
+                        b * nc,
+                        nh,
+                        CHUNK.div_ceil(tt),
+                        8 * (tt * rank).next_multiple_of(4),
+                        smem
+                    ),
+                    "inter-chunk term",
+                    [
+                        dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
+                        r_i, na_i, tt_i
+                    ]
+                );
+            } else {
+                go!(
+                    &k.cb.inter,
+                    cfg3(b * nc, nh, CHUNK, 256, 0),
+                    "inter-chunk term",
+                    [
+                        dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
+                        r_i, na_i
+                    ]
+                );
+            }
+            if geom.dsloc_tiles.0 > 0 {
+                let (jc, sl, smem) = geom.dsloc_tiles;
+                let (jc_i, sl_i) = (jc as i32, sl as i32);
+                go!(
+                    &k.cb.dsloc_tiles,
+                    cfg3(b * nc, nh, ds.div_ceil(32 * jc), 32 * hd.div_ceil(4), smem),
+                    "local state gradient",
+                    [
+                        dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
+                        jc_i, sl_i
+                    ]
+                );
+            } else {
+                let (nt, dsloc_smem) = geom.dsloc;
+                let nt_i = nt as i32;
+                go!(
+                    &k.cb.dsloc,
+                    cfg3(b * nc, nh, ds.div_ceil(nt), nt * hd, dsloc_smem),
+                    "local state gradient",
+                    [
+                        dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
+                        nt_i
+                    ]
+                );
+            }
             go!(
                 &k.cb.pass,
                 cfg3(b * nh, (hd * ds).div_ceil(256), 1, 256, 0),
@@ -1652,15 +1687,35 @@ impl Mamba3MimoGpuTrainer {
                 (0i32, terms_base)
             };
             let tg_i = tg as i32;
-            go!(
-                k.cb.state_terms.get(act),
-                cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
-                "state terms",
-                [
-                    dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i,
-                    hd_i, ds_i, r_i, na_i, tg_i, stage
-                ]
-            );
+            if geom.terms_tiles.0 > 0 {
+                let (tt, smem) = geom.terms_tiles;
+                let tt_i = tt as i32;
+                go!(
+                    k.cb.state_terms_tiles.get(act),
+                    cfg3(
+                        b * nc,
+                        nh,
+                        CHUNK.div_ceil(tt),
+                        8 * (tt * rank).next_multiple_of(4),
+                        smem
+                    ),
+                    "state terms",
+                    [
+                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i,
+                        ng_i, hd_i, ds_i, r_i, na_i, tt_i
+                    ]
+                );
+            } else {
+                go!(
+                    k.cb.state_terms.get(act),
+                    cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
+                    "state terms",
+                    [
+                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i,
+                        ng_i, hd_i, ds_i, r_i, na_i, tg_i, stage
+                    ]
+                );
+            }
             let (tl, pairs_smem) = geom.pairs;
             let tl_i = tl as i32;
             if geom.pairs_tiles.0 > 0 {

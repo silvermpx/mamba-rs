@@ -188,7 +188,7 @@ impl Mamba3MimoGpuEngine {
                 cfg.d_model
             ));
         }
-        let smem = scan_smem_bytes(hd, ds, rank, cfg.num_rope_angles());
+        let smem = scan_smem_bytes(hd, ds, rank);
         if smem > kernels.smem_optin || hd > 1024 {
             return Err(format!(
                 "a head of {hd} channels and {ds} states needs {smem} bytes of shared memory; \

@@ -137,14 +137,20 @@ __device__ __forceinline__ float mimo_tanh_pi(const TI* pr, int ang_col, int a) 
 // A float sum in (-6.28, 0) means the floor is -1, which leaves the single
 // wrap add. Zero (whose sign the full formula settles), wider sums and
 // non-finite values take the full formula.
-__device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
-    const float s = __fadd_rn(theta, inc);
-    if (s > 0.0f && s < 6.28f) return s;
+// The rare steps, out of line so the common step stays a float add and
+// two compares rather than a select over the double division.
+__device__ __noinline__ float mimo_wrap_slow(float theta, float inc, float s) {
     const double two_pi = 6.283185307179586;
     double acc = (double)theta + (double)inc;
     if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
     acc -= two_pi * floor(acc / two_pi);
     return (float)acc;
+}
+
+__device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
+    const float s = __fadd_rn(theta, inc);
+    if (s > 0.0f && s < 6.28f) return s;
+    return mimo_wrap_slow(theta, inc, s);
 }
 
 // Advance the head's angles `theta` by tanh_pi dt (wrapped into [0, 2 pi))
@@ -301,11 +307,18 @@ __device__ __forceinline__ void mimo_state_store(
 }
 
 // The scan of one head over a window. Grid (batch, nheads), block a whole
-// number of warps covering headdim (the threads past it help move the
-// state and build the keys). Dynamic shared memory, in floats:
-// hd * (ds + 1) for the state rows, 3 * R * ds for the previous keys, the
-// keys and the queries, 2 * na for the angles' sines and cosines, and 8
-// for the step scalars.
+// number of warps covering headdim and at least the angles (the threads
+// past headdim help move the state and build the keys). Dynamic shared
+// memory, in floats: hd * (ds + 1) for the state rows, 3 * R * ds for the
+// keys of the previous and the current token and the queries.
+//
+// A token costs two barriers. Every thread computes the step scalars with
+// mimo_tok_disc's expressions; thread a < na keeps angle a in a register,
+// advances it as mimo_tok_angles does and rotates the key and query pairs
+// (a, a + N/2) of every rank from their biased values itself, the other
+// elements are biased as mimo_tok_keys does; the keys of the previous and
+// the current token swap buffers instead of being copied. Every value is
+// the one the per-step pieces compute.
 //
 // The state (ssm [B, H, P, N], k [B, H, R, N], v [B, H, P], angle
 // [B, H, na]) is read at the start and written back at the end. `out` is
@@ -340,9 +353,6 @@ __device__ __forceinline__ void mimo_scan_body(
     float* kp = st + hd * (ds + 1);
     float* kc = kp + rank * ds;
     float* qv = kc + rank * ds;
-    float* sn = qv + rank * ds;
-    float* cs = sn + na;
-    float* scal = cs + na;
     const long long bh = (long long)b * nh + h;
     mimo_state_load(st, ssm + bh * hd * ds, hd, ds);
     for (int i = tid; i < rank * ds; i += blockDim.x)
@@ -360,7 +370,14 @@ __device__ __forceinline__ void mimo_scan_body(
     }
     const float dval = D[h];
     const int heads = 2 * di + 2 * rgn;
+    const int ang_col = heads + 3 * nh;
+    const int half = ds / 2;
     const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
+    const bool angle_owner = tid < na;
+    float theta = angle_owner ? ang[bh * na + tid] : 0.0f;
+    const float dtb = dt_bias[h];
+    float* kprev = kp;
+    float* kcur = kc;
     __syncthreads();
     for (int t = 0; t < seq; t++) {
         const long long row = (long long)b * seq + t;
@@ -368,34 +385,72 @@ __device__ __forceinline__ void mimo_scan_body(
         if (CKPT && t % stride == 0) {
             const long long q = ((long long)b * nseg + t / stride) * nh + h;
             mimo_state_store(ck_ssm + q * hd * ds, st, hd, ds);
-            for (int i = tid; i < rank * ds; i += blockDim.x) ck_k[q * rank * ds + i] = kp[i];
+            for (int i = tid; i < rank * ds; i += blockDim.x) ck_k[q * rank * ds + i] = kprev[i];
             if (own) ck_v[q * hd + tid] = v_prev;
-            for (int a = tid; a < na; a += blockDim.x) ck_ang[q * na + a] = ang[bh * na + a];
+            if (angle_owner) ck_ang[q * na + tid] = theta;
         }
-        mimo_tok_disc(scal, pr, heads, nh, h, dt_bias, a_floor);
-        __syncthreads();
-        mimo_tok_angles(sn, cs, ang + bh * na, pr, heads + 3 * nh, scal[3], na);
-        mimo_tok_keys(kc, qv, bn + row * rgn, cn + row * rgn, b_bias, c_bias, h, g, ng, rank, ds);
-        __syncthreads();
-        mimo_tok_rotate(kc, qv, sn, cs, rank, ds, na);
+        // The step scalars, mimo_tok_disc's expressions in every thread.
+        float dd_a = to_f(pr[heads + nh + h]);
+        float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
+                                : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
+        float a_ = -ht;
+        a_ = a_ > -a_floor ? -a_floor : a_;
+        const float spin = __fadd_rn(to_f(pr[heads + h]), dtb);
+        const float dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
+        const float trap = to_f(pr[heads + 2 * nh + h]);
+        const float alpha = mimo_exp(__fmul_rn(a_, dt));
+        const float lam = mimo_sigmoid(trap);
+        const float lam_c = mimo_sigmoid(-trap);
+        const float beta = __fmul_rn(__fmul_rn(alpha, dt), lam_c);
+        const float gamma = __fmul_rn(lam, dt);
+        const float* bnr = bn + row * rgn;
+        const float* cnr = cn + row * rgn;
+        if (angle_owner) {
+            const int a = tid;
+            theta = mimo_wrap_add(theta, __fmul_rn(mimo_tanh_pi(pr, ang_col, a), dt));
+            float sa, ca;
+            sincosf(theta, &sa, &ca);
+            for (int r = 0; r < rank; r++) {
+                const long long src = ((long long)r * ng + g) * ds;
+                const long long bias = ((long long)h * rank + r) * ds;
+                const float k0 = __fadd_rn(bnr[src + a], b_bias[bias + a]);
+                const float k1 = __fadd_rn(bnr[src + a + half], b_bias[bias + a + half]);
+                kcur[r * ds + a] = __fsub_rn(__fmul_rn(ca, k0), __fmul_rn(sa, k1));
+                kcur[r * ds + a + half] = __fadd_rn(__fmul_rn(sa, k0), __fmul_rn(ca, k1));
+                const float q0 = __fadd_rn(cnr[src + a], c_bias[bias + a]);
+                const float q1 = __fadd_rn(cnr[src + a + half], c_bias[bias + a + half]);
+                qv[r * ds + a] = __fsub_rn(__fmul_rn(ca, q0), __fmul_rn(sa, q1));
+                qv[r * ds + a + half] = __fadd_rn(__fmul_rn(sa, q0), __fmul_rn(ca, q1));
+            }
+        }
+        for (int i = tid; i < rank * ds; i += blockDim.x) {
+            const int r = i / ds, n = i - r * ds;
+            if (n < na || (n >= half && n - half < na)) continue;
+            const long long src = ((long long)r * ng + g) * ds + n;
+            const long long bias = ((long long)h * rank + r) * ds + n;
+            kcur[i] = __fadd_rn(bnr[src], b_bias[bias]);
+            qv[i] = __fadd_rn(cnr[src], c_bias[bias]);
+        }
         __syncthreads();
         if (own) {
             const float x = to_f(pr[di + h * hd + tid]);
             const float z = to_f(pr[h * hd + tid]);
             float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
-            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kc, kp, qv,
-                             scal[0], scal[1], scal[2], dval, rank, ds);
+            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
+                             alpha, beta, gamma, dval, rank, ds);
             mimo_put(&out[row * di + h * hd + tid], mimo_tok_gate<RK>(y, pz, po, z, rank));
             v_prev = x;
         }
         __syncthreads();
-        for (int i = tid; i < rank * ds; i += blockDim.x) kp[i] = kc[i];
-        __syncthreads();
+        float* used = kprev;
+        kprev = kcur;
+        kcur = used;
     }
     mimo_state_store(ssm + bh * hd * ds, st, hd, ds);
     for (int i = tid; i < rank * ds; i += blockDim.x)
-        kst[bh * rank * ds + i] = kp[i];
+        kst[bh * rank * ds + i] = kprev[i];
     if (own) vst[bh * hd + tid] = v_prev;
+    if (angle_owner) ang[bh * na + tid] = theta;
 }
 
 #define DEFINE_MIMO_SCAN(NAME, TI)                                             \

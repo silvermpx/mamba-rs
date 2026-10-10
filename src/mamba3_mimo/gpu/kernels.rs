@@ -54,7 +54,15 @@ pub struct Mamba3MimoKernels {
 pub struct MimoChunkedBwd {
     pub gate: TypedKernel,
     pub inter: CudaFunction,
+    /// `m3mb_inter` and `m3mb_state_terms` for a tile of tokens at once,
+    /// when [`ChunkedGeom::inter_tiles`] and [`ChunkedGeom::terms_tiles`]
+    /// fit.
+    pub inter_tiles: CudaFunction,
+    pub state_terms_tiles: TypedKernel,
     pub dsloc: CudaFunction,
+    /// `m3mb_dsloc` as register tiles, when [`ChunkedGeom::dsloc_tiles`]
+    /// fits.
+    pub dsloc_tiles: CudaFunction,
     pub pass: CudaFunction,
     pub chunk_dot: CudaFunction,
     pub state_terms: TypedKernel,
@@ -97,6 +105,15 @@ pub struct ChunkedGeom {
     pub scan_tiles: (usize, usize, usize, usize),
     /// `m3mb_dsloc`: state indices per block, bytes.
     pub dsloc: (usize, usize),
+    /// `m3mb_dsloc_tiles`: key columns per lane (0 when a head of more than
+    /// 128 channels leaves it to `m3mb_dsloc`), tokens staged per pass,
+    /// bytes.
+    pub dsloc_tiles: (usize, usize, usize),
+    /// `m3mb_inter_tiles` and `m3mb_state_terms_tiles`: tokens per block
+    /// and bytes, (0, 0) when a head of more than 128 channels or state
+    /// indices, or a rank past 64, leaves them to the per-token kernels.
+    pub inter_tiles: (usize, usize),
+    pub terms_tiles: (usize, usize),
     /// `m3mb_pairs`: tokens per tile, bytes.
     pub pairs: (usize, usize),
     /// `m3mb_pairs_dq` and `m3mb_pairs_dk` at the same tile: their bytes, or
@@ -127,7 +144,8 @@ pub fn chunked_geom(
     })?;
     // The register-tile state kernel: ut [sl][R][P rounded up to 4],
     // kt [sl][R][32 jc], wt [sl]. The largest pass that leaves room for a
-    // second block on the multiprocessor, else the largest that fits.
+    // second block on the multiprocessor, else the largest that fits. The
+    // backward's local state gradient has the same shape.
     let state_tiles = if hd <= 128 {
         let jc = match ds.div_ceil(32) {
             1 => 1,
@@ -182,6 +200,9 @@ pub fn chunked_geom(
             scan,
             scan_tiles,
             dsloc: (0, 0),
+            dsloc_tiles: (0, 0, 0),
+            inter_tiles: (0, 0),
+            terms_tiles: (0, 0),
             pairs: (0, 0),
             pairs_tiles: (0, 0),
         });
@@ -198,6 +219,29 @@ pub fn chunked_geom(
         let bytes = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
         (bytes <= cap).then_some((tl, bytes))
     })?;
+    // The token-tile inter and state-terms kernels: rows (t, r) of `tt`
+    // tokens padded to a float4 multiple plus 4. inter: the entering state,
+    // dy transposed, d, and the trees' partials past d when the first two do
+    // not hold them; state terms: dS with rows padded by one, u and the keys
+    // transposed, ste, the partials. The largest token tile that fits.
+    let token_tiles = |bytes: &dyn Fn(usize, usize) -> usize| {
+        if hd > 128 || ds > 128 || rank > CHUNK {
+            return (0, 0);
+        }
+        [16usize, 8, 4, 2, 1]
+            .into_iter()
+            .filter(|&tt| tt * rank <= CHUNK)
+            .map(|tt| (tt, bytes(tt, (tt * rank).next_multiple_of(4) + 4)))
+            .find(|&(_, b)| b <= cap)
+            .unwrap_or((0, 0))
+    };
+    let inter_tiles = token_tiles(&|tt, rs| {
+        let front = hd * ds + hd * rs;
+        let red = if tt * 256 > front { tt * 256 } else { 0 };
+        (front + tt * rank * ds + red) * 4
+    });
+    let terms_tiles =
+        token_tiles(&|tt, rs| (hd * (ds + 1) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4);
     // The split pair kernels: dy (transposed), u, the keys, w M (transposed)
     // and w for dq; the keys and u (transposed), the queries and dy, G, w M
     // and w G for dk and du. Rows padded to a float4 multiple plus 4.
@@ -219,16 +263,19 @@ pub fn chunked_geom(
         scan,
         scan_tiles,
         dsloc,
+        dsloc_tiles: state_tiles,
+        inter_tiles,
+        terms_tiles,
         pairs,
         pairs_tiles,
     })
 }
 
 /// The scan's shared memory for a head: the state rows padded by one, the
-/// previous keys, the keys and the queries, the angles' sines and cosines,
-/// the step scalars.
-pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize, na: usize) -> usize {
-    (hd * (ds + 1) + 3 * rank * ds + 2 * na + 8) * 4
+/// keys of the previous and the current token and the queries. The angles
+/// stay in their threads' registers.
+pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize) -> usize {
+    (hd * (ds + 1) + 3 * rank * ds) * 4
 }
 
 /// The training backward's shared memory for a head: the replay state rows
@@ -263,8 +310,8 @@ pub fn scan_cfg(
 ) -> LaunchConfig {
     LaunchConfig {
         grid_dim: (batch as u32, nh as u32, 1),
-        block_dim: (hd.next_multiple_of(32).max(256) as u32, 1, 1),
-        shared_mem_bytes: scan_smem_bytes(hd, ds, rank, na) as u32,
+        block_dim: (hd.max(na).next_multiple_of(32).max(256) as u32, 1, 1),
+        shared_mem_bytes: scan_smem_bytes(hd, ds, rank) as u32,
     }
 }
 
@@ -331,7 +378,10 @@ impl Mamba3MimoKernels {
             cb: MimoChunkedBwd {
                 gate: typed("m3mb_gate")?,
                 inter: get("m3mb_inter")?,
+                inter_tiles: get("m3mb_inter_tiles")?,
+                state_terms_tiles: typed("m3mb_state_terms_tiles")?,
                 dsloc: get("m3mb_dsloc")?,
+                dsloc_tiles: get("m3mb_dsloc_tiles")?,
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
                 state_terms: typed("m3mb_state_terms")?,
@@ -366,12 +416,23 @@ impl Mamba3MimoKernels {
                 (&kernels.cb.pairs_dq, "pairs dq"),
                 (&kernels.cb.pairs_dk, "pairs dk"),
                 (&kernels.cb.state_terms, "state_terms"),
+                (&kernels.cb.state_terms_tiles, "state_terms tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
                 }
             }
-            budget.min(opt_in_dynamic_smem(&kernels.cb.dsloc, optin, "dsloc")?)
+            budget = budget.min(opt_in_dynamic_smem(&kernels.cb.dsloc, optin, "dsloc")?);
+            budget = budget.min(opt_in_dynamic_smem(
+                &kernels.cb.inter_tiles,
+                optin,
+                "inter tiles",
+            )?);
+            budget.min(opt_in_dynamic_smem(
+                &kernels.cb.dsloc_tiles,
+                optin,
+                "dsloc tiles",
+            )?)
         };
         Ok(kernels)
     }
@@ -393,6 +454,8 @@ mod tests {
         let tiles = released.scan_tiles;
         assert_eq!((tiles.0, tiles.1, tiles.2), (16, 16, 64));
         assert_eq!(released.pairs_tiles, (38784, 66304));
+        assert_eq!(released.inter_tiles.0, 16);
+        assert_eq!(released.terms_tiles.0, 8);
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
         let wide = chunked_geom((16, 16, 16), cap, true).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
@@ -418,6 +481,8 @@ mod tests {
                     g.dsloc.1,
                     g.pairs.1,
                     g.pairs_tiles.0,
+                    g.inter_tiles.1,
+                    g.terms_tiles.1,
                     g.pairs_tiles.1,
                 ];
                 for bytes in sizes {
