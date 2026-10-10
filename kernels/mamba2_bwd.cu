@@ -1983,20 +1983,46 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
         const float* ck = ckpt + (((long long)b * nseg + seg) * nh + h) * pn;
         float* st = tile0;
         m2_tile_load(st, ck, hd, ds);
+        // The replay's per-token inputs (this thread's B and C index, and
+        // for a channel its x and the step scalars) are loaded a token
+        // ahead into registers, so a token starts with no global round trip.
+        const bool one_each = ds <= (int)blockDim.x;
+        float bq = 0.0f, cq = 0.0f, xq = 0.0f, s0q = 0.0f, s1q = 0.0f, s2q = 0.0f;
+        auto fetch_in = [&](int t) {
+            const long long row = (long long)b * seq + t;
+            const long long xrow = row * conv_dim;
+            if (one_each && tid < ds) {
+                bq = to_f(xbc[xrow + d_ssm + (long long)g * ds + tid]);
+                cq = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + tid]);
+            }
+            if (own) {
+                const float* sc = scal3 + (row * nh + h) * 3;
+                xq = to_f(xbc[xrow + (long long)h * hd + tid]);
+                s0q = sc[0];
+                s1q = sc[1];
+                s2q = sc[2];
+            }
+        };
+        fetch_in(t0);
         __syncthreads();
         for (int t = t0; t < t1; t++) {
             const long long row = (long long)b * seq + t;
             const long long xrow = row * conv_dim;
-            for (int n = tid; n < ds; n += blockDim.x) {
-                b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
-                c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+            if (one_each) {
+                if (tid < ds) {
+                    b_sm[tid] = bq;
+                    c_sm[tid] = cq;
+                }
+            } else {
+                for (int n = tid; n < ds; n += blockDim.x) {
+                    b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
+                    c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+                }
             }
+            const float xp = xq, a0 = s0q, a1 = s1q, a2 = s2q;
+            if (t + 1 < t1) fetch_in(t + 1);
             __syncthreads();
-            if (own) {
-                const float* sc = scal3 + (row * nh + h) * 3;
-                const float xp = to_f(xbc[xrow + (long long)h * hd + tid]);
-                m2_row_step(st + tid * ld, b_sm, c_sm, sc[0], sc[1], sc[2], xp, ds);
-            }
+            if (own) m2_row_step(st + tid * ld, b_sm, c_sm, a0, a1, a2, xp, ds);
             __syncthreads();
             m2_tile_store(rec + (bh * stride + (t - t0)) * pn, st, hd, ds);
         }
