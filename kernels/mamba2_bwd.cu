@@ -2233,6 +2233,52 @@ DEFINE_M2S_BWD_TILES(m2s_bwd_tiles, float)
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_bf16, __nv_bfloat16)
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_f16, __half)
 
+// out[j] += sum_r parts[r][j] over `rows` rows of `dim` columns: the
+// shared reduce_sum_axis0's per-thread strided sums and halving tree, so
+// its bits. That reduction's `width` threads (a power of two up to 256)
+// each sum the rows v, v + width, ... of a column; here a block takes `cw`
+// neighbouring columns (8, 16 or 32) and runs those sums for all of them,
+// a lane a column, so a warp's loads cover whole sectors of a row instead
+// of one float of 32 rows. Grid ceil(dim / cw), block 256, shared memory
+// width * cw floats.
+extern "C" __global__ void m2b_reduce_rows(
+    float* __restrict__ out, const float* __restrict__ parts,
+    long long rows, long long dim, int width, int cw
+) {
+    extern __shared__ float m2b_red[];  // [width][cw]
+    const int lane = threadIdx.x & 31;
+    const int c = lane % cw;
+    const int slots = (blockDim.x >> 5) * (32 / cw);
+    const int slot = (threadIdx.x >> 5) * (32 / cw) + lane / cw;
+    const long long col = (long long)blockIdx.x * cw + c;
+    const bool live = col < dim;
+    // Eight of the thread's sums at once: their loads are independent, the
+    // adds of each stay in row order.
+    for (int v0 = slot; v0 < width; v0 += 8 * slots) {
+        float sum[8];
+#pragma unroll
+        for (int u = 0; u < 8; u++) sum[u] = 0.0f;
+        for (long long r0 = v0; r0 < rows; r0 += width) {
+#pragma unroll
+            for (int u = 0; u < 8; u++) {
+                const long long r = r0 + (long long)u * slots;
+                if (live && v0 + u * slots < width && r < rows) sum[u] += parts[r * dim + col];
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < 8; u++) {
+            const int v = v0 + u * slots;
+            if (v < width) m2b_red[v * cw + c] = sum[u];
+        }
+    }
+    __syncthreads();
+    for (int s = width / 2; s > 0; s >>= 1) {
+        for (int v = slot; v < s; v += slots) m2b_red[v * cw + c] += m2b_red[(v + s) * cw + c];
+        __syncthreads();
+    }
+    if (slot == 0 && live) out[col] = out[col] + m2b_red[c];
+}
+
 // dB and dC of the sequential path into the B and C columns of dxbc: the
 // group's heads summed ascending. Grid 1-D over rows * G * N * 2.
 extern "C" __global__ void m2s_bc_groups(

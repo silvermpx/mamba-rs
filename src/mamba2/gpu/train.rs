@@ -896,28 +896,33 @@ impl Mamba2GpuTrainer {
         self.reduce_axis0(g_scale, axis0, (rows, dm))
     }
 
-    /// `out[j] += sum_r parts[r][j]`, the Fixed fixed-tree reduction.
+    /// `out[j] += sum_r parts[r][j]`, the shared fixed-tree reduction's
+    /// order (so its bits) with a block taking 32 neighbouring columns when
+    /// there are enough of them to fill the GPU, else 8.
     fn reduce_axis0(
         &self,
         out: u64,
         parts: u64,
         (rows, dim): (usize, usize),
     ) -> Result<(), String> {
-        let block = (rows as u32).next_power_of_two().clamp(32, 256);
-        let (rows_i, dim_i, acc) = (rows as i32, dim as i32, 1i32);
+        let width = (rows as u32).next_power_of_two().clamp(32, 256);
+        let cw: u32 = if dim >= 4096 { 32 } else { 8 };
+        let (rows_i, dim_i) = (rows as i64, dim as i64);
+        let (width_i, cw_i) = (width as i32, cw as i32);
         let mut bld = self
             .ctx
             .stream
-            .launch_builder(&self.ctx.kernels.reduce_sum_axis0);
+            .launch_builder(&self.kernels.bwd.reduce_rows);
         bld.arg(&out);
         bld.arg(&parts);
         bld.arg(&rows_i);
         bld.arg(&dim_i);
-        bld.arg(&acc);
+        bld.arg(&width_i);
+        bld.arg(&cw_i);
         let cfg = LaunchConfig {
-            grid_dim: (dim as u32, 1, 1),
-            block_dim: (block, 1, 1),
-            shared_mem_bytes: block * 4,
+            grid_dim: ((dim as u32).div_ceil(cw), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: width * cw * 4,
         };
         unsafe { bld.launch(cfg) }
             .map(|_| ())

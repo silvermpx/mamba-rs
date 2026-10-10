@@ -90,6 +90,9 @@ pub struct Mamba2BwdKernels {
     pub seq_bwd_tiles: TypedKernel,
     pub seq_scalars: TypedKernel,
     pub seq_bc_groups: CudaFunction,
+    /// The column sums of per-row weight-gradient partials, the shared
+    /// reduction's bits read a row's neighbouring columns at a time.
+    pub reduce_rows: CudaFunction,
     /// A bias gradient from bf16 or f16 rows.
     pub bias_grad: HalfKernel,
 }
@@ -259,6 +262,7 @@ impl Mamba2Kernels {
                 seq_bwd_tiles: typed("m2s_bwd_tiles")?,
                 seq_scalars: typed("m2s_scalars")?,
                 seq_bc_groups: get("m2s_bc_groups")?,
+                reduce_rows: get("m2b_reduce_rows")?,
                 bias_grad: HalfKernel {
                     bf16: get("m2b_bias_grad_bf16")?,
                     f16: get("m2b_bias_grad_f16")?,
