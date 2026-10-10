@@ -163,11 +163,33 @@ __device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
     return mimo_wrap_slow(theta, inc, s);
 }
 
+// Whether three rank-row buffers of N-wide rows start on 16 bytes and keep
+// every row there, so four neighbouring state indices load as one float4.
+__device__ __forceinline__ bool mimo_rows_aligned(
+    const float* a, const float* b, const float* c, int ds
+) {
+    const unsigned long long bits = reinterpret_cast<unsigned long long>(a)
+        | reinterpret_cast<unsigned long long>(b) | reinterpret_cast<unsigned long long>(c);
+    return (ds & 3) == 0 && (bits & 15) == 0;
+}
+
+// The four values at src (16-byte aligned) into column r of rows 0..3 of a
+// batch, the J-by-rank arrays of the row loops (J is 4 wherever it runs).
+template <int J, int RA>
+__device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const float* src) {
+    const float4 v = *reinterpret_cast<const float4*>(src);
+    const float w[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+    for (int j = 0; j < J; j++) dst[j][r] = w[j];
+}
+
 // One channel's row: u_r = Psi_r x, up_r = Psi_r x_prev, the state row
 // s = alpha s + sum_r (gamma u_r kc_r + beta up_r kp_r), and the readouts
 // y_r = s . q_r + D u_r. At a compiled rank the state indices go in
 // batches, every load of a batch issued before its chains run: the row's
 // own store would otherwise hold the next index's loads back a round trip.
+// The keys and queries of a batch of four, the same for every channel of a
+// warp, come as one float4 per rank when their rows are 16-byte aligned.
 // The chains are the same, n ascending.
 template <int RK>
 __device__ __forceinline__ void mimo_tok_row(
@@ -187,17 +209,28 @@ __device__ __forceinline__ void mimo_tok_row(
         bv[r] = __fmul_rn(beta, up[r]);
         y[r] = 0.0f;
     }
+    const bool vec = J == 4 && mimo_rows_aligned(kc, kp, qv, ds);
     int n = 0;
     for (; J > 1 && n + J <= ds; n += J) {
         float sv[J], kcv[J][MIMO_RA(RK)], kpv[J][MIMO_RA(RK)], qvv[J][MIMO_RA(RK)];
 #pragma unroll
-        for (int j = 0; j < J; j++) {
-            sv[j] = srow[n + j];
+        for (int j = 0; j < J; j++) sv[j] = srow[n + j];
+        if (vec) {
 #pragma unroll
             for (int r = 0; r < R; r++) {
-                kcv[j][r] = kc[r * ds + n + j];
-                kpv[j][r] = kp[r * ds + n + j];
-                qvv[j][r] = qv[r * ds + n + j];
+                mimo_split4(kcv, r, kc + r * ds + n);
+                mimo_split4(kpv, r, kp + r * ds + n);
+                mimo_split4(qvv, r, qv + r * ds + n);
+            }
+        } else {
+#pragma unroll
+            for (int j = 0; j < J; j++) {
+#pragma unroll
+                for (int r = 0; r < R; r++) {
+                    kcv[j][r] = kc[r * ds + n + j];
+                    kpv[j][r] = kp[r * ds + n + j];
+                    qvv[j][r] = qv[r * ds + n + j];
+                }
             }
         }
 #pragma unroll
@@ -345,7 +378,7 @@ __device__ __forceinline__ void mimo_scan_body(
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     float* st = mimo_sm;
-    float* kp = st + hd * (ds + 1);
+    float* kp = st + ((hd * (ds + 1) + 3) & ~3);  // the keys start on 16 bytes
     float* kc = kp + rank * ds;
     float* qv = kc + rank * ds;
     const long long bh = (long long)b * nh + h;

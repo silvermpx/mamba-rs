@@ -158,8 +158,9 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const int nseg = (seq + stride - 1) / stride;
     const long long rsz = mimo_rec_size(hd, ds, rank, na);
     float* st = mb_sm;                         // replay state rows [P][N+1]
-    float* dsr = st + hd * (ds + 1);           // dS rows [P][N+1]
-    float* kp = dsr + hd * (ds + 1);           // replay previous keys [R*N]
+    const int rows4 = (hd * (ds + 1) + 3) & ~3;  // so the keys start on 16 bytes
+    float* dsr = st + rows4;                   // dS rows [P][N+1]
+    float* kp = dsr + rows4;                   // replay previous keys [R*N]
     float* kc = kp + rn;
     float* qv = kc + rn;
     float* dkc = qv + rn;                      // this token's key gradient
@@ -494,15 +495,25 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                     upv[r] = r_up[tid * rank + r];
                     uv[r] = r_u[tid * rank + r];
                 }
+                const bool vec = RB == 4 && mimo_rows_aligned(kpr, kcr, kcr, ds);
                 int n = 0;
                 for (; RB > 1 && n + RB <= ds; n += RB) {
                     float dsb[RB], pb[RB], kpb[RB][MIMO_RA(RK)], kcb[RB][MIMO_RA(RK)];
                     _Pragma("unroll") for (int j = 0; j < RB; j++) {
                         dsb[j] = drow[n + j];
                         pb[j] = prow[n + j];
+                    }
+                    if (vec) {
                         _Pragma("unroll") for (int r = 0; r < R; r++) {
-                            kpb[j][r] = kpr[r * ds + n + j];
-                            kcb[j][r] = kcr[r * ds + n + j];
+                            mimo_split4(kpb, r, kpr + r * ds + n);
+                            mimo_split4(kcb, r, kcr + r * ds + n);
+                        }
+                    } else {
+                        _Pragma("unroll") for (int j = 0; j < RB; j++) {
+                            _Pragma("unroll") for (int r = 0; r < R; r++) {
+                                kpb[j][r] = kpr[r * ds + n + j];
+                                kcb[j][r] = kcr[r * ds + n + j];
+                            }
                         }
                     }
                     _Pragma("unroll") for (int j = 0; j < RB; j++) {

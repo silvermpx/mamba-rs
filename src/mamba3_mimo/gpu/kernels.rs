@@ -272,20 +272,26 @@ pub fn chunked_geom(
 }
 
 /// The scan's shared memory for a head: the state rows padded by one, the
-/// keys of the previous and the current token and the queries. The angles
-/// stay in their threads' registers.
+/// keys of the previous and the current token and the queries, the keys
+/// starting on 16 bytes. The angles stay in their threads' registers.
 pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize) -> usize {
-    (hd * (ds + 1) + 3 * rank * ds) * 4
+    ((hd * (ds + 1)).next_multiple_of(4) + 3 * rank * ds) * 4
 }
 
 /// The training backward's shared memory for a head: the replay state rows
-/// and the state-gradient rows (each padded by one), the replay keys, keys
-/// and queries, the key and query gradients, the previous keys' carry and
-/// the bias accumulators, three [P, R] tiles, three angle arrays (the
-/// token's angle gradient, its carry and tanh_pi) and three reduction slots
-/// per channel thread (the channels rounded up to a warp).
+/// and the state-gradient rows (each padded by one, each block of rows to a
+/// multiple of four floats so the keys start on 16 bytes), the replay
+/// keys, keys and queries, the key and query gradients, the previous keys'
+/// carry and the bias accumulators, three [P, R] tiles, three angle arrays
+/// (the token's angle gradient, its carry and tanh_pi) and three reduction
+/// slots per channel thread (the channels rounded up to a warp).
 pub fn scan_bwd_smem_bytes((hd, ds, rank, na): (usize, usize, usize, usize)) -> usize {
-    (2 * hd * (ds + 1) + 8 * rank * ds + 3 * hd * rank + 3 * na + 3 * hd.next_multiple_of(32)) * 4
+    (2 * (hd * (ds + 1)).next_multiple_of(4)
+        + 8 * rank * ds
+        + 3 * hd * rank
+        + 3 * na
+        + 3 * hd.next_multiple_of(32))
+        * 4
 }
 
 /// The training backward's block: a thread per channel, and at least 256
