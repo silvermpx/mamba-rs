@@ -3,6 +3,8 @@
 //! Source: Dao & Gu, "Transformers are SSMs", ICML 2024 (arXiv 2405.21060);
 //! the reference is state-spaces/mamba `mamba_ssm/modules/mamba2.py`.
 
+use crate::config::ScanMode;
+
 /// Configuration for a Mamba-2 backbone.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mamba2Config {
@@ -42,9 +44,33 @@ pub struct Mamba2Config {
     pub gated_norm_eps: f32,
     /// The gated MLP after the mixer in every layer; 0 means no MLP.
     pub d_intermediate: usize,
+    /// Which scan the GPU runs over a window, as for Mamba-1 and Mamba-3:
+    /// the sequential recurrence (the decode step's formulas token by
+    /// token) or the chunked state space dual. See
+    /// [`Self::prefill_parallel`] and [`Self::train_use_parallel_scan`].
+    /// The CPU always runs the recurrence.
+    pub scan_mode: ScanMode,
 }
 
 impl Mamba2Config {
+    /// Whether a prompt window of `seq_len` tokens runs the chunked scan:
+    /// `Sequential` and `Parallel` always as named (the sequential kernels
+    /// serve every d_state), `Auto` the chunked scan above
+    /// [`ScanMode::PARALLEL_SCAN_THRESHOLD`] tokens.
+    pub fn prefill_parallel(&self, seq_len: usize) -> bool {
+        match self.scan_mode {
+            ScanMode::Sequential => false,
+            ScanMode::Parallel => true,
+            ScanMode::Auto => seq_len > ScanMode::PARALLEL_SCAN_THRESHOLD,
+        }
+    }
+
+    /// Whether training runs the chunked scan: every mode but `Sequential`,
+    /// as Mamba-3 resolves it (training windows are long).
+    pub fn train_use_parallel_scan(&self) -> bool {
+        !matches!(self.scan_mode, ScanMode::Sequential)
+    }
+
     pub fn d_inner(&self) -> usize {
         self.d_model * self.expand
     }
@@ -155,6 +181,7 @@ impl Default for Mamba2Config {
             rms_norm_eps: 1e-5,
             gated_norm_eps: 1e-5,
             d_intermediate: 0,
+            scan_mode: ScanMode::Auto,
         }
     }
 }

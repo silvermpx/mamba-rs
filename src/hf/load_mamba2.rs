@@ -108,6 +108,7 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
         conv_bias: bool_or(ssm, "conv_bias", true)?,
         rms_norm_eps: f32_or(&root, "norm_epsilon", 1e-5)?,
         gated_norm_eps: 1e-5,
+        scan_mode: crate::config::ScanMode::Auto,
     };
     cfg.validate()?;
     Ok(HfMamba2Config {

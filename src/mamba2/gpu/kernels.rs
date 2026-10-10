@@ -1,7 +1,8 @@
-//! The Mamba-2 CUDA module: `kernels/mamba2_ops.cu` after the typed
-//! prelude, compiled with NVRTC and cached under its own module kind, so
-//! adding it moves no identity of the Fixed or Mamba-3 modules. The norms
-//! and the residual adds come from the Fixed module through the context.
+//! The Mamba-2 CUDA module: `kernels/mamba2_ops.cu`, `mamba2_ssd.cu` and
+//! `mamba2_bwd.cu` after the typed prelude, compiled with NVRTC and cached
+//! under its own module kind, so adding it moves no identity of the Fixed
+//! or Mamba-3 modules. The norms, the residual adds and the optimizer come
+//! from the Fixed module through the context.
 
 use std::sync::Arc;
 
@@ -9,12 +10,16 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 
 use crate::mamba_ssm::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::mamba_ssm::gpu::kernel_identity as ki;
-use crate::mamba_ssm::gpu::kernels::TypedKernel;
+use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
 
 /// The compiled Mamba-2 kernels.
 pub struct Mamba2Kernels {
     /// The decode step of every head, by activation dtype.
     pub step_fwd: TypedKernel,
+    /// The sequential prefill: the decode step's recurrence over a window.
+    pub seq_fwd: TypedKernel,
+    /// The training forward's sequential scan, writing replay checkpoints.
+    pub seq_fwd_ckpt: TypedKernel,
     /// The grouped gated RMSNorm.
     pub gated_norm_fwd: TypedKernel,
     /// The gate without a norm.
@@ -33,8 +38,41 @@ pub struct Mamba2Kernels {
     pub chunk_state: TypedKernel,
     pub state_passing: CudaFunction,
     pub chunk_scan: TypedKernel,
+    /// The training backward, f32.
+    pub bwd: Mamba2BwdKernels,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
+}
+
+/// The backward of the window and the training helpers
+/// (`kernels/mamba2_bwd.cu`); the kernels that read the stored projection
+/// or conv rows come in every activation dtype.
+pub struct Mamba2BwdKernels {
+    pub a_neg: CudaFunction,
+    pub dhloc: TypedKernel,
+    pub state_passing: CudaFunction,
+    pub chunk_dot: CudaFunction,
+    pub dx: TypedKernel,
+    pub rowsums: TypedKernel,
+    pub pairs: TypedKernel,
+    pub db: TypedKernel,
+    pub dc: TypedKernel,
+    pub combine: TypedKernel,
+    pub head_grads: CudaFunction,
+    pub d_parts: TypedKernel,
+    pub d_reduce: CudaFunction,
+    pub gated_norm: TypedKernel,
+    pub gate_only: TypedKernel,
+    pub mlp_gate: TypedKernel,
+    pub conv_dv: TypedKernel,
+    pub conv_dx: TypedKernel,
+    pub conv_dw: TypedKernel,
+    /// The sequential path's backward of the recurrence (replay per
+    /// segment) and the group sums of its dB and dC.
+    pub seq_bwd: TypedKernel,
+    pub seq_bc_groups: CudaFunction,
+    /// A bias gradient from bf16 or f16 rows.
+    pub bias_grad: HalfKernel,
 }
 
 /// The threads of one decode-step block: one warp, one channel each. Its
@@ -84,6 +122,7 @@ impl Mamba2Kernels {
                     include_str!("../../../kernels/_typed_prelude.cuh"),
                     include_str!("../../../kernels/mamba2_ops.cu"),
                     include_str!("../../../kernels/mamba2_ssd.cu"),
+                    include_str!("../../../kernels/mamba2_bwd.cu"),
                 ],
                 kind: ki::ModuleKind::Mamba2Combined,
                 cache_prefix: "mamba2-kernels-v1-",
@@ -103,8 +142,10 @@ impl Mamba2Kernels {
                 f16: get(&format!("{base}_f16"))?,
             })
         };
-        Ok(Self {
+        let kernels = Self {
             step_fwd: typed("m2_step_fwd")?,
+            seq_fwd: typed("m2_seq_fwd")?,
+            seq_fwd_ckpt: typed("m2_seq_fwd_ckpt")?,
             gated_norm_fwd: typed("m2_gated_norm_fwd")?,
             gate_only_fwd: typed("m2_gate_only_fwd")?,
             mlp_gate_fwd: typed("m2_mlp_gate_fwd")?,
@@ -116,8 +157,59 @@ impl Mamba2Kernels {
             chunk_state: typed("m2_chunk_state")?,
             state_passing: get("m2_state_passing")?,
             chunk_scan: typed("m2_chunk_scan")?,
+            bwd: Mamba2BwdKernels {
+                a_neg: get("m2_a_neg")?,
+                dhloc: typed("m2b_dhloc")?,
+                state_passing: get("m2b_state_passing")?,
+                chunk_dot: get("m2b_chunk_dot")?,
+                dx: typed("m2b_dx")?,
+                rowsums: typed("m2b_rowsums")?,
+                pairs: typed("m2b_pairs")?,
+                db: typed("m2b_db")?,
+                dc: typed("m2b_dc")?,
+                combine: typed("m2b_combine")?,
+                head_grads: get("m2b_head_grads")?,
+                d_parts: typed("m2b_d_parts")?,
+                d_reduce: get("m2b_d_reduce")?,
+                gated_norm: typed("m2b_gated_norm")?,
+                gate_only: typed("m2b_gate_only")?,
+                mlp_gate: typed("m2b_mlp_gate")?,
+                conv_dv: typed("m2b_conv_dv")?,
+                conv_dx: typed("m2b_conv_dx")?,
+                conv_dw: typed("m2b_conv_dw")?,
+                seq_bwd: typed("m2s_bwd")?,
+                seq_bc_groups: get("m2s_bc_groups")?,
+                bias_grad: HalfKernel {
+                    bf16: get("m2b_bias_grad_bf16")?,
+                    f16: get("m2b_bias_grad_f16")?,
+                },
+            },
             compiler_identity,
             artifact_identity,
-        })
+        };
+        {
+            use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+            let k = &kernels.bwd.seq_bwd;
+            for f in [&k.f32, &k.bf16, &k.f16] {
+                // A refused opt-in leaves the default 48 KB; an oversized
+                // launch then fails loudly with its own error.
+                let _ = f.set_attribute(
+                    FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    SEQ_BWD_SMEM_MAX as i32,
+                );
+            }
+        }
+        Ok(kernels)
     }
+}
+
+/// The per-block opt-in the sequential backward may use: consumer parts
+/// cap it near 99 KB.
+pub const SEQ_BWD_SMEM_MAX: usize = 99 * 1024;
+
+/// The sequential backward's shared memory for a head: the replay state
+/// rows and the state-gradient rows (each padded by one), B and C, the step
+/// scalars, x and dy of the token, one reduction slot per thread.
+pub fn seq_bwd_smem_bytes(hd: usize, ds: usize, threads: usize) -> usize {
+    (2 * hd * (ds + 1) + 2 * ds + 4 + 2 * hd + threads) * 4
 }

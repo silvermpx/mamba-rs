@@ -85,6 +85,459 @@ impl GpuMamba2Layer {
             out_proj_b: opt(&lw.out_proj_b)?,
         })
     }
+
+    fn ptrs(&self) -> LayerPtrs {
+        LayerPtrs {
+            norm_w: self.norm_weight.cached_ptr(),
+            in_w: self.in_proj_w.cached_ptr(),
+            in_b: self.in_proj_b.as_ref().map(GpuBuffer::cached_ptr),
+            conv_w: self.conv_w.cached_ptr(),
+            conv_b: self.conv_b.cached_ptr(),
+            dt_bias: self.dt_bias.cached_ptr(),
+            a_neg: self.a_neg.cached_ptr(),
+            d: self.d_param.cached_ptr(),
+            gate_w: self.gate_norm_weight.as_ref().map(GpuBuffer::cached_ptr),
+            out_w: self.out_proj_w.cached_ptr(),
+            out_b: self.out_proj_b.as_ref().map(GpuBuffer::cached_ptr),
+        }
+    }
+}
+
+/// One layer's weights as device pointers, the form the shared launches
+/// take: the engine's buffers and the trainer's flat arena both give it.
+#[derive(Clone, Copy)]
+pub(crate) struct LayerPtrs {
+    pub norm_w: u64,
+    pub in_w: u64,
+    pub in_b: Option<u64>,
+    pub conv_w: u64,
+    /// Zeros for a model without a conv bias.
+    pub conv_b: u64,
+    pub dt_bias: u64,
+    pub a_neg: u64,
+    pub d: u64,
+    pub gate_w: Option<u64>,
+    pub out_w: u64,
+    pub out_b: Option<u64>,
+}
+
+/// One layer's window buffers: the projection rows it reads, what it
+/// writes, and the conv and SSM states it carries (this layer's slices).
+pub(crate) struct WindowPtrs {
+    pub proj: u64,
+    pub xbc: u64,
+    pub conv: u64,
+    pub conv_next: u64,
+    pub ssm: u64,
+    pub dt: u64,
+    pub acs: u64,
+    pub cb: u64,
+    pub states: u64,
+    pub y: u64,
+    /// The sequential scan's replay checkpoints, [B, S, H, P, N] (0 for
+    /// none), written every `stride` tokens.
+    pub ckpt: u64,
+    pub stride: usize,
+}
+
+/// What the engine and the trainer share to launch a layer: the context,
+/// the Mamba-2 module, the shape and the activation dtype.
+#[derive(Clone, Copy)]
+pub(crate) struct M2Exec<'a> {
+    pub ctx: &'a GpuCtx,
+    pub kernels: &'a Mamba2Kernels,
+    pub cfg: &'a Mamba2Config,
+    pub act: WeightDtype,
+}
+
+impl M2Exec<'_> {
+    /// RMSNorm of f32 rows into `y`: in the activation dtype when `typed`,
+    /// else f32.
+    pub(crate) fn rmsnorm(
+        &self,
+        (y, x, w, rms): (u64, u64, u64, u64),
+        (rows, typed): (usize, bool),
+    ) -> Result<(), String> {
+        let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
+        let eps = self.cfg.rms_norm_eps;
+        let kernel = if typed && self.act != WeightDtype::F32 {
+            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
+        } else {
+            &self.ctx.kernels.rmsnorm_fwd
+        };
+        let mut bld = self.ctx.stream.launch_builder(kernel);
+        bld.arg(&y);
+        bld.arg(&rms);
+        bld.arg(&x);
+        bld.arg(&w);
+        bld.arg(&rows_i);
+        bld.arg(&dm_i);
+        bld.arg(&eps);
+        unsafe { bld.launch(grid_norm(rows, self.cfg.d_model)) }
+            .map(|_| ())
+            .map_err(|e| format!("Mamba-2 rmsnorm: {e:?}"))
+    }
+
+    /// Norm and in_proj of `rows` rows of `temporal` into `proj`.
+    pub(crate) fn norm_in_proj(
+        &self,
+        lw: &LayerPtrs,
+        (temporal, post, rms, proj): (u64, u64, u64, u64),
+        rows: usize,
+    ) -> Result<(), String> {
+        self.rmsnorm((post, temporal, lw.norm_w, rms), (rows, true))?;
+        let t = |ptr| TypedPtr {
+            ptr,
+            dtype: self.act,
+        };
+        gpu_gemm_typed_forward_raw(
+            self.ctx,
+            t(proj),
+            t(post),
+            t(lw.in_w),
+            lw.in_b,
+            (rows, self.cfg.d_model, self.cfg.in_proj_out_dim()),
+        )
+    }
+
+    /// The gated rows `[silu(z0) x0 | gate(y, z)]`, the out_proj GEMM and
+    /// the residual add into `temporal`, for `rows` rows.
+    pub(crate) fn gate_out_residual(
+        &self,
+        lw: &LayerPtrs,
+        (temporal, proj, y, gated, out): (u64, u64, u64, u64, u64),
+        rows: usize,
+    ) -> Result<(), String> {
+        let c = &self.cfg;
+        let stream = &self.ctx.stream;
+        let (dm, di, ip) = (c.d_model, c.d_inner(), c.in_proj_out_dim());
+        let (d_mlp, d_ssm, ng, hd) = (c.d_mlp(), c.ssm_dim(), c.ngroups, c.headdim);
+        let ld_out = di as i64;
+        let ld_proj = ip as i64;
+        let out_col = d_mlp as i32;
+        let z_off = (2 * d_mlp) as i32;
+        let rows_l = rows as i64;
+        let (d_ssm_i, ng_i, hd_i) = (d_ssm as i32, ng as i32, hd as i32);
+        if let Some(w) = lw.gate_w {
+            let eps = c.gated_norm_eps;
+            let nbg = i32::from(c.norm_before_gate);
+            let mut bld = stream.launch_builder(self.kernels.gated_norm_fwd.get(self.act));
+            bld.arg(&gated);
+            bld.arg(&ld_out);
+            bld.arg(&out_col);
+            bld.arg(&y);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&z_off);
+            bld.arg(&w);
+            bld.arg(&rows_l);
+            bld.arg(&d_ssm_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&eps);
+            bld.arg(&nbg);
+            unsafe { bld.launch(gated_norm_cfg(rows, d_ssm, ng, hd)) }
+                .map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
+        } else {
+            let mut bld = stream.launch_builder(self.kernels.gate_only_fwd.get(self.act));
+            bld.arg(&gated);
+            bld.arg(&ld_out);
+            bld.arg(&out_col);
+            bld.arg(&y);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&z_off);
+            bld.arg(&rows_l);
+            bld.arg(&d_ssm_i);
+            unsafe { bld.launch(grid_1d(rows * d_ssm)) }
+                .map_err(|e| format!("Mamba-2 gate: {e:?}"))?;
+        }
+        if d_mlp > 0 {
+            let d_mlp_i = d_mlp as i32;
+            let mut bld = stream.launch_builder(self.kernels.mlp_gate_fwd.get(self.act));
+            bld.arg(&gated);
+            bld.arg(&ld_out);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&rows_l);
+            bld.arg(&d_mlp_i);
+            unsafe { bld.launch(grid_1d(rows * d_mlp)) }
+                .map_err(|e| format!("Mamba-2 inner MLP: {e:?}"))?;
+        }
+        let t = |ptr| TypedPtr {
+            ptr,
+            dtype: self.act,
+        };
+        gpu_gemm_typed_forward_raw(
+            self.ctx,
+            t(out),
+            t(gated),
+            t(lw.out_w),
+            lw.out_b,
+            (rows, di, dm),
+        )?;
+        let n = (rows * dm) as i32;
+        let mut bld = if self.act == WeightDtype::F32 {
+            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
+            bld.arg(&temporal);
+            bld
+        } else {
+            let mut bld =
+                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
+            bld.arg(&temporal);
+            bld.arg(&temporal);
+            bld
+        };
+        bld.arg(&out);
+        bld.arg(&n);
+        unsafe { bld.launch(grid_1d(rows * dm)) }
+            .map(|_| ())
+            .map_err(|e| format!("Mamba-2 residual: {e:?}"))
+    }
+
+    pub(crate) fn dt_flags(&self) -> (i32, f32, f32) {
+        let (lo, hi) = self.cfg.dt_limit;
+        let limited = self.cfg.dt_limit != (0.0, f32::INFINITY);
+        (i32::from(limited), lo, hi)
+    }
+
+    /// One layer's window from its projection rows: the conv over the
+    /// window and the conv state after it, then the scan into `w.y`: with
+    /// `chunked`, dt and its chunk cumsum, the C.B products, the chunk
+    /// states, the state passing and the chunk scan; else the recurrence
+    /// token by token (the decode step's formulas, so its bits are those of
+    /// as many decode steps; `dt`, `acs`, `cb` and `states` are not
+    /// touched). The conv and SSM states carry in and out.
+    pub(crate) fn window(
+        &self,
+        l: usize,
+        lw: &LayerPtrs,
+        w: &WindowPtrs,
+        (b, t_len, chunked): (usize, usize, bool),
+    ) -> Result<(), String> {
+        let c = self.cfg;
+        let rows = b * t_len;
+        let nc = t_len.div_ceil(CHUNK);
+        let (ip, cd) = (c.in_proj_out_dim(), c.conv_dim());
+        let (d_mlp, d_ssm, nh, hd, ds, ng) = (
+            c.d_mlp(),
+            c.ssm_dim(),
+            c.nheads(),
+            c.headdim,
+            c.d_state,
+            c.ngroups,
+        );
+        let stream = &self.ctx.stream;
+        let (proj, xbc, conv, conv_next, ssm) = (w.proj, w.xbc, w.conv, w.conv_next, w.ssm);
+        let (dt, acs, cb, states, y) = (w.dt, w.acs, w.cb, w.states, w.y);
+        let conv_per_layer = b * cd * c.d_conv;
+        let xbc_col = 2 * d_mlp + d_ssm;
+        let (b_i, t_i, cd_i, dconv_i) = (b as i32, t_len as i32, cd as i32, c.d_conv as i32);
+        let (nh_i, ng_i, hd_i, ds_i) = (nh as i32, ng as i32, hd as i32, ds as i32);
+        let ld_proj = ip as i64;
+        let ld_xbc = cd as i64;
+        let (xbc_col_i, dt_off_i) = (xbc_col as i32, (xbc_col + cd) as i32);
+        let (b_col_i, c_col_i) = (d_ssm as i32, (d_ssm + ng * ds) as i32);
+        let (limited, lo, hi) = self.dt_flags();
+        let d_per_channel = i32::from(c.d_has_hdim);
+        let launch =
+            |cfg: LaunchConfig,
+             what: &str,
+             l: usize,
+             run: &dyn Fn(LaunchConfig) -> Result<(), cudarc::driver::DriverError>| {
+                run(cfg).map_err(|e| format!("Mamba-2 window {what} L{l}: {e:?}"))
+            };
+        let (cw, cbias) = (lw.conv_w, lw.conv_b);
+        launch(grid_1d(rows * cd), "conv", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
+            bld.arg(&xbc);
+            bld.arg(&conv);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&xbc_col_i);
+            bld.arg(&cw);
+            bld.arg(&cbias);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&cd_i);
+            bld.arg(&dconv_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        launch(grid_1d(b * cd), "conv state", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.conv_state.get(self.act));
+            bld.arg(&conv_next);
+            bld.arg(&conv);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&xbc_col_i);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&cd_i);
+            bld.arg(&dconv_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        let copied = unsafe {
+            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                conv,
+                conv_next,
+                conv_per_layer * 4,
+                stream.cu_stream(),
+            )
+        };
+        if copied != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("Mamba-2 conv state copy L{l}: {copied:?}"));
+        }
+        let (dtb, an) = (lw.dt_bias, lw.a_neg);
+        if !chunked {
+            let dp = lw.d;
+            let ip_i = ip as i32;
+            let (z_off_i, dt_off_seq) = ((2 * d_mlp) as i32, (xbc_col + cd) as i32);
+            let flags: i32 = d_per_channel | (limited << 2);
+            let (ckpt, stride_i) = (w.ckpt, w.stride as i32);
+            return launch(step_cfg(b, nh, hd, ds), "sequential scan", l, &|g| unsafe {
+                let kernel = if ckpt == 0 {
+                    &self.kernels.seq_fwd
+                } else {
+                    &self.kernels.seq_fwd_ckpt
+                };
+                let mut bld = stream.launch_builder(kernel.get(self.act));
+                bld.arg(&y);
+                bld.arg(&ssm);
+                bld.arg(&xbc);
+                bld.arg(&proj);
+                bld.arg(&dtb);
+                bld.arg(&an);
+                bld.arg(&dp);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&nh_i);
+                bld.arg(&ng_i);
+                bld.arg(&hd_i);
+                bld.arg(&ds_i);
+                bld.arg(&cd_i);
+                bld.arg(&ip_i);
+                bld.arg(&z_off_i);
+                bld.arg(&dt_off_seq);
+                bld.arg(&flags);
+                bld.arg(&lo);
+                bld.arg(&hi);
+                if ckpt != 0 {
+                    bld.arg(&ckpt);
+                    bld.arg(&stride_i);
+                }
+                bld.launch(g).map(|_| ())
+            });
+        }
+        let dt_cfg = LaunchConfig {
+            grid_dim: ((b * nc) as u32, nh.div_ceil(32) as u32, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        launch(dt_cfg, "dt", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.dt_cumsum.get(self.act));
+            bld.arg(&dt);
+            bld.arg(&acs);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&dt_off_i);
+            bld.arg(&dtb);
+            bld.arg(&an);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&limited);
+            bld.arg(&lo);
+            bld.arg(&hi);
+            bld.launch(g).map(|_| ())
+        })?;
+        let bmm_cfg = LaunchConfig {
+            grid_dim: ((b * nc) as u32, ng as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        launch(bmm_cfg, "bmm", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.bmm_chunk.get(self.act));
+            bld.arg(&cb);
+            bld.arg(&xbc);
+            bld.arg(&ld_xbc);
+            bld.arg(&b_col_i);
+            bld.arg(&c_col_i);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&ng_i);
+            bld.arg(&ds_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        let state_cfg = LaunchConfig {
+            grid_dim: ((b * nc) as u32, nh as u32, (hd * ds).div_ceil(256) as u32),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        launch(state_cfg, "chunk state", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.chunk_state.get(self.act));
+            bld.arg(&states);
+            bld.arg(&xbc);
+            bld.arg(&ld_xbc);
+            bld.arg(&b_col_i);
+            bld.arg(&dt);
+            bld.arg(&acs);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        let pass_cfg = LaunchConfig {
+            grid_dim: ((b * nh) as u32, (hd * ds).div_ceil(256) as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        launch(pass_cfg, "state passing", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(&self.kernels.state_passing);
+            bld.arg(&states);
+            bld.arg(&ssm);
+            bld.arg(&acs);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        let dp = lw.d;
+        let scan_cfg = LaunchConfig {
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                (CHUNK * hd).div_ceil(128) as u32,
+            ),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        launch(scan_cfg, "chunk scan", l, &|g| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.chunk_scan.get(self.act));
+            bld.arg(&y);
+            bld.arg(&states);
+            bld.arg(&cb);
+            bld.arg(&xbc);
+            bld.arg(&ld_xbc);
+            bld.arg(&c_col_i);
+            bld.arg(&dt);
+            bld.arg(&acs);
+            bld.arg(&dp);
+            bld.arg(&d_per_channel);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.launch(g).map(|_| ())
+        })?;
+        Ok(())
+    }
 }
 
 /// The recurrent state of every layer: the conv window `[L, B, conv_dim,
@@ -229,6 +682,15 @@ impl Mamba2GpuInferenceEngine {
         })
     }
 
+    fn exec(&self) -> M2Exec<'_> {
+        M2Exec {
+            ctx: &self.ctx,
+            kernels: &self.kernels,
+            cfg: &self.cfg,
+            act: self.act,
+        }
+    }
+
     pub fn ctx(&self) -> &GpuCtx {
         &self.ctx
     }
@@ -281,33 +743,6 @@ impl Mamba2GpuInferenceEngine {
             .map_err(|e| format!("Mamba-2 step sync: {e:?}"))
     }
 
-    /// RMSNorm of f32 rows into `y`: in the activation dtype when `typed`,
-    /// else f32.
-    fn rmsnorm(
-        &self,
-        (y, x, w, rms): (u64, u64, u64, u64),
-        (rows, typed): (usize, bool),
-    ) -> Result<(), String> {
-        let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
-        let eps = self.cfg.rms_norm_eps;
-        let kernel = if typed && self.act != WeightDtype::F32 {
-            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_fwd
-        };
-        let mut bld = self.ctx.stream.launch_builder(kernel);
-        bld.arg(&y);
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&w);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(rows, self.cfg.d_model)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 rmsnorm: {e:?}"))
-    }
-
     /// The input rows into `temporal`: a copy for the identity projection,
     /// else the input GEMM.
     fn project_input(
@@ -328,133 +763,6 @@ impl Mamba2GpuInferenceEngine {
                 )
             },
         }
-    }
-
-    /// Norm and in_proj of `rows` rows of `temporal` into `proj`.
-    fn norm_in_proj(
-        &self,
-        lw: &GpuMamba2Layer,
-        (temporal, post, rms, proj): (u64, u64, u64, u64),
-        rows: usize,
-    ) -> Result<(), String> {
-        self.rmsnorm(
-            (post, temporal, lw.norm_weight.cached_ptr(), rms),
-            (rows, true),
-        )?;
-        let t = |ptr| TypedPtr {
-            ptr,
-            dtype: self.act,
-        };
-        gpu_gemm_typed_forward_raw(
-            &self.ctx,
-            t(proj),
-            t(post),
-            t(lw.in_proj_w.cached_ptr()),
-            lw.in_proj_b.as_ref().map(GpuBuffer::cached_ptr),
-            (rows, self.cfg.d_model, self.cfg.in_proj_out_dim()),
-        )
-    }
-
-    /// The gated rows `[silu(z0) x0 | gate(y, z)]`, the out_proj GEMM and
-    /// the residual add into `temporal`, for `rows` rows.
-    fn gate_out_residual(
-        &self,
-        lw: &GpuMamba2Layer,
-        (temporal, proj, y, gated, out): (u64, u64, u64, u64, u64),
-        rows: usize,
-    ) -> Result<(), String> {
-        let c = &self.cfg;
-        let stream = &self.ctx.stream;
-        let (dm, di, ip) = (c.d_model, c.d_inner(), c.in_proj_out_dim());
-        let (d_mlp, d_ssm, ng, hd) = (c.d_mlp(), c.ssm_dim(), c.ngroups, c.headdim);
-        let ld_out = di as i64;
-        let ld_proj = ip as i64;
-        let out_col = d_mlp as i32;
-        let z_off = (2 * d_mlp) as i32;
-        let rows_l = rows as i64;
-        let (d_ssm_i, ng_i, hd_i) = (d_ssm as i32, ng as i32, hd as i32);
-        if let Some(nw) = &lw.gate_norm_weight {
-            let w = nw.cached_ptr();
-            let eps = c.gated_norm_eps;
-            let nbg = i32::from(c.norm_before_gate);
-            let mut bld = stream.launch_builder(self.kernels.gated_norm_fwd.get(self.act));
-            bld.arg(&gated);
-            bld.arg(&ld_out);
-            bld.arg(&out_col);
-            bld.arg(&y);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&z_off);
-            bld.arg(&w);
-            bld.arg(&rows_l);
-            bld.arg(&d_ssm_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&eps);
-            bld.arg(&nbg);
-            unsafe { bld.launch(gated_norm_cfg(rows, d_ssm, ng, hd)) }
-                .map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
-        } else {
-            let mut bld = stream.launch_builder(self.kernels.gate_only_fwd.get(self.act));
-            bld.arg(&gated);
-            bld.arg(&ld_out);
-            bld.arg(&out_col);
-            bld.arg(&y);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&z_off);
-            bld.arg(&rows_l);
-            bld.arg(&d_ssm_i);
-            unsafe { bld.launch(grid_1d(rows * d_ssm)) }
-                .map_err(|e| format!("Mamba-2 gate: {e:?}"))?;
-        }
-        if d_mlp > 0 {
-            let d_mlp_i = d_mlp as i32;
-            let mut bld = stream.launch_builder(self.kernels.mlp_gate_fwd.get(self.act));
-            bld.arg(&gated);
-            bld.arg(&ld_out);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&rows_l);
-            bld.arg(&d_mlp_i);
-            unsafe { bld.launch(grid_1d(rows * d_mlp)) }
-                .map_err(|e| format!("Mamba-2 inner MLP: {e:?}"))?;
-        }
-        let t = |ptr| TypedPtr {
-            ptr,
-            dtype: self.act,
-        };
-        gpu_gemm_typed_forward_raw(
-            &self.ctx,
-            t(out),
-            t(gated),
-            t(lw.out_proj_w.cached_ptr()),
-            lw.out_proj_b.as_ref().map(GpuBuffer::cached_ptr),
-            (rows, di, dm),
-        )?;
-        let n = (rows * dm) as i32;
-        let mut bld = if self.act == WeightDtype::F32 {
-            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
-            bld.arg(&temporal);
-            bld
-        } else {
-            let mut bld =
-                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
-            bld.arg(&temporal);
-            bld.arg(&temporal);
-            bld
-        };
-        bld.arg(&out);
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(rows * dm)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 residual: {e:?}"))
-    }
-
-    fn dt_flags(&self) -> (i32, f32, f32) {
-        let (lo, hi) = self.cfg.dt_limit;
-        let limited = self.cfg.dt_limit != (0.0, f32::INFINITY);
-        (i32::from(limited), lo, hi)
     }
 
     /// The step's kernels on the stream, input already uploaded; the
@@ -489,10 +797,11 @@ impl Mamba2GpuInferenceEngine {
         let (b_i, cd_i, ip_i, dconv_i) = (b as i32, cd as i32, ip as i32, c.d_conv as i32);
         let (nh_i, ng_i, hd_i, ds_i) = (nh as i32, ng as i32, hd as i32, ds as i32);
         let (z_off_i, dt_off_i) = ((2 * d_mlp) as i32, (xbc_col + cd) as i32);
-        let (limited, lo, hi) = self.dt_flags();
+        let (limited, lo, hi) = self.exec().dt_flags();
         let flags: i32 = i32::from(c.d_has_hdim) | (limited << 2);
         for (l, lw) in self.layers.iter().enumerate() {
-            self.norm_in_proj(lw, (temporal, post, rms, proj), b)?;
+            self.exec()
+                .norm_in_proj(&lw.ptrs(), (temporal, post, rms, proj), b)?;
             // The conv step reads the xBC columns of the projection in place.
             let xbc = scratch.xbc.cached_ptr();
             {
@@ -545,8 +854,8 @@ impl Mamba2GpuInferenceEngine {
                 unsafe { bld.launch(step_cfg(b, nh, hd, ds)) }
                     .map_err(|e| format!("Mamba-2 step L{l}: {e:?}"))?;
             }
-            self.gate_out_residual(
-                lw,
+            self.exec().gate_out_residual(
+                &lw.ptrs(),
                 (
                     temporal,
                     proj,
@@ -557,7 +866,7 @@ impl Mamba2GpuInferenceEngine {
                 b,
             )?;
         }
-        self.rmsnorm(
+        self.exec().rmsnorm(
             (
                 scratch.final_out.cached_ptr(),
                 temporal,
@@ -628,206 +937,37 @@ impl Mamba2GpuInferenceEngine {
         let c = &self.cfg;
         let (b, t_len) = (self.batch, pf.seq_len);
         let rows = b * t_len;
-        let nc = t_len.div_ceil(CHUNK);
-        let (ip, cd) = (c.in_proj_out_dim(), c.conv_dim());
-        let (d_mlp, d_ssm, nh, hd, ds, ng) = (
-            c.d_mlp(),
-            c.ssm_dim(),
-            c.nheads(),
-            c.headdim,
-            c.d_state,
-            c.ngroups,
-        );
-        let stream = &self.ctx.stream;
+        let conv_per_layer = b * c.conv_dim() * c.d_conv;
+        let ssm_per_layer = b * c.nheads() * c.headdim * c.d_state;
         self.project_input((&mut pf.temporal, &pf.input), rows)?;
         let temporal = pf.temporal.cached_ptr();
-        let (post, rms, proj, xbc) = (
+        let (post, rms, proj, y) = (
             pf.post.cached_ptr(),
             pf.rms.cached_ptr(),
             pf.proj.cached_ptr(),
-            pf.xbc.cached_ptr(),
-        );
-        let (dt, acs, cb, states, y) = (
-            pf.dt.cached_ptr(),
-            pf.acs.cached_ptr(),
-            pf.cb.cached_ptr(),
-            pf.states.cached_ptr(),
             pf.y.cached_ptr(),
         );
-        let conv_per_layer = b * cd * c.d_conv;
-        let ssm_per_layer = b * nh * hd * ds;
-        let xbc_col = 2 * d_mlp + d_ssm;
-        let (b_i, t_i, cd_i, dconv_i) = (b as i32, t_len as i32, cd as i32, c.d_conv as i32);
-        let (nh_i, ng_i, hd_i, ds_i) = (nh as i32, ng as i32, hd as i32, ds as i32);
-        let ld_proj = ip as i64;
-        let ld_xbc = cd as i64;
-        let (xbc_col_i, dt_off_i) = (xbc_col as i32, (xbc_col + cd) as i32);
-        let (b_col_i, c_col_i) = (d_ssm as i32, (d_ssm + ng * ds) as i32);
-        let (limited, lo, hi) = self.dt_flags();
-        let d_per_channel = i32::from(c.d_has_hdim);
-        let launch =
-            |cfg: LaunchConfig,
-             what: &str,
-             l: usize,
-             run: &dyn Fn(LaunchConfig) -> Result<(), cudarc::driver::DriverError>| {
-                run(cfg).map_err(|e| format!("Mamba-2 prefill {what} L{l}: {e:?}"))
-            };
+        let x = self.exec();
         for (l, lw) in self.layers.iter().enumerate() {
-            self.norm_in_proj(lw, (temporal, post, rms, proj), rows)?;
-            let conv = state.conv.cached_ptr() + (l * conv_per_layer * 4) as u64;
-            let ssm = state.ssm.cached_ptr() + (l * ssm_per_layer * 4) as u64;
-            let (cw, cbias) = (lw.conv_w.cached_ptr(), lw.conv_b.cached_ptr());
-            let conv_next = pf.conv_next.cached_ptr();
-            launch(grid_1d(rows * cd), "conv", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
-                bld.arg(&xbc);
-                bld.arg(&conv);
-                bld.arg(&proj);
-                bld.arg(&ld_proj);
-                bld.arg(&xbc_col_i);
-                bld.arg(&cw);
-                bld.arg(&cbias);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&cd_i);
-                bld.arg(&dconv_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            launch(grid_1d(b * cd), "conv state", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.conv_state.get(self.act));
-                bld.arg(&conv_next);
-                bld.arg(&conv);
-                bld.arg(&proj);
-                bld.arg(&ld_proj);
-                bld.arg(&xbc_col_i);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&cd_i);
-                bld.arg(&dconv_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            let copied = unsafe {
-                cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                    conv,
-                    conv_next,
-                    conv_per_layer * 4,
-                    stream.cu_stream(),
-                )
+            let lp = lw.ptrs();
+            x.norm_in_proj(&lp, (temporal, post, rms, proj), rows)?;
+            let w = WindowPtrs {
+                proj,
+                xbc: pf.xbc.cached_ptr(),
+                conv: state.conv.cached_ptr() + (l * conv_per_layer * 4) as u64,
+                conv_next: pf.conv_next.cached_ptr(),
+                ssm: state.ssm.cached_ptr() + (l * ssm_per_layer * 4) as u64,
+                dt: pf.dt.cached_ptr(),
+                acs: pf.acs.cached_ptr(),
+                cb: pf.cb.cached_ptr(),
+                states: pf.states.cached_ptr(),
+                y,
+                ckpt: 0,
+                stride: 1,
             };
-            if copied != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("Mamba-2 conv state copy L{l}: {copied:?}"));
-            }
-            let (dtb, an) = (lw.dt_bias.cached_ptr(), lw.a_neg.cached_ptr());
-            let dt_cfg = LaunchConfig {
-                grid_dim: ((b * nc) as u32, nh.div_ceil(32) as u32, 1),
-                block_dim: (32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            launch(dt_cfg, "dt", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.dt_cumsum.get(self.act));
-                bld.arg(&dt);
-                bld.arg(&acs);
-                bld.arg(&proj);
-                bld.arg(&ld_proj);
-                bld.arg(&dt_off_i);
-                bld.arg(&dtb);
-                bld.arg(&an);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&limited);
-                bld.arg(&lo);
-                bld.arg(&hi);
-                bld.launch(g).map(|_| ())
-            })?;
-            let bmm_cfg = LaunchConfig {
-                grid_dim: ((b * nc) as u32, ng as u32, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            launch(bmm_cfg, "bmm", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.bmm_chunk.get(self.act));
-                bld.arg(&cb);
-                bld.arg(&xbc);
-                bld.arg(&ld_xbc);
-                bld.arg(&b_col_i);
-                bld.arg(&c_col_i);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&ng_i);
-                bld.arg(&ds_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            let state_cfg = LaunchConfig {
-                grid_dim: ((b * nc) as u32, nh as u32, (hd * ds).div_ceil(256) as u32),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            launch(state_cfg, "chunk state", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.chunk_state.get(self.act));
-                bld.arg(&states);
-                bld.arg(&xbc);
-                bld.arg(&ld_xbc);
-                bld.arg(&b_col_i);
-                bld.arg(&dt);
-                bld.arg(&acs);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            let pass_cfg = LaunchConfig {
-                grid_dim: ((b * nh) as u32, (hd * ds).div_ceil(256) as u32, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            launch(pass_cfg, "state passing", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(&self.kernels.state_passing);
-                bld.arg(&states);
-                bld.arg(&ssm);
-                bld.arg(&acs);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            let dp = lw.d_param.cached_ptr();
-            let scan_cfg = LaunchConfig {
-                grid_dim: (
-                    (b * nc) as u32,
-                    nh as u32,
-                    (CHUNK * hd).div_ceil(128) as u32,
-                ),
-                block_dim: (128, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            launch(scan_cfg, "chunk scan", l, &|g| unsafe {
-                let mut bld = stream.launch_builder(self.kernels.chunk_scan.get(self.act));
-                bld.arg(&y);
-                bld.arg(&states);
-                bld.arg(&cb);
-                bld.arg(&xbc);
-                bld.arg(&ld_xbc);
-                bld.arg(&c_col_i);
-                bld.arg(&dt);
-                bld.arg(&acs);
-                bld.arg(&dp);
-                bld.arg(&d_per_channel);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.launch(g).map(|_| ())
-            })?;
-            self.gate_out_residual(
-                lw,
+            x.window(l, &lp, &w, (b, t_len, c.prefill_parallel(t_len)))?;
+            x.gate_out_residual(
+                &lp,
                 (
                     temporal,
                     proj,
@@ -838,7 +978,7 @@ impl Mamba2GpuInferenceEngine {
                 rows,
             )?;
         }
-        self.rmsnorm(
+        x.rmsnorm(
             (
                 pf.final_rows.cached_ptr(),
                 temporal,

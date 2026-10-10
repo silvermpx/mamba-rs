@@ -246,7 +246,12 @@ fn m2_gpu_prefill_matches_cpu() {
 fn m2_gpu_prefill_seams_are_bit_exact() {
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
-    for (label, cfg) in [cases()[1], cases()[4]] {
+    for (label, base) in [cases()[1], cases()[4]] {
+        // The chunked scan for every window, the 64-token ones included.
+        let cfg = Mamba2Config {
+            scan_mode: mamba_rs::config::ScanMode::Parallel,
+            ..base
+        };
         let w = drawn(&cfg, input_dim, 29);
         let dm = cfg.d_model;
         let engine = Mamba2GpuInferenceEngine::new(&device, &w, cfg, input_dim, 1).unwrap();
@@ -376,5 +381,78 @@ fn m2_gpu_typed_lanes_track_cpu() {
                 "{dtype:?} {label}: rel_l2 {worst:.3e} over {tol:.0e}"
             );
         }
+    }
+}
+
+/// The sequential prefill (ScanMode::Sequential) gives the bits of as many
+/// decode steps, rows and states, and tracks the chunked prefill.
+#[test]
+fn m2_gpu_sequential_prefill_is_decode_steps() {
+    use mamba_rs::config::ScanMode;
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let (batch, seq) = (2usize, 77usize);
+    for (label, base) in cases() {
+        let cfg = Mamba2Config {
+            scan_mode: ScanMode::Sequential,
+            ..base
+        };
+        let w = drawn(&cfg, input_dim, 29);
+        let dm = cfg.d_model;
+        let inputs = det(batch * seq * input_dim, 610, 1.0);
+        let engine = Mamba2GpuInferenceEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let mut st = engine.alloc_state().unwrap();
+        let mut pf = engine.alloc_prefill(seq).unwrap();
+        let mut rows = vec![0f32; batch * seq * dm];
+        engine
+            .prefill(&inputs, &mut rows, &mut st, &mut pf)
+            .unwrap();
+
+        let mut dst = engine.alloc_state().unwrap();
+        let mut dsc = engine.alloc_scratch().unwrap();
+        let mut out = vec![0f32; batch * dm];
+        for t in 0..seq {
+            let x: Vec<f32> = (0..batch)
+                .flat_map(|b| {
+                    let o = (b * seq + t) * input_dim;
+                    inputs[o..o + input_dim].to_vec()
+                })
+                .collect();
+            engine.step(&x, &mut out, &mut dst, &mut dsc).unwrap();
+            for b in 0..batch {
+                assert_eq!(
+                    &rows[(b * seq + t) * dm..(b * seq + t + 1) * dm],
+                    &out[b * dm..(b + 1) * dm],
+                    "{label}: token {t} of sequence {b}"
+                );
+            }
+        }
+        let s = &engine.ctx().stream;
+        assert_eq!(
+            st.ssm.to_cpu(s).unwrap(),
+            dst.ssm.to_cpu(s).unwrap(),
+            "{label}: SSM states"
+        );
+        assert_eq!(
+            st.conv.to_cpu(s).unwrap(),
+            dst.conv.to_cpu(s).unwrap(),
+            "{label}: conv states"
+        );
+
+        let chunked_cfg = Mamba2Config {
+            scan_mode: ScanMode::Parallel,
+            ..base
+        };
+        let chunked =
+            Mamba2GpuInferenceEngine::new(&device, &w, chunked_cfg, input_dim, batch).unwrap();
+        let mut cst = chunked.alloc_state().unwrap();
+        let mut cpf = chunked.alloc_prefill(seq).unwrap();
+        let mut crow = vec![0f32; batch * seq * dm];
+        chunked
+            .prefill(&inputs, &mut crow, &mut cst, &mut cpf)
+            .unwrap();
+        let e = rel_l2(&rows, &crow);
+        eprintln!("{label}: sequential vs chunked prefill rel_l2 {e:.2e}");
+        assert!(e < TOL, "{label}: rel_l2 {e:.3e}");
     }
 }

@@ -42,15 +42,135 @@ __device__ __forceinline__ float m2_silu(float z) {
 #define M2_FLAG_GATE_IN_SCAN 2
 #define M2_FLAG_DT_LIMIT 4
 
-// One decode step of every head: grid (B, H, ceil(P / blockDim.x)),
-// block a whole number of warps. Dynamic shared memory:
-// (2 * N + 4 + rows * (N + 1)) floats for B, C, the step scalars and the
-// block's rows of the state, padded by one so a thread's row walk hits
-// distinct banks. The state tile moves through shared memory with
-// coalesced loads and stores; each thread then owns one channel's row.
+// The step scalars of head h at one token, by thread 0 of the block:
+// scal[0] = e^acs, scal[1] = (C.B) e^0 dt, scal[2] = e^0 dt.
+template <typename TI>
+__device__ __forceinline__ void m2_step_scalars(
+    float* scal, const float* b_sm, const float* c_sm, const TI* proj_row,
+    int dt_off, int h, const float* dt_bias, const float* a_neg, int ds,
+    int flags, float dt_min, float dt_max
+) {
+    if (threadIdx.x != 0) return;
+    float raw = to_f(proj_row[dt_off + h]);
+    float dt = m2_softplus(__fadd_rn(raw, dt_bias[h]));
+    if (flags & M2_FLAG_DT_LIMIT) dt = fminf(fmaxf(dt, dt_min), dt_max);
+    float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));
+    float cb = 0.0f;
+    for (int n = 0; n < ds; n++) cb = __fmaf_rn(c_sm[n], b_sm[n], cb);
+    float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));
+    scal[0] = m2_exp(acs);
+    scal[1] = __fmul_rn(__fmul_rn(cb, e0), dt);
+    scal[2] = __fmul_rn(e0, dt);
+}
+
+// One channel's row at one token: the readout from the previous state
+// (scaled by e^acs) and the state update h = e^acs h + B (x e^0 dt), both
+// over n ascending. Returns C.h_prev e^acs + (C.B dt) x.
+__device__ __forceinline__ float m2_row_step(
+    float* trow, const float* b_sm, const float* c_sm,
+    float eacs, float w_diag, float x_scale, float xp, int ds
+) {
+    const float xw = __fmul_rn(xp, x_scale);
+    float acc = 0.0f;
+    for (int n = 0; n < ds; n++) {
+        float hp = trow[n];
+        acc = __fmaf_rn(c_sm[n], hp, acc);
+        trow[n] = __fmaf_rn(eacs, hp, __fmaf_rn(b_sm[n], xw, 0.0f));
+    }
+    acc = __fmul_rn(acc, eacs);
+    return __fmaf_rn(w_diag, xp, acc);
+}
+
+// The recurrence of every head over a window, token by token: grid
+// (B, H, ceil(P / blockDim.x)), block a whole number of warps. Dynamic
+// shared memory: (2 * N + 4 + rows * (N + 1)) floats for B, C, the step
+// scalars and the block's rows of the state, padded by one so a thread's
+// row walk hits distinct banks. The state tile moves through shared memory
+// with coalesced loads and stores once per window; each thread owns one
+// channel's row. Token t of sequence b is row b * seq + t of xbc, proj and
+// y. A decode step is the window of one token, so the sequential prefill
+// gives the bits of that many decode steps.
 //
 // y is f32: the norm that follows reads it before any downcast. With
-// M2_FLAG_GATE_IN_SCAN (no rmsnorm) the gate is applied here.
+// M2_FLAG_GATE_IN_SCAN (no rmsnorm) the gate is applied here. With CKPT
+// the state before tokens 0, stride, 2 stride, ... is also written to
+// `ckpt` ([B, S, H, P, N], S = ceil(seq / stride)), what the training
+// backward replays from.
+template <typename TI, bool CKPT>
+__device__ __forceinline__ void m2_steps_body(
+    float* __restrict__ y,
+    float* __restrict__ ssm,
+    const TI* __restrict__ xbc,
+    const TI* __restrict__ proj,
+    const float* __restrict__ dt_bias,
+    const float* __restrict__ a_neg,
+    const float* __restrict__ D,
+    int batch, int seq, int nh, int ng, int hd, int ds,
+    int conv_dim, int d_in_proj, int z_off, int dt_off,
+    int flags, float dt_min, float dt_max,
+    float* __restrict__ ckpt, int stride
+) {
+    extern __shared__ float m2s_sm[];
+    float* b_sm = m2s_sm;
+    float* c_sm = b_sm + ds;
+    float* scal = c_sm + ds;
+    float* tile = scal + 4;
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int p0 = blockIdx.z * blockDim.x;
+    const int tid = threadIdx.x;
+    if (b >= batch || h >= nh || p0 >= hd) return;
+    const int rows = min((int)blockDim.x, hd - p0);
+    const int g = h / (nh / ng);
+    const long long d_ssm = (long long)nh * hd;
+    const long long base = (((long long)b * nh + h) * hd + p0) * ds;
+    for (int r = 0; r < rows; r++) {
+        for (int n = tid; n < ds; n += blockDim.x) {
+            tile[r * (ds + 1) + n] = ssm[base + (long long)r * ds + n];
+        }
+    }
+    const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
+    for (int t = 0; t < seq; t++) {
+        const long long row = (long long)b * seq + t;
+        const long long xrow = row * conv_dim;
+        if (CKPT && t % stride == 0) {
+            const long long cbase =
+                ((((long long)b * nseg + t / stride) * nh + h) * hd + p0) * ds;
+            for (int r = 0; r < rows; r++)
+                for (int n = tid; n < ds; n += blockDim.x)
+                    ckpt[cbase + (long long)r * ds + n] = tile[r * (ds + 1) + n];
+        }
+        for (int n = tid; n < ds; n += blockDim.x) {
+            b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
+            c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+        }
+        __syncthreads();
+        m2_step_scalars(scal, b_sm, c_sm, proj + row * d_in_proj, dt_off, h, dt_bias,
+                        a_neg, ds, flags, dt_min, dt_max);
+        __syncthreads();
+        if (tid < rows) {
+            const int p = p0 + tid;
+            const float xp = to_f(xbc[xrow + (long long)h * hd + p]);
+            float acc = m2_row_step(tile + tid * (ds + 1), b_sm, c_sm, scal[0], scal[1],
+                                    scal[2], xp, ds);
+            float dv = (flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + p] : D[h];
+            acc = __fmaf_rn(xp, dv, acc);
+            if (flags & M2_FLAG_GATE_IN_SCAN) {
+                float z = to_f(proj[row * d_in_proj + z_off + (long long)h * hd + p]);
+                acc = __fmul_rn(acc, m2_silu(z));
+            }
+            y[row * d_ssm + (long long)h * hd + p] = acc;
+        }
+        __syncthreads();
+    }
+    for (int r = 0; r < rows; r++) {
+        for (int n = tid; n < ds; n += blockDim.x) {
+            ssm[base + (long long)r * ds + n] = tile[r * (ds + 1) + n];
+        }
+    }
+}
+
+// One decode step: the window of one token.
 #define DEFINE_M2_STEP_FWD(NAME, TI)                                           \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ y,                                                     \
@@ -64,81 +184,62 @@ extern "C" __global__ void NAME(                                               \
     int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
     int flags, float dt_min, float dt_max                                      \
 ) {                                                                            \
-    extern __shared__ float m2s_sm[];                                          \
-    float* b_sm = m2s_sm;                                                      \
-    float* c_sm = b_sm + ds;                                                   \
-    float* scal = c_sm + ds;                                                   \
-    float* tile = scal + 4;                                                    \
-    const int b = blockIdx.x;                                                  \
-    const int h = blockIdx.y;                                                  \
-    const int p0 = blockIdx.z * blockDim.x;                                    \
-    const int tid = threadIdx.x;                                               \
-    if (b >= batch || h >= nh || p0 >= hd) return;                             \
-    const int rows = min((int)blockDim.x, hd - p0);                            \
-    const int g = h / (nh / ng);                                               \
-    const long long d_ssm = (long long)nh * hd;                                \
-    const long long xrow = (long long)b * conv_dim;                            \
-    for (int n = tid; n < ds; n += blockDim.x) {                               \
-        b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);             \
-        c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);      \
-    }                                                                          \
-    const long long base = (((long long)b * nh + h) * hd + p0) * ds;          \
-    for (int r = 0; r < rows; r++) {                                           \
-        for (int n = tid; n < ds; n += blockDim.x) {                           \
-            tile[r * (ds + 1) + n] = ssm[base + (long long)r * ds + n];        \
-        }                                                                      \
-    }                                                                          \
-    __syncthreads();                                                           \
-    if (tid == 0) {                                                            \
-        float raw = to_f(proj[(long long)b * d_in_proj + dt_off + h]);         \
-        float dt = m2_softplus(__fadd_rn(raw, dt_bias[h]));                    \
-        if (flags & M2_FLAG_DT_LIMIT) dt = fminf(fmaxf(dt, dt_min), dt_max);   \
-        float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));                  \
-        float cb = 0.0f;                                                       \
-        for (int n = 0; n < ds; n++) cb = __fmaf_rn(c_sm[n], b_sm[n], cb);     \
-        float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));                   \
-        scal[0] = m2_exp(acs);                                                 \
-        scal[1] = __fmul_rn(__fmul_rn(cb, e0), dt);                            \
-        scal[2] = __fmul_rn(e0, dt);                                           \
-    }                                                                          \
-    __syncthreads();                                                           \
-    if (tid < rows) {                                                          \
-        const int p = p0 + tid;                                                \
-        const float eacs = scal[0];                                            \
-        const float w_diag = scal[1];                                          \
-        const float x_scale = scal[2];                                         \
-        const float xp = to_f(xbc[xrow + (long long)h * hd + p]);              \
-        const float xw = __fmul_rn(xp, x_scale);                               \
-        float* row = tile + tid * (ds + 1);                                    \
-        float acc = 0.0f;                                                      \
-        for (int n = 0; n < ds; n++) {                                         \
-            float hp = row[n];                                                 \
-            acc = __fmaf_rn(c_sm[n], hp, acc);                                 \
-            row[n] = __fmaf_rn(eacs, hp, __fmaf_rn(b_sm[n], xw, 0.0f));        \
-        }                                                                      \
-        acc = __fmul_rn(acc, eacs);                                            \
-        acc = __fmaf_rn(w_diag, xp, acc);                                      \
-        float dv = (flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + p]  \
-                                                   : D[h];                     \
-        acc = __fmaf_rn(xp, dv, acc);                                          \
-        if (flags & M2_FLAG_GATE_IN_SCAN) {                                    \
-            float z = to_f(proj[(long long)b * d_in_proj + z_off               \
-                               + (long long)h * hd + p]);                      \
-            acc = __fmul_rn(acc, m2_silu(z));                                  \
-        }                                                                      \
-        y[(long long)b * d_ssm + (long long)h * hd + p] = acc;                 \
-    }                                                                          \
-    __syncthreads();                                                           \
-    for (int r = 0; r < rows; r++) {                                           \
-        for (int n = tid; n < ds; n += blockDim.x) {                           \
-            ssm[base + (long long)r * ds + n] = tile[r * (ds + 1) + n];        \
-        }                                                                      \
-    }                                                                          \
+    m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, 1,   \
+        nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
+        dt_max, nullptr, 1);                                                   \
 }
 
 DEFINE_M2_STEP_FWD(m2_step_fwd, float)
 DEFINE_M2_STEP_FWD(m2_step_fwd_bf16, __nv_bfloat16)
 DEFINE_M2_STEP_FWD(m2_step_fwd_f16, __half)
+
+// The sequential prefill: the window of `seq` tokens.
+#define DEFINE_M2_SEQ_FWD(NAME, TI)                                            \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ y,                                                     \
+    float* __restrict__ ssm,                                                   \
+    const TI* __restrict__ xbc,                                                \
+    const TI* __restrict__ proj,                                               \
+    const float* __restrict__ dt_bias,                                         \
+    const float* __restrict__ a_neg,                                           \
+    const float* __restrict__ D,                                               \
+    int batch, int seq, int nh, int ng, int hd, int ds,                        \
+    int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
+    int flags, float dt_min, float dt_max                                      \
+) {                                                                            \
+    m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq, \
+        nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
+        dt_max, nullptr, 1);                                                   \
+}
+
+DEFINE_M2_SEQ_FWD(m2_seq_fwd, float)
+DEFINE_M2_SEQ_FWD(m2_seq_fwd_bf16, __nv_bfloat16)
+DEFINE_M2_SEQ_FWD(m2_seq_fwd_f16, __half)
+
+// The training forward's sequential scan: the sequential prefill, also
+// writing the replay checkpoints every `stride` tokens.
+#define DEFINE_M2_SEQ_FWD_CKPT(NAME, TI)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ y,                                                     \
+    float* __restrict__ ssm,                                                   \
+    const TI* __restrict__ xbc,                                                \
+    const TI* __restrict__ proj,                                               \
+    const float* __restrict__ dt_bias,                                         \
+    const float* __restrict__ a_neg,                                           \
+    const float* __restrict__ D,                                               \
+    int batch, int seq, int nh, int ng, int hd, int ds,                        \
+    int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
+    int flags, float dt_min, float dt_max,                                     \
+    float* __restrict__ ckpt, int stride                                       \
+) {                                                                            \
+    m2_steps_body<TI, true>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq,  \
+        nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
+        dt_max, ckpt, stride);                                                 \
+}
+
+DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt, float)
+DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt_bf16, __nv_bfloat16)
+DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt_f16, __half)
 
 // The grouped gated RMSNorm, gate first unless norm_before_gate:
 //   u = y silu(z); rstd = 1 / sqrt(sum(u^2) / gs + eps) per group;

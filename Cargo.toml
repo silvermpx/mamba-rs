@@ -607,6 +607,11 @@ path = "tests/m2_gpu_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m2_gpu_train_parity"
+path = "tests/m2_gpu_train_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m3_mimo_gpu_parity"
 path = "tests/m3_mimo_gpu_parity.rs"
 required-features = ["cuda"]
