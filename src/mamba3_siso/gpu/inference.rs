@@ -190,6 +190,10 @@ use crate::mamba_ssm::gpu::dtype::WeightDtype;
 
 pub struct Mamba3GpuInferenceMixedScratch {
     pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
+    /// The input cast to the weight dtype for the input projection,
+    /// `[batch * input_dim]` (one element without a projection). Its own
+    /// buffer: the context's half staging belongs to the GEMMs.
+    pub input_typed: DtypedBuf,
     /// f32 `[batch * d_model]` landing for the typed prefill's final
     /// hidden (downcast into `temporal` after the window) — a dedicated
     /// buffer so non-identity input projections (input_dim != d_model)
@@ -251,6 +255,7 @@ impl Mamba3GpuInferenceMixedScratch {
         let na = cfg.num_rope_angles().max(1);
         Ok(Self {
             gpu_input: GpuBuffer::zeros(stream, batch * input_dim)?,
+            input_typed: DtypedBuf::zeros(stream, (batch * input_dim).max(1), dtype)?,
             prefill_hidden: GpuBuffer::zeros(stream, batch * dm)?,
             temporal: DtypedBuf::zeros(stream, batch * dm, dtype)?,
             residual: GpuBuffer::zeros(stream, batch * dm)?,
@@ -620,31 +625,19 @@ impl Mamba3GpuInferenceEngine {
                 .temporal
                 .copy_from_raw(&scratch.gpu_input, &self.ctx.stream)?;
         } else {
-            // Input projection SGEMM
+            // The input projection with its bias in the GEMM's epilogue, as
+            // the prefill runs it: every row gets the bias vector (a flat
+            // add over all rows would read past it from the second row on).
             unsafe {
                 gpu_gemm_f32_forward_ptrs(
                     &self.ctx,
                     scratch.temporal.cached_ptr(),
                     scratch.gpu_input.cached_ptr(),
                     self.weights.input_proj_w.ptr(),
-                    None,
+                    Some(self.weights.input_proj_b.ptr()),
                     (b, self.input_dim, dm),
                 )
             }?;
-            // Add bias
-            {
-                let n = b * dm;
-                let n_i = n as i32;
-                let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-                let mut builder = self
-                    .ctx
-                    .stream
-                    .launch_builder(&self.kernels.vec_add_inplace);
-                builder.arg(scratch.temporal.inner());
-                builder.arg(self.weights.input_proj_b.inner());
-                builder.arg(&n_i);
-                unsafe { builder.launch(grid) }.map_err(|e| format!("input_proj bias: {e:?}"))?;
-            }
         }
 
         // Process each layer: the mixer branch, then the MLP branch of a
@@ -1147,7 +1140,7 @@ impl Drop for Mamba3GpuInferenceMixed {
 
 impl Mamba3GpuInferenceMixed {
     fn has_gemm_work(&self) -> bool {
-        self.engine.batch != 0 && self.engine.cfg.n_layers != 0
+        self.engine.batch != 0 && (self.engine.cfg.n_layers != 0 || !self.engine.identity_proj)
     }
 
     fn launch_captured_graph(&self) -> Result<(), String> {
@@ -1348,11 +1341,10 @@ impl Mamba3GpuInferenceMixed {
         self.graph.is_some()
     }
 
-    /// End-to-end bf16/f16 T=1 Mamba-3 pipeline.
-    ///
-    /// Requires identity_proj (LLM use case) — non-identity input projection
-    /// in mixed mode is not supported here because it would need a mixed-
-    /// dtype GEMM writing directly into the f32 residual buffer.
+    /// End-to-end bf16/f16 T=1 Mamba-3 pipeline. A model with an input
+    /// projection runs it as the typed prefill does: the input cast to the
+    /// weight dtype, the typed GEMM with the f32 bias, the result upcast
+    /// into the f32 residual.
     pub(super) fn step_kernels_mixed_native(
         &self,
         state: &mut Mamba3GpuInferenceState,
@@ -1362,14 +1354,12 @@ impl Mamba3GpuInferenceMixed {
         use cudarc::driver::PushKernelArg;
 
         let engine = &self.engine;
-        assert!(
-            engine.identity_proj,
-            "Mamba3 step_kernels_mixed_native requires identity_proj=true (LLM path)"
-        );
-        assert_eq!(
-            scratch.dtype, self.mixed_weights.bulk_dtype,
-            "Mamba3 mixed scratch dtype must match mixed weights bulk_dtype"
-        );
+        if scratch.dtype != self.mixed_weights.bulk_dtype {
+            return Err(format!(
+                "M3 mixed step: scratch dtype {:?} does not match the weights' {:?}",
+                scratch.dtype, self.mixed_weights.bulk_dtype
+            ));
+        }
         let dt = scratch.dtype;
         let b = engine.batch;
         let cfg = &engine.cfg;
@@ -1394,11 +1384,60 @@ impl Mamba3GpuInferenceMixed {
         let ng_i = ng as i32;
         let na_i = na as i32;
 
-        // Seed f32 residual with f32 gpu_input (identity_proj). copy_from_raw
-        // is CUDA Graph safe (cuMemcpyDtoDAsync on raw ptrs, no SyncOnDrop).
-        scratch
-            .residual
-            .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
+        // Seed the f32 residual with the input (identity_proj) or its
+        // projection. copy_from_raw is CUDA Graph safe (cuMemcpyDtoDAsync on
+        // raw ptrs, no SyncOnDrop).
+        if engine.identity_proj {
+            scratch
+                .residual
+                .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
+        } else {
+            let mid = engine.input_dim;
+            let (down, up) = match dt {
+                WeightDtype::Bf16 => (&k.cast_f32_to_bf16, &k.cast_bf16_to_f32),
+                WeightDtype::F16 => (&k.cast_f32_to_f16, &k.cast_f16_to_f32),
+                WeightDtype::F32 | WeightDtype::Tf32 => {
+                    return Err("M3 mixed step: unexpected f32 scratch dtype".into());
+                }
+            };
+            let staged = scratch.input_typed.cached_ptr();
+            {
+                let n = (b * mid) as i32;
+                let src = scratch.gpu_input.cached_ptr();
+                let mut bld = engine.ctx.stream.launch_builder(down);
+                bld.arg(&staged);
+                bld.arg(&src);
+                bld.arg(&n);
+                unsafe { bld.launch(grid_1d(b * mid)) }
+                    .map_err(|e| format!("M3 mixed input_proj input cast: {e:?}"))?;
+            }
+            let projected = scratch.temporal.cached_ptr();
+            gpu_gemm_typed_forward_raw(
+                &engine.ctx,
+                TypedPtr {
+                    ptr: projected,
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: staged,
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: w.input_proj_w.ptr(),
+                    dtype: dt,
+                },
+                Some(w.input_proj_b.ptr()),
+                (b, mid, dm),
+            )?;
+            let n = (b * dm) as i32;
+            let dst = scratch.residual.cached_ptr();
+            let mut bld = engine.ctx.stream.launch_builder(up);
+            bld.arg(&dst);
+            bld.arg(&projected);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(b * dm)) }
+                .map_err(|e| format!("M3 mixed input_proj residual upcast: {e:?}"))?;
+        }
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 

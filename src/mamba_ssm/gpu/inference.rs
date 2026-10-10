@@ -1496,10 +1496,8 @@ impl GpuMambaInferenceMixed {
         )
     }
 
-    fn has_gemm_work(&self, path: MixedGraphPath) -> bool {
-        self.engine.batch != 0
-            && (self.engine.cfg.n_layers != 0
-                || (path == MixedGraphPath::Legacy && !self.engine.identity_proj))
+    fn has_gemm_work(&self) -> bool {
+        self.engine.batch != 0 && (self.engine.cfg.n_layers != 0 || !self.engine.identity_proj)
     }
 
     fn ensure_graph_path(&self, path: MixedGraphPath) -> Result<(), String> {
@@ -1519,7 +1517,7 @@ impl GpuMambaInferenceMixed {
             .ok_or_else(|| "M1 mixed-native inference graph is not captured".to_string())?;
         with_validated_gemm_graph_launch(
             &self.engine.ctx,
-            self.has_gemm_work(path),
+            self.has_gemm_work(),
             self.captured_gemm_plan.as_ref(),
             "M1 mixed inference graph replay",
             || {
@@ -1667,7 +1665,7 @@ impl GpuMambaInferenceMixed {
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             self.launch_captured_graph(MixedGraphPath::Legacy)?;
         } else {
-            if self.has_gemm_work(MixedGraphPath::Legacy) {
+            if self.has_gemm_work() {
                 prepare_inference_arch_rung(&self.engine.ctx)?;
             }
             let manifest = self
@@ -1705,7 +1703,7 @@ impl GpuMambaInferenceMixed {
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             self.launch_captured_graph(MixedGraphPath::Legacy)?;
         } else {
-            if self.has_gemm_work(MixedGraphPath::Legacy) {
+            if self.has_gemm_work() {
                 prepare_inference_arch_rung(&self.engine.ctx)?;
             }
             let manifest = self
@@ -1738,8 +1736,8 @@ impl GpuMambaInferenceMixed {
     /// the typed variants (upcast compute, half storage), and only the
     /// residual stream stays f32 (HF `residual_in_fp32=True` semantics).
     ///
-    /// Requires `identity_proj=true` (HF LLM use case). The RL path keeps
-    /// using `step_kernels_generic` against `GpuInferenceScratch`.
+    /// A model with an input projection runs it first, into the f32
+    /// residual, as the half GEMM of the f32-activation path.
     /// Debug-only: run the mixed-native step stopping after `stop_after_layer`
     /// has been processed (so the caller can download `scratch.residual` /
     /// `scratch.temporal` and compare layer-by-layer against the f32 path).
@@ -1770,14 +1768,12 @@ impl GpuMambaInferenceMixed {
         stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let engine = &self.engine;
-        assert!(
-            engine.identity_proj,
-            "step_kernels_mixed_native requires identity_proj=true (LLM path)"
-        );
-        assert_eq!(
-            scratch.dtype, self.mixed_weights.bulk_dtype,
-            "mixed scratch dtype must match mixed weights bulk_dtype"
-        );
+        if scratch.dtype != self.mixed_weights.bulk_dtype {
+            return Err(format!(
+                "M1 mixed step: scratch dtype {:?} does not match the weights' {:?}",
+                scratch.dtype, self.mixed_weights.bulk_dtype
+            ));
+        }
         let dt = scratch.dtype;
         let b = engine.batch;
         let cfg = &engine.cfg;
@@ -1790,12 +1786,27 @@ impl GpuMambaInferenceMixed {
         let k = &engine.ctx.kernels;
         let w = &self.mixed_weights;
 
-        // Entry: residual_f32 <- gpu_input (identity_proj). Use copy_from_raw
-        // (cuMemcpyDtoDAsync on raw ptrs) — CUDA Graph safe; copy_from creates
-        // SyncOnDrop guards that invalidate the capture.
-        scratch
-            .residual
-            .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
+        // Entry: the f32 residual is the input itself (identity_proj) or its
+        // projection, the same half GEMM with an f32 result as the legacy
+        // path. copy_from_raw (cuMemcpyDtoDAsync on raw ptrs) is CUDA Graph
+        // safe; copy_from creates SyncOnDrop guards that invalidate the
+        // capture.
+        if engine.identity_proj {
+            scratch
+                .residual
+                .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
+        } else {
+            let (ipw_ptr, ipw_dtype) = w.input_proj_w();
+            gpu_gemm_forward_dispatch(
+                &engine.ctx,
+                &mut scratch.residual,
+                &scratch.gpu_input,
+                ipw_ptr,
+                ipw_dtype,
+                Some(w.input_proj_b()),
+                (b, engine.input_dim, dm),
+            )?;
+        }
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
@@ -2103,7 +2114,7 @@ impl GpuMambaInferenceMixed {
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             self.launch_captured_graph(MixedGraphPath::Native)?;
         } else {
-            if self.has_gemm_work(MixedGraphPath::Native) {
+            if self.has_gemm_work() {
                 prepare_inference_arch_rung(&self.engine.ctx)?;
             }
             let manifest = self
@@ -2145,7 +2156,7 @@ impl GpuMambaInferenceMixed {
             self.launch_captured_graph(MixedGraphPath::Native)?;
             Ok(())
         } else {
-            if self.has_gemm_work(MixedGraphPath::Native) {
+            if self.has_gemm_work() {
                 prepare_inference_arch_rung(&self.engine.ctx)?;
             }
             let manifest = self
@@ -2210,7 +2221,7 @@ impl GpuMambaInferenceMixed {
         }?;
         require_deterministic_gemm_graph_plan(
             &self.engine.ctx,
-            self.has_gemm_work(MixedGraphPath::Native),
+            self.has_gemm_work(),
             captured_gemm_plan.as_ref(),
             "M1 mixed-native inference graph capture",
         )?;
@@ -2264,7 +2275,7 @@ impl GpuMambaInferenceMixed {
         }?;
         require_deterministic_gemm_graph_plan(
             &self.engine.ctx,
-            self.has_gemm_work(MixedGraphPath::Legacy),
+            self.has_gemm_work(),
             captured_gemm_plan.as_ref(),
             "M1 legacy mixed inference graph capture",
         )?;
