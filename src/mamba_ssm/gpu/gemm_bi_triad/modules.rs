@@ -830,7 +830,13 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             crate::mamba_ssm::gpu::kernel_identity::read_cache(path, key, ArtifactKind::Ptx)
         && let Ok(src) =
             crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
-        && validate_module_ptx(request.module_kind, request.arch, &src).is_ok()
+        && validate_cached_module_ptx(
+            request.module_kind,
+            request.arch,
+            &hit.artifact_digest,
+            &src,
+        )
+        .is_ok()
         && let Ok(module) = request
             .ctx
             .load_module(cudarc::nvrtc::Ptx::from_src(src.clone()))
@@ -843,113 +849,129 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             .as_deref()
             .is_some_and(crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current)
     {
-        let extensions = module_composes_extensions(request.module_kind, request.arch);
-        let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
-        let sm89_half_abi =
-            census_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-        let sm89_exact_f32_abi =
-            census_sm89_exact_f32_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-        let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let sm89_tf32_joint_abi =
-            census_sm89_tf32_joint_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-        let fixed_half_abi =
-            census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-        let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_half_s3_abi = census_fixed_sm89_half_s3_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_finalist_abi = census_fixed_sm89_finalist_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_cells_abi = census_fixed_sm89_cells_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_sm120_exact_n64_abi = census_fixed_sm120_exact_n64_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_sm120_sliced_abi = census_fixed_sm120_sliced_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let fixed_sm120_postbias_abi = census_fixed_sm120_postbias_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
-            request.ctx,
-            request.module_kind,
-            request.arch,
-            &src,
-        );
-        let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
-        let (tf32_driver_abi, tf32_qualification_error) =
-            tf32_qualification_verdict(request.module_kind, extensions, census, validation);
-        if trace {
-            eprintln!(
-                "mamba-rs cache trace: {:?} hit artifact={}",
+        // One parse of the module text serves every census below.
+        with_ptx_parse_scope(&src, || {
+            let extensions = module_composes_extensions(request.module_kind, request.arch);
+            let census =
+                census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
+            let sm89_half_abi =
+                census_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
+            let sm89_exact_f32_abi = census_sm89_exact_f32_driver_abi(
+                request.ctx,
                 request.module_kind,
-                crate::mamba_ssm::gpu::kernel_identity::digest_hex(&hit.artifact_digest)
+                request.arch,
+                &src,
             );
-        }
-        loaded = Some((
-            module,
-            hit.artifact_digest,
-            tf32_qualification_error,
-            tf32_driver_abi,
-            sm89_half_abi,
-            sm89_exact_f32_abi,
-            sm89_exact_f32_d128_abi,
-            sm89_tf32_joint_abi,
-            fixed_half_abi,
-            fixed_half_swizzle_abi,
-            fixed_half_s3_abi,
-            fixed_rna_wide_abi,
-            fixed_finalist_abi,
-            fixed_exact_n64_abi,
-            fixed_cells_abi,
-            fixed_sm120_exact_n64_abi,
-            fixed_sm120_sliced_abi,
-            fixed_sm120_postbias_abi,
-            inference_sm89_driver_abi,
-        ));
+            let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let sm89_tf32_joint_abi = census_sm89_tf32_joint_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_half_abi = census_fixed_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_half_s3_abi = census_fixed_sm89_half_s3_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_finalist_abi = census_fixed_sm89_finalist_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_cells_abi = census_fixed_sm89_cells_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_sm120_exact_n64_abi = census_fixed_sm120_exact_n64_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_sm120_sliced_abi = census_fixed_sm120_sliced_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let fixed_sm120_postbias_abi = census_fixed_sm120_postbias_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &src,
+            );
+            let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
+            let (tf32_driver_abi, tf32_qualification_error) =
+                tf32_qualification_verdict(request.module_kind, extensions, census, validation);
+            if trace {
+                eprintln!(
+                    "mamba-rs cache trace: {:?} hit artifact={}",
+                    request.module_kind,
+                    crate::mamba_ssm::gpu::kernel_identity::digest_hex(&hit.artifact_digest)
+                );
+            }
+            loaded = Some((
+                module,
+                hit.artifact_digest,
+                tf32_qualification_error,
+                tf32_driver_abi,
+                sm89_half_abi,
+                sm89_exact_f32_abi,
+                sm89_exact_f32_d128_abi,
+                sm89_tf32_joint_abi,
+                fixed_half_abi,
+                fixed_half_swizzle_abi,
+                fixed_half_s3_abi,
+                fixed_rna_wide_abi,
+                fixed_finalist_abi,
+                fixed_exact_n64_abi,
+                fixed_cells_abi,
+                fixed_sm120_exact_n64_abi,
+                fixed_sm120_sliced_abi,
+                fixed_sm120_postbias_abi,
+                inference_sm89_driver_abi,
+            ));
+        });
     }
 
     let (
@@ -2397,7 +2419,49 @@ fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The cached modules whose PTX passed validation in this process, by
+/// kind, target and artifact digest. Validation reads the module text
+/// alone and the digest names that text, so the next context loading the
+/// same artifact need not read it again. Only passes are kept.
+static VALIDATED_CACHED_PTX: std::sync::Mutex<
+    Vec<(
+        ModuleKind,
+        String,
+        crate::mamba_ssm::gpu::kernel_identity::Sha256Digest,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn validate_cached_module_ptx(
+    module_kind: ModuleKind,
+    arch: &str,
+    artifact: &crate::mamba_ssm::gpu::kernel_identity::Sha256Digest,
+    ptx: &str,
+) -> Result<(), String> {
+    let passed = |known: &[(ModuleKind, String, _)]| {
+        known.iter().any(|(kind, target, digest)| {
+            *kind == module_kind && target == arch && digest == artifact
+        })
+    };
+    if passed(
+        &VALIDATED_CACHED_PTX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    ) {
+        return Ok(());
+    }
+    validate_module_ptx(module_kind, arch, ptx)?;
+    VALIDATED_CACHED_PTX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((module_kind, arch.to_owned(), *artifact));
+    Ok(())
+}
+
 fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
+    with_ptx_parse_scope(ptx, || validate_module_ptx_parts(module_kind, arch, ptx))
+}
+
+fn validate_module_ptx_parts(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     match module_kind {
         ModuleKind::Fixed => {
             validate_fixed_tf32_ptx(arch, ptx)?;
@@ -5946,40 +6010,43 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         }
     }
     let stripped = strip_ptx_comments(ptx)?;
-    for symbol in expected {
-        let entry = ptx_entry(&stripped, symbol)?;
-        if ptx_has_unquoted_token(&entry, |token| {
-            token.starts_with("atom.")
-                || token.starts_with("atom::")
-                || token.starts_with("red.")
-                || token.starts_with("red::")
-                || token.starts_with("redux.")
-        }) {
-            return Err(format!(
-                "Fixed TF32 {symbol} contains a reduction instruction"
-            ));
+    // One parse of the stripped text serves every symbol below.
+    with_ptx_parse_scope(&stripped, || -> Result<(), String> {
+        for symbol in expected {
+            let entry = ptx_entry(&stripped, symbol)?;
+            if ptx_has_unquoted_token(&entry, |token| {
+                token.starts_with("atom.")
+                    || token.starts_with("atom::")
+                    || token.starts_with("red.")
+                    || token.starts_with("red::")
+                    || token.starts_with("redux.")
+            }) {
+                return Err(format!(
+                    "Fixed TF32 {symbol} contains a reduction instruction"
+                ));
+            }
         }
-    }
-    if owns_sm120 {
-        for base in FIXED_SM120_HALF_BASES {
-            for suffix in ["_bf16", "_f16", "_f32out_bf16", "_f32out_f16"] {
-                let symbol = format!("{base}{suffix}");
-                let entry = ptx_entry(&stripped, &symbol)?;
-                if ptx_has_unquoted_token(&entry, |token| {
-                    token.starts_with("atom.")
-                        || token.starts_with("atom::")
-                        || token.starts_with("red.")
-                        || token.starts_with("red::")
-                        || token.starts_with("redux.")
-                }) {
-                    return Err(format!(
-                        "Fixed SM120 half {symbol} contains a reduction instruction"
-                    ));
+        if owns_sm120 {
+            for base in FIXED_SM120_HALF_BASES {
+                for suffix in ["_bf16", "_f16", "_f32out_bf16", "_f32out_f16"] {
+                    let symbol = format!("{base}{suffix}");
+                    let entry = ptx_entry(&stripped, &symbol)?;
+                    if ptx_has_unquoted_token(&entry, |token| {
+                        token.starts_with("atom.")
+                            || token.starts_with("atom::")
+                            || token.starts_with("red.")
+                            || token.starts_with("red::")
+                            || token.starts_with("redux.")
+                    }) {
+                        return Err(format!(
+                            "Fixed SM120 half {symbol} contains a reduction instruction"
+                        ));
+                    }
                 }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn validate_scalar_zero_reduction_ptx(ptx: &str) -> Result<(), String> {
@@ -6275,7 +6342,7 @@ struct PtxToken<'a> {
     end: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedPtxEntry {
     symbol: String,
     text: String,
@@ -6664,7 +6731,73 @@ fn parse_ptx_function(
     ))
 }
 
-fn parse_ptx(ptx: &str) -> Result<ParsedPtx, String> {
+/// A text being validated: its address, its length and its parse once made.
+type PtxParseSlot = (usize, usize, Option<std::rc::Rc<ParsedPtx>>);
+
+thread_local! {
+    /// The module texts a validation pass is reading, each with its parse
+    /// once made. The validators look entries up one symbol at a time, and
+    /// re-tokenizing a module of megabytes for every lookup made each
+    /// context creation cost seconds. The pass holds the text borrowed for
+    /// as long as its slot lives, so no other text can sit at that address
+    /// meanwhile.
+    static PTX_PARSE_SCOPE: std::cell::RefCell<Vec<PtxParseSlot>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `f` with one parse of `ptx` shared by every [`parse_ptx`] of that
+/// same text inside it.
+fn with_ptx_parse_scope<R>(ptx: &str, f: impl FnOnce() -> R) -> R {
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            PTX_PARSE_SCOPE.with(|scope| {
+                scope.borrow_mut().pop();
+            });
+        }
+    }
+    PTX_PARSE_SCOPE.with(|scope| {
+        scope
+            .borrow_mut()
+            .push((ptx.as_ptr() as usize, ptx.len(), None));
+    });
+    let _pop = Pop;
+    f()
+}
+
+/// The parse of a module text, shared inside a [`with_ptx_parse_scope`] of
+/// that text and made afresh outside one.
+fn parse_ptx(ptx: &str) -> Result<std::rc::Rc<ParsedPtx>, String> {
+    let key = (ptx.as_ptr() as usize, ptx.len());
+    let scoped = PTX_PARSE_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        scope
+            .iter()
+            .rev()
+            .find(|(at, len, _)| (*at, *len) == key)
+            .map(|(_, _, parsed)| parsed.clone())
+    });
+    match scoped {
+        Some(Some(parsed)) => Ok(parsed),
+        Some(None) => {
+            let parsed = std::rc::Rc::new(parse_ptx_text(ptx)?);
+            PTX_PARSE_SCOPE.with(|scope| {
+                if let Some(slot) = scope
+                    .borrow_mut()
+                    .iter_mut()
+                    .rev()
+                    .find(|(at, len, _)| (*at, *len) == key)
+                {
+                    slot.2 = Some(parsed.clone());
+                }
+            });
+            Ok(parsed)
+        }
+        None => Ok(std::rc::Rc::new(parse_ptx_text(ptx)?)),
+    }
+}
+
+fn parse_ptx_text(ptx: &str) -> Result<ParsedPtx, String> {
     let stripped = strip_ptx_comments(ptx)?;
     let tokens = ptx_tokens(&stripped);
 
@@ -6746,8 +6879,8 @@ fn parse_ptx(ptx: &str) -> Result<ParsedPtx, String> {
 fn ptx_entry_symbols(ptx: &str) -> Result<Vec<String>, String> {
     Ok(parse_ptx(ptx)?
         .entries
-        .into_iter()
-        .map(|entry| entry.symbol)
+        .iter()
+        .map(|entry| entry.symbol.clone())
         .collect())
 }
 
@@ -6756,7 +6889,7 @@ fn validate_exact_ptx_exports(
     expected_count: usize,
     expected: &[&str],
     ptx: &str,
-) -> Result<ParsedPtx, String> {
+) -> Result<std::rc::Rc<ParsedPtx>, String> {
     let expected_entries = expected.len();
     let mut expected_counts = BTreeMap::new();
     for &symbol in expected {
@@ -6801,17 +6934,15 @@ fn validate_exact_ptx_exports(
 }
 
 fn parsed_ptx_entry(ptx: &str, symbol: &str) -> Result<ParsedPtxEntry, String> {
-    let mut matches = parse_ptx(ptx)?
-        .entries
-        .into_iter()
-        .filter(|entry| entry.symbol == symbol);
+    let parsed = parse_ptx(ptx)?;
+    let mut matches = parsed.entries.iter().filter(|entry| entry.symbol == symbol);
     let entry = matches
         .next()
         .ok_or_else(|| format!("TF32 PTX is missing entry {symbol}"))?;
     if matches.next().is_some() {
         return Err(format!("TF32 PTX contains duplicate entry {symbol}"));
     }
-    Ok(entry)
+    Ok(entry.clone())
 }
 
 fn parsed_ptx_entry_ref<'a>(
@@ -7210,6 +7341,7 @@ fn validate_sm80_ptx(arch: &str, ptx: &str) -> Result<(), String> {
 fn ptx_target(ptx: &str) -> Result<String, String> {
     parse_ptx(ptx)?
         .target
+        .clone()
         .ok_or_else(|| "specialized PTX has no target directive".to_string())
 }
 

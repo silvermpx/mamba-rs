@@ -853,13 +853,46 @@ pub(crate) fn nvrtc_library_domain_is_current(expected: &[u8]) -> bool {
     query_nvrtc_library_domain().as_deref() == Some(expected)
 }
 
+/// A library file as last hashed: its canonical path, size and
+/// modification time.
+type LibraryStamp = (PathBuf, u64, std::time::SystemTime);
+
+/// The NVRTC library set's digest with the stamps of the files it was
+/// computed from. Every cache hit re-checks the libraries, and hashing the
+/// whole set (over a hundred megabytes) for each module made context
+/// creation slow; a replaced or rewritten library gets a new size or
+/// modification time and is hashed again.
+static NVRTC_DOMAIN_MEMO: std::sync::Mutex<Option<(Vec<LibraryStamp>, Vec<u8>)>> =
+    std::sync::Mutex::new(None);
+
+fn library_stamp(path: &Path) -> Option<LibraryStamp> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&canonical).ok()?;
+    Some((canonical, meta.len(), meta.modified().ok()?))
+}
+
 fn query_nvrtc_library_domain() -> Option<Vec<u8>> {
     let runtime = unique_loaded_library_path("libnvrtc.so")?;
     let builtins = match unique_loaded_library_path("libnvrtc-builtins.so") {
         Some(path) => path,
         None => nvrtc_builtins_sibling(&runtime)?,
     };
-    nvrtc_library_domain_from_paths(&runtime, &builtins)
+    let stamps = vec![library_stamp(&runtime)?, library_stamp(&builtins)?];
+    {
+        let memo = NVRTC_DOMAIN_MEMO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((known, domain)) = memo.as_ref()
+            && *known == stamps
+        {
+            return Some(domain.clone());
+        }
+    }
+    let domain = nvrtc_library_domain_from_paths(&runtime, &builtins)?;
+    *NVRTC_DOMAIN_MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamps, domain.clone()));
+    Some(domain)
 }
 
 fn loaded_library_domain(needle: &str) -> Option<Sha256Digest> {
