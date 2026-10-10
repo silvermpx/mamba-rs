@@ -62,6 +62,9 @@ pub struct Mamba2BwdKernels {
     pub chunk_dot: CudaFunction,
     pub dx: TypedKernel,
     pub rowsums: TypedKernel,
+    /// `m2b_dx` and `m2b_rowsums` as one register-tile block per chunk and
+    /// head, when [`dx_tiles_geom`] fits the head.
+    pub dx_tiles: TypedKernel,
     pub pairs: TypedKernel,
     pub db: TypedKernel,
     pub dc: TypedKernel,
@@ -203,6 +206,7 @@ impl Mamba2Kernels {
                 chunk_dot: get("m2b_chunk_dot")?,
                 dx: typed("m2b_dx")?,
                 rowsums: typed("m2b_rowsums")?,
+                dx_tiles: typed("m2b_dx_tiles")?,
                 pairs: typed("m2b_pairs")?,
                 db: typed("m2b_db")?,
                 dc: typed("m2b_dc")?,
@@ -238,6 +242,7 @@ impl Mamba2Kernels {
                 (&kernels.bwd.gated_norm, "gated norm backward"),
                 (&kernels.bwd.seq_bwd, "sequential backward"),
                 (&kernels.chunk_scan_tiles, "chunk scan tiles"),
+                (&kernels.bwd.dx_tiles, "dx tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -256,6 +261,29 @@ pub const CHUNK_SCAN_TT: usize = 32;
 /// one, the tile's C rows and weights, the x rows of the chunk.
 pub fn chunk_scan_tiles_smem_bytes(hd: usize, ds: usize) -> usize {
     (hd * (ds + 1) + CHUNK_SCAN_TT * ds + CHUNK_SCAN_TT * CHUNK + CHUNK * hd) * 4
+}
+
+/// The fused dx and token sums' state indices per staging pass and shared
+/// memory: the staging (the B or C rows and the dS or H rows of `nk`
+/// indices, later the three [64][P + 1] token rows), the weights [64][64],
+/// the dy rows [64][P rounded up to 4] and the acs and dt of the chunk. The
+/// largest pass that fits `cap` (all of N, then halves); `None` past 256
+/// channels (a block past 1024 threads) or when even one index does not fit.
+pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize) -> Option<(usize, usize)> {
+    if hd == 0 || hd > 256 || ds == 0 {
+        return None;
+    }
+    let p4 = hd.next_multiple_of(4);
+    let bytes = |nk: usize| {
+        ((nk * (CHUNK + 4 + p4 + 4)).max(3 * CHUNK * (hd + 1))
+            + CHUNK * CHUNK
+            + CHUNK * p4
+            + 2 * CHUNK)
+            * 4
+    };
+    std::iter::successors(Some(ds), |&nk| (nk > 1).then(|| nk.div_ceil(2)))
+        .find(|&nk| bytes(nk) <= cap)
+        .map(|nk| (nk, bytes(nk)))
 }
 
 /// The sequential backward's shared memory for a head: the replay state

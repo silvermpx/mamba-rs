@@ -27,7 +27,9 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
-use super::kernels::{CHUNK, Mamba2Kernels, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes};
+use super::kernels::{
+    CHUNK, Mamba2Kernels, dx_tiles_geom, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes,
+};
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
@@ -308,6 +310,9 @@ pub struct Mamba2GpuTrainer {
     /// one, and the tokens between its replay checkpoints.
     seq_mode: bool,
     stride: usize,
+    /// The fused dx and token sums' (state indices per pass, shared bytes)
+    /// on the chunked path when the head fits; else the two kernels run.
+    dx_tiles: Option<(usize, usize)>,
     template: Mamba2Weights,
     layout: Layout,
     master: GpuBuffer,
@@ -438,6 +443,13 @@ impl Mamba2GpuTrainer {
         // checkpoints; the other path's are left one element long.
         let chunked = |n: usize| if seq_mode { 1 } else { n };
         let sequential = |n: usize| if seq_mode { n } else { 1 };
+        // The fused dx keeps acc, ste and yi in shared memory.
+        let dx_tiles = if seq_mode {
+            None
+        } else {
+            dx_tiles_geom(hd, ds, optin)
+        };
+        let unfused = |n: usize| if dx_tiles.is_some() { 1 } else { chunked(n) };
         let acts = (0..c.n_layers)
             .map(|_| -> Result<LayerActs, String> {
                 Ok(LayerActs {
@@ -468,9 +480,9 @@ impl Mamba2GpuTrainer {
             rec: z(sequential(batch * nh * stride * hd * ds))?,
             db_h: z(sequential(rows * nh * ds))?,
             dc_h: z(sequential(rows * nh * ds))?,
-            acc: z(chunked(rows * d_ssm))?,
-            ste: z(chunked(rows * d_ssm))?,
-            yi: z(chunked(rows * d_ssm))?,
+            acc: z(unfused(rows * d_ssm))?,
+            ste: z(unfused(rows * d_ssm))?,
+            yi: z(unfused(rows * d_ssm))?,
             dcbh: z(chunked(per_chunk * PAIRS))?,
             mm: z(chunked(per_chunk * PAIRS))?,
             ddtx: z(chunked(per_chunk * CHUNK))?,
@@ -552,6 +564,7 @@ impl Mamba2GpuTrainer {
             act,
             seq_mode,
             stride,
+            dx_tiles,
         };
         trainer.refresh_mirror()?;
         Ok(trainer)
@@ -1259,10 +1272,46 @@ impl Mamba2GpuTrainer {
                     [dot, states, ds_buf, count, pn_i]
                 );
             }
-            let (acc, ste, yi) = (s.acc.cached_ptr(), s.ste.cached_ptr(), s.yi.cached_ptr());
-            {
-                let d = lp.d;
-                let per_channel = i32::from(c.d_has_hdim);
+            let (ddtx, qv, inter) = (s.ddtx.cached_ptr(), s.qv.cached_ptr(), s.inter.cached_ptr());
+            let d = lp.d;
+            let per_channel = i32::from(c.d_has_hdim);
+            if let Some((nk, smem)) = self.dx_tiles {
+                let nk_i = nk as i32;
+                go!(
+                    k.dx_tiles.get(act),
+                    LaunchConfig {
+                        grid_dim: ((b * nc) as u32, nh as u32, 1),
+                        block_dim: ((16 * hd.div_ceil(4)) as u32, 1, 1),
+                        shared_mem_bytes: smem as u32,
+                    },
+                    "dx",
+                    [
+                        dxbc,
+                        ddtx,
+                        qv,
+                        inter,
+                        dy,
+                        xbc,
+                        ld_xbc,
+                        b_col,
+                        c_col,
+                        states,
+                        ds_buf,
+                        cb,
+                        dt,
+                        acs,
+                        d,
+                        per_channel,
+                        t_i,
+                        nh_i,
+                        ng_i,
+                        hd_i,
+                        ds_i,
+                        nk_i
+                    ]
+                );
+            } else {
+                let (acc, ste, yi) = (s.acc.cached_ptr(), s.ste.cached_ptr(), s.yi.cached_ptr());
                 go!(
                     k.dx.get(act),
                     cfg3(b * nc, nh, (CHUNK * hd).div_ceil(128), 128),
@@ -1292,16 +1341,15 @@ impl Mamba2GpuTrainer {
                         ds_i
                     ]
                 );
+                go!(
+                    k.rowsums.get(act),
+                    cfg3(b * nc, nh, 1, CHUNK as u32),
+                    "token sums",
+                    [
+                        ddtx, qv, inter, acc, ste, yi, dy, xbc, ld_xbc, dt, b_i, t_i, nh_i, hd_i
+                    ]
+                );
             }
-            let (ddtx, qv, inter) = (s.ddtx.cached_ptr(), s.qv.cached_ptr(), s.inter.cached_ptr());
-            go!(
-                k.rowsums.get(act),
-                cfg3(b * nc, nh, 1, CHUNK as u32),
-                "token sums",
-                [
-                    ddtx, qv, inter, acc, ste, yi, dy, xbc, ld_xbc, dt, b_i, t_i, nh_i, hd_i
-                ]
-            );
             let (dcbh, mm) = (s.dcbh.cached_ptr(), s.mm.cached_ptr());
             go!(
                 k.pairs.get(act),
