@@ -280,6 +280,8 @@ impl Mamba2Kernels {
                 (&kernels.bwd.seq_bwd, "sequential backward"),
                 (&kernels.bwd.seq_bwd_tiles, "sequential backward tiles"),
                 (&kernels.chunk_scan_tiles, "chunk scan tiles"),
+                (&kernels.bmm_chunk, "chunk bmm"),
+                (&kernels.chunk_state, "chunk state"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
                 (&kernels.bwd.db_tiles, "dB tiles"),
                 (&kernels.bwd.dc_tiles, "dC tiles"),
@@ -301,6 +303,21 @@ pub const CHUNK_SCAN_TT: usize = 32;
 /// one, the tile's C rows and weights, the x rows of the chunk.
 pub fn chunk_scan_tiles_smem_bytes(hd: usize, ds: usize) -> usize {
     (hd * (ds + 1) + CHUNK_SCAN_TT * ds + CHUNK_SCAN_TT * CHUNK + CHUNK * hd) * 4
+}
+
+/// The chunk bmm's shared memory: the chunk's C and B rows transposed,
+/// padded to 68, up to 128 state indices a pass.
+pub fn bmm_smem_bytes(ds: usize) -> usize {
+    2 * ds.min(128) * (CHUNK + 4) * 4
+}
+
+/// The chunk state kernel's state indices per block (32 per lane column,
+/// one to four columns) and shared memory: the weighted inputs [64][P
+/// rounded up to 4], the B rows of the block's indices and the per-token
+/// weights.
+pub fn chunk_state_geom(hd: usize, ds: usize) -> (usize, usize) {
+    let cols = 32 * ds.div_ceil(32).min(4).next_power_of_two().min(4);
+    (cols, CHUNK * (hd.next_multiple_of(4) + cols + 1) * 4)
 }
 
 /// The fused dx and token sums' state indices per staging pass and shared

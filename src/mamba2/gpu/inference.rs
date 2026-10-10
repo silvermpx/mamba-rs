@@ -16,8 +16,8 @@ use cudarc::driver::PushKernelArg;
 use cudarc::driver::LaunchConfig;
 
 use super::kernels::{
-    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, chunk_scan_tiles_smem_bytes, decode_rows, gated_norm_cfg,
-    gated_norm_smem_bytes, step_cfg, step_rows,
+    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
+    chunk_state_geom, decode_rows, gated_norm_cfg, gated_norm_smem_bytes, step_cfg, step_rows,
 };
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
@@ -178,6 +178,13 @@ pub(crate) fn check_device_envelope(
              {optin}",
             cfg.ssm_dim() / ng,
             gated_norm_smem_bytes(cfg.ssm_dim(), ng, hd)
+        ));
+    }
+    let state_smem = chunk_state_geom(hd, ds).1;
+    if state_smem > optin {
+        return Err(format!(
+            "a chunk state of {hd} channels needs {state_smem} bytes of shared memory; this GPU \
+             serves {optin}"
         ));
     }
     let grid_limit = 65_535usize;
@@ -485,8 +492,8 @@ impl M2Exec<'_> {
             );
         }
         let dt_cfg = LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh.div_ceil(32) as u32, 1),
-            block_dim: (32, 1, 1),
+            grid_dim: ((b * nc) as u32, nh.div_ceil(4) as u32, 1),
+            block_dim: (CHUNK as u32, 4, 1),
             shared_mem_bytes: 0,
         };
         launch(dt_cfg, "dt", l, &|g| unsafe {
@@ -509,7 +516,7 @@ impl M2Exec<'_> {
         let bmm_cfg = LaunchConfig {
             grid_dim: ((b * nc) as u32, ng as u32, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: bmm_smem_bytes(ds) as u32,
         };
         launch(bmm_cfg, "bmm", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.bmm_chunk.get(self.act));
@@ -524,10 +531,11 @@ impl M2Exec<'_> {
             bld.arg(&ds_i);
             bld.launch(g).map(|_| ())
         })?;
+        let (state_cols, state_smem) = chunk_state_geom(hd, ds);
         let state_cfg = LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh as u32, (hd * ds).div_ceil(256) as u32),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
+            grid_dim: ((b * nc) as u32, nh as u32, ds.div_ceil(state_cols) as u32),
+            block_dim: ((32 * hd.div_ceil(4)).min(256) as u32, 1, 1),
+            shared_mem_bytes: state_smem as u32,
         };
         launch(state_cfg, "chunk state", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.chunk_state.get(self.act));
