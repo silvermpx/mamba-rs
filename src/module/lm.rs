@@ -56,6 +56,18 @@ pub enum AnyScratch {
 }
 
 impl AnyBackbone {
+    /// Pack the backbone's projections for decode (see
+    /// [`MambaBackbone::pack_for_decode`]): the same outputs without a BLAS,
+    /// faster on large layers, at the memory of a second copy of them.
+    pub fn pack_for_decode(&mut self) {
+        match self {
+            Self::M1(b) => b.pack_for_decode(),
+            Self::M2(b) => b.pack_for_decode(),
+            Self::M3(b) => b.pack_for_decode(),
+            Self::M3Mimo(b) => b.pack_for_decode(),
+        }
+    }
+
     pub fn forward_step(
         &self,
         input: &[f32],

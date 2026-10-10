@@ -63,7 +63,7 @@ fn m1_cpu_benchmark() {
 
     for (name, cfg) in &configs() {
         let input_dim = cfg.d_model;
-        let backbone = MambaBackbone::init(*cfg, input_dim, 42);
+        let mut backbone = MambaBackbone::init(*cfg, input_dim, 42);
         let mut state = backbone.alloc_state();
         let mut scratch = backbone.alloc_scratch();
         let mut output = vec![0.0f32; cfg.d_model];
@@ -83,13 +83,28 @@ fn m1_cpu_benchmark() {
         }
         let us_per_step = t0.elapsed().as_micros() as f64 / iterations as f64;
 
+        // The same steps with the projections packed for decode.
+        backbone.pack_for_decode();
+        state.reset();
+        for _ in 0..100 {
+            backbone.forward_step(&input, &mut output, &mut state, &mut scratch);
+        }
+        state.reset();
+        let t0 = Instant::now();
+        for _ in 0..iterations {
+            backbone.forward_step(&input, &mut output, &mut state, &mut scratch);
+        }
+        let us_packed = t0.elapsed().as_micros() as f64 / iterations as f64;
+
         println!(
-            "{name:>8}: d_model={:>3}, layers={}, d_inner={:>4}, params={:>7} | {:.1} us/step",
+            "{name:>8}: d_model={:>3}, layers={}, d_inner={:>4}, params={:>7} | {:.1} us/step, \
+             packed {:.1}",
             cfg.d_model,
             cfg.n_layers,
             cfg.d_inner(),
             backbone.param_count(),
             us_per_step,
+            us_packed,
         );
     }
 

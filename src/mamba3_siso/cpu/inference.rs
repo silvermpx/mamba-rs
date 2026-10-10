@@ -15,8 +15,48 @@ const MAX_ANGLES: usize = MAX_DS / 2;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
+use crate::mlp::cpu::GatedMlpPacked;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::norms::{bcnorm, rms_norm_weighted, rmsnorm_gated};
+use crate::ops::packed::{PackedLinear, linear_row};
+
+/// One layer's projections packed for decode.
+#[derive(Clone, Debug)]
+pub struct Mamba3LayerPacked {
+    pub in_proj: PackedLinear,
+    pub out_proj: PackedLinear,
+}
+
+/// Every projection of a Mamba-3 backbone packed for decode: a copy of the
+/// weights' projections, so it must be packed again after they change.
+#[derive(Clone, Debug)]
+pub struct Mamba3PackedLinears {
+    pub layers: Vec<Mamba3LayerPacked>,
+    /// One per layer with an MLP.
+    pub mlp: Vec<GatedMlpPacked>,
+    /// The input projection, absent for a backbone without one.
+    pub input_proj: Option<PackedLinear>,
+}
+
+impl Mamba3PackedLinears {
+    /// Pack every projection of `weights`.
+    pub fn pack(weights: &Mamba3Weights, cfg: &Mamba3Config, input_dim: usize) -> Self {
+        let (dm, di) = (cfg.d_model, cfg.d_inner());
+        Self {
+            layers: weights
+                .layers
+                .iter()
+                .map(|lw| Mamba3LayerPacked {
+                    in_proj: PackedLinear::pack(&lw.in_proj_w, dm, cfg.in_proj_out_dim()),
+                    out_proj: PackedLinear::pack(&lw.out_proj_w, di, dm),
+                })
+                .collect(),
+            mlp: weights.mlp.iter().map(GatedMlpPacked::pack).collect(),
+            input_proj: (!weights.input_proj_w.is_empty())
+                .then(|| PackedLinear::pack(&weights.input_proj_w, input_dim, dm)),
+        }
+    }
+}
 
 /// Pre-allocated scratch buffers for Mamba-3 T=1 step.
 pub struct Mamba3StepScratch {
@@ -81,6 +121,17 @@ pub fn mamba3_layer_step(
     state: &mut Mamba3LayerState,
     cfg: &Mamba3Config,
 ) {
+    layer_step(temporal, scratch, (lw, None), state, cfg);
+}
+
+/// [`mamba3_layer_step`] with the projections packed when `lp` holds them.
+fn layer_step(
+    temporal: &mut [f32],
+    scratch: &mut Mamba3StepScratch,
+    (lw, lp): (&Mamba3LayerWeights, Option<&Mamba3LayerPacked>),
+    state: &mut Mamba3LayerState,
+    cfg: &Mamba3Config,
+) {
     let dm = cfg.d_model;
     let di = cfg.d_inner();
     let ds = cfg.d_state;
@@ -103,13 +154,12 @@ pub fn mamba3_layer_step(
     );
 
     // 3. in_proj: [d_model] → [in_proj_dim] (BLAS matvec, no bias)
-    crate::ops::blas::matvec_forward(
+    linear_row(
         &mut scratch.proj[..ip],
         &scratch.norm_buf[..dm],
-        &lw.in_proj_w,
+        (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
         None,
-        dm,
-        ip,
+        (dm, ip),
     );
 
     // 4. 8-way split: z, x, B, C, dd_dt, dd_A, trap, angles
@@ -269,13 +319,12 @@ pub fn mamba3_layer_step(
     }
 
     // 8. out_proj: [d_inner] → [d_model] (BLAS matvec) + residual
-    crate::ops::blas::matvec_forward(
+    linear_row(
         &mut temporal[..dm],
         &scratch.gated[..di],
-        &lw.out_proj_w,
+        (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
         None,
-        di,
-        dm,
+        (di, dm),
     );
     for (t_out, &r) in temporal[..dm].iter_mut().zip(&scratch.residual[..dm]) {
         *t_out += r;
@@ -294,6 +343,45 @@ pub fn mamba3_step(
     states: &mut [Mamba3LayerState],
     cfg: &Mamba3Config,
 ) {
+    backbone_step(temporal, input, scratch, (weights, None), states, cfg);
+}
+
+/// [`mamba3_step`] with every projection taken from `packed` (packed from
+/// these `weights` by [`Mamba3PackedLinears::pack`]).
+///
+/// # Panics
+///
+/// When `packed` holds another number of layers or MLPs than `weights`.
+pub fn mamba3_step_packed(
+    temporal: &mut [f32],
+    input: &[f32],
+    scratch: &mut Mamba3StepScratch,
+    (weights, packed): (&Mamba3Weights, &Mamba3PackedLinears),
+    states: &mut [Mamba3LayerState],
+    cfg: &Mamba3Config,
+) {
+    assert!(
+        packed.layers.len() == weights.layers.len() && packed.mlp.len() == weights.mlp.len(),
+        "packed projections of another backbone"
+    );
+    backbone_step(
+        temporal,
+        input,
+        scratch,
+        (weights, Some(packed)),
+        states,
+        cfg,
+    );
+}
+
+fn backbone_step(
+    temporal: &mut [f32],
+    input: &[f32],
+    scratch: &mut Mamba3StepScratch,
+    (weights, packed): (&Mamba3Weights, Option<&Mamba3PackedLinears>),
+    states: &mut [Mamba3LayerState],
+    cfg: &Mamba3Config,
+) {
     let dm = cfg.d_model;
     let input_dim = input.len();
 
@@ -305,27 +393,34 @@ pub fn mamba3_step(
         debug_assert_eq!(input_dim, dm);
         temporal[..dm].copy_from_slice(&input[..dm]);
     } else {
-        crate::ops::blas::matvec_forward(
+        linear_row(
             &mut temporal[..dm],
             &input[..input_dim],
-            &weights.input_proj_w,
+            (
+                &weights.input_proj_w,
+                packed.and_then(|p| p.input_proj.as_ref()),
+            ),
             Some(&weights.input_proj_b),
-            input_dim,
-            dm,
+            (input_dim, dm),
         );
     }
 
     // Process each layer: the mixer branch, then the MLP branch when the
     // model has one.
     for (layer_idx, lw) in weights.layers.iter().enumerate() {
-        mamba3_layer_step(temporal, scratch, lw, &mut states[layer_idx], cfg);
+        let lp = packed.map(|p| &p.layers[layer_idx]);
+        layer_step(temporal, scratch, (lw, lp), &mut states[layer_idx], cfg);
         if let Some(mlp) = weights.mlp.get(layer_idx) {
-            crate::mlp::cpu::gated_mlp_step(
-                &mut temporal[..dm],
-                mlp,
-                &mut scratch.mlp,
-                cfg.rms_norm_eps,
-            );
+            let t = &mut temporal[..dm];
+            match packed {
+                Some(p) => crate::mlp::cpu::gated_mlp_step_packed(
+                    t,
+                    (mlp, &p.mlp[layer_idx]),
+                    &mut scratch.mlp,
+                    cfg.rms_norm_eps,
+                ),
+                None => crate::mlp::cpu::gated_mlp_step(t, mlp, &mut scratch.mlp, cfg.rms_norm_eps),
+            }
         }
     }
 

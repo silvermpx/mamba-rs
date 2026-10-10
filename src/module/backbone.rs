@@ -1,5 +1,8 @@
 use crate::config::MambaConfig;
-use crate::inference::{MambaStepScratch, mamba_step, mamba_step_no_proj};
+use crate::inference::{
+    MambaPackedLinears, MambaStepScratch, mamba_step, mamba_step_no_proj,
+    mamba_step_no_proj_packed, mamba_step_packed,
+};
 use crate::state::MambaState;
 use crate::weights::{MambaLayerWeights, MambaWeights};
 
@@ -27,6 +30,10 @@ pub struct MambaBackbone {
     cfg: MambaConfig,
     input_dim: usize,
     identity_proj: bool,
+    /// The projections packed for decode by [`Self::pack_for_decode`]: a
+    /// copy of `weights`, dropped by every mutable access to them so a step
+    /// never reads stale panels.
+    packed: Option<MambaPackedLinears>,
 }
 
 impl MambaBackbone {
@@ -41,6 +48,7 @@ impl MambaBackbone {
             cfg,
             input_dim,
             identity_proj: false,
+            packed: None,
         }
     }
 
@@ -62,6 +70,7 @@ impl MambaBackbone {
             cfg,
             input_dim,
             identity_proj: false,
+            packed: None,
         })
     }
 
@@ -122,6 +131,7 @@ impl MambaBackbone {
             cfg,
             input_dim: d,
             identity_proj: true,
+            packed: None,
         })
     }
 
@@ -135,8 +145,10 @@ impl MambaBackbone {
         &self.weights
     }
 
-    /// Mutable weight access (for optimizer updates).
+    /// Mutable weight access (for optimizer updates). Drops the packed
+    /// projections; pack again with [`Self::pack_for_decode`].
     pub fn weights_mut(&mut self) -> &mut MambaWeights {
+        self.packed = None;
         &mut self.weights
     }
 
@@ -145,9 +157,29 @@ impl MambaBackbone {
         &self.weights.layers[index]
     }
 
-    /// Mutable access to a specific layer's weights.
+    /// Mutable access to a specific layer's weights. Drops the packed
+    /// projections; pack again with [`Self::pack_for_decode`].
     pub fn layer_mut(&mut self, index: usize) -> &mut MambaLayerWeights {
+        self.packed = None;
         &mut self.weights.layers[index]
+    }
+
+    /// Pack the projections in panels for the single-step decode
+    /// ([`Self::forward_step`] and [`Self::forward_sequence`]): the same
+    /// outputs as the row-major product without a BLAS, faster on large
+    /// layers, at the memory of a second copy of the projections. A mutable
+    /// access to the weights drops the copy.
+    pub fn pack_for_decode(&mut self) {
+        self.packed = Some(MambaPackedLinears::pack(
+            &self.weights,
+            &self.cfg,
+            self.input_dim,
+        ));
+    }
+
+    /// Whether the projections are packed for decode.
+    pub fn is_packed(&self) -> bool {
+        self.packed.is_some()
     }
 
     /// Number of layers.
@@ -182,17 +214,33 @@ impl MambaBackbone {
         state: &mut MambaState,
         scratch: &mut MambaStepScratch,
     ) {
-        if self.identity_proj {
-            mamba_step_no_proj(
+        match (&self.packed, self.identity_proj) {
+            (Some(p), true) => mamba_step_no_proj_packed(
+                input,
+                output,
+                (&self.weights, p),
+                &mut state.layers,
+                scratch,
+                &self.cfg,
+            ),
+            (Some(p), false) => mamba_step_packed(
+                input,
+                output,
+                (&self.weights, p),
+                &mut state.layers,
+                scratch,
+                &self.cfg,
+                self.input_dim,
+            ),
+            (None, true) => mamba_step_no_proj(
                 input,
                 output,
                 &self.weights,
                 &mut state.layers,
                 scratch,
                 &self.cfg,
-            );
-        } else {
-            mamba_step(
+            ),
+            (None, false) => mamba_step(
                 input,
                 output,
                 &self.weights,
@@ -200,7 +248,7 @@ impl MambaBackbone {
                 scratch,
                 &self.cfg,
                 self.input_dim,
-            );
+            ),
         }
     }
 
@@ -299,5 +347,58 @@ impl MambaBackbone {
             &dims,
             mode,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn det(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed.max(1);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// Packed projections give the row-major step's bits over a chain of
+    /// steps (without a BLAS), and a mutable access to the weights drops
+    /// them, so a step never reads panels of weights that changed.
+    #[test]
+    fn packed_decode_keeps_the_bits_and_drops_on_mutation() {
+        let cfg = MambaConfig {
+            d_model: 96,
+            n_layers: 2,
+            ..MambaConfig::default()
+        };
+        let input_dim = 40;
+        let plain = MambaBackbone::init(cfg, input_dim, 7);
+        let mut packed = MambaBackbone::init(cfg, input_dim, 7);
+        packed.pack_for_decode();
+        assert!(packed.is_packed());
+        let (mut s0, mut s1) = (plain.alloc_state(), packed.alloc_state());
+        let (mut c0, mut c1) = (plain.alloc_scratch(), packed.alloc_scratch());
+        let (mut o0, mut o1) = (vec![0f32; cfg.d_model], vec![0f32; cfg.d_model]);
+        for t in 0..12u64 {
+            let x = det(input_dim, 100 + t);
+            plain.forward_step(&x, &mut o0, &mut s0, &mut c0);
+            packed.forward_step(&x, &mut o1, &mut s1, &mut c1);
+            if cfg!(not(any(
+                all(feature = "accelerate", target_os = "macos"),
+                feature = "gemm-blas"
+            ))) {
+                assert_eq!(o0, o1, "step {t}");
+            }
+        }
+        packed.weights_mut().layers[0].in_proj_w[0] += 1.0;
+        assert!(!packed.is_packed());
+        packed.pack_for_decode();
+        packed.layer_mut(1).out_proj_w[0] += 1.0;
+        assert!(!packed.is_packed());
     }
 }

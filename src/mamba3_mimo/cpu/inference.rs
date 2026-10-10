@@ -13,8 +13,46 @@ use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use super::core::{HeadScratch, HeadState, mimo_head_step, prepare_token, row_norm};
-use crate::mlp::cpu::{GatedMlpStepScratch, gated_mlp_step};
-use crate::ops::blas::matvec_forward;
+use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
+use crate::ops::packed::{PackedLinear, linear_row};
+
+/// One layer's projections packed for decode.
+#[derive(Clone, Debug)]
+pub struct Mamba3MimoLayerPacked {
+    pub in_proj: PackedLinear,
+    pub out_proj: PackedLinear,
+}
+
+/// Every projection of a MIMO backbone packed for decode: a copy of the
+/// weights' projections, so it must be packed again after they change.
+#[derive(Clone, Debug)]
+pub struct Mamba3MimoPackedLinears {
+    pub layers: Vec<Mamba3MimoLayerPacked>,
+    /// One per layer with an MLP.
+    pub mlp: Vec<GatedMlpPacked>,
+    /// The input projection, absent for a backbone without one.
+    pub input_proj: Option<PackedLinear>,
+}
+
+impl Mamba3MimoPackedLinears {
+    /// Pack every projection of `weights`.
+    pub fn pack(weights: &Mamba3MimoWeights, cfg: &Mamba3MimoConfig, input_dim: usize) -> Self {
+        let (dm, di) = (cfg.d_model, cfg.d_inner());
+        Self {
+            layers: weights
+                .layers
+                .iter()
+                .map(|lw| Mamba3MimoLayerPacked {
+                    in_proj: PackedLinear::pack(&lw.in_proj_w, dm, cfg.in_proj_out_dim()),
+                    out_proj: PackedLinear::pack(&lw.out_proj_w, di, dm),
+                })
+                .collect(),
+            mlp: weights.mlp.iter().map(GatedMlpPacked::pack).collect(),
+            input_proj: (!weights.input_proj_w.is_empty())
+                .then(|| PackedLinear::pack(&weights.input_proj_w, input_dim, dm)),
+        }
+    }
+}
 
 /// Reusable buffers for [`mamba3_mimo_step`].
 pub struct Mamba3MimoStepScratch {
@@ -57,6 +95,18 @@ pub fn mamba3_mimo_layer_step(
     state: &mut Mamba3MimoLayerState,
     cfg: &Mamba3MimoConfig,
 ) {
+    layer_step(temporal, scratch, (lw, None), state, cfg);
+}
+
+/// [`mamba3_mimo_layer_step`] with the projections packed when `lp` holds
+/// them.
+fn layer_step(
+    temporal: &mut [f32],
+    scratch: &mut Mamba3MimoStepScratch,
+    (lw, lp): (&Mamba3MimoLayerWeights, Option<&Mamba3MimoLayerPacked>),
+    state: &mut Mamba3MimoLayerState,
+    cfg: &Mamba3MimoConfig,
+) {
     let (dm, di, n, p_len, r) = (
         cfg.d_model,
         cfg.d_inner(),
@@ -73,13 +123,12 @@ pub fn mamba3_mimo_layer_step(
         &lw.norm_weight,
         cfg.rms_norm_eps,
     );
-    matvec_forward(
+    linear_row(
         &mut scratch.proj,
         &scratch.norm_buf,
-        &lw.in_proj_w,
+        (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
         None,
-        dm,
-        cfg.in_proj_out_dim(),
+        (dm, cfg.in_proj_out_dim()),
     );
     let tok = prepare_token(
         cfg,
@@ -102,13 +151,12 @@ pub fn mamba3_mimo_layer_step(
         );
     }
 
-    matvec_forward(
+    linear_row(
         &mut temporal[..dm],
         &scratch.o,
-        &lw.out_proj_w,
+        (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
         None,
-        di,
-        dm,
+        (di, dm),
     );
     for (t, &res) in temporal[..dm].iter_mut().zip(&scratch.residual) {
         *t += res;
@@ -126,23 +174,76 @@ pub fn mamba3_mimo_step(
     states: &mut [Mamba3MimoLayerState],
     cfg: &Mamba3MimoConfig,
 ) {
+    backbone_step(temporal, input, scratch, (weights, None), states, cfg);
+}
+
+/// [`mamba3_mimo_step`] with every projection taken from `packed` (packed
+/// from these `weights` by [`Mamba3MimoPackedLinears::pack`]).
+///
+/// # Panics
+///
+/// When `packed` holds another number of layers or MLPs than `weights`.
+pub fn mamba3_mimo_step_packed(
+    temporal: &mut [f32],
+    input: &[f32],
+    scratch: &mut Mamba3MimoStepScratch,
+    (weights, packed): (&Mamba3MimoWeights, &Mamba3MimoPackedLinears),
+    states: &mut [Mamba3MimoLayerState],
+    cfg: &Mamba3MimoConfig,
+) {
+    assert!(
+        packed.layers.len() == weights.layers.len() && packed.mlp.len() == weights.mlp.len(),
+        "packed projections of another backbone"
+    );
+    backbone_step(
+        temporal,
+        input,
+        scratch,
+        (weights, Some(packed)),
+        states,
+        cfg,
+    );
+}
+
+fn backbone_step(
+    temporal: &mut [f32],
+    input: &[f32],
+    scratch: &mut Mamba3MimoStepScratch,
+    (weights, packed): (&Mamba3MimoWeights, Option<&Mamba3MimoPackedLinears>),
+    states: &mut [Mamba3MimoLayerState],
+    cfg: &Mamba3MimoConfig,
+) {
     let dm = cfg.d_model;
     if weights.input_proj_w.is_empty() {
         temporal[..dm].copy_from_slice(&input[..dm]);
     } else {
-        matvec_forward(
+        linear_row(
             &mut temporal[..dm],
             input,
-            &weights.input_proj_w,
+            (
+                &weights.input_proj_w,
+                packed.and_then(|p| p.input_proj.as_ref()),
+            ),
             Some(&weights.input_proj_b),
-            input.len(),
-            dm,
+            (input.len(), dm),
         );
     }
     for (l, (lw, st)) in weights.layers.iter().zip(states.iter_mut()).enumerate() {
-        mamba3_mimo_layer_step(temporal, scratch, lw, st, cfg);
+        layer_step(
+            temporal,
+            scratch,
+            (lw, packed.map(|p| &p.layers[l])),
+            st,
+            cfg,
+        );
         if let Some(mlp) = weights.mlp.get(l) {
-            gated_mlp_step(&mut temporal[..dm], mlp, &mut scratch.mlp, cfg.rms_norm_eps);
+            let t = &mut temporal[..dm];
+            match packed {
+                Some(p) => {
+                    gated_mlp_step_packed(t, (mlp, &p.mlp[l]), &mut scratch.mlp, cfg.rms_norm_eps)
+                }
+                None => gated_mlp_step(t, mlp, &mut scratch.mlp, cfg.rms_norm_eps),
+            }
         }
     }
     scratch.norm_buf.copy_from_slice(&temporal[..dm]);

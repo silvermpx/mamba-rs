@@ -118,8 +118,8 @@ pub mod gpu3 {
 
 pub use config::MambaConfig;
 pub use mamba_ssm::cpu::inference::{
-    MambaLayerScratch, MambaStepScratch, mamba_block_step, mamba_layer_step, mamba_step,
-    mamba_step_no_proj,
+    MambaLayerPacked, MambaLayerScratch, MambaPackedLinears, MambaStepScratch, mamba_block_step,
+    mamba_layer_step, mamba_step, mamba_step_no_proj, mamba_step_no_proj_packed, mamba_step_packed,
 };
 pub use module::MambaBackbone;
 pub use state::{MambaLayerState, MambaState};

@@ -9,7 +9,9 @@
 //! [`MambaBackbone`]: crate::module::MambaBackbone
 
 use crate::mamba3_siso::config::Mamba3Config;
-use crate::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
+use crate::mamba3_siso::cpu::inference::{
+    Mamba3PackedLinears, Mamba3StepScratch, mamba3_step, mamba3_step_packed,
+};
 use crate::mamba3_siso::state::{Mamba3LayerState, Mamba3State};
 use crate::mamba3_siso::weights::Mamba3Weights;
 
@@ -24,6 +26,9 @@ use crate::mamba3_siso::weights::Mamba3Weights;
 pub struct Mamba3Backbone {
     weights: Mamba3Weights,
     cfg: Mamba3Config,
+    /// The projections packed for decode by [`Self::pack_for_decode`]; the
+    /// weights never change after construction, so the copy stays current.
+    packed: Option<Mamba3PackedLinears>,
 }
 
 impl Mamba3Backbone {
@@ -32,7 +37,11 @@ impl Mamba3Backbone {
     /// Mamba-paper dt_proj scheme for the discretization MLP).
     pub fn init(cfg: Mamba3Config, input_dim: usize, seed: u64) -> Self {
         let weights = Mamba3Weights::init(&cfg, input_dim, seed);
-        Self { weights, cfg }
+        Self {
+            weights,
+            cfg,
+            packed: None,
+        }
     }
 
     /// Wrap pre-loaded weights — e.g. from
@@ -46,7 +55,11 @@ impl Mamba3Backbone {
         input_dim: usize,
     ) -> Result<Self, String> {
         weights.validate(&cfg, input_dim)?;
-        Ok(Self { weights, cfg })
+        Ok(Self {
+            weights,
+            cfg,
+            packed: None,
+        })
     }
 
     /// Borrow the weight bundle (e.g. for serialization).
@@ -64,6 +77,23 @@ impl Mamba3Backbone {
         self.cfg.d_model
     }
 
+    /// Pack the projections in panels for [`Self::forward_step`]: the same
+    /// outputs as the row-major product without a BLAS, faster on large
+    /// layers, at the memory of a second copy of the projections.
+    pub fn pack_for_decode(&mut self) {
+        let input_dim = self.weights.input_proj_w.len() / self.cfg.d_model.max(1);
+        self.packed = Some(Mamba3PackedLinears::pack(
+            &self.weights,
+            &self.cfg,
+            input_dim,
+        ));
+    }
+
+    /// Whether the projections are packed for decode.
+    pub fn is_packed(&self) -> bool {
+        self.packed.is_some()
+    }
+
     /// Single-step (T=1) forward. Reads `input[..d_model]`, writes
     /// `temporal[..d_model]`, advances each layer's recurrent state in
     /// `states` in place. `scratch` is reusable across calls.
@@ -74,7 +104,17 @@ impl Mamba3Backbone {
         scratch: &mut Mamba3StepScratch,
         states: &mut [Mamba3LayerState],
     ) {
-        mamba3_step(temporal, input, scratch, &self.weights, states, &self.cfg);
+        match &self.packed {
+            Some(p) => mamba3_step_packed(
+                temporal,
+                input,
+                scratch,
+                (&self.weights, p),
+                states,
+                &self.cfg,
+            ),
+            None => mamba3_step(temporal, input, scratch, &self.weights, states, &self.cfg),
+        }
     }
 
     /// Allocate a zero-initialized full-stack recurrent state (SSM + K +
@@ -88,5 +128,57 @@ impl Mamba3Backbone {
     /// proj). Reusable across calls; never aliased across threads.
     pub fn alloc_scratch(&self) -> Mamba3StepScratch {
         Mamba3StepScratch::new(&self.cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn det(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed.max(1);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    const NO_BLAS: bool = cfg!(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )));
+
+    /// Packed projections (the mixers', the MLPs' and the input's) give
+    /// the row-major step's bits over a chain of steps, without a BLAS.
+    #[test]
+    fn packed_decode_keeps_the_bits() {
+        let cfg = Mamba3Config {
+            d_model: 64,
+            d_state: 16,
+            headdim: 16,
+            n_layers: 2,
+            d_intermediate: 200,
+            ..Mamba3Config::default()
+        };
+        let input_dim = 40;
+        let plain = Mamba3Backbone::init(cfg, input_dim, 7);
+        let mut packed = Mamba3Backbone::init(cfg, input_dim, 7);
+        packed.pack_for_decode();
+        assert!(packed.is_packed());
+        let (mut s0, mut s1) = (plain.alloc_state(), packed.alloc_state());
+        let (mut c0, mut c1) = (plain.alloc_scratch(), packed.alloc_scratch());
+        let (mut o0, mut o1) = (vec![0f32; cfg.d_model], vec![0f32; cfg.d_model]);
+        for t in 0..12u64 {
+            let x = det(input_dim, 100 + t);
+            plain.forward_step(&x, &mut o0, &mut c0, &mut s0.layers);
+            packed.forward_step(&x, &mut o1, &mut c1, &mut s1.layers);
+            if NO_BLAS {
+                assert_eq!(o0, o1, "step {t}");
+            }
+        }
     }
 }

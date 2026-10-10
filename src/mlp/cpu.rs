@@ -2,9 +2,9 @@
 //! window at once for prefill.
 
 use super::GatedMlpLayerWeights;
-use crate::ops::blas::matvec_forward;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::norms::rms_norm_weighted;
+use crate::ops::packed::{PackedLinear, linear_row};
 
 /// `v * silu(g)`, the gate the reference applies (`F.silu`), with the same
 /// exponential every other CPU gate here uses.
@@ -35,6 +35,24 @@ impl GatedMlpStepScratch {
     }
 }
 
+/// One MLP's projections packed for decode (see [`PackedLinear`]).
+#[derive(Clone, Debug)]
+pub struct GatedMlpPacked {
+    pub fc1: PackedLinear,
+    pub fc2: PackedLinear,
+}
+
+impl GatedMlpPacked {
+    /// Pack both projections of `w`.
+    pub fn pack(w: &GatedMlpLayerWeights) -> Self {
+        let (d, h) = (w.norm_weight.len(), w.hidden());
+        Self {
+            fc1: PackedLinear::pack(&w.fc1_w, d, 2 * h),
+            fc2: PackedLinear::pack(&w.fc2_w, h, d),
+        }
+    }
+}
+
 /// One token through one MLP branch: `temporal += mlp(norm2(temporal))`.
 pub fn gated_mlp_step(
     temporal: &mut [f32],
@@ -42,15 +60,46 @@ pub fn gated_mlp_step(
     s: &mut GatedMlpStepScratch,
     eps: f32,
 ) {
+    mlp_step(temporal, (w, None), s, eps);
+}
+
+/// [`gated_mlp_step`] with the projections taken from `p` (packed from `w`).
+pub fn gated_mlp_step_packed(
+    temporal: &mut [f32],
+    (w, p): (&GatedMlpLayerWeights, &GatedMlpPacked),
+    s: &mut GatedMlpStepScratch,
+    eps: f32,
+) {
+    mlp_step(temporal, (w, Some(p)), s, eps);
+}
+
+fn mlp_step(
+    temporal: &mut [f32],
+    (w, p): (&GatedMlpLayerWeights, Option<&GatedMlpPacked>),
+    s: &mut GatedMlpStepScratch,
+    eps: f32,
+) {
     let d = w.norm_weight.len();
     let h = w.hidden();
     rms_norm_weighted(&mut s.norm[..d], &temporal[..d], &w.norm_weight, eps);
-    matvec_forward(&mut s.up[..2 * h], &s.norm[..d], &w.fc1_w, None, d, 2 * h);
+    linear_row(
+        &mut s.up[..2 * h],
+        &s.norm[..d],
+        (&w.fc1_w, p.map(|p| &p.fc1)),
+        None,
+        (d, 2 * h),
+    );
     let (val, gate) = s.up[..2 * h].split_at(h);
     for ((a, &v), &g) in s.act[..h].iter_mut().zip(val).zip(gate) {
         *a = gated(v, g);
     }
-    matvec_forward(&mut s.down[..d], &s.act[..h], &w.fc2_w, None, h, d);
+    linear_row(
+        &mut s.down[..d],
+        &s.act[..h],
+        (&w.fc2_w, p.map(|p| &p.fc2)),
+        None,
+        (h, d),
+    );
     for (t, &r) in temporal[..d].iter_mut().zip(&s.down[..d]) {
         *t += r;
     }

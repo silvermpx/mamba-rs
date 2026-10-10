@@ -4,11 +4,58 @@
 //! - [`mamba_layer_step`]: Pure mixer (no norm, no residual). Matches Tri Dao's `Mamba` class.
 //! - [`mamba_block_step`]: Pre-norm + mixer + residual. Matches Tri Dao's `Block` class.
 //! - [`mamba_step`]: Full backbone: input_proj + N blocks + norm_f.
+//!
+//! [`mamba_step_packed`] runs the same step with the projections packed in
+//! panels ([`MambaPackedLinears`]), the same bits as the row-major product
+//! without a BLAS, faster on the weights a decode streams from memory.
 
 use crate::config::MambaConfig;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::packed::{PackedLinear, linear_row as linear};
 use crate::state::MambaLayerState;
 use crate::weights::{MambaLayerWeights, MambaWeights};
+
+// ---------------------------------------------------------------------------
+// Packed projections
+// ---------------------------------------------------------------------------
+
+/// One layer's projections packed for decode.
+#[derive(Clone, Debug)]
+pub struct MambaLayerPacked {
+    pub in_proj: PackedLinear,
+    pub x_proj: PackedLinear,
+    pub dt_proj: PackedLinear,
+    pub out_proj: PackedLinear,
+}
+
+/// Every projection of a backbone packed for decode: a copy of the weights'
+/// projections, so it must be packed again after the weights change.
+#[derive(Clone, Debug)]
+pub struct MambaPackedLinears {
+    pub layers: Vec<MambaLayerPacked>,
+    /// The input projection, absent for a backbone without one.
+    pub input_proj: Option<PackedLinear>,
+}
+
+impl MambaPackedLinears {
+    /// Pack every projection of `weights`.
+    pub fn pack(weights: &MambaWeights, cfg: &MambaConfig, input_dim: usize) -> Self {
+        let (dm, di) = (cfg.d_model, cfg.d_inner());
+        let layers = weights
+            .layers
+            .iter()
+            .map(|lw| MambaLayerPacked {
+                in_proj: PackedLinear::pack(&lw.in_proj_w, dm, 2 * di),
+                x_proj: PackedLinear::pack(&lw.x_proj_w, di, cfg.xdbl_dim()),
+                dt_proj: PackedLinear::pack(&lw.dt_proj_w, cfg.dt_rank(), di),
+                out_proj: PackedLinear::pack(&lw.out_proj_w, di, dm),
+            })
+            .collect();
+        let input_proj = (!weights.input_proj_w.is_empty())
+            .then(|| PackedLinear::pack(&weights.input_proj_w, input_dim, dm));
+        Self { layers, input_proj }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Scratch buffers
@@ -93,6 +140,18 @@ pub fn mamba_layer_step(
     scratch: &mut MambaLayerScratch,
     cfg: &MambaConfig,
 ) {
+    layer_step(input, output, (lw, None), state, scratch, cfg);
+}
+
+/// [`mamba_layer_step`] with the projections packed when `lp` holds them.
+fn layer_step(
+    input: &[f32],
+    output: &mut [f32],
+    (lw, lp): (&MambaLayerWeights, Option<&MambaLayerPacked>),
+    state: &mut MambaLayerState,
+    scratch: &mut MambaLayerScratch,
+    cfg: &MambaConfig,
+) {
     let d_model = cfg.d_model;
     let d_inner = cfg.d_inner();
     let d_state = cfg.d_state;
@@ -101,12 +160,12 @@ pub fn mamba_layer_step(
     let xdbl_dim = cfg.xdbl_dim();
 
     // in_proj: [d_model] -> [2*d_inner] (no bias)
-    matvec_no_bias(
+    linear(
         &mut scratch.proj[..2 * d_inner],
         &input[..d_model],
-        &lw.in_proj_w,
-        d_model,
-        2 * d_inner,
+        (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
+        None,
+        (d_model, 2 * d_inner),
     );
 
     // Split x + gate SiLU
@@ -139,22 +198,21 @@ pub fn mamba_layer_step(
     }
 
     // x_proj: u [d_inner] -> xdbl [dt_rank + 2*d_state]
-    matvec_no_bias(
+    linear(
         &mut scratch.xdbl[..xdbl_dim],
         &scratch.x[..d_inner],
-        &lw.x_proj_w,
-        d_inner,
-        xdbl_dim,
+        (&lw.x_proj_w, lp.map(|p| &p.x_proj)),
+        None,
+        (d_inner, xdbl_dim),
     );
 
     // dt_proj: delta_raw [dt_rank] -> delta [d_inner] + softplus
-    matvec_with_bias(
+    linear(
         &mut scratch.delta[..d_inner],
         &scratch.xdbl[..dt_rank],
-        &lw.dt_proj_w,
+        (&lw.dt_proj_w, lp.map(|p| &p.dt_proj)),
         Some(&lw.dt_proj_b),
-        dt_rank,
-        d_inner,
+        (dt_rank, d_inner),
     );
     for d in 0..d_inner {
         let raw = scratch.delta[d];
@@ -200,12 +258,12 @@ pub fn mamba_layer_step(
     }
 
     // out_proj: gated [d_inner] -> output [d_model]
-    matvec_no_bias(
+    linear(
         &mut output[..d_model],
         &scratch.y[..d_inner],
-        &lw.out_proj_w,
-        d_inner,
-        d_model,
+        (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
+        None,
+        (d_inner, d_model),
     );
 }
 
@@ -231,6 +289,17 @@ pub fn mamba_block_step(
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
 ) {
+    block_step(hidden, (lw, None), state, scratch, cfg);
+}
+
+/// [`mamba_block_step`] with the projections packed when `lp` holds them.
+fn block_step(
+    hidden: &mut [f32],
+    (lw, lp): (&MambaLayerWeights, Option<&MambaLayerPacked>),
+    state: &mut MambaLayerState,
+    scratch: &mut MambaStepScratch,
+    cfg: &MambaConfig,
+) {
     let d_model = cfg.d_model;
 
     // Save residual
@@ -247,10 +316,10 @@ pub fn mamba_block_step(
     }
 
     // Pure mixer
-    mamba_layer_step(
+    layer_step(
         &scratch.norm_buf[..d_model],
         &mut hidden[..d_model],
-        lw,
+        (lw, lp),
         state,
         &mut scratch.layer,
         cfg,
@@ -289,15 +358,57 @@ pub fn mamba_step(
     input_dim: usize,
 ) {
     let d_model = cfg.d_model;
-    matvec_with_bias(
+    linear(
         &mut output[..d_model],
         input,
-        &weights.input_proj_w,
+        (&weights.input_proj_w, None),
         Some(&weights.input_proj_b),
-        input_dim,
-        d_model,
+        (input_dim, d_model),
     );
-    mamba_blocks_and_norm(output, weights, state, scratch, cfg);
+    mamba_blocks_and_norm(output, (weights, None), state, scratch, cfg);
+}
+
+/// [`mamba_step`] with every projection taken from `packed` (packed from
+/// these `weights` by [`MambaPackedLinears::pack`]).
+///
+/// # Panics
+///
+/// When `packed` holds another number of layers than `weights`.
+pub fn mamba_step_packed(
+    input: &[f32],
+    output: &mut [f32],
+    (weights, packed): (&MambaWeights, &MambaPackedLinears),
+    state: &mut [MambaLayerState],
+    scratch: &mut MambaStepScratch,
+    cfg: &MambaConfig,
+    input_dim: usize,
+) {
+    let d_model = cfg.d_model;
+    linear(
+        &mut output[..d_model],
+        input,
+        (&weights.input_proj_w, packed.input_proj.as_ref()),
+        Some(&weights.input_proj_b),
+        (input_dim, d_model),
+    );
+    mamba_blocks_and_norm(output, (weights, Some(packed)), state, scratch, cfg);
+}
+
+/// [`mamba_step_no_proj`] with every projection taken from `packed`.
+///
+/// # Panics
+///
+/// When `packed` holds another number of layers than `weights`.
+pub fn mamba_step_no_proj_packed(
+    input: &[f32],
+    output: &mut [f32],
+    (weights, packed): (&MambaWeights, &MambaPackedLinears),
+    state: &mut [MambaLayerState],
+    scratch: &mut MambaStepScratch,
+    cfg: &MambaConfig,
+) {
+    output[..cfg.d_model].copy_from_slice(&input[..cfg.d_model]);
+    mamba_blocks_and_norm(output, (weights, Some(packed)), state, scratch, cfg);
 }
 
 /// Like [`mamba_step`] but skips the input projection (identity: input copied to output).
@@ -311,20 +422,28 @@ pub fn mamba_step_no_proj(
     cfg: &MambaConfig,
 ) {
     output[..cfg.d_model].copy_from_slice(&input[..cfg.d_model]);
-    mamba_blocks_and_norm(output, weights, state, scratch, cfg);
+    mamba_blocks_and_norm(output, (weights, None), state, scratch, cfg);
 }
 
 #[inline]
 fn mamba_blocks_and_norm(
     output: &mut [f32],
-    weights: &MambaWeights,
+    (weights, packed): (&MambaWeights, Option<&MambaPackedLinears>),
     state: &mut [MambaLayerState],
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
 ) {
     let d_model = cfg.d_model;
+    if let Some(p) = packed {
+        assert_eq!(
+            p.layers.len(),
+            weights.layers.len(),
+            "packed projections of another backbone"
+        );
+    }
     for (layer_idx, lw) in weights.layers.iter().enumerate() {
-        mamba_block_step(output, lw, &mut state[layer_idx], scratch, cfg);
+        let lp = packed.map(|p| &p.layers[layer_idx]);
+        block_step(output, (lw, lp), &mut state[layer_idx], scratch, cfg);
     }
     let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
     let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
@@ -412,26 +531,7 @@ pub fn mamba_step_batch(
 
 // --- BLAS dispatch (delegates to ops/blas.rs for platform-specific SGEMM) ---
 
-use crate::ops::blas::matvec_forward;
-
 #[inline]
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + fast_exp_scalar(-x))
-}
-
-#[inline]
-fn matvec_with_bias(
-    out: &mut [f32],
-    x: &[f32],
-    w: &[f32],
-    bias: Option<&[f32]>,
-    n_in: usize,
-    n_out: usize,
-) {
-    matvec_forward(out, x, w, bias, n_in, n_out);
-}
-
-#[inline]
-fn matvec_no_bias(out: &mut [f32], x: &[f32], w: &[f32], n_in: usize, n_out: usize) {
-    matvec_forward(out, x, w, None, n_in, n_out);
 }

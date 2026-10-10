@@ -14,6 +14,8 @@
 
 use pulp::{Arch, Simd, WithSimd};
 
+use super::blas::matvec_forward;
+
 /// Columns per panel.
 pub const PANEL: usize = 64;
 
@@ -125,6 +127,22 @@ impl PackedLinear {
             n_out,
             rows: batch,
         });
+    }
+}
+
+/// One row `out = x W + bias` from the panels when there are some, else from
+/// the row-major `w`: the same bits without a BLAS.
+#[inline]
+pub fn linear_row(
+    out: &mut [f32],
+    x: &[f32],
+    (w, packed): (&[f32], Option<&PackedLinear>),
+    bias: Option<&[f32]>,
+    (n_in, n_out): (usize, usize),
+) {
+    match packed {
+        Some(p) => p.forward(out, x, bias, 1),
+        None => matvec_forward(out, x, w, bias, n_in, n_out),
     }
 }
 
