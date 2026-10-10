@@ -688,8 +688,10 @@ DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_f16, __half)
 // inter pass streams the entering state through the same space.
 // Shared memory: q [N][QR + 4], keys [nk][68], u [64][32 JP],
 // Gw [64][QR + 4], w [tq][kt], the chunk's Acs, scale and gamma [3][64];
-// QR = tq R rounded up to 8. The heaviest query tile (the last) runs first.
-// Grid (B * nc, H, ceil(64 / tq)), block 4 QR threads.
+// QR = tq R rounded up to 8. A warp holds 4 query rows, so a block of 64
+// rows runs 16 warps: one block fills the shared memory of an SM and the
+// extra warps hide the staging loads. The heaviest query tile (the last)
+// runs first. Grid (B * nc, H, ceil(64 / tq)), block 8 QR threads.
 template <typename TI, int JP>
 __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     TI* __restrict__ out, float* __restrict__ y_out,
@@ -738,7 +740,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     float* yg = rb;                                  // gate: [qr][PP]
     const int tid = threadIdx.x;
     const int lane = tid & 31;
-    const int rw0 = 8 * (tid >> 5);
+    const int rw0 = 4 * (tid >> 5);
     for (int s = tid; s < lc; s += blockDim.x) {
         const float* cf = coef + ((b * seq + t0 + s) * nh + h) * 4;
         sc[s] = cf[3];
@@ -761,17 +763,17 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             for (int n = lane; n < ds; n += 32) qt[n * qrs + rw] = 0.0f;
         }
     }
-    int trow[8];
+    int trow[4];
     int tmax = -1;
 #pragma unroll
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         const int rw = rw0 + i;
         trow[i] = rw < rows ? tile0 + rw / rank : -1;
         tmax = max(tmax, trow[i]);
     }
-    float y[8][JP];
+    float y[4][JP];
 #pragma unroll
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
 #pragma unroll
         for (int j = 0; j < JP; j++) y[i][j] = 0.0f;
     }
@@ -789,20 +791,19 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         __syncthreads();
         for (int n = 0; n < mm; n++) {
             const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
-            const float4 q1 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0 + 4);
-            const float qv[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+            const float qv[4] = {q0.x, q0.y, q0.z, q0.w};
             float sv[JP];
 #pragma unroll
             for (int j = 0; j < JP; j++) sv[j] = stg[n * (PP + 1) + lane + 32 * j];
 #pragma unroll
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 4; i++) {
 #pragma unroll
                 for (int j = 0; j < JP; j++) y[i][j] = __fmaf_rn(qv[i], sv[j], y[i][j]);
             }
         }
     }
 #pragma unroll
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         if (trow[i] < 0) continue;
         const float ef = mimo_exp(sc[trow[i]]);
 #pragma unroll
@@ -836,9 +837,9 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
                           : sc[2 * M3M_CHUNK + t];
             wts[i] = w;
         }
-        float ga[8][2];
+        float ga[4][2];
 #pragma unroll
-        for (int i = 0; i < 8; i++) ga[i][0] = ga[i][1] = 0.0f;
+        for (int i = 0; i < 4; i++) ga[i][0] = ga[i][1] = 0.0f;
         for (int m0 = 0; m0 < ds; m0 += nk) {
             const int mm = min(nk, ds - m0);
             if (m0 > 0) __syncthreads();
@@ -860,18 +861,17 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             __syncthreads();
             for (int n = 0; n < mm; n++) {
                 const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
-                const float4 q1 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0 + 4);
-                const float qv[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+                const float qv[4] = {q0.x, q0.y, q0.z, q0.w};
                 const float k0 = kts[n * KCS + lane], k1 = kts[n * KCS + lane + 32];
 #pragma unroll
-                for (int i = 0; i < 8; i++) {
+                for (int i = 0; i < 4; i++) {
                     ga[i][0] = __fmaf_rn(qv[i], k0, ga[i][0]);
                     ga[i][1] = __fmaf_rn(qv[i], k1, ga[i][1]);
                 }
             }
         }
 #pragma unroll
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 4; i++) {
 #pragma unroll
             for (int j = 0; j < 2; j++) {
                 const int col = lane + 32 * j;
@@ -886,13 +886,12 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             const int s = s0 + k / rank;
             if (s > tmax) break;
             const float4 g0 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0);
-            const float4 g1 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0 + 4);
-            const float gv[8] = {g0.x, g0.y, g0.z, g0.w, g1.x, g1.y, g1.z, g1.w};
+            const float gv[4] = {g0.x, g0.y, g0.z, g0.w};
             float uv[JP];
 #pragma unroll
             for (int j = 0; j < JP; j++) uv[j] = ut[k * PP + lane + 32 * j];
 #pragma unroll
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 4; i++) {
                 if (s <= trow[i]) {
 #pragma unroll
                     for (int j = 0; j < JP; j++) y[i][j] = __fmaf_rn(gv[i], uv[j], y[i][j]);
@@ -903,7 +902,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     __syncthreads();
     const float dval = D[h];
 #pragma unroll
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         if (trow[i] < 0) continue;
         const int rw = rw0 + i, r = rw % rank;
         const long long row_t = b * seq + t0 + trow[i];
@@ -937,7 +936,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
 }
 
 #define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI)                                   \
-extern "C" __global__ void NAME(                                                \
+extern "C" __global__ void __launch_bounds__(512) NAME(                         \
     TI* __restrict__ out, float* __restrict__ y_out,                            \
     const TI* __restrict__ proj, long long ld_proj,                             \
     const float* __restrict__ bn, const float* __restrict__ cn,                 \

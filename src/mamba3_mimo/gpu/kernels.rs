@@ -174,7 +174,7 @@ pub fn chunked_geom(
     // The register-tile output kernel: queries [N][QR + 4], keys [nk][68],
     // inputs [64][32 jp], weighted G [64][QR + 4], weights [tq][kt] and the
     // chunk's three scalars, QR = tq R rounded up to 8 (at most 64 rows, so
-    // at most 256 threads); the keys take the most state indices per pass
+    // at most 512 threads); the keys take the most state indices per pass
     // that fit.
     let scan_tiles = if hd <= 128 && rank <= CHUNK {
         let tq = [16usize, 8, 4, 2, 1]

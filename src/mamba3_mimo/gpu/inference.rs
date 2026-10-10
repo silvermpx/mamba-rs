@@ -1053,7 +1053,7 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&nk_i);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: ((b * nc) as u32, nh as u32, CHUNK.div_ceil(tq) as u32),
-            block_dim: ((4 * (tq * r).next_multiple_of(8)) as u32, 1, 1),
+            block_dim: ((8 * (tq * r).next_multiple_of(8)) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
         unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
