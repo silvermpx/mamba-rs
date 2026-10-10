@@ -46,6 +46,37 @@ __device__ __forceinline__ float m3m_rot(
     return v;
 }
 
+// The inputs of one m3m_rot value, loaded apart from the turn so a thread
+// can put a whole batch of loads in flight before it turns any: the biased
+// value at n, its pair partner at the other half and the pair's sine and
+// cosine, the last three only when the pair turns.
+struct M3mRotIn {
+    float v, w, s, c;
+};
+
+__device__ __forceinline__ M3mRotIn m3m_rot_load(
+    const float* src, const float* bias, int n, int half, int na,
+    const float* sr, const float* cr
+) {
+    const int a = n < half ? n : n - half;
+    const int m = n < half ? n + half : a;
+    M3mRotIn in = {__fadd_rn(src[n], bias[n]), 0.0f, 0.0f, 0.0f};
+    if (a < na) {
+        in.w = __fadd_rn(src[m], bias[m]);
+        in.s = sr[a];
+        in.c = cr[a];
+    }
+    return in;
+}
+
+// m3m_rot's value from loaded inputs, the same arithmetic.
+__device__ __forceinline__ float m3m_rot_turn(const M3mRotIn& in, int n, int half, int na) {
+    const int a = n < half ? n : n - half;
+    if (a >= na) return in.v;
+    return n < half ? mimo_rot_pair(in.v, in.w, in.s, in.c).x
+                    : mimo_rot_pair(in.w, in.v, in.s, in.c).y;
+}
+
 // A small product out[r][c] = init(r, c) + sum_k L(r, k) R(k, c), k
 // ascending, as register tiles: a warp takes 4 rows at a time and a lane
 // the columns lane, lane + 32, ... (JC of them), so a step of k loads 4 + JC
@@ -748,19 +779,39 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         sc[2 * M3M_CHUNK + s] = cf[1];
     }
     const int warp = tid >> 5, nw = blockDim.x >> 5;
-    for (int rw = warp; rw < qr; rw += nw) {
-        if (rw < rows) {
-            const int r = rw % rank;
-            const long long row = b * seq + t0 + tile0 + rw / rank;
-            const float* src = cn + row * rgn + ((long long)r * ng + g) * ds;
-            const float* bias = c_bias + ((long long)h * rank + r) * ds;
-            const float* sr_ = sn + (row * nh + h) * na;
-            const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll 4
-            for (int n = lane; n < ds; n += 32)
-                qt[n * qrs + rw] = m3m_rot(src, bias, n, half, na, sr_, cr_);
-        } else {
-            for (int n = lane; n < ds; n += 32) qt[n * qrs + rw] = 0.0f;
+    // The queries, rotated: four of a warp's rows and two state indices a
+    // lane at a time, every load of the batch in flight before any turn, so
+    // a thread waits one round trip a batch rather than one a value.
+    for (int qw = warp; qw < qr; qw += 4 * nw) {
+        for (int n0 = 0; n0 < ds; n0 += 64) {
+            M3mRotIn in[4][2];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int rw = qw + u * nw;
+                const int r = rw % rank;
+                const long long row = b * seq + t0 + tile0 + rw / rank;
+                const float* src = cn + row * rgn + ((long long)r * ng + g) * ds;
+                const float* bias = c_bias + ((long long)h * rank + r) * ds;
+                const float* sr_ = sn + (row * nh + h) * na;
+                const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll
+                for (int v = 0; v < 2; v++) {
+                    const int n = n0 + lane + 32 * v;
+                    in[u][v] = rw < rows && n < ds
+                        ? m3m_rot_load(src, bias, n, half, na, sr_, cr_)
+                        : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int rw = qw + u * nw;
+#pragma unroll
+                for (int v = 0; v < 2; v++) {
+                    const int n = n0 + lane + 32 * v;
+                    if (rw < qr && n < ds)
+                        qt[n * qrs + rw] = rw < rows ? m3m_rot_turn(in[u][v], n, half, na) : 0.0f;
+                }
+            }
         }
     }
     int trow[4];
@@ -783,10 +834,27 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     for (int m0 = 0; m0 < ds; m0 += nsp) {
         const int mm = min(nsp, ds - m0);
         __syncthreads();
-        for (int p = warp; p < PP; p += nw) {
-            const float* row = sp + (long long)p * ds + m0;
-#pragma unroll 4
-            for (int n = lane; n < mm; n += 32) stg[n * (PP + 1) + p] = p < hd ? row[n] : 0.0f;
+        for (int p0 = warp; p0 < PP; p0 += 4 * nw) {
+            for (int n0 = 0; n0 < mm; n0 += 128) {
+                float sv[4][4];
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const float* row = sp + (long long)(p0 + u * nw) * ds + m0;
+#pragma unroll
+                    for (int v = 0; v < 4; v++) {
+                        const int n = n0 + lane + 32 * v;
+                        sv[u][v] = p0 + u * nw < hd && n < mm ? row[n] : 0.0f;
+                    }
+                }
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+#pragma unroll
+                    for (int v = 0; v < 4; v++) {
+                        const int p = p0 + u * nw, n = n0 + lane + 32 * v;
+                        if (p < PP && n < mm) stg[n * (PP + 1) + p] = sv[u][v];
+                    }
+                }
+            }
         }
         __syncthreads();
         for (int n = 0; n < mm; n++) {
@@ -813,19 +881,32 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     for (int s0 = 0; s0 < s_end; s0 += kt) {
         const int cols = min(kt, s_end - s0) * rank;
         __syncthreads();
-        for (int col = warp; col < KC; col += nw) {
-            if (col < cols) {
+        // The rank inputs, four of a warp's columns in flight together.
+        for (int c0 = warp; c0 < KC; c0 += 4 * nw) {
+            float xv[4][JP], mv[4][JP];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int col = c0 + u * nw;
                 const TI* xr = proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di
                     + (long long)h * hd;
                 const float* mx = mimo_x + ((long long)h * rank + col % rank) * hd;
 #pragma unroll
                 for (int j = 0; j < JP; j++) {
                     const int p = lane + 32 * j;
-                    ut[col * PP + p] = p < hd ? __fmul_rn(mx[p], to_f(xr[p])) : 0.0f;
+                    const bool live = col < cols && p < hd;
+                    xv[u][j] = live ? to_f(xr[p]) : 0.0f;
+                    mv[u][j] = live ? mx[p] : 0.0f;
                 }
-            } else {
+            }
 #pragma unroll
-                for (int j = 0; j < JP; j++) ut[col * PP + lane + 32 * j] = 0.0f;
+            for (int u = 0; u < 4; u++) {
+                const int col = c0 + u * nw;
+                if (col >= KC) continue;
+#pragma unroll
+                for (int j = 0; j < JP; j++) {
+                    const int p = lane + 32 * j;
+                    ut[col * PP + p] = col < cols && p < hd ? __fmul_rn(mv[u][j], xv[u][j]) : 0.0f;
+                }
             }
         }
         for (int i = tid; i < tq * kt; i += blockDim.x) {
@@ -843,19 +924,38 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         for (int m0 = 0; m0 < ds; m0 += nk) {
             const int mm = min(nk, ds - m0);
             if (m0 > 0) __syncthreads();
-            for (int col = warp; col < KC; col += nw) {
-                if (col < cols) {
-                    const int r = col % rank;
-                    const long long row = b * seq + t0 + s0 + col / rank;
-                    const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
-                    const float* bias = b_bias + ((long long)h * rank + r) * ds;
-                    const float* sr_ = sn + (row * nh + h) * na;
-                    const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll 4
-                    for (int n = lane; n < mm; n += 32)
-                        kts[n * KCS + col] = m3m_rot(src, bias, m0 + n, half, na, sr_, cr_);
-                } else {
-                    for (int n = lane; n < mm; n += 32) kts[n * KCS + col] = 0.0f;
+            // The keys, rotated, batched like the queries.
+            for (int c0 = warp; c0 < KC; c0 += 4 * nw) {
+                for (int n0 = 0; n0 < mm; n0 += 64) {
+                    M3mRotIn in[4][2];
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int col = c0 + u * nw;
+                        const int r = col % rank;
+                        const long long row = b * seq + t0 + s0 + col / rank;
+                        const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
+                        const float* bias = b_bias + ((long long)h * rank + r) * ds;
+                        const float* sr_ = sn + (row * nh + h) * na;
+                        const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll
+                        for (int v = 0; v < 2; v++) {
+                            const int n = n0 + lane + 32 * v;
+                            in[u][v] = col < cols && n < mm
+                                ? m3m_rot_load(src, bias, m0 + n, half, na, sr_, cr_)
+                                : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                        }
+                    }
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int col = c0 + u * nw;
+#pragma unroll
+                        for (int v = 0; v < 2; v++) {
+                            const int n = n0 + lane + 32 * v;
+                            if (col < KC && n < mm)
+                                kts[n * KCS + col] =
+                                    col < cols ? m3m_rot_turn(in[u][v], m0 + n, half, na) : 0.0f;
+                        }
+                    }
                 }
             }
             __syncthreads();
