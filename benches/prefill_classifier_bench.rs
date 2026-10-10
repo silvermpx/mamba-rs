@@ -84,7 +84,12 @@ fn prefill_bench_classifier_shape() {
 // Run every instrument, or only the ones named on the command line:
 // `cargo bench --bench <target>  -- <name> [<name> ...]`.
 fn main() {
-    let selected: Vec<String> = std::env::args().skip(1).collect();
+    // cargo bench passes its own `--bench` flag; only the other arguments
+    // name instruments.
+    let selected: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
     let run = |name: &str| selected.is_empty() || selected.iter().any(|s| s == name);
     if run("prefill_bench_classifier_shape") {
         prefill_bench_classifier_shape();
