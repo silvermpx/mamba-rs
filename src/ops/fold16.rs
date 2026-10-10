@@ -48,6 +48,65 @@ pub fn sum_sq_fold16(x: &[f32]) -> f32 {
     dot_fold16(x, x)
 }
 
+/// [`dot_fold16`] under the best SIMD level at hand: the same bits on
+/// every machine, with fused multiply-adds in vector registers where the
+/// scalar loop would call the library `fmaf` on an x86 without FMA.
+#[inline]
+pub fn dot_fold16_simd(a: &[f32], b: &[f32]) -> f32 {
+    struct Dot<'a>(&'a [f32], &'a [f32]);
+    impl pulp::WithSimd for Dot<'_> {
+        type Output = f32;
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> f32 {
+            dot16(simd, self.0, self.1)
+        }
+    }
+    pulp::Arch::new().dispatch(Dot(a, b))
+}
+
+/// [`sum_sq_fold16`] under the best SIMD level at hand, the same bits.
+#[inline]
+pub fn sum_sq_fold16_simd(x: &[f32]) -> f32 {
+    dot_fold16_simd(x, x)
+}
+
+/// [`dot_fold16`] inside a body already dispatched to `S`: the sixteen
+/// logical lanes are 16 / L vectors of L lanes, vector j % (16 / L) taking
+/// the j-th whole vector of the input, so every lane sums its elements in
+/// ascending order whatever L is.
+#[inline(always)]
+pub fn dot16<S: pulp::Simd>(simd: S, a: &[f32], b: &[f32]) -> f32 {
+    match S::F32_LANES {
+        4 => dot16_k::<S, 4>(simd, a, b),
+        8 => dot16_k::<S, 2>(simd, a, b),
+        16 => dot16_k::<S, 1>(simd, a, b),
+        _ => dot_fold16(a, b),
+    }
+}
+
+#[inline(always)]
+fn dot16_k<S: pulp::Simd, const K: usize>(simd: S, a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (ah, at) = S::as_simd_f32s(&a[..n]);
+    let (bh, bt) = S::as_simd_f32s(&b[..n]);
+    let mut acc = [simd.splat_f32s(0.0); K];
+    for (j, (&x, &y)) in ah.iter().zip(bh).enumerate() {
+        acc[j % K] = simd.mul_add_f32s(x, y, acc[j % K]);
+    }
+    let l = S::F32_LANES;
+    let mut lanes = [0f32; FOLD16];
+    for (v, &acc_v) in acc.iter().enumerate() {
+        let (dst, _) = S::as_mut_simd_f32s(&mut lanes[v * l..(v + 1) * l]);
+        dst[0] = acc_v;
+    }
+    let base = ah.len() * l;
+    for (t, (&x, &y)) in at.iter().zip(bt).enumerate() {
+        let i = (base + t) % FOLD16;
+        lanes[i] = x.mul_add(y, lanes[i]);
+    }
+    fold16_tree(&lanes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +133,11 @@ mod tests {
                 dot_fold16(&a[..n], &b[..n]).to_bits(),
                 reference(&a[..n], &b[..n]).to_bits(),
                 "n={n}"
+            );
+            assert_eq!(
+                dot_fold16_simd(&a[..n], &b[..n]).to_bits(),
+                reference(&a[..n], &b[..n]).to_bits(),
+                "simd n={n}"
             );
         }
     }

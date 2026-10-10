@@ -136,12 +136,10 @@ impl<K: Ranks> WithSimd for MimoRows<'_, K> {
         // the same way for every rank (they share the length n).
         let mut kp = [(&[][..], &[][..]); MAX_MIMO_RANK];
         let mut kc = [(&[][..], &[][..]); MAX_MIMO_RANK];
-        let mut qv = [(&[][..], &[][..]); MAX_MIMO_RANK];
         for i in 0..r {
             let span = i * n..(i + 1) * n;
             kp[i] = S::as_simd_f32s(&self.k_prev[span.clone()]);
-            kc[i] = S::as_simd_f32s(&self.k_cur[span.clone()]);
-            qv[i] = S::as_simd_f32s(&self.q[span]);
+            kc[i] = S::as_simd_f32s(&self.k_cur[span]);
         }
         for ((row, (bvp, gxp)), yp) in self
             .state
@@ -155,7 +153,6 @@ impl<K: Ranks> WithSimd for MimoRows<'_, K> {
                 vbv[i] = simd.splat_f32s(bvp[i]);
                 vgx[i] = simd.splat_f32s(gxp[i]);
             }
-            let mut yacc = [zero; MAX_MIMO_RANK];
             let (s_h, s_t) = S::as_mut_simd_f32s(row);
             for (j, s) in s_h.iter_mut().enumerate() {
                 let mut inner = simd.mul_f32s(vgx[0], kc[0].0[j]);
@@ -164,14 +161,7 @@ impl<K: Ranks> WithSimd for MimoRows<'_, K> {
                     inner = simd.mul_add_f32s(vgx[i], kc[i].0[j], inner);
                     inner = simd.mul_add_f32s(vbv[i], kp[i].0[j], inner);
                 }
-                let ns = simd.mul_add_f32s(va, *s, inner);
-                *s = ns;
-                for i in 0..r {
-                    yacc[i] = simd.mul_add_f32s(ns, qv[i].0[j], yacc[i]);
-                }
-            }
-            for i in 0..r {
-                yp[i] = simd.reduce_sum_f32s(yacc[i]);
+                *s = simd.mul_add_f32s(va, *s, inner);
             }
             for (j, s) in s_t.iter_mut().enumerate() {
                 let mut inner = gxp[0] * kc[0].1[j];
@@ -181,9 +171,11 @@ impl<K: Ranks> WithSimd for MimoRows<'_, K> {
                     inner = bvp[i].mul_add(kp[i].1[j], inner);
                 }
                 *s = self.alpha.mul_add(*s, inner);
-                for i in 0..r {
-                    yp[i] = (*s).mul_add(qv[i].1[j], yp[i]);
-                }
+            }
+            // Each rank's readout in the sixteen-lane order of
+            // crate::ops::fold16: the same bits on every instruction set.
+            for (y, q) in yp.iter_mut().zip(self.q.chunks_exact(n)) {
+                *y = crate::ops::fold16::dot16(simd, row, q);
             }
         }
     }

@@ -27,26 +27,11 @@ const MAX_ANGLES: usize = MAX_DS / 2;
 
 use pulp::{Arch, Simd, WithSimd};
 
+/// sum x^2 in the sixteen-lane order of [`crate::ops::fold16`]: the same
+/// bits on every instruction set.
 #[inline]
 pub(crate) fn simd_sum_sq(x: &[f32]) -> f32 {
-    struct SumSq<'a>(&'a [f32]);
-    impl WithSimd for SumSq<'_> {
-        type Output = f32;
-        #[inline(always)]
-        fn with_simd<S: Simd>(self, simd: S) -> f32 {
-            let (head, tail) = S::as_simd_f32s(self.0);
-            let mut acc = simd.splat_f32s(0.0);
-            for &v in head {
-                acc = simd.mul_add_f32s(v, v, acc);
-            }
-            let mut s = simd.reduce_sum_f32s(acc);
-            for &v in tail {
-                s += v * v;
-            }
-            s
-        }
-    }
-    Arch::new().dispatch(SumSq(x))
+    crate::ops::fold16::sum_sq_fold16_simd(x)
 }
 
 #[inline]
@@ -83,7 +68,8 @@ pub(crate) fn simd_rms_scale(out: &mut [f32], x: &[f32], weight: &[f32], inv_rms
 
 /// One state row of the SSM recurrence under a chosen SIMD level:
 /// state[n] = alpha*state[n] + beta_v*k_prev[n] + gamma_x*k_cur[n],
-/// returning y = sum(state[n] * q[n]).
+/// returning y = sum(state[n] * q[n]) in the sixteen-lane order of
+/// [`crate::ops::fold16`], the same bits on every instruction set.
 #[inline(always)]
 fn ssm_row<S: Simd>(
     simd: S,
@@ -97,19 +83,13 @@ fn ssm_row<S: Simd>(
     let (s_h, s_t) = S::as_mut_simd_f32s(state);
     let (kp_h, kp_t) = S::as_simd_f32s(kp);
     let (kc_h, kc_t) = S::as_simd_f32s(kc);
-    let (q_h, q_t) = S::as_simd_f32s(q);
-    let mut yacc = simd.splat_f32s(0.0);
-    for (((s, &kp), &kc), &q) in s_h.iter_mut().zip(kp_h).zip(kc_h).zip(q_h) {
-        let ns = simd.mul_add_f32s(va, *s, simd.mul_add_f32s(vbv, kp, simd.mul_f32s(vgx, kc)));
-        *s = ns;
-        yacc = simd.mul_add_f32s(ns, q, yacc);
+    for ((s, &kp), &kc) in s_h.iter_mut().zip(kp_h).zip(kc_h) {
+        *s = simd.mul_add_f32s(va, *s, simd.mul_add_f32s(vbv, kp, simd.mul_f32s(vgx, kc)));
     }
-    let mut y = simd.reduce_sum_f32s(yacc);
-    for (((s, &kp), &kc), &q) in s_t.iter_mut().zip(kp_t).zip(kc_t).zip(q_t) {
+    for ((s, &kp), &kc) in s_t.iter_mut().zip(kp_t).zip(kc_t) {
         *s = a.mul_add(*s, bv.mul_add(kp, gx * kc));
-        y = (*s).mul_add(q, y);
     }
-    y
+    crate::ops::fold16::dot16(simd, state, q)
 }
 
 /// One head's channels at one step of the SSM recurrence: for every
