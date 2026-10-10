@@ -68,14 +68,35 @@ __device__ __forceinline__ void m2_step_scalars(
 
 // One channel's row at one token: the readout from the previous state
 // (scaled by e^acs) and the state update h = e^acs h + B (x e^0 dt), both
-// over n ascending. Returns C.h_prev e^acs + (C.B dt) x.
+// over n ascending. Returns C.h_prev e^acs + (C.B dt) x. With B and C on
+// 16 bytes the indices go four at a time, B and C one float4 each and the
+// row's four values loaded before the chain takes them.
 __device__ __forceinline__ float m2_row_step(
-    float* trow, const float* b_sm, const float* c_sm,
+    float* __restrict__ trow, const float* __restrict__ b_sm, const float* __restrict__ c_sm,
     float eacs, float w_diag, float x_scale, float xp, int ds
 ) {
     const float xw = __fmul_rn(xp, x_scale);
     float acc = 0.0f;
-    for (int n = 0; n < ds; n++) {
+    int n = 0;
+    const unsigned long long bits =
+        reinterpret_cast<unsigned long long>(b_sm) | reinterpret_cast<unsigned long long>(c_sm);
+    if (((ds & 3) | (bits & 15)) == 0) {
+        for (; n + 4 <= ds; n += 4) {
+            const float4 b4 = *reinterpret_cast<const float4*>(b_sm + n);
+            const float4 c4 = *reinterpret_cast<const float4*>(c_sm + n);
+            const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
+            const float cc[4] = {c4.x, c4.y, c4.z, c4.w};
+            float hv[4];
+#pragma unroll
+            for (int j = 0; j < 4; j++) hv[j] = trow[n + j];
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                acc = __fmaf_rn(cc[j], hv[j], acc);
+                trow[n + j] = __fmaf_rn(eacs, hv[j], __fmaf_rn(bb[j], xw, 0.0f));
+            }
+        }
+    }
+    for (; n < ds; n++) {
         float hp = trow[n];
         acc = __fmaf_rn(c_sm[n], hp, acc);
         trow[n] = __fmaf_rn(eacs, hp, __fmaf_rn(b_sm[n], xw, 0.0f));
@@ -253,7 +274,29 @@ __device__ __forceinline__ void m2_steps_body(
             const float* cs = cur + ds;
             float* trow = tile + tid * (ds + 1);
             float cb = 0.0f, acc = 0.0f;
-            for (int n = 0; n < ds; n++) {
+            int n = 0;
+            // Four state indices at a time, B and C (the same for every
+            // channel of the block) one float4 each, the row's four values
+            // loaded before the chains take them: the row's own stores would
+            // otherwise hold every next load back a round trip.
+            if (((ds & 3) | (reinterpret_cast<unsigned long long>(cur) & 15)) == 0) {
+                for (; n + 4 <= ds; n += 4) {
+                    const float4 b4 = *reinterpret_cast<const float4*>(bs + n);
+                    const float4 c4 = *reinterpret_cast<const float4*>(cs + n);
+                    const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
+                    const float cc[4] = {c4.x, c4.y, c4.z, c4.w};
+                    float hv[4];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) hv[j] = trow[n + j];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        cb = __fmaf_rn(cc[j], bb[j], cb);
+                        acc = __fmaf_rn(cc[j], hv[j], acc);
+                        trow[n + j] = __fmaf_rn(eacs, hv[j], __fmaf_rn(bb[j], xw, 0.0f));
+                    }
+                }
+            }
+            for (; n < ds; n++) {
                 const float bn = bs[n], cn = cs[n], hp = trow[n];
                 cb = __fmaf_rn(cn, bn, cb);
                 acc = __fmaf_rn(cn, hp, acc);
