@@ -139,12 +139,17 @@ __device__ __forceinline__ void m2_tile_store(
 
 // The recurrence of every head over a window, token by token: grid
 // (B, H, ceil(P / blockDim.x)), block (channels, helpers): thread x of the
-// first row owns channel p0 + x, and the helper rows only move the state
-// tile and the token's B and C through shared memory. Dynamic
-// shared memory: (2 * N + 4 + rows * (N + 1)) floats for B, C, the step
-// scalars and the block's rows of the state, padded by one so a thread's
-// row walk hits distinct banks. The state tile moves through shared memory
-// with coalesced loads and stores once per window; each thread owns one
+// first row owns channel p0 + x, and the helper rows move the state tile
+// and bring the next token's B and C into the other half of a double
+// buffer while the owners run the current token, so a token costs one
+// barrier. Each owner computes the step scalars itself with
+// m2_step_scalars' expressions and runs their C.B chain in the same n loop
+// as m2_row_step's two, so no thread waits on a scalar phase; every chain
+// is the one m2_step_scalars and m2_row_step run. Dynamic shared memory:
+// (4 * N + rows * (N + 1)) floats for the two halves of B and C and the
+// block's rows of the state, padded by one so a thread's row walk hits
+// distinct banks. The state tile moves through shared memory with
+// coalesced loads and stores once per window; each thread owns one
 // channel's row. Token t of sequence b is row b * seq + t of xbc, proj and
 // y. A decode step is the window of one token, so the sequential prefill
 // gives the bits of that many decode steps.
@@ -169,10 +174,8 @@ __device__ __forceinline__ void m2_steps_body(
     float* __restrict__ ckpt, int stride
 ) {
     extern __shared__ float m2s_sm[];
-    float* b_sm = m2s_sm;
-    float* c_sm = b_sm + ds;
-    float* scal = c_sm + ds;
-    float* tile = scal + 4;
+    float* bc = m2s_sm;            // [2][2 N]: B then C of a token, two halves
+    float* tile = m2s_sm + 4 * ds;
     const int b = blockIdx.x;
     const int h = blockIdx.y;
     const int p0 = blockIdx.z * blockDim.x;
@@ -182,39 +185,88 @@ __device__ __forceinline__ void m2_steps_body(
     const int lin = threadIdx.y * blockDim.x + tid;
     const int nthr = blockDim.x * blockDim.y;
     const bool owner = threadIdx.y == 0 && tid < rows;
+    // The helper rows move the next token's B and C; a block of owners
+    // alone moves them itself.
+    const bool mover = blockDim.y == 1 || threadIdx.y > 0;
+    const int mlin = blockDim.y == 1 ? lin : lin - (int)blockDim.x;
+    const int mthr = blockDim.y == 1 ? nthr : nthr - (int)blockDim.x;
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
+    const long long b_col = d_ssm + (long long)g * ds;
+    const long long c_col = d_ssm + (long long)(ng + g) * ds;
     const long long base = (((long long)b * nh + h) * hd + p0) * ds;
+    const int p = p0 + tid;
     m2_tile_load(tile, ssm + base, rows, ds);
+    if (seq > 0) {
+        const long long x0 = (long long)b * seq * conv_dim;
+        for (int n = lin; n < ds; n += nthr) {
+            bc[n] = to_f(xbc[x0 + b_col + n]);
+            bc[ds + n] = to_f(xbc[x0 + c_col + n]);
+        }
+    }
+    float dv = 0.0f, bias = 0.0f, an = 0.0f, raw = 0.0f, xp = 0.0f, z = 0.0f;
+    const bool gate = (flags & M2_FLAG_GATE_IN_SCAN) != 0;
+    if (owner) {
+        dv = (flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + p] : D[h];
+        bias = dt_bias[h];
+        an = a_neg[h];
+        if (seq > 0) {
+            const long long row = (long long)b * seq;
+            raw = to_f(proj[row * d_in_proj + dt_off + h]);
+            xp = to_f(xbc[row * conv_dim + (long long)h * hd + p]);
+            if (gate) z = to_f(proj[row * d_in_proj + z_off + (long long)h * hd + p]);
+        }
+    }
+    __syncthreads();
     const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
     for (int t = 0; t < seq; t++) {
         const long long row = (long long)b * seq + t;
-        const long long xrow = row * conv_dim;
         if (CKPT && t % stride == 0) {
             const long long cbase =
                 ((((long long)b * nseg + t / stride) * nh + h) * hd + p0) * ds;
             m2_tile_store(ckpt + cbase, tile, rows, ds);
+            __syncthreads();
         }
-        for (int n = lin; n < ds; n += nthr) {
-            b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
-            c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
-        }
-        __syncthreads();
-        m2_step_scalars(scal, b_sm, c_sm, proj + row * d_in_proj, dt_off, h, dt_bias,
-                        a_neg, ds, flags, dt_min, dt_max);
-        __syncthreads();
-        if (owner) {
-            const int p = p0 + tid;
-            const float xp = to_f(xbc[xrow + (long long)h * hd + p]);
-            float acc = m2_row_step(tile + tid * (ds + 1), b_sm, c_sm, scal[0], scal[1],
-                                    scal[2], xp, ds);
-            float dv = (flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + p] : D[h];
-            acc = __fmaf_rn(xp, dv, acc);
-            if (flags & M2_FLAG_GATE_IN_SCAN) {
-                float z = to_f(proj[row * d_in_proj + z_off + (long long)h * hd + p]);
-                acc = __fmul_rn(acc, m2_silu(z));
+        const float* cur = bc + (t & 1) * 2 * ds;
+        if (mover && t + 1 < seq) {
+            float* nxt = bc + ((t + 1) & 1) * 2 * ds;
+            const long long xn = (row + 1) * conv_dim;
+            for (int n = mlin; n < ds; n += mthr) {
+                nxt[n] = to_f(xbc[xn + b_col + n]);
+                nxt[ds + n] = to_f(xbc[xn + c_col + n]);
             }
+        }
+        if (owner) {
+            float raw_n = 0.0f, xp_n = 0.0f, z_n = 0.0f;
+            if (t + 1 < seq) {
+                raw_n = to_f(proj[(row + 1) * d_in_proj + dt_off + h]);
+                xp_n = to_f(xbc[(row + 1) * conv_dim + (long long)h * hd + p]);
+                if (gate) z_n = to_f(proj[(row + 1) * d_in_proj + z_off + (long long)h * hd + p]);
+            }
+            float dt = m2_softplus(__fadd_rn(raw, bias));
+            if ((flags & M2_FLAG_DT_LIMIT) && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);
+            const float acs = __fadd_rn(0.0f, __fmul_rn(dt, an));
+            const float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));
+            const float eacs = m2_exp(acs);
+            const float xw = __fmul_rn(xp, __fmul_rn(e0, dt));
+            const float* bs = cur;
+            const float* cs = cur + ds;
+            float* trow = tile + tid * (ds + 1);
+            float cb = 0.0f, acc = 0.0f;
+            for (int n = 0; n < ds; n++) {
+                const float bn = bs[n], cn = cs[n], hp = trow[n];
+                cb = __fmaf_rn(cn, bn, cb);
+                acc = __fmaf_rn(cn, hp, acc);
+                trow[n] = __fmaf_rn(eacs, hp, __fmaf_rn(bn, xw, 0.0f));
+            }
+            const float w_diag = __fmul_rn(__fmul_rn(cb, e0), dt);
+            acc = __fmaf_rn(w_diag, xp, __fmul_rn(acc, eacs));
+            acc = __fmaf_rn(xp, dv, acc);
+            if (gate) acc = __fmul_rn(acc, m2_silu(z));
             y[row * d_ssm + (long long)h * hd + p] = acc;
+            raw = raw_n;
+            xp = xp_n;
+            z = z_n;
         }
         __syncthreads();
     }

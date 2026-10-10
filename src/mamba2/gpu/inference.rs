@@ -16,7 +16,7 @@ use cudarc::driver::PushKernelArg;
 use cudarc::driver::LaunchConfig;
 
 use super::kernels::{
-    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, chunk_scan_tiles_smem_bytes, gated_norm_cfg,
+    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, chunk_scan_tiles_smem_bytes, decode_rows, gated_norm_cfg,
     gated_norm_smem_bytes, step_cfg, step_rows,
 };
 use crate::mamba_ssm::gpu::blas::{
@@ -1118,7 +1118,7 @@ impl Mamba2GpuInferenceEngine {
                 bld.arg(&flags);
                 bld.arg(&lo);
                 bld.arg(&hi);
-                let rows = step_rows(hd, ds, self.kernels.smem_optin)
+                let rows = decode_rows((b, nh), (hd, ds), self.kernels.smem_optin)
                     .ok_or("the decode step does not fit this GPU's shared memory")?;
                 unsafe { bld.launch(step_cfg(b, nh, (hd, ds), rows)) }
                     .map_err(|e| format!("Mamba-2 step L{l}: {e:?}"))?;

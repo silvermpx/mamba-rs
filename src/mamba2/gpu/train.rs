@@ -28,8 +28,8 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
 use super::kernels::{
-    CHUNK, Mamba2Kernels, dx_tiles_geom, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes,
-    seq_bwd_tiles_smem_bytes,
+    CHUNK, Mamba2Kernels, bc_tiles_smem_bytes, dx_tiles_geom, gated_norm_bwd_smem_bytes,
+    seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes,
 };
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
 use crate::mamba_ssm::gpu::blas::{
@@ -1369,25 +1369,52 @@ impl Mamba2GpuTrainer {
                     dcbh, mm, dy, xbc, ld_xbc, cb, dt, acs, b_i, t_i, nh_i, ng_i, hd_i
                 ]
             );
-            let bc_cfg = cfg3(b * nc, ng, (CHUNK * ds).div_ceil(128), 128);
-            go!(
-                k.db.get(act),
-                bc_cfg,
-                "dB",
-                [
-                    dxbc, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, b_i, t_i, nh_i, ng_i,
-                    hd_i, ds_i
-                ]
-            );
-            go!(
-                k.dc.get(act),
-                bc_cfg,
-                "dC",
-                [
-                    dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs, b_i, t_i, nh_i, ng_i,
-                    hd_i, ds_i
-                ]
-            );
+            let bc_smem = bc_tiles_smem_bytes(hd);
+            if bc_smem <= self.kernels.smem_optin {
+                let tiles = LaunchConfig {
+                    grid_dim: ((b * nc) as u32, ng as u32, ds.div_ceil(32) as u32),
+                    block_dim: (512, 1, 1),
+                    shared_mem_bytes: bc_smem as u32,
+                };
+                go!(
+                    k.db_tiles.get(act),
+                    tiles,
+                    "dB",
+                    [
+                        dxbc, dy, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, t_i, nh_i,
+                        ng_i, hd_i, ds_i
+                    ]
+                );
+                go!(
+                    k.dc_tiles.get(act),
+                    tiles,
+                    "dC",
+                    [
+                        dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, dt, acs, t_i, nh_i,
+                        ng_i, hd_i, ds_i
+                    ]
+                );
+            } else {
+                let bc_cfg = cfg3(b * nc, ng, (CHUNK * ds).div_ceil(128), 128);
+                go!(
+                    k.db.get(act),
+                    bc_cfg,
+                    "dB",
+                    [
+                        dxbc, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, b_i, t_i, nh_i,
+                        ng_i, hd_i, ds_i
+                    ]
+                );
+                go!(
+                    k.dc.get(act),
+                    bc_cfg,
+                    "dC",
+                    [
+                        dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs, b_i, t_i, nh_i,
+                        ng_i, hd_i, ds_i
+                    ]
+                );
+            }
             {
                 let (da_parts, dbias_parts) = (s.da_parts.cached_ptr(), s.dbias_parts.cached_ptr());
                 let (dt_bias, a_neg) = (lp.dt_bias, lp.a_neg);
@@ -1591,9 +1618,17 @@ impl Mamba2GpuTrainer {
             );
             let g_w = at(g_base, ls.conv_w);
             let g_b = opt_at(g_base, ls.conv_b).unwrap_or(0);
+            // 32 channels a block with a warp per tap and one for the bias,
+            // 128 rows of dv and the inputs (plus the d_conv - 1 rows before)
+            // staged at a time.
+            let dw_cfg = LaunchConfig {
+                grid_dim: (cd.div_ceil(32) as u32, 1, 1),
+                block_dim: (32, (c.d_conv + 1) as u32, 1),
+                shared_mem_bytes: ((128 + 128 + c.d_conv - 1) * 32 * 4) as u32,
+            };
             go!(
                 k.conv_dw.get(act),
-                grid_1d(cd * (c.d_conv + 1)),
+                dw_cfg,
                 "conv weights",
                 [
                     g_w, g_b, dv, conv0, proj, ld_proj, xbc_col_i, b_i, t_i, cd_i, dconv_i

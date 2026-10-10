@@ -727,6 +727,151 @@ DEFINE_M2B_DB(m2b_db, float)
 DEFINE_M2B_DB(m2b_db_bf16, __nv_bfloat16)
 DEFINE_M2B_DB(m2b_db_f16, __half)
 
+// m2b_db and m2b_dc as register tiles, one block per (chunk, group, tile
+// of 32 state indices): a warp takes 4 rows (s for dB, t for dC) and a
+// lane an index n. For each head of the group ascending, the head's x (dB)
+// or dy (dC) rows are staged transposed [P][64] with its dS (dB) or H (dC)
+// columns [P][32]; the p-ascending inner sum from 0 then joins the row's
+// chain as fma(inner, scale, acc), scale = dt_s E(L-1, s) (dB) or e^Acs_t
+// (dC). Then the chain runs over the staged dCB of the group (each pair
+// summed over the heads ascending from 0) and the C rows t >= s (dB) or
+// the B rows s <= t (dC), ascending: the bits of m2b_db and m2b_dc.
+// Shared memory: (68 P + 32 P + 64 * 64 + 64 * 32 + 64) floats (the
+// transposed rows padded to 68 so their staging writes spread over banks).
+// Grid (B * nc, G, ceil(N / 32)), block 512.
+template <typename T, bool DC>
+__device__ __forceinline__ void m2b_bc_tiles_body(
+    float* __restrict__ dxbc,
+    const float* __restrict__ dy,
+    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
+    const float* __restrict__ mat, const float* __restrict__ dcbh,
+    const float* __restrict__ dt, const float* __restrict__ acs,
+    int seq, int nh, int ng, int hd, int dstate
+) {
+    extern __shared__ float m2bt_sm[];
+    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
+    const long long bc = blockIdx.x;
+    const int g = blockIdx.y;
+    const int n0 = blockIdx.z * 32;
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M2_CHUNK;
+    const int lc = min(M2_CHUNK, seq - t0);
+    const int hpg = nh / ng;
+    const long long d_ssm = (long long)nh * hd;
+    constexpr int LS = M2_CHUNK + 4;
+    float* lt = m2bt_sm;                     // [P][LS]
+    float* rt = lt + hd * LS;                // [P][32]
+    float* dcbg = rt + hd * 32;              // [64][64], t by s
+    float* orow = dcbg + M2_CHUNK * M2_CHUNK;// [64][32]
+    float* scale = orow + M2_CHUNK * 32;     // [64]
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5, nw = blockDim.x >> 5;
+    const int r0 = 4 * warp;
+    const int n = n0 + lane;
+    const long long row0 = b * seq + t0;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int k = 0; k < hpg; k++) {
+        const int h = g * hpg + k;
+        const long long sc = (bc * nh + h) * M2_CHUNK;
+        const float* mh = mat + (bc * nh + h) * hd * (long long)dstate;
+        __syncthreads();
+        for (int r = warp; r < M2_CHUNK; r += nw) {
+            for (int p = lane; p < hd; p += 32) {
+                float v = 0.0f;
+                if (r < lc) {
+                    v = DC ? dy[(row0 + r) * d_ssm + (long long)h * hd + p]
+                           : to_f(xbc[(row0 + r) * ld_xbc + (long long)h * hd + p]);
+                }
+                lt[p * LS + r] = v;
+            }
+        }
+        for (int p = warp; p < hd; p += nw)
+            rt[p * 32 + lane] = n < dstate ? mh[(long long)p * dstate + n] : 0.0f;
+        for (int r = tid; r < M2_CHUNK; r += blockDim.x) {
+            float sv = 0.0f;
+            if (r < lc) {
+                sv = DC ? m2_exp(acs[sc + r])
+                        : __fmul_rn(dt[sc + r],
+                                    m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs[sc + r]), 0.0f)));
+            }
+            scale[r] = sv;
+        }
+        __syncthreads();
+        float inner[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int p = 0; p < hd; p++) {
+            const float4 l4 = *reinterpret_cast<const float4*>(lt + p * LS + r0);
+            const float rv = rt[p * 32 + lane];
+            inner[0] = __fmaf_rn(l4.x, rv, inner[0]);
+            inner[1] = __fmaf_rn(l4.y, rv, inner[1]);
+            inner[2] = __fmaf_rn(l4.z, rv, inner[2]);
+            inner[3] = __fmaf_rn(l4.w, rv, inner[3]);
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) acc[i] = __fmaf_rn(inner[i], scale[r0 + i], acc[i]);
+    }
+    __syncthreads();
+    for (int e = tid; e < M2_CHUNK * M2_CHUNK; e += blockDim.x) {
+        const int t = e / M2_CHUNK, s_ = e % M2_CHUNK;
+        float dcb = 0.0f;
+        if (s_ <= t && t < lc) {
+            for (int k = 0; k < hpg; k++)
+                dcb = __fadd_rn(dcb, dcbh[(bc * nh + g * hpg + k) * M2B_PAIRS + m2b_pair(t, s_)]);
+        }
+        dcbg[e] = dcb;
+    }
+    const int ocol = (DC ? b_col : c_col) + g * dstate;
+    for (int r = warp; r < M2_CHUNK; r += nw)
+        orow[r * 32 + lane] = r < lc && n < dstate ? to_f(xbc[(row0 + r) * ld_xbc + ocol + n]) : 0.0f;
+    __syncthreads();
+    if (DC) {
+        // dC row t: s = 0 .. t ascending.
+        for (int s_ = 0; s_ <= r0 + 3 && s_ < lc; s_++) {
+            const float bv = orow[s_ * 32 + lane];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                if (s_ <= r0 + i) acc[i] = __fmaf_rn(dcbg[(r0 + i) * M2_CHUNK + s_], bv, acc[i]);
+            }
+        }
+    } else {
+        // dB row s: t = s .. lc - 1 ascending.
+        for (int t = r0; t < lc; t++) {
+            const float cv = orow[t * 32 + lane];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                if (t >= r0 + i) acc[i] = __fmaf_rn(dcbg[t * M2_CHUNK + r0 + i], cv, acc[i]);
+            }
+        }
+    }
+    if (n >= dstate) return;
+    const int wcol = (DC ? c_col : b_col) + g * dstate;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const int r = r0 + i;
+        if (r < lc) dxbc[(row0 + r) * ld_xbc + wcol + n] = acc[i];
+    }
+}
+
+#define DEFINE_M2B_BC_TILES(NAME, T, DC)                                        \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ dxbc,                                                   \
+    const float* __restrict__ dy,                                               \
+    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,          \
+    const float* __restrict__ mat, const float* __restrict__ dcbh,              \
+    const float* __restrict__ dt, const float* __restrict__ acs,                \
+    int seq, int nh, int ng, int hd, int dstate                                 \
+) {                                                                             \
+    m2b_bc_tiles_body<T, DC>(dxbc, dy, xbc, ld_xbc, b_col, c_col, mat, dcbh,    \
+        dt, acs, seq, nh, ng, hd, dstate);                                      \
+}
+DEFINE_M2B_BC_TILES(m2b_db_tiles, float, false)
+DEFINE_M2B_BC_TILES(m2b_db_tiles_bf16, __nv_bfloat16, false)
+DEFINE_M2B_BC_TILES(m2b_db_tiles_f16, __half, false)
+DEFINE_M2B_BC_TILES(m2b_dc_tiles, float, true)
+DEFINE_M2B_BC_TILES(m2b_dc_tiles_bf16, __nv_bfloat16, true)
+DEFINE_M2B_BC_TILES(m2b_dc_tiles_f16, __half, true)
+
 // dC of a chunk and group, one thread per (t, n): the group's heads
 // ascending (each dy_t . H_c[:, n], p ascending, times e^Acs_t), then
 // s <= t ascending of dCB[t][s] B_s[n]. Written into the C columns.
@@ -1301,8 +1446,14 @@ DEFINE_M2B_CONV_DX(m2b_conv_dx_bf16, __nv_bfloat16)
 DEFINE_M2B_CONV_DX(m2b_conv_dx_f16, __half)
 
 // The conv weight and bias gradients, one thread per (c, k), k == d_conv
-// standing for the bias: rows ascending (sequence, then token).
-// Grid 1-D over conv_dim * (d_conv + 1). `g_b` may be null.
+// standing for the bias: rows ascending (sequence, then token). A block
+// takes 32 channels (a lane each, a warp per k) and streams the rows in
+// tiles of M2B_DW_ROWS through shared memory: dv [rows][32] and the conv
+// inputs [rows + d_conv - 1][32] from the row d_conv - 1 before the tile
+// (a token's taps inside its sequence are those rows; the taps before a
+// sequence's first token come from state0). Grid ceil(conv_dim / 32),
+// block (32, d_conv + 1); `g_b` may be null.
+#define M2B_DW_ROWS 128
 template <typename T>
 __device__ __forceinline__ void m2b_conv_dw_body(
     float* __restrict__ g_w, float* __restrict__ g_b,
@@ -1311,27 +1462,51 @@ __device__ __forceinline__ void m2b_conv_dw_body(
     const T* __restrict__ proj, long long ld_proj, int xbc_col,
     int batch, int seq, int conv_dim, int d_conv
 ) {
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= (long long)conv_dim * (d_conv + 1)) return;
-    const int c = (int)(i / (d_conv + 1));
-    const int k = (int)(i % (d_conv + 1));
-    if (k == d_conv && g_b == nullptr) return;
+    extern __shared__ float m2bc_sm[];
+    constexpr int CH = 32;
+    const int halo = d_conv - 1;
+    float* dvs = m2bc_sm;                    // [M2B_DW_ROWS][CH]
+    float* xs = dvs + M2B_DW_ROWS * CH;      // [M2B_DW_ROWS + halo][CH]
+    const int c0 = blockIdx.x * CH;
+    const int lane = threadIdx.x, k = threadIdx.y;
+    const int c = c0 + lane;
+    const int tid = threadIdx.y * CH + lane, nthr = CH * blockDim.y;
+    const long long rows = (long long)batch * seq;
+    const bool live = c < conv_dim && (k < d_conv || g_b != nullptr);
     float acc = 0.0f;
-    for (int b = 0; b < batch; b++) {
-        for (int t = 0; t < seq; t++) {
-            const long long row = (long long)b * seq + t;
-            const float g = dv[row * conv_dim + c];
-            if (k == d_conv) {
-                acc = __fadd_rn(acc, g);
-            } else {
-                int src = t - (d_conv - 1) + k;
-                float xv = src >= 0
-                    ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])
-                    : state0[((long long)b * conv_dim + c) * d_conv + d_conv + src];
-                acc = __fmaf_rn(xv, g, acc);
+    long long b = 0;
+    int t = 0;
+    for (long long r0 = 0; r0 < rows; r0 += M2B_DW_ROWS) {
+        const int rn = (int)min((long long)M2B_DW_ROWS, rows - r0);
+        __syncthreads();
+        for (int e = tid; e < (rn + halo) * CH; e += nthr) {
+            const int rr = e / CH, cc = e % CH;
+            const int ch = c0 + cc;
+            const long long xrow = r0 - halo + rr;
+            xs[e] = xrow >= 0 && ch < conv_dim ? to_f(proj[xrow * ld_proj + xbc_col + ch]) : 0.0f;
+            if (rr < rn) dvs[e] = ch < conv_dim ? dv[(r0 + rr) * conv_dim + ch] : 0.0f;
+        }
+        __syncthreads();
+        if (live) {
+            for (int rr = 0; rr < rn; rr++) {
+                const float g = dvs[rr * CH + lane];
+                if (k == d_conv) {
+                    acc = __fadd_rn(acc, g);
+                } else {
+                    const int src = t - halo + k;
+                    const float xv = src >= 0
+                        ? xs[(rr + k) * CH + lane]
+                        : state0[(b * conv_dim + c) * d_conv + d_conv + src];
+                    acc = __fmaf_rn(xv, g, acc);
+                }
+                if (++t == seq) {
+                    t = 0;
+                    b++;
+                }
             }
         }
     }
+    if (!live) return;
     if (k == d_conv) {
         g_b[c] = __fadd_rn(g_b[c], acc);
     } else {

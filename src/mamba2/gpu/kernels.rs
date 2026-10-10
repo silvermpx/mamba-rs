@@ -68,6 +68,10 @@ pub struct Mamba2BwdKernels {
     pub pairs: TypedKernel,
     pub db: TypedKernel,
     pub dc: TypedKernel,
+    /// `m2b_db` and `m2b_dc` as register tiles, when
+    /// [`bc_tiles_smem_bytes`] fits.
+    pub db_tiles: TypedKernel,
+    pub dc_tiles: TypedKernel,
     pub combine: TypedKernel,
     pub head_grads: CudaFunction,
     pub d_parts: TypedKernel,
@@ -90,10 +94,10 @@ pub struct Mamba2BwdKernels {
     pub bias_grad: HalfKernel,
 }
 
-/// The scan's shared memory for a block of `rows` channels: B and C, the
-/// step scalars and the rows' state tile, each row padded by one.
+/// The scan's shared memory for a block of `rows` channels: B and C of two
+/// tokens and the rows' state tile, each row padded by one.
 pub fn step_smem_bytes(rows: usize, ds: usize) -> usize {
-    (2 * ds + 4 + rows * (ds + 1)) * 4
+    (4 * ds + rows * (ds + 1)) * 4
 }
 
 /// The channels per block of the decode and sequential scans: a warp when
@@ -105,6 +109,31 @@ pub fn step_rows(hd: usize, ds: usize, cap: usize) -> Option<usize> {
         .into_iter()
         .map(|r| r.min(hd.max(1)))
         .find(|&r| step_smem_bytes(r, ds) <= cap)
+}
+
+/// The channels per block of a decode step of `batch` sequences over `nh`
+/// heads: the widest block (32, 16, 8, then 4 rows) that still leaves at
+/// least `DECODE_BLOCKS` blocks, so a lone token spreads the heads' state
+/// tiles over many blocks (a block moves its rows with 128 threads) while a
+/// batch keeps the wide blocks that share each token's B and C; fewer rows
+/// when the block does not fit `cap`. The rows never change a value.
+pub fn decode_rows(
+    (batch, nh): (usize, usize),
+    (hd, ds): (usize, usize),
+    cap: usize,
+) -> Option<usize> {
+    const DECODE_BLOCKS: usize = 384;
+    let fits = |r: usize| step_smem_bytes(r, ds) <= cap;
+    [32usize, 16, 8, 4]
+        .into_iter()
+        .map(|r| r.min(hd.max(1)))
+        .find(|&r| fits(r) && batch * nh * hd.div_ceil(r) >= DECODE_BLOCKS)
+        .or_else(|| {
+            [4usize, 2, 1]
+                .into_iter()
+                .map(|r| r.min(hd.max(1)))
+                .find(|&r| fits(r))
+        })
 }
 
 /// Launch geometry of the decode and sequential scans with `rows` channels
@@ -214,6 +243,8 @@ impl Mamba2Kernels {
                 pairs: typed("m2b_pairs")?,
                 db: typed("m2b_db")?,
                 dc: typed("m2b_dc")?,
+                db_tiles: typed("m2b_db_tiles")?,
+                dc_tiles: typed("m2b_dc_tiles")?,
                 combine: typed("m2b_combine")?,
                 head_grads: get("m2b_head_grads")?,
                 d_parts: typed("m2b_d_parts")?,
@@ -250,6 +281,8 @@ impl Mamba2Kernels {
                 (&kernels.bwd.seq_bwd_tiles, "sequential backward tiles"),
                 (&kernels.chunk_scan_tiles, "chunk scan tiles"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
+                (&kernels.bwd.db_tiles, "dB tiles"),
+                (&kernels.bwd.dc_tiles, "dC tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -291,6 +324,14 @@ pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize) -> Option<(usize, usize)>
     std::iter::successors(Some(ds), |&nk| (nk > 1).then(|| nk.div_ceil(2)))
         .find(|&nk| bytes(nk) <= cap)
         .map(|nk| (nk, bytes(nk)))
+}
+
+/// The tiled dB and dC's shared memory for a head of `hd` channels: the
+/// head's x or dy rows transposed (padded to 68), its dS or H columns of a
+/// 32-index tile, the group's dCB [64][64], the C or B rows of the tile and
+/// the rows' scales.
+pub fn bc_tiles_smem_bytes(hd: usize) -> usize {
+    ((CHUNK + 4) * hd + 32 * hd + CHUNK * CHUNK + CHUNK * 32 + CHUNK) * 4
 }
 
 /// The tiled sequential backward's shared memory for a head: the states
