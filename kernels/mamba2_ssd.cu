@@ -240,13 +240,12 @@ DEFINE_M2_BMM(m2_bmm_chunk_bf16, __nv_bfloat16)
 DEFINE_M2_BMM(m2_bmm_chunk_f16, __half)
 
 // Stages `count` values into shared memory through load(i) and put(i, v),
-// four indices a thread at a time with every load of the four issued before
-// any store, so a thread waits one round trip a batch rather than one a
-// value. The values are load's, unchanged.
+// thread `tid` of `nthr` taking four indices at a time with every load of
+// the four issued before any store, so a thread waits one round trip a
+// batch rather than one a value. The values are load's, unchanged.
 template <class LF, class PF>
-__device__ __forceinline__ void m2_stage4(int count, LF load, PF put) {
-    const int nthr = blockDim.x;
-    for (int i0 = threadIdx.x; i0 < count; i0 += 4 * nthr) {
+__device__ __forceinline__ void m2_stage4(int count, int tid, int nthr, LF load, PF put) {
+    for (int i0 = tid; i0 < count; i0 += 4 * nthr) {
         float v[4];
 #pragma unroll
         for (int k = 0; k < 4; k++) {
@@ -299,14 +298,14 @@ __device__ __forceinline__ void m2_chunk_state_body(
     for (int t = tid; t < lc; t += blockDim.x)
         ws[t] = __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t]);
     __syncthreads();
-    m2_stage4(lc * p4,
+    m2_stage4(lc * p4, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int t = i / p4, p = i - t * p4;
                   const long long r = (b * seq + t0 + t) * ld_xbc;
                   return p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t]) : 0.0f;
               },
               [&](int i, float v) { xs[i] = v; });
-    m2_stage4(lc * NT,
+    m2_stage4(lc * NT, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int t = i / NT, ni = i - t * NT;
                   const int n = n0 + ni;
@@ -521,19 +520,19 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     float* ws = cs + M2_SCAN_TT * ds;          // [TT][64]
     float* xs = ws + M2_SCAN_TT * M2_CHUNK;    // [64][P]
     const float* hg = states + (bc * nh + h) * (long long)hd * ds;
-    m2_stage4(hd * ds, [&](int i) { return hg[i]; },
+    m2_stage4(hd * ds, threadIdx.x, blockDim.x, [&](int i) { return hg[i]; },
               [&](int i, float v) {
                   const int p = i / ds;
                   hs[p * hld + i - p * ds] = v;
               });
-    m2_stage4(tn * ds,
+    m2_stage4(tn * ds, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int t = i / ds, n = i - t * ds;
                   return to_f(
                       xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col + (long long)g * ds + n]);
               },
               [&](int i, float v) { cs[i] = v; });
-    m2_stage4(tn * M2_CHUNK,
+    m2_stage4(tn * M2_CHUNK, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int tl = i / M2_CHUNK, s = i - tl * M2_CHUNK;
                   const int t = tile0 + tl;
@@ -548,7 +547,7 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
                   return w;
               },
               [&](int i, float v) { ws[i] = v; });
-    m2_stage4(send * hd,
+    m2_stage4(send * hd, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int s = i / hd, p = i - s * hd;
                   return to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + p]);

@@ -448,18 +448,23 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         acs_s[i] = i < lc ? acs[sc + i] : 0.0f;
         dt_s[i] = i < lc ? dt[sc + i] : 0.0f;
     }
-    for (int i = tid; i < M2_CHUNK * M2_CHUNK; i += blockDim.x) {
-        const int t = i / M2_CHUNK, s = i % M2_CHUNK;
-        float w = 0.0f;
-        if (s <= t && t < lc)
-            w = __fmul_rn(cb[cbo + m2b_pair(t, s)],
-                          m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f)));
-        wv[i] = w;
-    }
-    for (int i = tid; i < M2_CHUNK * p4; i += blockDim.x) {
-        const int t = i / p4, p = i % p4;
-        dyt[i] = t < lc && p < hd ? dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + p] : 0.0f;
-    }
+    m2_stage4(M2_CHUNK * M2_CHUNK, tid, blockDim.x,
+              [&](int i) {
+                  const int t = i / M2_CHUNK, s = i - t * M2_CHUNK;
+                  float w = 0.0f;
+                  if (s <= t && t < lc)
+                      w = __fmul_rn(cb[cbo + m2b_pair(t, s)],
+                                    m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f)));
+                  return w;
+              },
+              [&](int i, float v) { wv[i] = v; });
+    m2_stage4(M2_CHUNK * p4, tid, blockDim.x,
+              [&](int i) {
+                  const int t = i / p4, p = i - t * p4;
+                  return t < lc && p < hd
+                      ? dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + p] : 0.0f;
+              },
+              [&](int i, float v) { dyt[i] = v; });
     float st[4][4], ci[4][4];
     const float* hs = ds_in + ((bc * nh + h) * hd) * (long long)dstate;
     const float* hc = states + ((bc * nh + h) * hd) * (long long)dstate;
@@ -476,16 +481,26 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         for (int m0 = 0; m0 < dstate; m0 += nk) {
             const int mm = min(nk, dstate - m0);
             __syncthreads();
-            for (int i = tid; i < M2_CHUNK * mm; i += blockDim.x) {
-                const int s = i / mm, n = i % mm;
-                lt[n * lts + s] = s < lc
-                    ? to_f(xbc[(b * seq + t0 + s) * ld_xbc + col + (long long)g * dstate + m0 + n])
-                    : 0.0f;
-            }
-            for (int i = tid; i < p4 * mm; i += blockDim.x) {
-                const int p = i / mm, n = i % mm;
-                rt[n * rts + p] = p < hd ? src[(long long)p * dstate + m0 + n] : 0.0f;
-            }
+            m2_stage4(M2_CHUNK * mm, tid, blockDim.x,
+                      [&](int i) {
+                          const int s = i / mm, n = i - s * mm;
+                          return s < lc ? to_f(xbc[(b * seq + t0 + s) * ld_xbc + col
+                                                   + (long long)g * dstate + m0 + n])
+                                        : 0.0f;
+                      },
+                      [&](int i, float v) {
+                          const int s = i / mm;
+                          lt[(i - s * mm) * lts + s] = v;
+                      });
+            m2_stage4(p4 * mm, tid, blockDim.x,
+                      [&](int i) {
+                          const int p = i / mm, n = i - p * mm;
+                          return p < hd ? src[(long long)p * dstate + m0 + n] : 0.0f;
+                      },
+                      [&](int i, float v) {
+                          const int p = i / mm;
+                          rt[(i - p * mm) * rts + p] = v;
+                      });
             __syncthreads();
             for (int n = 0; n < mm; n++) {
                 const float4 l4 = *reinterpret_cast<const float4*>(lt + n * lts + s0);
@@ -1503,13 +1518,20 @@ __device__ __forceinline__ void m2b_conv_dw_body(
     for (long long r0 = 0; r0 < rows; r0 += M2B_DW_ROWS) {
         const int rn = (int)min((long long)M2B_DW_ROWS, rows - r0);
         __syncthreads();
-        for (int e = tid; e < (rn + halo) * CH; e += nthr) {
-            const int rr = e / CH, cc = e % CH;
-            const int ch = c0 + cc;
-            const long long xrow = r0 - halo + rr;
-            xs[e] = xrow >= 0 && ch < conv_dim ? to_f(proj[xrow * ld_proj + xbc_col + ch]) : 0.0f;
-            if (rr < rn) dvs[e] = ch < conv_dim ? dv[(r0 + rr) * conv_dim + ch] : 0.0f;
-        }
+        m2_stage4((rn + halo) * CH, tid, nthr,
+                  [&](int e) {
+                      const int rr = e / CH, ch = c0 + e % CH;
+                      const long long xrow = r0 - halo + rr;
+                      return xrow >= 0 && ch < conv_dim
+                          ? to_f(proj[xrow * ld_proj + xbc_col + ch]) : 0.0f;
+                  },
+                  [&](int e, float v) { xs[e] = v; });
+        m2_stage4(rn * CH, tid, nthr,
+                  [&](int e) {
+                      const int rr = e / CH, ch = c0 + e % CH;
+                      return ch < conv_dim ? dv[(r0 + rr) * conv_dim + ch] : 0.0f;
+                  },
+                  [&](int e, float v) { dvs[e] = v; });
         __syncthreads();
         if (live) {
             for (int rr = 0; rr < rn; rr++) {
