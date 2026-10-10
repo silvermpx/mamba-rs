@@ -298,8 +298,9 @@ DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt_f16, __half)
 // With norm_before_gate the sum runs over y and out = ((y rstd) w) silu(z).
 // Grid (rows, ngroups), one block per row group. The sum is two levels,
 // fixed: each head's channels ascending, then the group's heads ascending.
-// The group's values are staged in dynamic shared memory (gs floats, plus
-// one per head of the group). `out` is written at column out_col of rows
+// The group's values are staged in dynamic shared memory, each head's
+// row padded by one so the per-head sums (one thread a head) read distinct
+// banks (gs + heads floats, plus one per head of the group). `out` is written at column out_col of rows
 // ld_out wide.
 #define DEFINE_M2_GATED_NORM(NAME, TI, TO, FROM_F)                             \
 extern "C" __global__ void NAME(                                               \
@@ -317,18 +318,18 @@ extern "C" __global__ void NAME(                                               \
     const int gs = d_ssm / ng;                                                 \
     const int heads = gs / hd;                                                 \
     float* u = m2n_sm;                                                         \
-    float* head_sum = u + gs;                                                  \
+    float* head_sum = u + gs + heads;                                          \
     const long long c0 = (long long)g * gs;                                    \
     for (int i = threadIdx.x; i < gs; i += blockDim.x) {                       \
         float yv = y[r * d_ssm + c0 + i];                                      \
         float zv = to_f(proj[r * ld_proj + z_off + c0 + i]);                   \
-        u[i] = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));             \
+        u[i + i / hd] = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));    \
     }                                                                          \
     __syncthreads();                                                           \
     for (int hh = threadIdx.x; hh < heads; hh += blockDim.x) {                 \
         float s = 0.0f;                                                        \
         for (int p = 0; p < hd; p++) {                                         \
-            float v = u[hh * hd + p];                                          \
+            float v = u[hh * (hd + 1) + p];                                    \
             s = __fmaf_rn(v, v, s);                                            \
         }                                                                      \
         head_sum[hh] = s;                                                      \
@@ -345,7 +346,7 @@ extern "C" __global__ void NAME(                                               \
     __syncthreads();                                                           \
     const float rs = rstd_sh;                                                  \
     for (int i = threadIdx.x; i < gs; i += blockDim.x) {                       \
-        float v = __fmul_rn(__fmul_rn(u[i], rs), w[c0 + i]);                   \
+        float v = __fmul_rn(__fmul_rn(u[i + i / hd], rs), w[c0 + i]);          \
         if (norm_before_gate) {                                                \
             float zv = to_f(proj[r * ld_proj + z_off + c0 + i]);               \
             v = __fmul_rn(v, m2_silu(zv));                                     \

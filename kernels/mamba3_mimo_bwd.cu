@@ -51,6 +51,30 @@ __device__ __forceinline__ float mimo_block_sum(float v, float* red) {
     return out;
 }
 
+// Three block-wide sums through one tree: each value takes the same fixed
+// tree as mimo_block_sum, in its own third of `red` (3 blockDim floats),
+// for a third of the barriers.
+__device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, float* red) {
+    const int n = blockDim.x, t = threadIdx.x;
+    red[t] = a;
+    red[n + t] = b;
+    red[2 * n + t] = c;
+    __syncthreads();
+    int width = 1;
+    while (width < n) width <<= 1;
+    for (int w = width >> 1; w > 0; w >>= 1) {
+        if (t < w && t + w < n) {
+            red[t] = __fadd_rn(red[t], red[t + w]);
+            red[n + t] = __fadd_rn(red[n + t], red[n + t + w]);
+            red[2 * n + t] = __fadd_rn(red[2 * n + t], red[2 * n + t + w]);
+        }
+        __syncthreads();
+    }
+    const float3 out = make_float3(red[0], red[n], red[2 * n]);
+    __syncthreads();
+    return out;
+}
+
 // The record of one token, in floats: the state row after the token
 // [P, N], the rotated keys and queries and the biased ones before the
 // rotation [R, N] each, u, up and y [P, R], the previous input [P], the
@@ -115,7 +139,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     float* dthc = dth + na;                    // the angle gradient carry
     float* tpn = dthc + na;                    // tanh_pi of the token
     float* scal = tpn + na;                    // 8
-    float* red = scal + 8;                     // blockDim
+    float* red = scal + 8;                     // 3 blockDim
 
     const bool own = tid < hd;
     float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
@@ -340,9 +364,8 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 d_bn_h[(row * nh + h) * rn + i] = dkc[i];
                 d_cn_h[(row * nh + h) * rn + i] = dq[i];
             }
-            const float d_alpha_s = mimo_block_sum(da_loc, red);
-            const float d_beta = mimo_block_sum(db_loc, red);
-            const float d_gamma = mimo_block_sum(dg_loc, red);
+            const float3 sums = mimo_block_sum3(da_loc, db_loc, dg_loc, red);
+            const float d_alpha_s = sums.x, d_beta = sums.y, d_gamma = sums.z;
             if (tid == 0) {
                 float d_dt = 0.0f;
                 for (int a = 0; a < na; a++) d_dt = __fmaf_rn(dth[a], tpn[a], d_dt);

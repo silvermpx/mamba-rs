@@ -16,7 +16,8 @@ use cudarc::driver::PushKernelArg;
 use cudarc::driver::LaunchConfig;
 
 use super::kernels::{
-    CHUNK, Mamba2Kernels, gated_norm_cfg, gated_norm_smem_bytes, step_cfg, step_rows,
+    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, chunk_scan_tiles_smem_bytes, gated_norm_cfg,
+    gated_norm_smem_bytes, step_cfg, step_rows,
 };
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
@@ -562,17 +563,38 @@ impl M2Exec<'_> {
             bld.launch(g).map(|_| ())
         })?;
         let dp = lw.d;
-        let scan_cfg = LaunchConfig {
-            grid_dim: (
-                (b * nc) as u32,
-                nh as u32,
-                (CHUNK * hd).div_ceil(128) as u32,
-            ),
-            block_dim: (128, 1, 1),
-            shared_mem_bytes: 0,
+        // The register-tiled scan when its staging fits; both give the same
+        // bits.
+        let tiles_smem = chunk_scan_tiles_smem_bytes(hd, ds);
+        let (scan_kernel, scan_cfg) = if tiles_smem <= self.kernels.smem_optin {
+            (
+                &self.kernels.chunk_scan_tiles,
+                LaunchConfig {
+                    grid_dim: (
+                        (b * nc) as u32,
+                        nh as u32,
+                        CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
+                    ),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: tiles_smem as u32,
+                },
+            )
+        } else {
+            (
+                &self.kernels.chunk_scan,
+                LaunchConfig {
+                    grid_dim: (
+                        (b * nc) as u32,
+                        nh as u32,
+                        (CHUNK * hd).div_ceil(128) as u32,
+                    ),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+            )
         };
         launch(scan_cfg, "chunk scan", l, &|g| unsafe {
-            let mut bld = stream.launch_builder(self.kernels.chunk_scan.get(self.act));
+            let mut bld = stream.launch_builder(scan_kernel.get(self.act));
             bld.arg(&y);
             bld.arg(&states);
             bld.arg(&cb);

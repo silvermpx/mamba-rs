@@ -318,3 +318,152 @@ extern "C" __global__ void NAME(                                               \
 DEFINE_M2_CHUNK_SCAN(m2_chunk_scan, float)
 DEFINE_M2_CHUNK_SCAN(m2_chunk_scan_bf16, __nv_bfloat16)
 DEFINE_M2_CHUNK_SCAN(m2_chunk_scan_f16, __half)
+
+// The outputs of m2_chunk_scan as register tiles, for the shapes whose
+// staging fits shared memory: one block per (chunk, head, tile of
+// M2_SCAN_TT tokens), 256 threads. The tile's entering states h_prev
+// [P][N + 1] (rows padded so a warp's channel reads fall in distinct
+// banks), its C rows, the weights W[t][s] = cb e^min(Acs_t - Acs_s, 0) dt_s
+// and the x rows of every token up to the tile's last are staged; a warp
+// then takes 4 tokens at a time and a lane the channels lane, lane + 32.
+// Each output keeps m2_chunk_scan's chain: n ascending from zero, times
+// e^Acs_t, then s ascending up to t, then D x_t. Dynamic shared memory:
+// P (N + 1) + TT N + TT 64 + 64 P floats.
+#define M2_SCAN_TT 32
+template <typename TI>
+__device__ __forceinline__ void m2_chunk_scan_tiles_body(
+    float* __restrict__ y,
+    const float* __restrict__ states,
+    const float* __restrict__ cb,
+    const TI* __restrict__ xbc, long long ld_xbc, int c_col,
+    const float* __restrict__ dt, const float* __restrict__ acs,
+    const float* __restrict__ D, int d_per_channel,
+    int batch, int seq, int nh, int ng, int hd, int ds
+) {
+    extern __shared__ float m2cs_sm[];
+    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
+    const long long bc = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tile0 = blockIdx.z * M2_SCAN_TT;
+    if (bc >= (long long)batch * nc || h >= nh) return;
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M2_CHUNK;
+    const int lc = min(M2_CHUNK, seq - t0);
+    if (tile0 >= lc) return;
+    const int tn = min(M2_SCAN_TT, lc - tile0);
+    const int send = tile0 + tn;
+    const int g = h / (nh / ng);
+    const long long sc = (bc * nh + h) * M2_CHUNK;
+    const long long tri = (bc * ng + g) * (M2_CHUNK * (M2_CHUNK + 1) / 2);
+    const int hld = ds + 1;
+    float* hs = m2cs_sm;                       // [P][N + 1]
+    float* cs = hs + hd * hld;                 // [TT][N]
+    float* ws = cs + M2_SCAN_TT * ds;          // [TT][64]
+    float* xs = ws + M2_SCAN_TT * M2_CHUNK;    // [64][P]
+    const float* hg = states + (bc * nh + h) * (long long)hd * ds;
+    for (int i = threadIdx.x; i < hd * ds; i += blockDim.x) {
+        const int p = i / ds;
+        hs[p * hld + i - p * ds] = hg[i];
+    }
+    for (int i = threadIdx.x; i < tn * ds; i += blockDim.x) {
+        const int t = i / ds, n = i % ds;
+        cs[i] = to_f(xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col + (long long)g * ds + n]);
+    }
+    for (int i = threadIdx.x; i < tn * M2_CHUNK; i += blockDim.x) {
+        const int tl = i / M2_CHUNK, s = i % M2_CHUNK;
+        const int t = tile0 + tl;
+        float w = 0.0f;
+        if (s <= t) {
+            const float acs_t = acs[sc + t];
+            w = __fmul_rn(
+                __fmul_rn(cb[tri + (long long)t * (t + 1) / 2 + s],
+                          m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),
+                dt[sc + s]);
+        }
+        ws[i] = w;
+    }
+    for (int i = threadIdx.x; i < send * hd; i += blockDim.x) {
+        const int s = i / hd, p = i % hd;
+        xs[i] = to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + p]);
+    }
+    __syncthreads();
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    if (warp >= nw) return;
+    for (int r0 = 4 * warp; r0 < tn; r0 += 4 * nw) {
+        const int rows = min(4, tn - r0);
+        for (int c0 = 0; c0 < hd; c0 += 64) {
+            float acc[4][2];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                acc[i][0] = 0.0f;
+                acc[i][1] = 0.0f;
+            }
+            const int p0 = c0 + lane, p1 = c0 + lane + 32;
+            const bool on0 = p0 < hd, on1 = p1 < hd;
+            for (int n = 0; n < ds; n++) {
+                const float h0 = on0 ? hs[p0 * hld + n] : 0.0f;
+                const float h1 = on1 ? hs[p1 * hld + n] : 0.0f;
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    const float cv = i < rows ? cs[(r0 + i) * ds + n] : 0.0f;
+                    acc[i][0] = __fmaf_rn(cv, h0, acc[i][0]);
+                    acc[i][1] = __fmaf_rn(cv, h1, acc[i][1]);
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                if (i < rows) {
+                    const float e = m2_exp(acs[sc + tile0 + r0 + i]);
+                    acc[i][0] = __fmul_rn(acc[i][0], e);
+                    acc[i][1] = __fmul_rn(acc[i][1], e);
+                }
+            }
+            const int last = tile0 + r0 + rows - 1;
+            for (int s = 0; s <= last; s++) {
+                const float x0 = on0 ? xs[s * hd + p0] : 0.0f;
+                const float x1 = on1 ? xs[s * hd + p1] : 0.0f;
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    if (i < rows && s <= tile0 + r0 + i) {
+                        const float w = ws[(r0 + i) * M2_CHUNK + s];
+                        acc[i][0] = __fmaf_rn(w, x0, acc[i][0]);
+                        acc[i][1] = __fmaf_rn(w, x1, acc[i][1]);
+                    }
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                if (i >= rows) continue;
+                const int t = tile0 + r0 + i;
+                const long long yrow = (b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd;
+                if (on0) {
+                    const float dv = d_per_channel ? D[(long long)h * hd + p0] : D[h];
+                    y[yrow + p0] = __fmaf_rn(xs[t * hd + p0], dv, acc[i][0]);
+                }
+                if (on1) {
+                    const float dv = d_per_channel ? D[(long long)h * hd + p1] : D[h];
+                    y[yrow + p1] = __fmaf_rn(xs[t * hd + p1], dv, acc[i][1]);
+                }
+            }
+        }
+    }
+}
+
+#define DEFINE_M2_CHUNK_SCAN_TILES(NAME, TI)                                   \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ y,                                                     \
+    const float* __restrict__ states,                                          \
+    const float* __restrict__ cb,                                              \
+    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                  \
+    const float* __restrict__ dt, const float* __restrict__ acs,               \
+    const float* __restrict__ D, int d_per_channel,                            \
+    int batch, int seq, int nh, int ng, int hd, int ds                         \
+) {                                                                            \
+    m2_chunk_scan_tiles_body<TI>(y, states, cb, xbc, ld_xbc, c_col, dt, acs,   \
+        D, d_per_channel, batch, seq, nh, ng, hd, ds);                         \
+}
+
+DEFINE_M2_CHUNK_SCAN_TILES(m2_chunk_scan_tiles, float)
+DEFINE_M2_CHUNK_SCAN_TILES(m2_chunk_scan_tiles_bf16, __nv_bfloat16)
+DEFINE_M2_CHUNK_SCAN_TILES(m2_chunk_scan_tiles_f16, __half)

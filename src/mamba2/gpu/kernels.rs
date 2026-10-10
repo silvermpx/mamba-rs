@@ -39,6 +39,9 @@ pub struct Mamba2Kernels {
     pub chunk_state: TypedKernel,
     pub state_passing: CudaFunction,
     pub chunk_scan: TypedKernel,
+    /// The chunk scan as register tiles, for shapes whose staging fits
+    /// (see [`chunk_scan_tiles_smem_bytes`]).
+    pub chunk_scan_tiles: TypedKernel,
     /// The training backward, f32.
     pub bwd: Mamba2BwdKernels,
     /// The dynamic shared memory each opted-in kernel (the scans, the gated
@@ -112,17 +115,18 @@ pub fn step_cfg(batch: usize, nh: usize, (hd, ds): (usize, usize), rows: usize) 
 /// Tokens per SSD chunk.
 pub const CHUNK: usize = 64;
 
-/// The gated norm's shared memory: the group and its per-head sums.
+/// The gated norm's shared memory: the group, each head's row padded by
+/// one, and its per-head sums.
 pub fn gated_norm_smem_bytes(d_ssm: usize, ng: usize, hd: usize) -> usize {
     let gs = d_ssm / ng;
-    (gs + gs / hd) * 4
+    (gs + 2 * (gs / hd)) * 4
 }
 
-/// The gated norm backward's shared memory: the group twice and its
-/// per-head sums.
+/// The gated norm backward's shared memory: the group twice, each head's
+/// row padded by one, and its per-head sums.
 pub fn gated_norm_bwd_smem_bytes(d_ssm: usize, ng: usize, hd: usize) -> usize {
     let gs = d_ssm / ng;
-    (2 * gs + gs / hd) * 4
+    (2 * gs + 3 * (gs / hd)) * 4
 }
 
 /// Launch geometry of the gated norm: one block per (row, group), its
@@ -191,6 +195,7 @@ impl Mamba2Kernels {
             chunk_state: typed("m2_chunk_state")?,
             state_passing: get("m2_state_passing")?,
             chunk_scan: typed("m2_chunk_scan")?,
+            chunk_scan_tiles: typed("m2_chunk_scan_tiles")?,
             bwd: Mamba2BwdKernels {
                 a_neg: get("m2_a_neg")?,
                 dhloc: typed("m2b_dhloc")?,
@@ -232,6 +237,7 @@ impl Mamba2Kernels {
                 (&kernels.gated_norm_fwd, "gated norm"),
                 (&kernels.bwd.gated_norm, "gated norm backward"),
                 (&kernels.bwd.seq_bwd, "sequential backward"),
+                (&kernels.chunk_scan_tiles, "chunk scan tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -241,6 +247,15 @@ impl Mamba2Kernels {
         };
         Ok(kernels)
     }
+}
+
+/// Tokens per block of the tiled chunk scan.
+pub const CHUNK_SCAN_TT: usize = 32;
+
+/// The tiled chunk scan's shared memory: the entering state rows padded by
+/// one, the tile's C rows and weights, the x rows of the chunk.
+pub fn chunk_scan_tiles_smem_bytes(hd: usize, ds: usize) -> usize {
+    (hd * (ds + 1) + CHUNK_SCAN_TT * ds + CHUNK_SCAN_TT * CHUNK + CHUNK * hd) * 4
 }
 
 /// The sequential backward's shared memory for a head: the replay state

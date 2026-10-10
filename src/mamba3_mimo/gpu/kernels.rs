@@ -154,12 +154,12 @@ pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize, na: usize) -> usize {
 /// and the state-gradient rows (each padded by one), the replay keys, keys
 /// and queries, the key and query gradients, the previous keys' carry and
 /// the bias accumulators, three [P, R] tiles, the angle arrays, the step
-/// scalars and one reduction slot per thread.
+/// scalars and three reduction slots per thread.
 pub fn scan_bwd_smem_bytes(
     (hd, ds, rank, na): (usize, usize, usize, usize),
     threads: usize,
 ) -> usize {
-    (2 * hd * (ds + 1) + 8 * rank * ds + 3 * hd * rank + 6 * na + 8 + threads) * 4
+    (2 * hd * (ds + 1) + 8 * rank * ds + 3 * hd * rank + 6 * na + 8 + 3 * threads) * 4
 }
 
 /// Tokens per chunk of the chunked path.

@@ -787,7 +787,7 @@ extern "C" __global__ void m2b_d_reduce(
 // gate first: dy = du silu(z), dz = du y silu'(z);
 // norm first: dy = du,         dz = dout (xh w) silu'(z).
 // dz is written into the z columns of d_proj. Dynamic shared memory:
-// 2 gs + gs / hd floats.
+// 2 (gs + heads) + heads floats.
 template <typename T>
 __device__ __forceinline__ void m2b_gated_norm_body(
     float* __restrict__ dy,
@@ -806,20 +806,22 @@ __device__ __forceinline__ void m2b_gated_norm_body(
     if (r >= rows || g >= ng) return;
     const int gs = d_ssm / ng;
     const int heads = gs / hd;
+    // Each head's row padded by one: the per-head sums (one thread a head)
+    // then read distinct banks. Element i of the group sits at i + i / hd.
     float* u = m2bn_sm;
-    float* gw = u + gs;
-    float* head_sum = gw + gs;
+    float* gw = u + gs + heads;
+    float* head_sum = gw + gs + heads;
     const long long c0 = (long long)g * gs;
     for (int i = threadIdx.x; i < gs; i += blockDim.x) {
         float yv = y[r * d_ssm + c0 + i];
         float zv = to_f(proj[r * ld_proj + z_off + c0 + i]);
-        u[i] = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));
+        u[i + i / hd] = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));
     }
     __syncthreads();
     for (int hh = threadIdx.x; hh < heads; hh += blockDim.x) {
         float s = 0.0f;
         for (int p = 0; p < hd; p++) {
-            float v = u[hh * hd + p];
+            float v = u[hh * (hd + 1) + p];
             s = __fmaf_rn(v, v, s);
         }
         head_sum[hh] = s;
@@ -836,7 +838,7 @@ __device__ __forceinline__ void m2b_gated_norm_body(
     for (int i = threadIdx.x; i < gs; i += blockDim.x) {
         const float d = to_f(dout[r * ld_out + out_col + c0 + i]);
         const float wv = w[c0 + i];
-        const float xh = __fmul_rn(u[i], rs);
+        const float xh = __fmul_rn(u[i + i / hd], rs);
         float d1 = d;
         if (norm_before_gate) {
             const float zv = to_f(proj[r * ld_proj + z_off + c0 + i]);
@@ -844,14 +846,14 @@ __device__ __forceinline__ void m2b_gated_norm_body(
             m2b_put(&d_proj[r * ld_proj + z_off + c0 + i],
                     __fmul_rn(__fmul_rn(d, __fmul_rn(xh, wv)), m2b_silu_grad(zv)));
         }
-        gw[i] = __fmul_rn(wv, d1);
+        gw[i + i / hd] = __fmul_rn(wv, d1);
         dw_parts[r * d_ssm + c0 + i] = __fmul_rn(d1, xh);
     }
     __syncthreads();
     for (int hh = threadIdx.x; hh < heads; hh += blockDim.x) {
         float s = 0.0f;
         for (int p = 0; p < hd; p++) {
-            const int i = hh * hd + p;
+            const int i = hh * (hd + 1) + p;
             s = __fmaf_rn(__fmul_rn(u[i], rs), gw[i], s);
         }
         head_sum[hh] = s;
@@ -865,8 +867,8 @@ __device__ __forceinline__ void m2b_gated_norm_body(
     __syncthreads();
     const float c1 = scal[1];
     for (int i = threadIdx.x; i < gs; i += blockDim.x) {
-        const float xh = __fmul_rn(u[i], rs);
-        const float du = __fmul_rn(rs, __fsub_rn(gw[i], __fmul_rn(xh, c1)));
+        const float xh = __fmul_rn(u[i + i / hd], rs);
+        const float du = __fmul_rn(rs, __fsub_rn(gw[i + i / hd], __fmul_rn(xh, c1)));
         if (norm_before_gate) {
             dy[r * d_ssm + c0 + i] = du;
         } else {
@@ -1223,8 +1225,7 @@ __device__ __forceinline__ void m2s_bwd_body(
         const int t0 = seg * stride;
         const int t1 = min(t0 + stride, seq);
         const float* ck = ckpt + (((long long)b * nseg + seg) * nh + h) * pn;
-        for (int p = 0; p < hd; p++)
-            for (int n = tid; n < ds; n += blockDim.x) st[p * (ds + 1) + n] = ck[(long long)p * ds + n];
+        m2_tile_load(st, ck, hd, ds);
         __syncthreads();
         for (int t = t0; t < t1; t++) {
             const long long row = (long long)b * seq + t;
@@ -1241,17 +1242,20 @@ __device__ __forceinline__ void m2s_bwd_body(
                 const float xp = to_f(xbc[xrow + (long long)h * hd + tid]);
                 float* trow = st + tid * (ds + 1);
                 m2_row_step(trow, b_sm, c_sm, scal[0], scal[1], scal[2], xp, ds);
-                float* r = rec + (bh * stride + (t - t0)) * pn + (long long)tid * ds;
-                for (int n = 0; n < ds; n++) r[n] = trow[n];
             }
             __syncthreads();
+            m2_tile_store(rec + (bh * stride + (t - t0)) * pn, st, hd, ds);
         }
+        __syncthreads();
         for (int t = t1 - 1; t >= t0; t--) {
             const long long row = (long long)b * seq + t;
             const long long xrow = row * conv_dim;
             const int slot = t - t0;
             const float* h_cur = rec + (bh * stride + slot) * pn;
             const float* h_prev = slot > 0 ? rec + (bh * stride + slot - 1) * pn : ck;
+            // The state before the token into the replay tile (unused by the
+            // walk back), so each channel's row reads from shared memory.
+            m2_tile_load(st, h_prev, hd, ds);
             for (int n = tid; n < ds; n += blockDim.x) {
                 b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
                 c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
@@ -1288,7 +1292,7 @@ __device__ __forceinline__ void m2s_bwd_body(
                 for (int n = 0; n < ds; n++) {
                     const float dsv = drow[n];
                     sx = __fmaf_rn(dsv, b_sm[n], sx);
-                    dal_loc = __fmaf_rn(dsv, h_prev[(long long)tid * ds + n], dal_loc);
+                    dal_loc = __fmaf_rn(dsv, st[tid * (ds + 1) + n], dal_loc);
                     drow[n] = __fmul_rn(alpha, dsv);
                 }
                 dxbc[xrow + (long long)h * hd + tid] = __fmaf_rn(dt, sx, __fmul_rn(dval, dyv));

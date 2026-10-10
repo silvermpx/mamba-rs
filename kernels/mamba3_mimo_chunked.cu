@@ -46,6 +46,59 @@ __device__ __forceinline__ float m3m_rot(
     return v;
 }
 
+// A small product out[r][c] = init(r, c) + sum_k L(r, k) R(k, c), k
+// ascending, as register tiles: a warp takes 4 rows at a time and a lane
+// the columns lane, lane + 32, ... (JC of them), so a step of k loads 4 + JC
+// values for 4 JC products and a warp's column loads fall in distinct banks.
+// Every output keeps the one chain over k ascending a thread would run
+// alone. Only whole warps work: the threads of a last partial warp sit
+// out, so every output has one owner whatever the block size (at least 32).
+template <int JC, class LF, class RF, class INF, class PUTF>
+__device__ __forceinline__ void m3m_tile_product(
+    int rows, int cols, int depth, LF lf, RF rf, INF init, PUTF put
+) {
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int nw = blockDim.x >> 5;
+    if (warp >= nw) return;
+    for (int r0 = 4 * warp; r0 < rows; r0 += 4 * nw) {
+        for (int c0 = 0; c0 < cols; c0 += 32 * JC) {
+            float acc[4][JC];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int r = r0 + i, c = c0 + lane + 32 * j;
+                    acc[i][j] = r < rows && c < cols ? init(r, c) : 0.0f;
+                }
+            }
+            for (int k = 0; k < depth; k++) {
+                float lv[4], rv[JC];
+#pragma unroll
+                for (int i = 0; i < 4; i++) lv[i] = r0 + i < rows ? lf(r0 + i, k) : 0.0f;
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int c = c0 + lane + 32 * j;
+                    rv[j] = c < cols ? rf(k, c) : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < JC; j++) acc[i][j] = __fmaf_rn(lv[i], rv[j], acc[i][j]);
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int r = r0 + i, c = c0 + lane + 32 * j;
+                    if (r < rows && c < cols) put(r, c, acc[i][j]);
+                }
+            }
+        }
+    }
+}
+
 // The step scalars and angles of every token of the window, one block per
 // (sequence, head). Thread 0 walks the tokens: dt, gamma = lam dt, the
 // chunk-local Acs (a running sum from zero at each chunk start) and scale;
@@ -364,15 +417,12 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
             xs[i] = to_f(proj[(b * seq + t0 + s0 + sk) * ld_proj + di + (long long)h * hd + pp]);
         }
         __syncthreads();
-        for (int i = tid; i < tn * rank * sn_ * rank; i += blockDim.x) {
-            const int col = i % (sn_ * rank);
-            const int rw = i / (sn_ * rank);
-            const float* q = qs + rw * ds;
-            const float* k = ks + col * kld;
-            float acc = 0.0f;
-            for (int n = 0; n < ds; n++) acc = __fmaf_rn(q[n], k[n], acc);
-            gs[rw * (ST * rank) + col] = acc;
-        }
+        m3m_tile_product<1>(
+            tn * rank, sn_ * rank, ds,
+            [&](int rw, int n) { return qs[rw * ds + n]; },
+            [&](int n, int col) { return ks[col * kld + n]; },
+            [&](int, int) { return 0.0f; },
+            [&](int rw, int col, float v) { gs[rw * (ST * rank) + col] = v; });
         __syncthreads();
         if (live) {
             for (int sk = 0; sk < sn_; sk++) {
