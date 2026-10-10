@@ -92,41 +92,56 @@ DEFINE_MIMO_BC_NORM(mimo_bc_norm_bf16, __nv_bfloat16)
 DEFINE_MIMO_BC_NORM(mimo_bc_norm_f16, __half)
 
 // The pieces of one token, shared by the scan and by the training
-// backward's replay so both compute the same bits. Every thread of the
-// block calls each piece; the caller places the barriers.
+// backward's replay so both compute the same bits.
 
-// The step scalars of head h, by thread 0: alpha, beta = alpha dt lam_c,
-// gamma = lam dt, dt, then A, lam and lam_c for the backward.
+// The step scalars of head h at one token: alpha = e^(A dt), beta =
+// alpha dt lam_c, gamma = lam dt, and dt, A, lam and lam_c for the
+// backward.
+struct MimoStep {
+    float alpha, beta, gamma, dt, a, lam, lam_c;
+};
+
 template <typename TI>
-__device__ __forceinline__ void mimo_tok_disc(
-    float* scal, const TI* pr, int heads, int nh, int h,
-    const float* dt_bias, float a_floor
+__device__ __forceinline__ MimoStep mimo_step_scalars(
+    const TI* pr, int heads, int nh, int h, float dt_bias, float a_floor
 ) {
-    if (threadIdx.x != 0) return;
+    MimoStep st;
     float dd_a = to_f(pr[heads + nh + h]);
     float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
                             : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
-    float a = -ht;
-    a = a > -a_floor ? -a_floor : a;
-    float spin = __fadd_rn(to_f(pr[heads + h]), dt_bias[h]);
-    float dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
-    float trap = to_f(pr[heads + 2 * nh + h]);
-    float alpha = mimo_exp(__fmul_rn(a, dt));
-    float lam = mimo_sigmoid(trap);
-    float lam_c = mimo_sigmoid(-trap);
-    scal[0] = alpha;
-    scal[1] = __fmul_rn(__fmul_rn(alpha, dt), lam_c);
-    scal[2] = __fmul_rn(lam, dt);
-    scal[3] = dt;
-    scal[4] = a;
-    scal[5] = lam;
-    scal[6] = lam_c;
+    st.a = -ht;
+    st.a = st.a > -a_floor ? -a_floor : st.a;
+    const float spin = __fadd_rn(to_f(pr[heads + h]), dt_bias);
+    st.dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
+    const float trap = to_f(pr[heads + 2 * nh + h]);
+    st.alpha = mimo_exp(__fmul_rn(st.a, st.dt));
+    st.lam = mimo_sigmoid(trap);
+    st.lam_c = mimo_sigmoid(-trap);
+    st.beta = __fmul_rn(__fmul_rn(st.alpha, st.dt), st.lam_c);
+    st.gamma = __fmul_rn(st.lam, st.dt);
+    return st;
+}
+
+// A key or query pair (a, a + N/2) turned by the angle's sine and cosine.
+__device__ __forceinline__ float2 mimo_rot_pair(float v0, float v1, float s, float c) {
+    return make_float2(__fsub_rn(__fmul_rn(c, v0), __fmul_rn(s, v1)),
+                       __fadd_rn(__fmul_rn(s, v0), __fmul_rn(c, v1)));
 }
 
 // The token's angle increment tanh(raw) pi for angle a.
 template <typename TI>
 __device__ __forceinline__ float mimo_tanh_pi(const TI* pr, int ang_col, int a) {
     return __fmul_rn(tanhf(to_f(pr[ang_col + a])), 3.14159265358979f);
+}
+
+// The rare steps of mimo_wrap_add, out of line so the common step stays a
+// float add and two compares rather than a select over the double division.
+__device__ __noinline__ float mimo_wrap_slow(float theta, float inc, float s) {
+    const double two_pi = 6.283185307179586;
+    double acc = (double)theta + (double)inc;
+    if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
+    acc -= two_pi * floor(acc / two_pi);
+    return (float)acc;
 }
 
 // One angle step: theta + inc summed in double and wrapped into [0, 2 pi)
@@ -137,68 +152,10 @@ __device__ __forceinline__ float mimo_tanh_pi(const TI* pr, int ang_col, int a) 
 // A float sum in (-6.28, 0) means the floor is -1, which leaves the single
 // wrap add. Zero (whose sign the full formula settles), wider sums and
 // non-finite values take the full formula.
-// The rare steps, out of line so the common step stays a float add and
-// two compares rather than a select over the double division.
-__device__ __noinline__ float mimo_wrap_slow(float theta, float inc, float s) {
-    const double two_pi = 6.283185307179586;
-    double acc = (double)theta + (double)inc;
-    if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
-    acc -= two_pi * floor(acc / two_pi);
-    return (float)acc;
-}
-
 __device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
     const float s = __fadd_rn(theta, inc);
     if (s > 0.0f && s < 6.28f) return s;
     return mimo_wrap_slow(theta, inc, s);
-}
-
-// Advance the head's angles `theta` by tanh_pi dt (wrapped into [0, 2 pi))
-// and take their sines and cosines.
-template <typename TI>
-__device__ __forceinline__ void mimo_tok_angles(
-    float* sn, float* cs, float* theta, const TI* pr, int ang_col, float dt, int na
-) {
-    for (int a = threadIdx.x; a < na; a += blockDim.x) {
-        float tp = mimo_tanh_pi(pr, ang_col, a);
-        float th = mimo_wrap_add(theta[a], __fmul_rn(tp, dt));
-        theta[a] = th;
-        sincosf(th, &sn[a], &cs[a]);
-    }
-}
-
-// The keys and queries before rotation: the group's normalised rows of
-// this token plus the head's biases.
-__device__ __forceinline__ void mimo_tok_keys(
-    float* kc, float* qv, const float* bn_row, const float* cn_row,
-    const float* b_bias, const float* c_bias, int h, int g, int ng, int rank, int ds
-) {
-    for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
-        const int r = i / ds, n = i % ds;
-        const long long src = ((long long)r * ng + g) * ds + n;
-        const long long bias = ((long long)h * rank + r) * ds + n;
-        kc[i] = __fadd_rn(bn_row[src], b_bias[bias]);
-        qv[i] = __fadd_rn(cn_row[src], c_bias[bias]);
-    }
-}
-
-// The half-split rotation of the keys and queries, pairs (a, a + N/2).
-__device__ __forceinline__ void mimo_tok_rotate(
-    float* kc, float* qv, const float* sn, const float* cs, int rank, int ds, int na
-) {
-    const int half = ds / 2;
-    for (int i = threadIdx.x; i < rank * na; i += blockDim.x) {
-        const int r = i / na, a = i % na;
-        const float s = sn[a], c = cs[a];
-        float* kr = kc + r * ds;
-        float* qr = qv + r * ds;
-        float k0 = kr[a], k1 = kr[a + half];
-        kr[a] = __fsub_rn(__fmul_rn(c, k0), __fmul_rn(s, k1));
-        kr[a + half] = __fadd_rn(__fmul_rn(s, k0), __fmul_rn(c, k1));
-        float q0 = qr[a], q1 = qr[a + half];
-        qr[a] = __fsub_rn(__fmul_rn(c, q0), __fmul_rn(s, q1));
-        qr[a + half] = __fadd_rn(__fmul_rn(s, q0), __fmul_rn(c, q1));
-    }
 }
 
 // One channel's row: u_r = Psi_r x, up_r = Psi_r x_prev, the state row
@@ -312,13 +269,13 @@ __device__ __forceinline__ void mimo_state_store(
 // memory, in floats: hd * (ds + 1) for the state rows, 3 * R * ds for the
 // keys of the previous and the current token and the queries.
 //
-// A token costs two barriers. Every thread computes the step scalars with
-// mimo_tok_disc's expressions; thread a < na keeps angle a in a register,
-// advances it as mimo_tok_angles does and rotates the key and query pairs
-// (a, a + N/2) of every rank from their biased values itself, the other
-// elements are biased as mimo_tok_keys does; the keys of the previous and
-// the current token swap buffers instead of being copied. Every value is
-// the one the per-step pieces compute.
+// A token costs two barriers. Every thread computes the step scalars
+// (mimo_step_scalars); thread a < na keeps angle a in a register, advances
+// it (mimo_wrap_add) and turns the key and query pairs (a, a + N/2) of
+// every rank from their biased values itself (mimo_rot_pair), the other
+// elements are only biased; the keys of the previous and the current token
+// swap buffers instead of being copied. The training backward's replay
+// runs the same pieces, so both compute the same bits.
 //
 // The state (ssm [B, H, P, N], k [B, H, R, N], v [B, H, P], angle
 // [B, H, na]) is read at the start and written back at the end. `out` is
@@ -389,20 +346,8 @@ __device__ __forceinline__ void mimo_scan_body(
             if (own) ck_v[q * hd + tid] = v_prev;
             if (angle_owner) ck_ang[q * na + tid] = theta;
         }
-        // The step scalars, mimo_tok_disc's expressions in every thread.
-        float dd_a = to_f(pr[heads + nh + h]);
-        float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
-                                : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
-        float a_ = -ht;
-        a_ = a_ > -a_floor ? -a_floor : a_;
-        const float spin = __fadd_rn(to_f(pr[heads + h]), dtb);
-        const float dt = spin > 20.0f ? spin : log1pf(mimo_exp(spin));
-        const float trap = to_f(pr[heads + 2 * nh + h]);
-        const float alpha = mimo_exp(__fmul_rn(a_, dt));
-        const float lam = mimo_sigmoid(trap);
-        const float lam_c = mimo_sigmoid(-trap);
-        const float beta = __fmul_rn(__fmul_rn(alpha, dt), lam_c);
-        const float gamma = __fmul_rn(lam, dt);
+        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor);
+        const float dt = sc.dt;
         const float* bnr = bn + row * rgn;
         const float* cnr = cn + row * rgn;
         if (angle_owner) {
@@ -415,12 +360,14 @@ __device__ __forceinline__ void mimo_scan_body(
                 const long long bias = ((long long)h * rank + r) * ds;
                 const float k0 = __fadd_rn(bnr[src + a], b_bias[bias + a]);
                 const float k1 = __fadd_rn(bnr[src + a + half], b_bias[bias + a + half]);
-                kcur[r * ds + a] = __fsub_rn(__fmul_rn(ca, k0), __fmul_rn(sa, k1));
-                kcur[r * ds + a + half] = __fadd_rn(__fmul_rn(sa, k0), __fmul_rn(ca, k1));
+                const float2 kr = mimo_rot_pair(k0, k1, sa, ca);
+                kcur[r * ds + a] = kr.x;
+                kcur[r * ds + a + half] = kr.y;
                 const float q0 = __fadd_rn(cnr[src + a], c_bias[bias + a]);
                 const float q1 = __fadd_rn(cnr[src + a + half], c_bias[bias + a + half]);
-                qv[r * ds + a] = __fsub_rn(__fmul_rn(ca, q0), __fmul_rn(sa, q1));
-                qv[r * ds + a + half] = __fadd_rn(__fmul_rn(sa, q0), __fmul_rn(ca, q1));
+                const float2 qr = mimo_rot_pair(q0, q1, sa, ca);
+                qv[r * ds + a] = qr.x;
+                qv[r * ds + a + half] = qr.y;
             }
         }
         for (int i = tid; i < rank * ds; i += blockDim.x) {
@@ -437,7 +384,7 @@ __device__ __forceinline__ void mimo_scan_body(
             const float z = to_f(pr[h * hd + tid]);
             float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
             mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
-                             alpha, beta, gamma, dval, rank, ds);
+                             sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
             mimo_put(&out[row * di + h * hd + tid], mimo_tok_gate<RK>(y, pz, po, z, rank));
             v_prev = x;
         }

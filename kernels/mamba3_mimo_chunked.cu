@@ -27,8 +27,8 @@
 
 // The rotated value at n of a biased key or query rank row (the group's
 // normalised row `src` plus the head's `bias`), the half-split pairs
-// (a, a + N/2) for a < na turned by the token's angles: the arithmetic of
-// mimo_tok_keys and mimo_tok_rotate.
+// (a, a + N/2) for a < na turned by the token's angles (mimo_rot_pair),
+// the scan's arithmetic.
 __device__ __forceinline__ float m3m_rot(
     const float* src, const float* bias, int n, int half, int na,
     const float* sr, const float* cr
@@ -36,12 +36,12 @@ __device__ __forceinline__ float m3m_rot(
     const float v = __fadd_rn(src[n], bias[n]);
     if (n < na) {
         const float v1 = __fadd_rn(src[n + half], bias[n + half]);
-        return __fsub_rn(__fmul_rn(cr[n], v), __fmul_rn(sr[n], v1));
+        return mimo_rot_pair(v, v1, sr[n], cr[n]).x;
     }
     if (n >= half && n - half < na) {
         const int a = n - half;
         const float v0 = __fadd_rn(src[a], bias[a]);
-        return __fadd_rn(__fmul_rn(sr[a], v0), __fmul_rn(cr[a], v));
+        return mimo_rot_pair(v0, v, sr[a], cr[a]).y;
     }
     return v;
 }

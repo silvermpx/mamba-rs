@@ -51,9 +51,11 @@ __device__ __forceinline__ float mimo_block_sum(float v, float* red) {
     return out;
 }
 
-// Three block-wide sums through one tree: each value takes the same fixed
-// tree as mimo_block_sum, in its own third of `red` (3 blockDim floats),
-// for a third of the barriers.
+// Three block-wide sums at once, each through mimo_block_sum's fixed tree
+// in its own third of `red` (3 blockDim floats), the result in thread 0
+// only: the levels above a warp in shared memory, the last five as
+// shuffles in warp 0, which pair the same operands in the same order (the
+// block is at least a warp). `red` is free again after the next barrier.
 __device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, float* red) {
     const int n = blockDim.x, t = threadIdx.x;
     red[t] = a;
@@ -62,7 +64,7 @@ __device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, flo
     __syncthreads();
     int width = 1;
     while (width < n) width <<= 1;
-    for (int w = width >> 1; w > 0; w >>= 1) {
+    for (int w = width >> 1; w >= 32; w >>= 1) {
         if (t < w && t + w < n) {
             red[t] = __fadd_rn(red[t], red[t + w]);
             red[n + t] = __fadd_rn(red[n + t], red[n + t + w]);
@@ -70,9 +72,35 @@ __device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, flo
         }
         __syncthreads();
     }
-    const float3 out = make_float3(red[0], red[n], red[2 * n]);
-    __syncthreads();
+    float3 out = make_float3(0.0f, 0.0f, 0.0f);
+    if (t < 32) {
+        float x = red[t], y = red[n + t], z = red[2 * n + t];
+#pragma unroll
+        for (int w = 16; w > 0; w >>= 1) {
+            const float xo = __shfl_down_sync(0xffffffffu, x, w);
+            const float yo = __shfl_down_sync(0xffffffffu, y, w);
+            const float zo = __shfl_down_sync(0xffffffffu, z, w);
+            if (t < w && t + w < n) {
+                x = __fadd_rn(x, xo);
+                y = __fadd_rn(y, yo);
+                z = __fadd_rn(z, zo);
+            }
+        }
+        out = make_float3(x, y, z);
+    }
     return out;
+}
+
+// A 4-byte asynchronous copy into shared memory and its fences.
+__device__ __forceinline__ void mimo_cp4(float* dst, const float* src) {
+    const unsigned d = (unsigned)__cvta_generic_to_shared(dst);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"(d), "l"(src));
+}
+__device__ __forceinline__ void mimo_cp_commit() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+__device__ __forceinline__ void mimo_cp_wait() {
+    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 }
 
 // The record of one token, in floats: the state row after the token
@@ -170,11 +198,18 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
         const int t0 = seg * stride;
         const int t1 = min(t0 + stride, seq);
         const long long q = ((long long)b * nseg + seg) * nh + h;
-        // The replay, from the segment's checkpoint.
+        // The replay, from the segment's checkpoint, with mimo_scan's step
+        // (two barriers a token, the same pieces, so the forward's bits),
+        // recording each token's scalars, angles, keys and queries before
+        // and after the turn, inputs and readouts.
         mimo_state_load(st, ck_ssm + q * hd * (long long)ds, hd, ds);
         for (int i = tid; i < rn; i += blockDim.x) kp[i] = ck_k[q * rn + i];
-        for (int a = tid; a < na; a += blockDim.x) angw[a] = ck_ang[q * na + a];
+        float theta = tid < na ? ck_ang[q * na + tid] : 0.0f;
         float v_prev = own ? ck_v[q * hd + tid] : 0.0f;
+        float* kprev = kp;
+        float* kcur = kc;
+        const int half = ds / 2;
+        const float dtb = dt_bias[h];
         __syncthreads();
         for (int t = t0; t < t1; t++) {
             const long long row = (long long)b * seq + t;
@@ -192,32 +227,71 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             float* r_sn = r_xp + hd;
             float* r_cs = r_sn + na;
             float* r_sc = r_cs + na;
-            mimo_tok_disc(scal, pr, heads, nh, h, dt_bias, a_floor);
-            __syncthreads();
-            if (tid < 8) r_sc[tid] = scal[tid];
-            mimo_tok_angles(sn, cs, angw, pr, ang_col, scal[3], na);
-            for (int a = tid; a < na; a += blockDim.x) {
-                r_sn[a] = sn[a];
-                r_cs[a] = cs[a];
+            const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor);
+            const float dt = sc.dt;
+            if (tid == 0) {
+                r_sc[0] = sc.alpha;
+                r_sc[1] = sc.beta;
+                r_sc[2] = sc.gamma;
+                r_sc[3] = sc.dt;
+                r_sc[4] = sc.a;
+                r_sc[5] = sc.lam;
+                r_sc[6] = sc.lam_c;
             }
-            mimo_tok_keys(kc, qv, bn + row * rgn, cn + row * rgn, b_bias, c_bias, h, g, ng, rank, ds);
+            const float* bnr = bn + row * rgn;
+            const float* cnr = cn + row * rgn;
+            if (tid < na) {
+                const int a = tid;
+                theta = mimo_wrap_add(theta, __fmul_rn(mimo_tanh_pi(pr, ang_col, a), dt));
+                float sa, ca;
+                sincosf(theta, &sa, &ca);
+                r_sn[a] = sa;
+                r_cs[a] = ca;
+                for (int r = 0; r < rank; r++) {
+                    const long long src = ((long long)r * ng + g) * ds;
+                    const long long bias = ((long long)h * rank + r) * ds;
+                    const int i0 = r * ds + a, i1 = r * ds + a + half;
+                    const float k0 = __fadd_rn(bnr[src + a], b_bias[bias + a]);
+                    const float k1 = __fadd_rn(bnr[src + a + half], b_bias[bias + a + half]);
+                    const float q0 = __fadd_rn(cnr[src + a], c_bias[bias + a]);
+                    const float q1 = __fadd_rn(cnr[src + a + half], c_bias[bias + a + half]);
+                    r_kpre[i0] = k0;
+                    r_kpre[i1] = k1;
+                    r_qpre[i0] = q0;
+                    r_qpre[i1] = q1;
+                    const float2 kr = mimo_rot_pair(k0, k1, sa, ca);
+                    const float2 qr = mimo_rot_pair(q0, q1, sa, ca);
+                    kcur[i0] = kr.x;
+                    kcur[i1] = kr.y;
+                    qv[i0] = qr.x;
+                    qv[i1] = qr.y;
+                    r_kc[i0] = kr.x;
+                    r_kc[i1] = kr.y;
+                    r_q[i0] = qr.x;
+                    r_q[i1] = qr.y;
+                }
+            }
             for (int i = tid; i < rn; i += blockDim.x) {
-                r_kpre[i] = kc[i];
-                r_qpre[i] = qv[i];
+                const int r = i / ds, n = i - r * ds;
+                if (n < na || (n >= half && n - half < na)) continue;
+                const long long src = ((long long)r * ng + g) * ds + n;
+                const long long bias = ((long long)h * rank + r) * ds + n;
+                const float kv = __fadd_rn(bnr[src], b_bias[bias]);
+                const float qn = __fadd_rn(cnr[src], c_bias[bias]);
+                kcur[i] = kv;
+                qv[i] = qn;
+                r_kpre[i] = kv;
+                r_qpre[i] = qn;
+                r_kc[i] = kv;
+                r_q[i] = qn;
             }
             __syncthreads();
-            mimo_tok_rotate(kc, qv, sn, cs, rank, ds, na);
-            __syncthreads();
-            for (int i = tid; i < rn; i += blockDim.x) {
-                r_kc[i] = kc[i];
-                r_q[i] = qv[i];
-            }
             if (own) {
                 const float x = to_f(pr[di + h * hd + tid]);
                 float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
                 float* srow = st + tid * (ds + 1);
-                mimo_tok_row<RK>(srow, y, u, up, px, x, v_prev, kc, kp, qv,
-                             scal[0], scal[1], scal[2], dval, rank, ds);
+                mimo_tok_row<RK>(srow, y, u, up, px, x, v_prev, kcur, kprev, qv,
+                             sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
                 _Pragma("unroll") for (int r = 0; r < R; r++) {
                     r_u[tid * rank + r] = u[r];
                     r_up[tid * rank + r] = up[r];
@@ -228,8 +302,9 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             }
             __syncthreads();
             mimo_state_store(r_s, st, hd, ds);
-            for (int i = tid; i < rn; i += blockDim.x) kp[i] = kc[i];
-            __syncthreads();
+            float* used = kprev;
+            kprev = kcur;
+            kcur = used;
         }
 
         // The segment walked back.
@@ -256,6 +331,14 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             const float* k_prev = prev ? prev + (long long)hd * ds : ck_k + q * rn;
             const float alpha = r_sc[0], beta = r_sc[1], gamma = r_sc[2], dt = r_sc[3];
             const float a_val = r_sc[4], lam = r_sc[5], lam_c = r_sc[6];
+            // The token's keys and queries and the previous keys into the
+            // replay's key buffers, free during the walk, while the gate runs.
+            for (int i = tid; i < rn; i += blockDim.x) {
+                mimo_cp4(kc + i, r_kc + i);
+                mimo_cp4(kp + i, k_prev + i);
+                mimo_cp4(qv + i, r_q + i);
+            }
+            mimo_cp_commit();
 
             // Gate, D and the readout: dy, dz, du; dS rows take sum_r dy q_r.
             float du[MIMO_RA(RK)], dup[MIMO_RA(RK)];
@@ -282,58 +365,50 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                     gxS[tid * rank + r] = __fmul_rn(gamma, r_u[tid * rank + r]);
                 }
                 mimo_put(&dp[h * hd + tid], dz);
+            }
+            mimo_cp_wait();
+            __syncthreads();
+            if (own) {
                 float* drow = dsr + tid * (ds + 1);
                 for (int n = 0; n < ds; n++) {
                     float acc = drow[n];
                     _Pragma("unroll") for (int r = 0; r < R; r++)
-                        acc = __fmaf_rn(dyS[tid * rank + r], r_q[r * ds + n], acc);
+                        acc = __fmaf_rn(dyS[tid * rank + r], qv[r * ds + n], acc);
                     drow[n] = acc;
                 }
             }
             __syncthreads();
-            // Per (r, n): dq, the previous keys' gradient and the key gradient.
+            // Per (r, n): dq from the state after the token, which the replay
+            // rows already hold: the replay leaves the segment's last state
+            // there, and every earlier token's is the state before the token
+            // walked just before it.
             for (int i = tid; i < rn; i += blockDim.x) {
                 const int r = i / ds, n = i % ds;
-                float aq = 0.0f, akp = 0.0f, akc = dkcar[i];
+                float aq = 0.0f;
+                for (int p = 0; p < hd; p++)
+                    aq = __fmaf_rn(dyS[p * rank + r], st[p * (ds + 1) + n], aq);
+                dq[i] = aq;
+            }
+            __syncthreads();
+            // The state before the token into the replay rows, while the key
+            // gradients and the rotation run.
+            for (int p = 0; p < hd; p++)
+                for (int n = tid; n < ds; n += blockDim.x)
+                    mimo_cp4(st + p * (ds + 1) + n, s_prev + (long long)p * ds + n);
+            mimo_cp_commit();
+            // Per (r, n): the previous keys' gradient and the key gradient.
+            for (int i = tid; i < rn; i += blockDim.x) {
+                const int r = i / ds, n = i % ds;
+                float akp = 0.0f, akc = dkcar[i];
                 for (int p = 0; p < hd; p++) {
                     const float dsv = dsr[p * (ds + 1) + n];
-                    aq = __fmaf_rn(dyS[p * rank + r], r_s[(long long)p * ds + n], aq);
                     akp = __fmaf_rn(dsv, bvS[p * rank + r], akp);
                     akc = __fmaf_rn(dsv, gxS[p * rank + r], akc);
                 }
-                dq[i] = aq;
                 dkc[i] = akc;
                 dkcar[i] = akp;
             }
             __syncthreads();
-            // The recurrence's scalars and the rank inputs; dS takes alpha.
-            float da_loc = 0.0f, db_loc = 0.0f, dg_loc = 0.0f;
-            if (own) {
-                float* drow = dsr + tid * (ds + 1);
-                for (int n = 0; n < ds; n++) {
-                    const float dsv = drow[n];
-                    da_loc = __fmaf_rn(dsv, s_prev[(long long)tid * ds + n], da_loc);
-                    _Pragma("unroll") for (int r = 0; r < R; r++) {
-                        const float dbv = __fmul_rn(dsv, k_prev[r * ds + n]);
-                        const float dgx = __fmul_rn(dsv, r_kc[r * ds + n]);
-                        db_loc = __fmaf_rn(dbv, r_up[tid * rank + r], db_loc);
-                        dup[r] = __fmaf_rn(dbv, beta, dup[r]);
-                        dg_loc = __fmaf_rn(dgx, r_u[tid * rank + r], dg_loc);
-                        du[r] = __fmaf_rn(dgx, gamma, du[r]);
-                    }
-                    drow[n] = __fmul_rn(alpha, dsv);
-                }
-                const float x = to_f(pr[di + h * hd + tid]);
-                const float xp = r_xp[tid];
-                float dx = dx_carry, dxp = 0.0f;
-                _Pragma("unroll") for (int r = 0; r < R; r++) {
-                    gx_loc[r] = __fmaf_rn(du[r], x, __fmaf_rn(dup[r], xp, gx_loc[r]));
-                    dx = __fmaf_rn(du[r], px[r], dx);
-                    dxp = __fmaf_rn(dup[r], px[r], dxp);
-                }
-                mimo_put(&dp[di + h * hd + tid], dx);
-                dx_carry = dxp;
-            }
             // The rotation back to the biased keys and queries, and dtheta.
             const int half = ds / 2;
             for (int a = tid; a < na; a += blockDim.x) {
@@ -357,7 +432,37 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 tpn[a] = mimo_tanh_pi(pr, ang_col, a);
                 d_tanh_h[(row * nh + h) * na + a] = __fmul_rn(acc, dt);
             }
+            mimo_cp_wait();
             __syncthreads();
+            // The recurrence's scalars and the rank inputs; dS takes alpha.
+            float da_loc = 0.0f, db_loc = 0.0f, dg_loc = 0.0f;
+            if (own) {
+                float* drow = dsr + tid * (ds + 1);
+                const float* prow = st + tid * (ds + 1);
+                for (int n = 0; n < ds; n++) {
+                    const float dsv = drow[n];
+                    da_loc = __fmaf_rn(dsv, prow[n], da_loc);
+                    _Pragma("unroll") for (int r = 0; r < R; r++) {
+                        const float dbv = __fmul_rn(dsv, kp[r * ds + n]);
+                        const float dgx = __fmul_rn(dsv, kc[r * ds + n]);
+                        db_loc = __fmaf_rn(dbv, r_up[tid * rank + r], db_loc);
+                        dup[r] = __fmaf_rn(dbv, beta, dup[r]);
+                        dg_loc = __fmaf_rn(dgx, r_u[tid * rank + r], dg_loc);
+                        du[r] = __fmaf_rn(dgx, gamma, du[r]);
+                    }
+                    drow[n] = __fmul_rn(alpha, dsv);
+                }
+                const float x = to_f(pr[di + h * hd + tid]);
+                const float xp = r_xp[tid];
+                float dx = dx_carry, dxp = 0.0f;
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
+                    gx_loc[r] = __fmaf_rn(du[r], x, __fmaf_rn(dup[r], xp, gx_loc[r]));
+                    dx = __fmaf_rn(du[r], px[r], dx);
+                    dxp = __fmaf_rn(dup[r], px[r], dxp);
+                }
+                mimo_put(&dp[di + h * hd + tid], dx);
+                dx_carry = dxp;
+            }
             for (int i = tid; i < rn; i += blockDim.x) {
                 gbb[i] = __fadd_rn(gbb[i], dkc[i]);
                 gcb[i] = __fadd_rn(gcb[i], dq[i]);
