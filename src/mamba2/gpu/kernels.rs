@@ -353,9 +353,18 @@ pub fn bc_tiles_smem_bytes(hd: usize) -> usize {
 
 /// The tiled sequential backward's shared memory for a head: the states
 /// after and before the token and dS (each row padded by one), B and C, x
-/// and dy of the token, two reduction slots per thread.
-pub fn seq_bwd_tiles_smem_bytes(hd: usize, ds: usize, threads: usize) -> usize {
-    (3 * hd * (ds + 1) + 2 * ds + 2 * hd + 2 * threads) * 4
+/// and dy of the token, two reduction slots per channel thread (the
+/// channels rounded up to a warp).
+pub fn seq_bwd_tiles_smem_bytes(hd: usize, ds: usize) -> usize {
+    (3 * hd * (ds + 1) + 2 * ds + 2 * hd + 2 * hd.next_multiple_of(32)) * 4
+}
+
+/// The tiled sequential backward's block: a thread per channel and at
+/// least 256 threads, since its dS update, dB and dC chains and tile moves
+/// spread over the whole block while only the channel threads walk the
+/// rows.
+pub fn seq_bwd_tiles_threads(hd: usize) -> usize {
+    hd.next_multiple_of(32).max(256)
 }
 
 /// The sequential backward's shared memory for a head: the replay state

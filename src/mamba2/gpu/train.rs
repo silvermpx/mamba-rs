@@ -29,7 +29,7 @@ use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
 use super::kernels::{
     CHUNK, Mamba2Kernels, bc_tiles_smem_bytes, dx_tiles_geom, gated_norm_bwd_smem_bytes,
-    seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes,
+    seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
 use crate::mamba_ssm::gpu::blas::{
@@ -456,8 +456,7 @@ impl Mamba2GpuTrainer {
             dx_tiles_geom(hd, ds, optin)
         };
         let unfused = |n: usize| if dx_tiles.is_some() { 1 } else { chunked(n) };
-        let seq_tiles =
-            seq_mode && seq_bwd_tiles_smem_bytes(hd, ds, hd.next_multiple_of(32)) <= optin;
+        let seq_tiles = seq_mode && seq_bwd_tiles_smem_bytes(hd, ds) <= optin;
         let acts = (0..c.n_layers)
             .map(|_| -> Result<LayerActs, String> {
                 Ok(LayerActs {
@@ -1492,8 +1491,8 @@ impl Mamba2GpuTrainer {
                 );
                 let cfg = LaunchConfig {
                     grid_dim: (b as u32, nh as u32, 1),
-                    block_dim: (threads as u32, 1, 1),
-                    shared_mem_bytes: seq_bwd_tiles_smem_bytes(hd, ds, threads) as u32,
+                    block_dim: (seq_bwd_tiles_threads(hd) as u32, 1, 1),
+                    shared_mem_bytes: seq_bwd_tiles_smem_bytes(hd, ds) as u32,
                 };
                 go!(
                     k.seq_bwd_tiles.get(act),

@@ -1841,15 +1841,18 @@ __device__ __forceinline__ void m2s_tile_fetch(
     m2s_cp_commit();
 }
 
-// Two block sums through mimo-style fixed trees at once (the tree of
-// m2s_bwd: width the power of two at or above the block, then
-// red[t] += red[t + w] for w halving), the levels above a warp in shared
-// memory and the last five by shuffles in warp 0, which pair the same
-// operands in the same order. The sums land in thread 0.
-__device__ __forceinline__ float2 m2s_block_sum2(float a, float b, float* red) {
-    const int n = blockDim.x, t = threadIdx.x;
-    red[t] = a;
-    red[n + t] = b;
+// Two sums of the values of the first `n` threads (a whole number of warps)
+// through mimo-style fixed trees at once (the tree of m2s_bwd: width the
+// power of two at or above n, then red[t] += red[t + w] for w halving), the
+// levels above a warp in shared memory and the last five by shuffles in
+// warp 0, which pair the same operands in the same order. The sums land in
+// thread 0.
+__device__ __forceinline__ float2 m2s_block_sum2(float a, float b, float* red, int n) {
+    const int t = threadIdx.x;
+    if (t < n) {
+        red[t] = a;
+        red[n + t] = b;
+    }
     __syncthreads();
     int width = 1;
     while (width < n) width <<= 1;
@@ -1883,9 +1886,13 @@ __device__ __forceinline__ float2 m2s_block_sum2(float a, float b, float* red) {
 // and records each state as m2s_bwd does; the walk back reads the state
 // after the token from its tile (the replay's last state, then the tile the
 // previous step loaded) and fetches the state before the next token
-// asynchronously into the tile it just finished with. Every chain and both
-// trees are m2s_bwd's, so the bits are its own. Dynamic shared memory:
-// 3 P (N + 1) + 2 N + 2 P + 2 blockDim floats.
+// asynchronously into the tile it just finished with. The block may be
+// wider than the channels: the dS update, the dB and dC chains and the
+// tile moves spread over all its threads, the row chains stay on the
+// channel threads and the sums keep the channel threads' width. Every
+// chain and both trees are m2s_bwd's, so the bits are its own. Dynamic
+// shared memory: 3 P (N + 1) + 2 N + 2 P + 2 lanes floats (lanes = P
+// rounded up to a warp).
 template <typename T>
 __device__ __forceinline__ void m2s_bwd_tiles_body(
     float* __restrict__ dxbc,
@@ -1920,6 +1927,8 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
     float* dyS = xS + hd;
     float* red = dyS + hd;
     const bool own = tid < hd;
+    // The channel threads, a warp multiple: the width of the block sums.
+    const int lanes = (hd + 31) & ~31;
     const float dval = own ? ((flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + tid] : D[h]) : 0.0f;
     float da_acc = 0.0f, dbias_acc = 0.0f;
     for (int p = 0; p < hd; p++)
@@ -1973,18 +1982,35 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
                 xp = to_f(xbc[xrow + (long long)h * hd + tid]);
                 xS[tid] = xp;
                 dyS[tid] = dyv;
-                float* drow = dsr + tid * ld;
-                for (int n = 0; n < ds; n++) drow[n] = __fmaf_rn(dyv, c_sm[n], drow[n]);
             }
             __syncthreads();
-            for (int n = tid; n < ds; n += blockDim.x) {
-                float dc = 0.0f, db = 0.0f;
-                for (int p = 0; p < hd; p++) {
-                    dc = __fmaf_rn(dyS[p], cur[p * ld + n], dc);
-                    db = __fmaf_rn(dsr[p * ld + n], xS[p], db);
+            // dS[p][n] += dy[p] C[n], each element its own step, over the
+            // whole block.
+            {
+                int p = tid / ds, n = tid - (tid / ds) * ds;
+                for (int e = tid; e < hd * ds; e += blockDim.x) {
+                    float* d = dsr + p * ld + n;
+                    *d = __fmaf_rn(dyS[p], c_sm[n], *d);
+                    n += blockDim.x;
+                    while (n >= ds) {
+                        n -= ds;
+                        p++;
+                    }
                 }
-                dc_h[(row * nh + h) * ds + n] = dc;
-                db_h[(row * nh + h) * ds + n] = __fmul_rn(db, dt);
+            }
+            __syncthreads();
+            // dC and dB per state index, the two chains of an index on two
+            // threads.
+            for (int k = tid; k < 2 * ds; k += blockDim.x) {
+                const int n = k < ds ? k : k - ds;
+                float acc = 0.0f;
+                if (k < ds) {
+                    for (int p = 0; p < hd; p++) acc = __fmaf_rn(dyS[p], cur[p * ld + n], acc);
+                    dc_h[(row * nh + h) * ds + n] = acc;
+                } else {
+                    for (int p = 0; p < hd; p++) acc = __fmaf_rn(dsr[p * ld + n], xS[p], acc);
+                    db_h[(row * nh + h) * ds + n] = __fmul_rn(acc, dt);
+                }
             }
             __syncthreads();
             // The tile of the state after this token is free: the state
@@ -1998,7 +2024,28 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
                 float* drow = dsr + tid * ld;
                 const float* prow = prev + tid * ld;
                 float sx = 0.0f;
-                for (int n = 0; n < ds; n++) {
+                int n = 0;
+                // Four indices at a time, B one float4, the rows' values
+                // loaded before the chains take them.
+                if (((ds & 3) | (reinterpret_cast<unsigned long long>(b_sm) & 15)) == 0) {
+                    for (; n + 4 <= ds; n += 4) {
+                        const float4 b4 = *reinterpret_cast<const float4*>(b_sm + n);
+                        const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
+                        float dv[4], pv[4];
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            dv[j] = drow[n + j];
+                            pv[j] = prow[n + j];
+                        }
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            sx = __fmaf_rn(dv[j], bb[j], sx);
+                            dal_loc = __fmaf_rn(dv[j], pv[j], dal_loc);
+                            drow[n + j] = __fmul_rn(alpha, dv[j]);
+                        }
+                    }
+                }
+                for (; n < ds; n++) {
                     const float dsv = drow[n];
                     sx = __fmaf_rn(dsv, b_sm[n], sx);
                     dal_loc = __fmaf_rn(dsv, prow[n], dal_loc);
@@ -2007,7 +2054,7 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
                 dxbc[xrow + (long long)h * hd + tid] = __fmaf_rn(dt, sx, __fmul_rn(dval, dyv));
                 ddt_loc = __fmul_rn(xp, sx);
             }
-            const float2 sums = m2s_block_sum2(ddt_loc, dal_loc, red);
+            const float2 sums = m2s_block_sum2(ddt_loc, dal_loc, red, lanes);
             if (tid == 0) {
                 const float ddt_x = sums.x, dalpha = sums.y;
                 const float da = __fmul_rn(dalpha, alpha);
