@@ -869,6 +869,11 @@ path = "benches/prefill_m1_vs_m3_bench.rs"
 harness = false
 
 [[bench]]
+name = "cpu_decode_bench"
+path = "benches/cpu_decode_bench.rs"
+harness = false
+
+[[bench]]
 name = "thin_rung_decode_bench"
 path = "benches/thin_rung_decode_bench.rs"
 harness = false

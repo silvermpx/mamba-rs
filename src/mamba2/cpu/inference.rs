@@ -8,6 +8,8 @@
 //!   [-> gated MLP] -> ... -> final RMSNorm
 //! ```
 
+use pulp::{Arch, Simd, WithSimd};
+
 use super::super::config::Mamba2Config;
 use super::super::state::Mamba2LayerState;
 use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
@@ -100,7 +102,50 @@ pub fn mamba2_layer_step(
 }
 
 /// [`mamba2_layer_step`] with the projections packed when `lp` holds them.
+/// The step runs under pulp's dispatch, so its scalar fused multiply-adds
+/// (norm, conv, dt, gate, all inlined) compile to the FMA instruction on an
+/// x86 built without it instead of a call to the library's fmaf; a fused
+/// multiply-add rounds once either way, so the bits are the same.
 fn layer_step(
+    temporal: &mut [f32],
+    scratch: &mut Mamba2StepScratch,
+    (lw, lp): (&Mamba2LayerWeights, Option<&Mamba2LayerPacked>),
+    state: &mut Mamba2LayerState,
+    cfg: &Mamba2Config,
+) {
+    struct Step<'a> {
+        temporal: &'a mut [f32],
+        scratch: &'a mut Mamba2StepScratch,
+        lw: &'a Mamba2LayerWeights,
+        lp: Option<&'a Mamba2LayerPacked>,
+        state: &'a mut Mamba2LayerState,
+        cfg: &'a Mamba2Config,
+    }
+    impl WithSimd for Step<'_> {
+        type Output = ();
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, _simd: S) {
+            layer_step_body(
+                self.temporal,
+                self.scratch,
+                (self.lw, self.lp),
+                self.state,
+                self.cfg,
+            );
+        }
+    }
+    Arch::new().dispatch(Step {
+        temporal,
+        scratch,
+        lw,
+        lp,
+        state,
+        cfg,
+    });
+}
+
+#[inline(always)]
+fn layer_step_body(
     temporal: &mut [f32],
     scratch: &mut Mamba2StepScratch,
     (lw, lp): (&Mamba2LayerWeights, Option<&Mamba2LayerPacked>),

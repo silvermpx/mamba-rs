@@ -18,7 +18,7 @@ use crate::ops::fold16::sum_sq_fold16;
 use crate::ops::portable_math::{exp_portable, silu_portable, softplus_portable};
 
 /// `dst = (src * r) * w` with `r = 1 / sqrt(sum(src^2) / n + eps)`.
-#[inline]
+#[inline(always)]
 pub(crate) fn rms_row(dst: &mut [f32], src: &[f32], w: &[f32], eps: f32) {
     let r = 1.0 / (sum_sq_fold16(src) / src.len() as f32 + eps).sqrt();
     for ((d, &s), &wv) in dst.iter_mut().zip(src).zip(w) {
@@ -30,7 +30,7 @@ pub(crate) fn rms_row(dst: &mut [f32], src: &[f32], w: &[f32], eps: f32) {
 /// `out[c] = silu(bias[c] + sum_k w[c][k] x[t - W + 1 + k][c])`, the sum
 /// started from the bias and taken oldest tap first. `hist` holds the
 /// previous `W - 1` inputs, oldest first.
-#[inline]
+#[inline(always)]
 pub(crate) fn conv_silu_token(out: &mut [f32], cur: &[f32], hist: &[f32], lw: &Mamba2LayerWeights) {
     let cd = cur.len();
     let width = lw.conv_w.len() / cd;
@@ -46,7 +46,7 @@ pub(crate) fn conv_silu_token(out: &mut [f32], cur: &[f32], hist: &[f32], lw: &M
 }
 
 /// Append this token's raw conv input to the history, dropping the oldest.
-#[inline]
+#[inline(always)]
 pub(crate) fn conv_hist_push(hist: &mut [f32], cur: &[f32]) {
     let cd = cur.len();
     if hist.is_empty() {
@@ -59,7 +59,7 @@ pub(crate) fn conv_hist_push(hist: &mut [f32], cur: &[f32]) {
 
 /// dt and dA of one head: `dt = clamp(softplus(raw + bias), lo, hi)` (a
 /// NaN passes through), `dA = exp(dt * -exp(a_log))`.
-#[inline]
+#[inline(always)]
 pub(crate) fn dt_da(raw: f32, bias: f32, a_log: f32, (lo, hi): (f32, f32)) -> (f32, f32) {
     // clamp keeps a NaN a NaN; the config guarantees lo <= hi.
     let dt = softplus_portable(raw + bias).clamp(lo, hi);
@@ -135,13 +135,14 @@ impl WithSimd for HeadScan<'_> {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn head_scan(scan: HeadScan<'_>) {
     Arch::new().dispatch(scan);
 }
 
 /// The mixer's output before out_proj, `[d_mlp | d_ssm]`: the inner MLP
 /// `silu(z0) * x0`, then y gated and normalised per group.
+#[inline(always)]
 pub(crate) fn gate_token(
     out: &mut [f32],
     y: &[f32],
@@ -190,6 +191,7 @@ pub(crate) fn gate_token(
 
 /// One token's SSM over every head: dt and dA, then the head's scan into
 /// `y` (`[d_ssm]`). `xbc` is the token's conv output.
+#[inline(always)]
 pub(crate) fn ssm_token(
     (state, y): (&mut [f32], &mut [f32]),
     xbc: &[f32],

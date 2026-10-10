@@ -146,6 +146,7 @@
 "m1_test_correctness" = "gate"
 "m2_grad_oracle" = "host"
 "m2_mimo_gpu_bench" = "bench"
+"cpu_decode_bench" = "bench"
 "m2_mimo_bits_digest" = "record"
 "half_input_projection_decode" = "gate"
 "m2_gpu_parity" = "gate"

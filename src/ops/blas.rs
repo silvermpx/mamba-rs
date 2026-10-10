@@ -142,6 +142,237 @@ pub fn sgemm_forward(
     );
 }
 
+/// One tile of the BLAS-free GEMM: `R` rows by `V` vectors of columns
+/// starting at `j0`, over the rows `ks` of `W`; the running sums start from
+/// `y` and go back to it.
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+#[inline(always)]
+fn tile<S: pulp::Simd, const R: usize, const V: usize>(
+    simd: S,
+    (y, x, w): (&mut [f32], &[f32], &[f32]),
+    (n_in, n_out, j0): (usize, usize, usize),
+    ks: core::ops::Range<usize>,
+) {
+    let width = V * S::F32_LANES;
+    let mut acc = [[simd.splat_f32s(0.0); V]; R];
+    for (r, row) in acc.iter_mut().enumerate() {
+        let (sums, _) = S::as_simd_f32s(&y[r * n_out + j0..r * n_out + j0 + width]);
+        row.copy_from_slice(sums);
+    }
+    for k in ks {
+        let (wk, _) = S::as_simd_f32s(&w[k * n_out + j0..k * n_out + j0 + width]);
+        for (r, row) in acc.iter_mut().enumerate() {
+            let xk = simd.splat_f32s(x[r * n_in + k]);
+            for (sum, &wv) in row.iter_mut().zip(wk) {
+                *sum = simd.add_f32s(*sum, simd.mul_f32s(xk, wv));
+            }
+        }
+    }
+    for (r, row) in acc.iter().enumerate() {
+        let (sums, _) = S::as_mut_simd_f32s(&mut y[r * n_out + j0..r * n_out + j0 + width]);
+        sums.copy_from_slice(row);
+    }
+}
+
+/// [`gemm_accumulate`] for one block of rows, ordered for a `W` larger
+/// than the caches: the columns go in panels of 64 and, for each, `k` in
+/// slabs of 256 rows of `W`, so a slab of the panel (64 KB) stays in L1
+/// while every 4-row tile of the block passes over it; the block then
+/// reads `W` once instead of once per 4 rows. Every output still adds its
+/// products onto its value in ascending `k` with a rounded multiply and a
+/// rounded add (the sums go back to `y` between slabs exactly), so the
+/// bits are the serial loop's.
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+fn gemm_accumulate_panels(y: &mut [f32], x: &[f32], w: &[f32], (n_in, n_out): (usize, usize)) {
+    use pulp::{Arch, Simd, WithSimd};
+    const PANEL: usize = 64;
+    const SLAB: usize = 256;
+
+    /// The tiles of `R` rows across the columns `c0..c1`, then the
+    /// columns short of a vector one by one.
+    #[inline(always)]
+    fn strips<S: Simd, const R: usize>(
+        simd: S,
+        (y, x, w): (&mut [f32], &[f32], &[f32]),
+        (n_in, n_out, c0, c1): (usize, usize, usize, usize),
+        ks: core::ops::Range<usize>,
+    ) {
+        let lanes = S::F32_LANES;
+        let mut j = c0;
+        if lanes <= 4 {
+            while j + 4 * lanes <= c1 {
+                tile::<S, R, 4>(simd, (&mut *y, x, w), (n_in, n_out, j), ks.clone());
+                j += 4 * lanes;
+            }
+        }
+        while j + 2 * lanes <= c1 {
+            tile::<S, R, 2>(simd, (&mut *y, x, w), (n_in, n_out, j), ks.clone());
+            j += 2 * lanes;
+        }
+        while j + lanes <= c1 {
+            tile::<S, R, 1>(simd, (&mut *y, x, w), (n_in, n_out, j), ks.clone());
+            j += lanes;
+        }
+        for r in 0..R {
+            for jj in j..c1 {
+                let mut sum = y[r * n_out + jj];
+                for k in ks.clone() {
+                    sum += x[r * n_in + k] * w[k * n_out + jj];
+                }
+                y[r * n_out + jj] = sum;
+            }
+        }
+    }
+
+    struct Panels<'a> {
+        y: &'a mut [f32],
+        x: &'a [f32],
+        w: &'a [f32],
+        n_in: usize,
+        n_out: usize,
+    }
+    impl WithSimd for Panels<'_> {
+        type Output = ();
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let Self {
+                y,
+                x,
+                w,
+                n_in,
+                n_out,
+            } = self;
+            let rows = y.len() / n_out;
+            for c0 in (0..n_out).step_by(PANEL) {
+                let c1 = (c0 + PANEL).min(n_out);
+                for k0 in (0..n_in).step_by(SLAB) {
+                    let ks = k0..(k0 + SLAB).min(n_in);
+                    let mut r = 0;
+                    while r + 4 <= rows {
+                        let (yr, xr) = (&mut y[r * n_out..(r + 4) * n_out], &x[r * n_in..]);
+                        strips::<S, 4>(simd, (yr, xr, w), (n_in, n_out, c0, c1), ks.clone());
+                        r += 4;
+                    }
+                    for r in r..rows {
+                        let (yr, xr) = (&mut y[r * n_out..(r + 1) * n_out], &x[r * n_in..]);
+                        strips::<S, 1>(simd, (yr, xr, w), (n_in, n_out, c0, c1), ks.clone());
+                    }
+                }
+            }
+        }
+    }
+    if n_in == 0 || n_out == 0 {
+        return;
+    }
+    Arch::new().dispatch(Panels {
+        y,
+        x,
+        w,
+        n_in,
+        n_out,
+    });
+}
+
+/// Whether a BLAS-free GEMM of `macs` products goes across the rayon
+/// pool: enough work, more than one thread, and a caller not already
+/// inside a pool task (a per-sample trainer keeps its GEMMs serial).
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+fn pool_gemm(macs: usize) -> bool {
+    macs >= 1 << 22 && rayon::current_num_threads() > 1 && rayon::current_thread_index().is_none()
+}
+
+/// `dX[B,K] = dY[B,N] W^T` without a BLAS: each block of 64 rows of `W`
+/// goes transposed into an `[N][64]` panel and the forward GEMM runs `dY`
+/// against it into a `[B][64]` block of `dX`. Every element is 0 plus its
+/// products over ascending `j`, each a rounded multiply and a rounded add,
+/// the chain of the plain loop over `j`; only the walk over memory
+/// changes (the plain loop read `W` a column at a time).
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+fn backward_dx(dx: &mut [f32], dy: &[f32], w: &[f32], (batch, n_in, n_out): (usize, usize, usize)) {
+    const PANEL: usize = 64;
+    let block = |k0: usize| -> Vec<f32> {
+        let kn = PANEL.min(n_in - k0);
+        let mut wt = vec![0.0f32; n_out * kn];
+        for kk in 0..kn {
+            let row = &w[(k0 + kk) * n_out..(k0 + kk + 1) * n_out];
+            for (j, &v) in row.iter().enumerate() {
+                wt[j * kn + kk] = v;
+            }
+        }
+        let mut out = vec![0.0f32; batch * kn];
+        gemm_accumulate(&mut out, dy, &wt, (n_out, kn));
+        out
+    };
+    let place = |dx: &mut [f32], k0: usize, out: &[f32]| {
+        let kn = out.len() / batch.max(1);
+        for (r, src) in out.chunks_exact(kn.max(1)).enumerate() {
+            dx[r * n_in + k0..r * n_in + k0 + kn].copy_from_slice(src);
+        }
+    };
+    if batch == 0 || n_in == 0 {
+        return;
+    }
+    if pool_gemm(batch * n_in * n_out) {
+        use rayon::prelude::*;
+        let blocks: Vec<(usize, Vec<f32>)> = (0..n_in)
+            .into_par_iter()
+            .step_by(PANEL)
+            .map(|k0| (k0, block(k0)))
+            .collect();
+        for (k0, out) in &blocks {
+            place(dx, *k0, out);
+        }
+    } else {
+        for k0 in (0..n_in).step_by(PANEL) {
+            let out = block(k0);
+            place(dx, k0, &out);
+        }
+    }
+}
+
+/// `dW[K,N] += X^T[K,B] dY[B,N]` without a BLAS: `X` transposed once, then
+/// the forward GEMM over blocks of rows of `dW` with `dY` as the weights.
+/// Every element adds its products onto its value over ascending batch
+/// rows with a rounded multiply and a rounded add, the plain loop's chain
+/// (which rewrote all of `dW` once per batch row).
+#[cfg(not(any(
+    all(feature = "accelerate", target_os = "macos"),
+    feature = "gemm-blas"
+)))]
+fn backward_dw(dw: &mut [f32], x: &[f32], dy: &[f32], (batch, n_in, n_out): (usize, usize, usize)) {
+    if batch == 0 || n_in == 0 || n_out == 0 {
+        return;
+    }
+    let mut xt = vec![0.0f32; n_in * batch];
+    for (r, row) in x.chunks_exact(n_in).enumerate() {
+        for (k, &v) in row.iter().enumerate() {
+            xt[k * batch + r] = v;
+        }
+    }
+    if pool_gemm(batch * n_in * n_out) {
+        use rayon::prelude::*;
+        let threads = rayon::current_num_threads();
+        let block = n_in.div_ceil(2 * threads).next_multiple_of(4).clamp(4, 64);
+        dw.par_chunks_mut(block * n_out)
+            .zip(xt.par_chunks(block * batch))
+            .for_each(|(d, xb)| gemm_accumulate(d, xb, dy, (batch, n_out)));
+    } else {
+        gemm_accumulate(dw, &xt, dy, (batch, n_out));
+    }
+}
+
 /// `Y[B,N] += X[B,K] @ W[K,N]` without a BLAS. Every output adds its
 /// products in ascending k onto the value already in `y`, each one a
 /// rounded multiply and then a rounded add, exactly as the plain triple
@@ -162,36 +393,6 @@ fn gemm_accumulate(y: &mut [f32], x: &[f32], w: &[f32], (n_in, n_out): (usize, u
     /// Above this many elements of W (2 MiB, the order of a core's L2)
     /// a lone row reads W in storage order.
     const STREAM_FLOATS: usize = 1 << 19;
-
-    /// One tile: `R` rows by `V` vectors of columns starting at `j0`, over
-    /// the rows `ks` of `W`.
-    #[inline(always)]
-    fn tile<S: Simd, const R: usize, const V: usize>(
-        simd: S,
-        (y, x, w): (&mut [f32], &[f32], &[f32]),
-        (n_in, n_out, j0): (usize, usize, usize),
-        ks: core::ops::Range<usize>,
-    ) {
-        let width = V * S::F32_LANES;
-        let mut acc = [[simd.splat_f32s(0.0); V]; R];
-        for (r, row) in acc.iter_mut().enumerate() {
-            let (sums, _) = S::as_simd_f32s(&y[r * n_out + j0..r * n_out + j0 + width]);
-            row.copy_from_slice(sums);
-        }
-        for k in ks {
-            let (wk, _) = S::as_simd_f32s(&w[k * n_out + j0..k * n_out + j0 + width]);
-            for (r, row) in acc.iter_mut().enumerate() {
-                let xk = simd.splat_f32s(x[r * n_in + k]);
-                for (sum, &wv) in row.iter_mut().zip(wk) {
-                    *sum = simd.add_f32s(*sum, simd.mul_f32s(xk, wv));
-                }
-            }
-        }
-        for (r, row) in acc.iter().enumerate() {
-            let (sums, _) = S::as_mut_simd_f32s(&mut y[r * n_out + j0..r * n_out + j0 + width]);
-            sums.copy_from_slice(row);
-        }
-    }
 
     /// Every column of `R` rows: wide tiles, then narrower ones, then the
     /// columns short of a vector one by one.
@@ -311,13 +512,14 @@ fn gemm_accumulate(y: &mut [f32], x: &[f32], w: &[f32], (n_in, n_out): (usize, u
     });
 }
 
-/// [`sgemm_forward`] with the gemm crate's internal rayon parallelism —
-/// the prefill serving path's single-page latency lever (a lone sequence
-/// cannot amortize across a batch, so the GEMM itself must parallelize).
-/// Tile-local accumulation keeps results bit-identical to the serial path
-/// (verified by the prefill parallel-invariance test). The Accelerate
-/// branch already threads internally and the scalar fallback is not a
-/// serving configuration — both delegate to [`sgemm_forward`].
+/// [`sgemm_forward`] spread over the rayon pool — the prefill and training
+/// forward's latency lever (a lone sequence cannot amortize across a
+/// batch, so the GEMM itself must parallelize). With the gemm crate its
+/// internal parallelism runs; without a BLAS the rows split into blocks,
+/// one task each, walked panel by panel; the
+/// Accelerate branch threads internally. Every output keeps the serial
+/// chain, so the bits do not depend on the pool (the prefill
+/// parallel-invariance test and the plain-loop bit test hold).
 pub fn sgemm_forward_par(
     y: &mut [f32],
     x: &[f32],
@@ -382,11 +584,41 @@ pub fn sgemm_forward_par(
             );
         }
     }
-    #[cfg(not(all(
-        feature = "gemm-blas",
-        not(all(feature = "accelerate", target_os = "macos"))
-    )))]
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     sgemm_forward(y, x, w, bias, batch, n_in, n_out);
+    #[cfg(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )))]
+    {
+        // Rows split into blocks across the pool, each block one task over
+        // its own rows of Y: every output's chain stays where the serial
+        // loop has it, so the bits do not depend on the pool. Inside a
+        // rayon task (a per-sample trainer, a batch of decodes) the pool is
+        // already busy and the GEMM stays serial; small GEMMs too.
+        if batch >= 8 && pool_gemm(batch * n_in * n_out) {
+            let threads = rayon::current_num_threads();
+            use rayon::prelude::*;
+            assert!(
+                x.len() >= batch * n_in && w.len() >= n_in * n_out && y.len() >= batch * n_out,
+                "sgemm_forward_par: undersized operands for {batch}x{n_in}x{n_out}"
+            );
+            let y = &mut y[..batch * n_out];
+            match bias {
+                Some(b) => y
+                    .chunks_exact_mut(n_out)
+                    .for_each(|r| r.copy_from_slice(&b[..n_out])),
+                None => y.fill(0.0),
+            }
+            let block = batch.div_ceil(2 * threads).next_multiple_of(4).clamp(4, 64);
+            let w = &w[..n_in * n_out];
+            y.par_chunks_mut(block * n_out)
+                .zip(x[..batch * n_in].par_chunks(block * n_in))
+                .for_each(|(yb, xb)| gemm_accumulate_panels(yb, xb, w, (n_in, n_out)));
+        } else {
+            sgemm_forward(y, x, w, bias, batch, n_in, n_out);
+        }
+    }
 }
 
 /// Single-sample matrix-vector forward: `y[N] = x[K] @ W[K,N] + bias[N]`.
@@ -510,18 +742,12 @@ pub fn sgemm_backward(
         all(feature = "accelerate", target_os = "macos"),
         feature = "gemm-blas"
     )))]
-    {
-        for row in 0..batch {
-            let dy_off = row * n_out;
-            let dx_off = row * n_in;
-            for j in 0..n_out {
-                let dv = dy[dy_off + j];
-                for k in 0..n_in {
-                    dx[dx_off + k] += dv * w[k * n_out + j];
-                }
-            }
-        }
-    }
+    backward_dx(
+        &mut dx[..batch * n_in],
+        &dy[..batch * n_out],
+        &w[..n_in * n_out],
+        (batch, n_in, n_out),
+    );
 
     // dW[K,N] += X^T[K,B] @ dY[B,N]
     #[cfg(all(feature = "accelerate", target_os = "macos"))]
@@ -577,19 +803,12 @@ pub fn sgemm_backward(
         all(feature = "accelerate", target_os = "macos"),
         feature = "gemm-blas"
     )))]
-    {
-        for row in 0..batch {
-            let x_off = row * n_in;
-            let dy_off = row * n_out;
-            for k in 0..n_in {
-                let xv = x_saved[x_off + k];
-                let w_off = k * n_out;
-                for j in 0..n_out {
-                    dw[w_off + j] += xv * dy[dy_off + j];
-                }
-            }
-        }
-    }
+    backward_dw(
+        &mut dw[..n_in * n_out],
+        &x_saved[..batch * n_in],
+        &dy[..batch * n_out],
+        (batch, n_in, n_out),
+    );
 
     // dBias[N] += colsum(dY) — always scalar (tiny)
     if let Some(db) = db {
@@ -696,6 +915,112 @@ mod tests {
                 .filter(|(a, b)| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan()))
                 .count();
             assert_eq!(differ, 0, "{batch}x{n_in}x{n_out}: {differ} outputs differ");
+        }
+    }
+
+    /// The pool-parallel forward (row blocks walked panel by panel) gives
+    /// the plain loop's bits at shapes large enough to take it, ragged rows
+    /// and columns included.
+    #[test]
+    fn test_sgemm_forward_par_matches_the_plain_loop_bitwise() {
+        let synth = |n: usize, seed: u32| -> Vec<f32> {
+            let mut s = seed;
+            (0..n)
+                .map(|i| {
+                    s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let v = ((s >> 8) as f32 / (1 << 24) as f32 - 0.5) * 3.0;
+                    if i % 211 == 7 { -0.0 } else { v }
+                })
+                .collect()
+        };
+        for (batch, n_in, n_out) in [
+            (64, 256, 300),
+            (37, 600, 1003),
+            (9, 700, 700),
+            (130, 97, 515),
+        ] {
+            let x = synth(batch * n_in, 11 + n_in as u32);
+            let w = synth(n_in * n_out, 12 + n_out as u32);
+            let bias = synth(n_out, 13);
+            let mut want = vec![0.0f32; batch * n_out];
+            for row in 0..batch {
+                want[row * n_out..(row + 1) * n_out].copy_from_slice(&bias);
+                for k in 0..n_in {
+                    let xv = x[row * n_in + k];
+                    for j in 0..n_out {
+                        want[row * n_out + j] += xv * w[k * n_out + j];
+                    }
+                }
+            }
+            let mut got = vec![0.0f32; batch * n_out];
+            sgemm_forward_par(&mut got, &x, &w, Some(&bias), batch, n_in, n_out);
+            let differ = want
+                .iter()
+                .zip(&got)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert_eq!(differ, 0, "{batch}x{n_in}x{n_out}: {differ} outputs differ");
+        }
+    }
+
+    /// The panel-based backward GEMMs give the plain loops' bits: dX as 0
+    /// plus the products over ascending j, dW as its value plus the
+    /// products over ascending batch rows; serial and pool-sized shapes,
+    /// ragged edges, signed zeros and non-finite values included.
+    #[test]
+    fn test_sgemm_backward_matches_the_plain_loops_bitwise() {
+        let synth = |n: usize, seed: u32| -> Vec<f32> {
+            let mut s = seed;
+            (0..n)
+                .map(|i| {
+                    s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let v = ((s >> 8) as f32 / (1 << 24) as f32 - 0.5) * 3.0;
+                    match i % 101 {
+                        13 => -0.0,
+                        41 => f32::INFINITY,
+                        _ => v,
+                    }
+                })
+                .collect()
+        };
+        let same = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .filter(|(x, y)| x.to_bits() != y.to_bits() && !(x.is_nan() && y.is_nan()))
+                .count()
+        };
+        for (batch, n_in, n_out) in [
+            (1, 7, 3),
+            (5, 9, 131),
+            (3, 130, 70),
+            (64, 300, 260),
+            (37, 129, 1003),
+        ] {
+            let dy = synth(batch * n_out, 21 + n_out as u32);
+            let x = synth(batch * n_in, 22 + n_in as u32);
+            let w = synth(n_in * n_out, 23);
+            let dw0 = synth(n_in * n_out, 24);
+            let mut want_dx = vec![0.0f32; batch * n_in];
+            let mut want_dw = dw0.clone();
+            for row in 0..batch {
+                for j in 0..n_out {
+                    let dv = dy[row * n_out + j];
+                    for k in 0..n_in {
+                        want_dx[row * n_in + k] += dv * w[k * n_out + j];
+                    }
+                }
+                for k in 0..n_in {
+                    let xv = x[row * n_in + k];
+                    for j in 0..n_out {
+                        want_dw[k * n_out + j] += xv * dy[row * n_out + j];
+                    }
+                }
+            }
+            let mut dx = vec![7.0f32; batch * n_in];
+            let mut dw = dw0.clone();
+            sgemm_backward(&mut dx, &mut dw, None, &dy, &x, &w, (batch, n_in, n_out));
+            assert_eq!(same(&want_dx, &dx), 0, "dX {batch}x{n_in}x{n_out}");
+            assert_eq!(same(&want_dw, &dw), 0, "dW {batch}x{n_in}x{n_out}");
         }
     }
 
