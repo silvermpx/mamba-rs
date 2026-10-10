@@ -239,13 +239,30 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
         const long long row = row0 + tl;
         const float* sr_ = sn + (row * nh + h) * na;
         const float* cr_ = cs + (row * nh + h) * na;
+        // Four terms' loads in flight before the chain takes them in order.
         float part = 0.0f;
-        for (int i = j; i < rn; i += 256) {
-            const int r = i / ds, n = i - r * ds;
-            const float q = m3m_rot(cn + row * rgn + ((long long)r * ng + g) * ds,
-                                    c_bias + ((long long)h * rank + r) * ds, n, half, na,
-                                    sr_, cr_);
-            part = __fmaf_rn(dd[(tl * rank + r) * ds + n], q, part);
+        for (int i0 = j; i0 < rn; i0 += 4 * 256) {
+            M3mRotIn in[4];
+            float dv[4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + 256 * u;
+                const int r = i / ds, n = i - r * ds;
+                in[u] = M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                dv[u] = 0.0f;
+                if (i < rn) {
+                    in[u] = m3m_rot_load(cn + row * rgn + ((long long)r * ng + g) * ds,
+                                         c_bias + ((long long)h * rank + r) * ds, n, half, na,
+                                         sr_, cr_);
+                    dv[u] = dd[(tl * rank + r) * ds + n];
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + 256 * u;
+                const int n = i % ds;
+                if (i < rn) part = __fmaf_rn(dv[u], m3m_rot_turn(in[u], n, half, na), part);
+            }
         }
         red[e] = part;
     }
@@ -260,7 +277,7 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
     for (int tl = tid; tl < tn; tl += blockDim.x) inter[(row0 + tl) * nh + h] = red[tl * 256];
 }
 
-extern "C" __global__ void m3mb_inter_tiles(
+extern "C" __global__ void __launch_bounds__(512) m3mb_inter_tiles(
     float* __restrict__ dq, float* __restrict__ inter,
     const float* __restrict__ dy, const float* __restrict__ enter,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
@@ -619,28 +636,44 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const long long row0 = b * seq + t0 + S0;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    for (int p = warp; p < hd; p += nw) {
-        for (int n = lane; n < ds; n += 32) dss[p * dld + n] = dsc[(long long)p * ds + n];
-    }
-    for (int a = warp; a < rs; a += nw) {
-        if (a < rows) {
-            const int r = a % rank;
-            const long long row = row0 + a / rank;
-            const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
-            const float* bias = b_bias + ((long long)h * rank + r) * ds;
-            const float* sr_ = sn + (row * nh + h) * na;
-            const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll 4
-            for (int n = lane; n < ds; n += 32)
-                kt[n * rs + a] = m3m_rot(src, bias, n, half, na, sr_, cr_);
-            const T* xr = proj + row * ld_proj + di + (long long)h * hd;
-            const float* mx = mimo_x + ((long long)h * rank + r) * hd;
-            for (int p = lane; p < hd; p += 32) ut[p * rs + a] = __fmul_rn(mx[p], to_f(xr[p]));
-        } else {
-            for (int n = lane; n < ds; n += 32) kt[n * rs + a] = 0.0f;
-            for (int p = lane; p < hd; p += 32) ut[p * rs + a] = 0.0f;
+    // The chunk's dS, four of a warp's rows and four indices a lane in
+    // flight together.
+    for (int p0 = warp; p0 < hd; p0 += 4 * nw) {
+        for (int n0 = 0; n0 < ds; n0 += 128) {
+            float dv[4][4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int p = p0 + u * nw;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int n = n0 + lane + 32 * j;
+                    dv[u][j] = p < hd && n < ds ? dsc[(long long)p * ds + n] : 0.0f;
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int p = p0 + u * nw;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int n = n0 + lane + 32 * j;
+                    if (p < hd && n < ds) dss[p * dld + n] = dv[u][j];
+                }
+            }
         }
     }
+    m3m_stage_rot(warp, nw, rows, rs, 0, ds, half, na,
+        [&](int a) {
+            const int r = a % rank;
+            const long long row = row0 + a / rank;
+            return M3mRotRow{bn + row * rgn + ((long long)r * ng + g) * ds,
+                             b_bias + ((long long)h * rank + r) * ds,
+                             sn + (row * nh + h) * na, cs + (row * nh + h) * na};
+        },
+        [&](int a, int n, float v) { kt[n * rs + a] = v; });
+    m3m_stage_u<T>(warp, nw, rows, rs, hd, hd,
+        [&](int a) { return proj + (row0 + a / rank) * ld_proj + di + (long long)h * hd; },
+        [&](int a) { return mimo_x + ((long long)h * rank + a % rank) * hd; },
+        [&](int a, int p, float v) { ut[p * rs + a] = v; });
     __syncthreads();
     float cfs[4];
 #pragma unroll
@@ -748,7 +781,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
 }
 
 #define DEFINE_M3MB_STATE_TERMS_TILES(NAME, T)                                  \
-extern "C" __global__ void NAME(                                                \
+extern "C" __global__ void __launch_bounds__(512) NAME(                         \
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,    \
     const float* __restrict__ dst, const T* __restrict__ proj,                  \
     long long ld_proj,                                                          \
@@ -1022,9 +1055,31 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
     const int warp = tid >> 5, nw = blockDim.x >> 5;
     const int a0 = 4 * warp;
     const long long trow0 = b * seq + t0 + T0;
-    for (int a = warp; a < trs; a += nw) {
-        const float* row = dy + ((trow0 + a / rank) * nh + h) * rank * hd + (a % rank) * hd;
-        for (int p = lane; p < hd; p += 32) dyt[p * trs + a] = a < ta ? row[p] : 0.0f;
+    // dy transposed, four of a warp's rows and four channels a lane in
+    // flight together.
+    for (int q0 = warp; q0 < trs; q0 += 4 * nw) {
+        for (int p0 = 0; p0 < hd; p0 += 128) {
+            float dv[4][4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int a = q0 + u * nw;
+                const float* row = dy + ((trow0 + a / rank) * nh + h) * rank * hd + (a % rank) * hd;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int p = p0 + lane + 32 * j;
+                    dv[u][j] = a < ta && p < hd ? row[p] : 0.0f;
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int a = q0 + u * nw;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int p = p0 + lane + 32 * j;
+                    if (a < trs && p < hd) dyt[p * trs + a] = dv[u][j];
+                }
+            }
+        }
     }
     float acc[4][4];
 #pragma unroll
@@ -1042,20 +1097,19 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
         const int sb = sn_ * rank;
         const long long srow0 = b * seq + t0 + S0;
         __syncthreads();
-        for (int col = warp; col < sb; col += nw) {
-            const int r = col % rank;
-            const long long row = srow0 + col / rank;
-            const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
-            const float* bias = b_bias + ((long long)h * rank + r) * ds;
-            const float* sr_ = sn + (row * nh + h) * na;
-            const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll 4
-            for (int n = lane; n < ds; n += 32)
-                ks[col * ds + n] = m3m_rot(src, bias, n, half, na, sr_, cr_);
-            const T* xr = proj + row * ld_proj + di + (long long)h * hd;
-            const float* mx = mimo_x + ((long long)h * rank + r) * hd;
-            for (int p = lane; p < hd; p += 32) us[col * uld + p] = __fmul_rn(mx[p], to_f(xr[p]));
-        }
+        m3m_stage_rot(warp, nw, sb, sb, 0, ds, half, na,
+            [&](int col) {
+                const int r = col % rank;
+                const long long row = srow0 + col / rank;
+                return M3mRotRow{bn + row * rgn + ((long long)r * ng + g) * ds,
+                                 b_bias + ((long long)h * rank + r) * ds,
+                                 sn + (row * nh + h) * na, cs + (row * nh + h) * na};
+            },
+            [&](int col, int n, float v) { ks[col * ds + n] = v; });
+        m3m_stage_u<T>(warp, nw, sb, sb, hd, hd,
+            [&](int col) { return proj + (srow0 + col / rank) * ld_proj + di + (long long)h * hd; },
+            [&](int col) { return mimo_x + ((long long)h * rank + col % rank) * hd; },
+            [&](int col, int p, float v) { us[col * uld + p] = v; });
         for (int i = tid; i < tn * sn_; i += blockDim.x) {
             const int tq = i / sn_, sk = i % sn_;
             const int t = T0 + tq, s = S0 + sk;
@@ -1326,7 +1380,7 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
 }
 
 #define DEFINE_M3MB_PAIRS_DQ(NAME, T)                                           \
-extern "C" __global__ void NAME(                                                \
+extern "C" __global__ void __launch_bounds__(512) NAME(                         \
     float* __restrict__ dq,                                                     \
     const float* __restrict__ dy, const T* __restrict__ proj,                   \
     long long ld_proj,                                                          \

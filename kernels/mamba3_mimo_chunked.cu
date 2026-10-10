@@ -77,6 +77,96 @@ __device__ __forceinline__ float m3m_rot_turn(const M3mRotIn& in, int n, int hal
                     : mimo_rot_pair(in.w, in.v, in.s, in.c).y;
 }
 
+// A rank row of keys or queries: the group's normalised row, the head's
+// bias and the token's sines and cosines, the inputs of m3m_rot.
+struct M3mRotRow {
+    const float* src;
+    const float* bias;
+    const float* sr;
+    const float* cr;
+};
+
+// Rotated rank rows into shared memory: rows i = first, first + step, ...
+// below `all` (those from `live` on as zeros) at the state indices m0 + n,
+// n below mm, put(i, n, value) storing each. Four rows and two indices a
+// lane go at a time, every load of the batch in flight before any is
+// turned, so a thread waits one round trip a batch rather than one a
+// value.
+template <class ROWF, class PUTF>
+__device__ __forceinline__ void m3m_stage_rot(
+    int first, int step, int live, int all, int m0, int mm, int half, int na,
+    ROWF row_of, PUTF put
+) {
+    const int lane = threadIdx.x & 31;
+    for (int i0 = first; i0 < all; i0 += 4 * step) {
+        for (int n0 = 0; n0 < mm; n0 += 64) {
+            M3mRotIn in[4][2];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + u * step;
+                const M3mRotRow rr = row_of(i);
+#pragma unroll
+                for (int v = 0; v < 2; v++) {
+                    const int n = n0 + lane + 32 * v;
+                    in[u][v] = i < live && n < mm
+                        ? m3m_rot_load(rr.src, rr.bias, m0 + n, half, na, rr.sr, rr.cr)
+                        : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + u * step;
+#pragma unroll
+                for (int v = 0; v < 2; v++) {
+                    const int n = n0 + lane + 32 * v;
+                    if (i < all && n < mm)
+                        put(i, n, i < live ? m3m_rot_turn(in[u][v], m0 + n, half, na) : 0.0f);
+                }
+            }
+        }
+    }
+}
+
+// The rank inputs u = Psi_r x of rows i (a token and a rank) into shared
+// memory, batched like m3m_stage_rot: x_of(i) is the row's input in proj
+// and mx_of(i) its Psi_r row; the channels below `width` are stored, those
+// from hd on (and the rows from `live` on) as zeros.
+template <typename TI, class XF, class MF, class PUTF>
+__device__ __forceinline__ void m3m_stage_u(
+    int first, int step, int live, int all, int hd, int width, XF x_of, MF mx_of, PUTF put
+) {
+    const int lane = threadIdx.x & 31;
+    for (int i0 = first; i0 < all; i0 += 4 * step) {
+        for (int p0 = 0; p0 < width; p0 += 128) {
+            float xv[4][4], mv[4][4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + u * step;
+                const TI* xr = x_of(i);
+                const float* mx = mx_of(i);
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int p = p0 + lane + 32 * j;
+                    const bool on = i < live && p < hd;
+                    xv[u][j] = on ? to_f(xr[p]) : 0.0f;
+                    mv[u][j] = on ? mx[p] : 0.0f;
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int i = i0 + u * step;
+                if (i >= all) continue;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int p = p0 + lane + 32 * j;
+                    if (p < width)
+                        put(i, p, i < live && p < hd ? __fmul_rn(mv[u][j], xv[u][j]) : 0.0f);
+                }
+            }
+        }
+    }
+}
+
 // A small product out[r][c] = init(r, c) + sum_k L(r, k) R(k, c), k
 // ascending, as register tiles: a warp takes 4 rows at a time and a lane
 // the columns lane, lane + 32, ... (JC of them), so a step of k loads 4 + JC
@@ -779,41 +869,16 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         sc[2 * M3M_CHUNK + s] = cf[1];
     }
     const int warp = tid >> 5, nw = blockDim.x >> 5;
-    // The queries, rotated: four of a warp's rows and two state indices a
-    // lane at a time, every load of the batch in flight before any turn, so
-    // a thread waits one round trip a batch rather than one a value.
-    for (int qw = warp; qw < qr; qw += 4 * nw) {
-        for (int n0 = 0; n0 < ds; n0 += 64) {
-            M3mRotIn in[4][2];
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int rw = qw + u * nw;
-                const int r = rw % rank;
-                const long long row = b * seq + t0 + tile0 + rw / rank;
-                const float* src = cn + row * rgn + ((long long)r * ng + g) * ds;
-                const float* bias = c_bias + ((long long)h * rank + r) * ds;
-                const float* sr_ = sn + (row * nh + h) * na;
-                const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll
-                for (int v = 0; v < 2; v++) {
-                    const int n = n0 + lane + 32 * v;
-                    in[u][v] = rw < rows && n < ds
-                        ? m3m_rot_load(src, bias, n, half, na, sr_, cr_)
-                        : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
-                }
-            }
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int rw = qw + u * nw;
-#pragma unroll
-                for (int v = 0; v < 2; v++) {
-                    const int n = n0 + lane + 32 * v;
-                    if (rw < qr && n < ds)
-                        qt[n * qrs + rw] = rw < rows ? m3m_rot_turn(in[u][v], n, half, na) : 0.0f;
-                }
-            }
-        }
-    }
+    // The queries, rotated.
+    m3m_stage_rot(warp, nw, rows, qr, 0, ds, half, na,
+        [&](int rw) {
+            const int r = rw % rank;
+            const long long row = b * seq + t0 + tile0 + rw / rank;
+            return M3mRotRow{cn + row * rgn + ((long long)r * ng + g) * ds,
+                             c_bias + ((long long)h * rank + r) * ds,
+                             sn + (row * nh + h) * na, cs + (row * nh + h) * na};
+        },
+        [&](int rw, int n, float v) { qt[n * qrs + rw] = v; });
     int trow[4];
     int tmax = -1;
 #pragma unroll
@@ -881,34 +946,13 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     for (int s0 = 0; s0 < s_end; s0 += kt) {
         const int cols = min(kt, s_end - s0) * rank;
         __syncthreads();
-        // The rank inputs, four of a warp's columns in flight together.
-        for (int c0 = warp; c0 < KC; c0 += 4 * nw) {
-            float xv[4][JP], mv[4][JP];
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int col = c0 + u * nw;
-                const TI* xr = proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di
-                    + (long long)h * hd;
-                const float* mx = mimo_x + ((long long)h * rank + col % rank) * hd;
-#pragma unroll
-                for (int j = 0; j < JP; j++) {
-                    const int p = lane + 32 * j;
-                    const bool live = col < cols && p < hd;
-                    xv[u][j] = live ? to_f(xr[p]) : 0.0f;
-                    mv[u][j] = live ? mx[p] : 0.0f;
-                }
-            }
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int col = c0 + u * nw;
-                if (col >= KC) continue;
-#pragma unroll
-                for (int j = 0; j < JP; j++) {
-                    const int p = lane + 32 * j;
-                    ut[col * PP + p] = col < cols && p < hd ? __fmul_rn(mv[u][j], xv[u][j]) : 0.0f;
-                }
-            }
-        }
+        // The rank inputs.
+        m3m_stage_u<TI>(warp, nw, cols, KC, hd, PP,
+            [&](int col) {
+                return proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di + (long long)h * hd;
+            },
+            [&](int col) { return mimo_x + ((long long)h * rank + col % rank) * hd; },
+            [&](int col, int p, float v) { ut[col * PP + p] = v; });
         for (int i = tid; i < tq * kt; i += blockDim.x) {
             const int t = tile0 + i / kt, s = s0 + i % kt;
             float w = 0.0f;
@@ -924,40 +968,16 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         for (int m0 = 0; m0 < ds; m0 += nk) {
             const int mm = min(nk, ds - m0);
             if (m0 > 0) __syncthreads();
-            // The keys, rotated, batched like the queries.
-            for (int c0 = warp; c0 < KC; c0 += 4 * nw) {
-                for (int n0 = 0; n0 < mm; n0 += 64) {
-                    M3mRotIn in[4][2];
-#pragma unroll
-                    for (int u = 0; u < 4; u++) {
-                        const int col = c0 + u * nw;
-                        const int r = col % rank;
-                        const long long row = b * seq + t0 + s0 + col / rank;
-                        const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
-                        const float* bias = b_bias + ((long long)h * rank + r) * ds;
-                        const float* sr_ = sn + (row * nh + h) * na;
-                        const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll
-                        for (int v = 0; v < 2; v++) {
-                            const int n = n0 + lane + 32 * v;
-                            in[u][v] = col < cols && n < mm
-                                ? m3m_rot_load(src, bias, m0 + n, half, na, sr_, cr_)
-                                : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
-                        }
-                    }
-#pragma unroll
-                    for (int u = 0; u < 4; u++) {
-                        const int col = c0 + u * nw;
-#pragma unroll
-                        for (int v = 0; v < 2; v++) {
-                            const int n = n0 + lane + 32 * v;
-                            if (col < KC && n < mm)
-                                kts[n * KCS + col] =
-                                    col < cols ? m3m_rot_turn(in[u][v], m0 + n, half, na) : 0.0f;
-                        }
-                    }
-                }
-            }
+            // The keys, rotated.
+            m3m_stage_rot(warp, nw, cols, KC, m0, mm, half, na,
+                [&](int col) {
+                    const int r = col % rank;
+                    const long long row = b * seq + t0 + s0 + col / rank;
+                    return M3mRotRow{bn + row * rgn + ((long long)r * ng + g) * ds,
+                                     b_bias + ((long long)h * rank + r) * ds,
+                                     sn + (row * nh + h) * na, cs + (row * nh + h) * na};
+                },
+                [&](int col, int n, float v) { kts[n * KCS + col] = v; });
             __syncthreads();
             for (int n = 0; n < mm; n++) {
                 const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
