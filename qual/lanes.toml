@@ -45,6 +45,7 @@
 "device_facts" = "qualification"
 "epilogue_bench" = "bench"
 "extreme_edge_coverage" = "contract"
+"family_compare_bench" = "bench"
 "f32_training_graph_parity" = "gate"
 "fixed_epilogue_pins" = "host"
 "gemm_bi_async_allocation" = "contract"
