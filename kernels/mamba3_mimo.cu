@@ -22,6 +22,23 @@
 
 #define MIMO_MAX_RANK 16
 
+// A body templated on RK runs at rank RK when RK > 0, its rank arrays then
+// unrolled into registers; RK = 0 runs at the runtime rank, its arrays in
+// local memory. The arithmetic is the same either way.
+#define MIMO_R(RK, rank) ((RK) > 0 ? (RK) : (rank))
+#define MIMO_RA(RK) ((RK) > 0 ? (RK) : MIMO_MAX_RANK)
+
+// Run the statement with `RK` bound to the runtime rank when it is one of
+// the compiled ranks, else to 0.
+#define MIMO_RANK_DISPATCH(rank, ...)                                          \
+    switch (rank) {                                                            \
+    case 1: { constexpr int RK = 1; __VA_ARGS__; } break;                      \
+    case 2: { constexpr int RK = 2; __VA_ARGS__; } break;                      \
+    case 4: { constexpr int RK = 4; __VA_ARGS__; } break;                      \
+    case 8: { constexpr int RK = 8; __VA_ARGS__; } break;                      \
+    default: { constexpr int RK = 0; __VA_ARGS__; } break;                     \
+    }
+
 __device__ __forceinline__ float mimo_exp(float x) {
     return exp2f(__fmul_rn(x, LOG2E));
 }
@@ -166,13 +183,16 @@ __device__ __forceinline__ void mimo_tok_rotate(
 // One channel's row: u_r = Psi_r x, up_r = Psi_r x_prev, the state row
 // s = alpha s + sum_r (gamma u_r kc_r + beta up_r kp_r), and the readouts
 // y_r = s . q_r + D u_r.
+template <int RK>
 __device__ __forceinline__ void mimo_tok_row(
     float* srow, float* y, float* u, float* up, const float* px, float x, float v_prev,
     const float* kc, const float* kp, const float* qv,
     float alpha, float beta, float gamma, float dval, int rank, int ds
 ) {
-    float bv[MIMO_MAX_RANK], gx[MIMO_MAX_RANK];
-    for (int r = 0; r < rank; r++) {
+    const int R = MIMO_R(RK, rank);
+    float bv[MIMO_RA(RK)], gx[MIMO_RA(RK)];
+#pragma unroll
+    for (int r = 0; r < R; r++) {
         u[r] = __fmul_rn(px[r], x);
         gx[r] = __fmul_rn(gamma, u[r]);
         up[r] = __fmul_rn(px[r], v_prev);
@@ -182,23 +202,28 @@ __device__ __forceinline__ void mimo_tok_row(
     for (int n = 0; n < ds; n++) {
         float inner = __fmul_rn(gx[0], kc[n]);
         inner = __fmaf_rn(bv[0], kp[n], inner);
-        for (int r = 1; r < rank; r++) {
+#pragma unroll
+        for (int r = 1; r < R; r++) {
             inner = __fmaf_rn(gx[r], kc[r * ds + n], inner);
             inner = __fmaf_rn(bv[r], kp[r * ds + n], inner);
         }
         float s = __fmaf_rn(alpha, srow[n], inner);
         srow[n] = s;
-        for (int r = 0; r < rank; r++) y[r] = __fmaf_rn(s, qv[r * ds + n], y[r]);
+#pragma unroll
+        for (int r = 0; r < R; r++) y[r] = __fmaf_rn(s, qv[r * ds + n], y[r]);
     }
-    for (int r = 0; r < rank; r++) y[r] = __fmaf_rn(dval, u[r], y[r]);
+#pragma unroll
+    for (int r = 0; r < R; r++) y[r] = __fmaf_rn(dval, u[r], y[r]);
 }
 
 // The gate: o = sum_r (y_r silu(Z_r z)) Phi_r.
+template <int RK>
 __device__ __forceinline__ float mimo_tok_gate(
     const float* y, const float* pz, const float* po, float z, int rank
 ) {
     float o = 0.0f;
-    for (int r = 0; r < rank; r++) {
+#pragma unroll
+    for (int r = 0; r < MIMO_R(RK, rank); r++) {
         float v = __fmul_rn(pz[r], z);
         float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
         float term = __fmul_rn(__fmul_rn(y[r], sg), po[r]);
@@ -211,8 +236,58 @@ __device__ __forceinline__ void mimo_put(float* p, float v) { *p = v; }
 __device__ __forceinline__ void mimo_put(__nv_bfloat16* p, float v) { *p = from_f_bf16(v); }
 __device__ __forceinline__ void mimo_put(__half* p, float v) { *p = from_f_f16(v); }
 
+// A head's [P, N] state between dense global rows and shared rows padded
+// to N + 1, every thread of the block taking float4 slices of the dense
+// rows so a block moves the whole state in a few loads per thread.
+__device__ __forceinline__ bool mimo_state_vec(const float* gl, int ds) {
+    return (ds & 3) == 0 && (reinterpret_cast<unsigned long long>(gl) & 15) == 0;
+}
+
+__device__ __forceinline__ void mimo_state_load(
+    float* __restrict__ sh, const float* __restrict__ gl, int hd, int ds
+) {
+    const int total = hd * ds;
+    if (mimo_state_vec(gl, ds)) {
+#pragma unroll 4
+        for (int i = threadIdx.x * 4; i < total; i += blockDim.x * 4) {
+            const int p = i / ds, n = i - p * ds;
+            const float4 v = *reinterpret_cast<const float4*>(gl + i);
+            float* d = sh + p * (ds + 1) + n;
+            d[0] = v.x;
+            d[1] = v.y;
+            d[2] = v.z;
+            d[3] = v.w;
+        }
+    } else {
+        for (int i = threadIdx.x; i < total; i += blockDim.x) {
+            const int p = i / ds;
+            sh[p * (ds + 1) + i - p * ds] = gl[i];
+        }
+    }
+}
+
+__device__ __forceinline__ void mimo_state_store(
+    float* __restrict__ gl, const float* __restrict__ sh, int hd, int ds
+) {
+    const int total = hd * ds;
+    if (mimo_state_vec(gl, ds)) {
+#pragma unroll 4
+        for (int i = threadIdx.x * 4; i < total; i += blockDim.x * 4) {
+            const int p = i / ds, n = i - p * ds;
+            const float* d = sh + p * (ds + 1) + n;
+            *reinterpret_cast<float4*>(gl + i) = make_float4(d[0], d[1], d[2], d[3]);
+        }
+    } else {
+        for (int i = threadIdx.x; i < total; i += blockDim.x) {
+            const int p = i / ds;
+            gl[i] = sh[p * (ds + 1) + i - p * ds];
+        }
+    }
+}
+
 // The scan of one head over a window. Grid (batch, nheads), block a whole
-// number of warps covering headdim. Dynamic shared memory, in floats:
+// number of warps covering headdim (the threads past it help move the
+// state and build the keys). Dynamic shared memory, in floats:
 // hd * (ds + 1) for the state rows, 3 * R * ds for the previous keys, the
 // keys and the queries, 2 * na for the angles' sines and cosines, and 8
 // for the step scalars.
@@ -223,7 +298,7 @@ __device__ __forceinline__ void mimo_put(__half* p, float v) { *p = from_f_f16(v
 // before tokens 0, stride, 2 stride, ... is also written to the
 // checkpoints ([B, S, H, ...], S = ceil(seq / stride)), what the training
 // backward replays from.
-template <typename TI, bool CKPT>
+template <typename TI, bool CKPT, int RK>
 __device__ __forceinline__ void mimo_scan_body(
     TI* __restrict__ out,
     float* __restrict__ ssm, float* __restrict__ kst,
@@ -254,15 +329,15 @@ __device__ __forceinline__ void mimo_scan_body(
     float* cs = sn + na;
     float* scal = cs + na;
     const long long bh = (long long)b * nh + h;
-    for (int p = 0; p < hd; p++)
-        for (int n = tid; n < ds; n += blockDim.x)
-            st[p * (ds + 1) + n] = ssm[(bh * hd + p) * ds + n];
+    mimo_state_load(st, ssm + bh * hd * ds, hd, ds);
     for (int i = tid; i < rank * ds; i += blockDim.x)
         kp[i] = kst[bh * rank * ds + i];
     const bool own = tid < hd;
     float v_prev = own ? vst[bh * hd + tid] : 0.0f;
-    float px[MIMO_MAX_RANK], pz[MIMO_MAX_RANK], po[MIMO_MAX_RANK];
-    for (int r = 0; r < rank; r++) {
+    const int R = MIMO_R(RK, rank);
+    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+#pragma unroll
+    for (int r = 0; r < R; r++) {
         const long long o = ((long long)h * rank + r) * hd + tid;
         px[r] = own ? mimo_x[o] : 0.0f;
         pz[r] = own ? mimo_z[o] : 0.0f;
@@ -277,9 +352,7 @@ __device__ __forceinline__ void mimo_scan_body(
         const TI* pr = proj + row * ld_proj;
         if (CKPT && t % stride == 0) {
             const long long q = ((long long)b * nseg + t / stride) * nh + h;
-            for (int p = 0; p < hd; p++)
-                for (int n = tid; n < ds; n += blockDim.x)
-                    ck_ssm[(q * hd + p) * ds + n] = st[p * (ds + 1) + n];
+            mimo_state_store(ck_ssm + q * hd * ds, st, hd, ds);
             for (int i = tid; i < rank * ds; i += blockDim.x) ck_k[q * rank * ds + i] = kp[i];
             if (own) ck_v[q * hd + tid] = v_prev;
             for (int a = tid; a < na; a += blockDim.x) ck_ang[q * na + a] = ang[bh * na + a];
@@ -294,19 +367,17 @@ __device__ __forceinline__ void mimo_scan_body(
         if (own) {
             const float x = to_f(pr[di + h * hd + tid]);
             const float z = to_f(pr[h * hd + tid]);
-            float u[MIMO_MAX_RANK], up[MIMO_MAX_RANK], y[MIMO_MAX_RANK];
-            mimo_tok_row(st + tid * (ds + 1), y, u, up, px, x, v_prev, kc, kp, qv,
-                         scal[0], scal[1], scal[2], dval, rank, ds);
-            mimo_put(&out[row * di + h * hd + tid], mimo_tok_gate(y, pz, po, z, rank));
+            float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kc, kp, qv,
+                             scal[0], scal[1], scal[2], dval, rank, ds);
+            mimo_put(&out[row * di + h * hd + tid], mimo_tok_gate<RK>(y, pz, po, z, rank));
             v_prev = x;
         }
         __syncthreads();
         for (int i = tid; i < rank * ds; i += blockDim.x) kp[i] = kc[i];
         __syncthreads();
     }
-    for (int p = 0; p < hd; p++)
-        for (int n = tid; n < ds; n += blockDim.x)
-            ssm[(bh * hd + p) * ds + n] = st[p * (ds + 1) + n];
+    mimo_state_store(ssm + bh * hd * ds, st, hd, ds);
     for (int i = tid; i < rank * ds; i += blockDim.x)
         kst[bh * rank * ds + i] = kp[i];
     if (own) vst[bh * hd + tid] = v_prev;
@@ -327,9 +398,10 @@ extern "C" __global__ void NAME(                                               \
     int seq, int nh, int ng, int hd, int ds, int rank, int na,                 \
     float a_floor                                                              \
 ) {                                                                            \
-    mimo_scan_body<TI, false>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,  \
-        dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd,   \
-        ds, rank, na, a_floor, nullptr, nullptr, nullptr, nullptr, 1);         \
+    MIMO_RANK_DISPATCH(rank, mimo_scan_body<TI, false, RK>(out, ssm, kst, vst, \
+        ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
+        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, nullptr,       \
+        nullptr, nullptr, nullptr, 1))                                         \
 }
 
 DEFINE_MIMO_SCAN(mimo_scan, float)
@@ -355,9 +427,10 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,                      \
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride           \
 ) {                                                                            \
-    mimo_scan_body<TI, true>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,   \
-        dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd,   \
-        ds, rank, na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride);            \
+    MIMO_RANK_DISPATCH(rank, mimo_scan_body<TI, true, RK>(out, ssm, kst, vst,  \
+        ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
+        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k,  \
+        ck_v, ck_ang, stride))                                                 \
 }
 
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float)

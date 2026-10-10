@@ -59,7 +59,7 @@ __device__ __forceinline__ long long mimo_rec_size(int hd, int ds, int rank, int
     return (long long)hd * ds + 4LL * rank * ds + 3LL * hd * rank + hd + 2LL * na + 8;
 }
 
-template <typename T>
+template <typename T, int RK>
 __device__ __forceinline__ void mimo_scan_bwd_body(
     T* __restrict__ d_proj, long long ld_proj,
     float* __restrict__ d_bn_h, float* __restrict__ d_cn_h,
@@ -89,6 +89,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     const int rn = rank * ds;
+    const int R = MIMO_R(RK, rank);
     const int heads = 2 * di + 2 * rgn;
     const int ang_col = heads + 3 * nh;
     const long long bh = (long long)b * nh + h;
@@ -117,9 +118,9 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     float* red = scal + 8;                     // blockDim
 
     const bool own = tid < hd;
-    float px[MIMO_MAX_RANK], pz[MIMO_MAX_RANK], po[MIMO_MAX_RANK];
-    float gx_loc[MIMO_MAX_RANK], gz_loc[MIMO_MAX_RANK], go_loc[MIMO_MAX_RANK];
-    for (int r = 0; r < rank; r++) {
+    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+    float gx_loc[MIMO_RA(RK)], gz_loc[MIMO_RA(RK)], go_loc[MIMO_RA(RK)];
+    _Pragma("unroll") for (int r = 0; r < R; r++) {
         const long long o = ((long long)h * rank + r) * hd + tid;
         px[r] = own ? mimo_x[o] : 0.0f;
         pz[r] = own ? mimo_z[o] : 0.0f;
@@ -146,9 +147,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
         const int t1 = min(t0 + stride, seq);
         const long long q = ((long long)b * nseg + seg) * nh + h;
         // The replay, from the segment's checkpoint.
-        for (int p = 0; p < hd; p++)
-            for (int n = tid; n < ds; n += blockDim.x)
-                st[p * (ds + 1) + n] = ck_ssm[(q * hd + p) * ds + n];
+        mimo_state_load(st, ck_ssm + q * hd * (long long)ds, hd, ds);
         for (int i = tid; i < rn; i += blockDim.x) kp[i] = ck_k[q * rn + i];
         for (int a = tid; a < na; a += blockDim.x) angw[a] = ck_ang[q * na + a];
         float v_prev = own ? ck_v[q * hd + tid] : 0.0f;
@@ -191,20 +190,20 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             }
             if (own) {
                 const float x = to_f(pr[di + h * hd + tid]);
-                float u[MIMO_MAX_RANK], up[MIMO_MAX_RANK], y[MIMO_MAX_RANK];
+                float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
                 float* srow = st + tid * (ds + 1);
-                mimo_tok_row(srow, y, u, up, px, x, v_prev, kc, kp, qv,
+                mimo_tok_row<RK>(srow, y, u, up, px, x, v_prev, kc, kp, qv,
                              scal[0], scal[1], scal[2], dval, rank, ds);
-                for (int r = 0; r < rank; r++) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
                     r_u[tid * rank + r] = u[r];
                     r_up[tid * rank + r] = up[r];
                     r_y[tid * rank + r] = y[r];
                 }
-                for (int n = 0; n < ds; n++) r_s[(long long)tid * ds + n] = srow[n];
                 r_xp[tid] = v_prev;
                 v_prev = x;
             }
             __syncthreads();
+            mimo_state_store(r_s, st, hd, ds);
             for (int i = tid; i < rn; i += blockDim.x) kp[i] = kc[i];
             __syncthreads();
         }
@@ -235,12 +234,12 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             const float a_val = r_sc[4], lam = r_sc[5], lam_c = r_sc[6];
 
             // Gate, D and the readout: dy, dz, du; dS rows take sum_r dy q_r.
-            float du[MIMO_MAX_RANK], dup[MIMO_MAX_RANK];
+            float du[MIMO_RA(RK)], dup[MIMO_RA(RK)];
             if (own) {
                 const float z = to_f(pr[h * hd + tid]);
                 const float d_o_v = to_f(d_o[row * di + h * hd + tid]);
                 float dz = 0.0f;
-                for (int r = 0; r < rank; r++) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
                     const float v = __fmul_rn(pz[r], z);
                     const float sg = mimo_sigmoid(v);
                     const float silu = __fmul_rn(v, sg);
@@ -262,7 +261,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 float* drow = dsr + tid * (ds + 1);
                 for (int n = 0; n < ds; n++) {
                     float acc = drow[n];
-                    for (int r = 0; r < rank; r++)
+                    _Pragma("unroll") for (int r = 0; r < R; r++)
                         acc = __fmaf_rn(dyS[tid * rank + r], r_q[r * ds + n], acc);
                     drow[n] = acc;
                 }
@@ -290,7 +289,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 for (int n = 0; n < ds; n++) {
                     const float dsv = drow[n];
                     da_loc = __fmaf_rn(dsv, s_prev[(long long)tid * ds + n], da_loc);
-                    for (int r = 0; r < rank; r++) {
+                    _Pragma("unroll") for (int r = 0; r < R; r++) {
                         const float dbv = __fmul_rn(dsv, k_prev[r * ds + n]);
                         const float dgx = __fmul_rn(dsv, r_kc[r * ds + n]);
                         db_loc = __fmaf_rn(dbv, r_up[tid * rank + r], db_loc);
@@ -303,7 +302,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 const float x = to_f(pr[di + h * hd + tid]);
                 const float xp = r_xp[tid];
                 float dx = dx_carry, dxp = 0.0f;
-                for (int r = 0; r < rank; r++) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
                     gx_loc[r] = __fmaf_rn(du[r], x, __fmaf_rn(dup[r], xp, gx_loc[r]));
                     dx = __fmaf_rn(du[r], px[r], dx);
                     dxp = __fmaf_rn(dup[r], px[r], dxp);
@@ -319,7 +318,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 for (int w = 0; w < 2; w++) {
                     float* gv = w == 0 ? dkc : dq;
                     const float* pv = w == 0 ? r_kpre : r_qpre;
-                    for (int r = 0; r < rank; r++) {
+                    _Pragma("unroll") for (int r = 0; r < R; r++) {
                         const float g0 = gv[r * ds + a], g1 = gv[r * ds + a + half];
                         const float v0 = pv[r * ds + a], v1 = pv[r * ds + a + half];
                         const float t0v = __fmul_rn(g0, __fsub_rn(__fmul_rn(-s, v0), __fmul_rn(c, v1)));
@@ -380,7 +379,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
 
     // The sequence's weight partials.
     if (own) {
-        for (int r = 0; r < rank; r++) {
+        _Pragma("unroll") for (int r = 0; r < R; r++) {
             const long long o = (bh * rank + r) * hd + tid;
             g_x[o] = gx_loc[r];
             g_z[o] = gz_loc[r];
@@ -420,10 +419,11 @@ extern "C" __global__ void NAME(                                                
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
     float a_floor                                                               \
 ) {                                                                             \
-    mimo_scan_bwd_body<T>(d_proj, ld_proj, d_bn_h, d_cn_h, d_tanh_h, g_x, g_z,  \
-        g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o, proj, bn, cn, ck_ssm, ck_k,      \
-        ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,  \
-        stride, nh, ng, hd, ds, rank, na, a_floor);                             \
+    MIMO_RANK_DISPATCH(rank, mimo_scan_bwd_body<T, RK>(d_proj, ld_proj, d_bn_h, \
+        d_cn_h, d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o,      \
+        proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D,   \
+        mimo_x, mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na,          \
+        a_floor))                                                               \
 }
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd, float)
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd_bf16, __nv_bfloat16)

@@ -264,13 +264,13 @@ extern "C" __global__ void m3m_state_pass(
 // with G[t,r,s,r'] = q_t[r] . k_s[r'] (n ascending) and w(t,s) =
 // e^min(Acs_t - Acs_s, 0) scale_s off the diagonal, gamma_t on it. The
 // queries of the tile stay staged; the keys come in s-tiles of `st` with
-// their G block. Shared memory: tt * R * N (queries) + st * R * N (keys) +
-// tt * R * st * R (G) + st * P (inputs) floats. The tile sizes change what
+// their G block. Shared memory: tt * R * N (queries) + st * R * (N + 1)
+// (keys, rows padded) + tt * R * st * R (G) + st * P (inputs) floats. The tile sizes change what
 // a pass stages, never the order of a thread's sum.
 // Grid (B * nc, H, ceil(64 / tt)), block tt * P threads. `y_out` (may be
 // null) receives the readouts y_t[r][p] with D, [B, T, H, R, P], what the
 // training backward's gate reads.
-template <typename TI>
+template <typename TI, int RK>
 __device__ __forceinline__ void m3m_chunk_scan_body(
     TI* __restrict__ out, float* __restrict__ y_out,
     const TI* __restrict__ proj, long long ld_proj,
@@ -298,11 +298,16 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     const int g = h / (nh / ng);
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
+    const int R = MIMO_R(RK, rank);
     const int half = ds / 2;
     const int ST = st;
+    // Key rows padded to N + 1: the block's G entries read one key row per
+    // thread, which at a row stride of N (a multiple of 32) would put a
+    // warp's reads in one bank.
+    const int kld = ds + 1;
     float* qs = m3m_sm;                       // [tt][R][N]
-    float* ks = qs + tt * rank * ds;          // [ST][R][N]
-    float* gs = ks + ST * rank * ds;          // [tt*R][ST*R]
+    float* ks = qs + tt * rank * ds;          // [ST][R][N + 1]
+    float* gs = ks + ST * rank * kld;         // [tt*R][ST*R]
     float* xs = gs + tt * rank * ST * rank;   // [ST][P]
     const int tid = threadIdx.x;
     const int tl = tid / hd, p = tid % hd;
@@ -316,9 +321,9 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                         sn + (row * nh + h) * na, cs + (row * nh + h) * na);
     }
     __syncthreads();
-    float y[MIMO_MAX_RANK];
-    float u_t[MIMO_MAX_RANK];
-    float px[MIMO_MAX_RANK];
+    float y[MIMO_RA(RK)];
+    float u_t[MIMO_RA(RK)];
+    float px[MIMO_RA(RK)];
     const int t = tile0 + tl;
     const long long row_t = b * seq + t0 + t;
     float acs_t = 0.0f, gamma_t = 0.0f;
@@ -329,14 +334,19 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
         const float xv = to_f(proj[row_t * ld_proj + di + (long long)h * hd + p]);
         const float* sp = enter + ((bc * nh + h) * hd + p) * (long long)ds;
         const float ef = mimo_exp(acs_t);
-        for (int r = 0; r < rank; r++) {
+        _Pragma("unroll") for (int r = 0; r < R; r++) {
             px[r] = mimo_x[((long long)h * rank + r) * hd + p];
             u_t[r] = __fmul_rn(px[r], xv);
-            float acc = 0.0f;
-            const float* q = qs + (tl * rank + r) * ds;
-            for (int n = 0; n < ds; n++) acc = __fmaf_rn(q[n], sp[n], acc);
-            y[r] = __fmul_rn(acc, ef);
+            y[r] = 0.0f;
         }
+        // Every rank's chain over n ascending, the entering row read once.
+        const float* q = qs + tl * rank * ds;
+        for (int n = 0; n < ds; n++) {
+            const float sv = sp[n];
+            _Pragma("unroll") for (int r = 0; r < R; r++)
+                y[r] = __fmaf_rn(q[r * ds + n], sv, y[r]);
+        }
+        _Pragma("unroll") for (int r = 0; r < R; r++) y[r] = __fmul_rn(y[r], ef);
     }
     const int s_end = tile0 + tn;
     for (int s0 = 0; s0 < s_end; s0 += ST) {
@@ -345,7 +355,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
         for (int i = tid; i < sn_ * rank * ds; i += blockDim.x) {
             const int sk = i / (rank * ds), r = (i / ds) % rank, n = i % ds;
             const long long row = b * seq + t0 + s0 + sk;
-            ks[i] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
+            ks[(sk * rank + r) * kld + n] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
                             b_bias + ((long long)h * rank + r) * ds, n, half, na,
                             sn + (row * nh + h) * na, cs + (row * nh + h) * na);
         }
@@ -358,7 +368,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
             const int col = i % (sn_ * rank);
             const int rw = i / (sn_ * rank);
             const float* q = qs + rw * ds;
-            const float* k = ks + col * ds;
+            const float* k = ks + col * kld;
             float acc = 0.0f;
             for (int n = 0; n < ds; n++) acc = __fmaf_rn(q[n], k[n], acc);
             gs[rw * (ST * rank) + col] = acc;
@@ -374,9 +384,9 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                     ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_t, cf[3]), 0.0f)), cf[2])
                     : gamma_t;
                 const float xsv = xs[sk * hd + p];
-                for (int r = 0; r < rank; r++) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
                     const float* grow = gs + (tl * rank + r) * (ST * rank) + sk * rank;
-                    for (int r2 = 0; r2 < rank; r2++) {
+                    _Pragma("unroll") for (int r2 = 0; r2 < R; r2++) {
                         const float us = __fmul_rn(px[r2], xsv);
                         y[r] = __fmaf_rn(__fmul_rn(grow[r2], w), us, y[r]);
                     }
@@ -386,18 +396,18 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     }
     if (live) {
         const float dval = D[h];
-        for (int r = 0; r < rank; r++) y[r] = __fmaf_rn(dval, u_t[r], y[r]);
+        _Pragma("unroll") for (int r = 0; r < R; r++) y[r] = __fmaf_rn(dval, u_t[r], y[r]);
         if (y_out != nullptr) {
-            for (int r = 0; r < rank; r++)
+            _Pragma("unroll") for (int r = 0; r < R; r++)
                 y_out[((row_t * nh + h) * rank + r) * hd + p] = y[r];
         }
-        float pz[MIMO_MAX_RANK], po[MIMO_MAX_RANK];
-        for (int r = 0; r < rank; r++) {
+        float pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+        _Pragma("unroll") for (int r = 0; r < R; r++) {
             pz[r] = mimo_z[((long long)h * rank + r) * hd + p];
             po[r] = mimo_o[((long long)h * rank + r) * hd + p];
         }
         const float z = to_f(proj[row_t * ld_proj + (long long)h * hd + p]);
-        mimo_put(&out[row_t * di + (long long)h * hd + p], mimo_tok_gate(y, pz, po, z, rank));
+        mimo_put(&out[row_t * di + (long long)h * hd + p], mimo_tok_gate<RK>(y, pz, po, z, rank));
     }
 }
 
@@ -415,9 +425,9 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ mimo_o,                                           \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st   \
 ) {                                                                             \
-    m3m_chunk_scan_body<TI>(out, y_out, proj, ld_proj, bn, cn, coef, sn, cs,    \
-        enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds,  \
-        rank, na, tt, st);                                                      \
+    MIMO_RANK_DISPATCH(rank, m3m_chunk_scan_body<TI, RK>(out, y_out, proj,      \
+        ld_proj, bn, cn, coef, sn, cs, enter, b_bias, c_bias, D, mimo_x,        \
+        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, tt, st))                 \
 }
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan, float)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)

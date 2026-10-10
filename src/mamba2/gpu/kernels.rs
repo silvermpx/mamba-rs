@@ -98,11 +98,13 @@ pub fn step_rows(hd: usize, ds: usize, cap: usize) -> Option<usize> {
 }
 
 /// Launch geometry of the decode and sequential scans with `rows` channels
-/// per block (see [`step_rows`]).
+/// per block (see [`step_rows`]), and helper thread rows up to 128 threads
+/// that move the state tile, so a decode step is not bound by one warp's
+/// loads.
 pub fn step_cfg(batch: usize, nh: usize, (hd, ds): (usize, usize), rows: usize) -> LaunchConfig {
     LaunchConfig {
         grid_dim: (batch as u32, nh as u32, hd.div_ceil(rows) as u32),
-        block_dim: (rows as u32, 1, 1),
+        block_dim: (rows as u32, (128 / rows).max(1) as u32, 1),
         shared_mem_bytes: step_smem_bytes(rows, ds) as u32,
     }
 }

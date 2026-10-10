@@ -51,7 +51,7 @@ __device__ __forceinline__ void m2_step_scalars(
     int dt_off, int h, const float* dt_bias, const float* a_neg, int ds,
     int flags, float dt_min, float dt_max
 ) {
-    if (threadIdx.x != 0) return;
+    if (threadIdx.x != 0 || threadIdx.y != 0) return;
     float raw = to_f(proj_row[dt_off + h]);
     float dt = m2_softplus(__fadd_rn(raw, dt_bias[h]));
     // A NaN dt stays NaN, as the CPU's clamp leaves it; fminf and fmaxf
@@ -84,8 +84,63 @@ __device__ __forceinline__ float m2_row_step(
     return __fmaf_rn(w_diag, xp, acc);
 }
 
+// A block's [rows, N] state tile between dense global rows and shared rows
+// padded to N + 1, every thread of the block taking float4 slices of the
+// dense rows, so the tile moves in a few loads per thread.
+__device__ __forceinline__ bool m2_tile_vec(const float* gl, int ds) {
+    return (ds & 3) == 0 && (reinterpret_cast<unsigned long long>(gl) & 15) == 0;
+}
+
+__device__ __forceinline__ void m2_tile_load(
+    float* __restrict__ sh, const float* __restrict__ gl, int rows, int ds
+) {
+    const int lin = threadIdx.y * blockDim.x + threadIdx.x;
+    const int nthr = blockDim.x * blockDim.y;
+    const int total = rows * ds;
+    if (m2_tile_vec(gl, ds)) {
+#pragma unroll 4
+        for (int i = lin * 4; i < total; i += nthr * 4) {
+            const int r = i / ds, n = i - r * ds;
+            const float4 v = *reinterpret_cast<const float4*>(gl + i);
+            float* d = sh + r * (ds + 1) + n;
+            d[0] = v.x;
+            d[1] = v.y;
+            d[2] = v.z;
+            d[3] = v.w;
+        }
+    } else {
+        for (int i = lin; i < total; i += nthr) {
+            const int r = i / ds;
+            sh[r * (ds + 1) + i - r * ds] = gl[i];
+        }
+    }
+}
+
+__device__ __forceinline__ void m2_tile_store(
+    float* __restrict__ gl, const float* __restrict__ sh, int rows, int ds
+) {
+    const int lin = threadIdx.y * blockDim.x + threadIdx.x;
+    const int nthr = blockDim.x * blockDim.y;
+    const int total = rows * ds;
+    if (m2_tile_vec(gl, ds)) {
+#pragma unroll 4
+        for (int i = lin * 4; i < total; i += nthr * 4) {
+            const int r = i / ds, n = i - r * ds;
+            const float* d = sh + r * (ds + 1) + n;
+            *reinterpret_cast<float4*>(gl + i) = make_float4(d[0], d[1], d[2], d[3]);
+        }
+    } else {
+        for (int i = lin; i < total; i += nthr) {
+            const int r = i / ds;
+            gl[i] = sh[r * (ds + 1) + i - r * ds];
+        }
+    }
+}
+
 // The recurrence of every head over a window, token by token: grid
-// (B, H, ceil(P / blockDim.x)), block a whole number of warps. Dynamic
+// (B, H, ceil(P / blockDim.x)), block (channels, helpers): thread x of the
+// first row owns channel p0 + x, and the helper rows only move the state
+// tile and the token's B and C through shared memory. Dynamic
 // shared memory: (2 * N + 4 + rows * (N + 1)) floats for B, C, the step
 // scalars and the block's rows of the state, padded by one so a thread's
 // row walk hits distinct banks. The state tile moves through shared memory
@@ -124,14 +179,13 @@ __device__ __forceinline__ void m2_steps_body(
     const int tid = threadIdx.x;
     if (b >= batch || h >= nh || p0 >= hd) return;
     const int rows = min((int)blockDim.x, hd - p0);
+    const int lin = threadIdx.y * blockDim.x + tid;
+    const int nthr = blockDim.x * blockDim.y;
+    const bool owner = threadIdx.y == 0 && tid < rows;
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
     const long long base = (((long long)b * nh + h) * hd + p0) * ds;
-    for (int r = 0; r < rows; r++) {
-        for (int n = tid; n < ds; n += blockDim.x) {
-            tile[r * (ds + 1) + n] = ssm[base + (long long)r * ds + n];
-        }
-    }
+    m2_tile_load(tile, ssm + base, rows, ds);
     const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
     for (int t = 0; t < seq; t++) {
         const long long row = (long long)b * seq + t;
@@ -139,11 +193,9 @@ __device__ __forceinline__ void m2_steps_body(
         if (CKPT && t % stride == 0) {
             const long long cbase =
                 ((((long long)b * nseg + t / stride) * nh + h) * hd + p0) * ds;
-            for (int r = 0; r < rows; r++)
-                for (int n = tid; n < ds; n += blockDim.x)
-                    ckpt[cbase + (long long)r * ds + n] = tile[r * (ds + 1) + n];
+            m2_tile_store(ckpt + cbase, tile, rows, ds);
         }
-        for (int n = tid; n < ds; n += blockDim.x) {
+        for (int n = lin; n < ds; n += nthr) {
             b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
             c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
         }
@@ -151,7 +203,7 @@ __device__ __forceinline__ void m2_steps_body(
         m2_step_scalars(scal, b_sm, c_sm, proj + row * d_in_proj, dt_off, h, dt_bias,
                         a_neg, ds, flags, dt_min, dt_max);
         __syncthreads();
-        if (tid < rows) {
+        if (owner) {
             const int p = p0 + tid;
             const float xp = to_f(xbc[xrow + (long long)h * hd + p]);
             float acc = m2_row_step(tile + tid * (ds + 1), b_sm, c_sm, scal[0], scal[1],
@@ -166,11 +218,7 @@ __device__ __forceinline__ void m2_steps_body(
         }
         __syncthreads();
     }
-    for (int r = 0; r < rows; r++) {
-        for (int n = tid; n < ds; n += blockDim.x) {
-            ssm[base + (long long)r * ds + n] = tile[r * (ds + 1) + n];
-        }
-    }
+    m2_tile_store(ssm + base, tile, rows, ds);
 }
 
 // One decode step: the window of one token.

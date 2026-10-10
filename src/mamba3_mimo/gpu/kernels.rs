@@ -106,11 +106,12 @@ pub fn chunked_geom(
             (bytes <= cap).then_some((nt, sl, bytes))
         })
     })?;
-    // The output kernel: queries [tt][R][N], keys [st][R][N], their block
-    // [tt R][st R], the keys' inputs [st][P].
+    // The output kernel: queries [tt][R][N], keys [st][R][N + 1], their
+    // block [tt R][st R], the keys' inputs [st][P].
     let scan = (1..=wide.min(CHUNK)).rev().find_map(|tt| {
         [8usize, 4, 2, 1].into_iter().find_map(|st| {
-            let bytes = (tt * rank * ds + st * rank * ds + tt * rank * st * rank + st * hd) * 4;
+            let bytes =
+                (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * hd) * 4;
             (bytes <= cap).then_some((tt, st, bytes))
         })
     })?;
@@ -128,10 +129,10 @@ pub fn chunked_geom(
         (bytes <= cap).then_some((nt, bytes))
     })?;
     // The pair terms: queries, keys and the dq tile, dy and u, three
-    // (tile R)^2 blocks.
+    // (tile R)^2 blocks; the key and u rows padded by one.
     let pairs = [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
         let tr = tl * rank;
-        let bytes = (3 * tr * ds + 2 * tr * hd + 3 * tr * tr) * 4;
+        let bytes = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
         (bytes <= cap).then_some((tl, bytes))
     })?;
     Some(ChunkedGeom {
@@ -170,7 +171,10 @@ pub fn scan_bwd_record_floats(hd: usize, ds: usize, rank: usize, na: usize) -> u
 }
 
 /// Launch geometry of the scan: one block per (batch, head), a whole
-/// number of warps covering the head's channels.
+/// number of warps covering the head's channels and at least eight, so a
+/// decode step moves the head's state through shared memory in a few
+/// vector loads per thread (the scan has no block-wide reduction, so its
+/// bits do not depend on the block size).
 pub fn scan_cfg(
     batch: usize,
     nh: usize,
@@ -178,7 +182,7 @@ pub fn scan_cfg(
 ) -> LaunchConfig {
     LaunchConfig {
         grid_dim: (batch as u32, nh as u32, 1),
-        block_dim: (hd.next_multiple_of(32) as u32, 1, 1),
+        block_dim: (hd.next_multiple_of(32).max(256) as u32, 1, 1),
         shared_mem_bytes: scan_smem_bytes(hd, ds, rank, na) as u32,
     }
 }
@@ -272,6 +276,7 @@ impl Mamba3MimoKernels {
                 (&kernels.chunk_state, "chunk_state"),
                 (&kernels.chunk_scan, "chunk_scan"),
                 (&kernels.cb.pairs, "pairs"),
+                (&kernels.cb.state_terms, "state_terms"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);

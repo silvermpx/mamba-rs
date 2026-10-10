@@ -239,12 +239,16 @@ extern "C" __global__ void m3mb_chunk_dot(
     if (threadIdx.x == 0) dot[q] = s;
 }
 
-// The state terms of a token, one block per (chunk, head, token), the
-// token's rotated keys staged:
+// The state terms of the chunk's tokens, one block per (chunk, head,
+// group of `tg` tokens), each token's rotated keys and inputs staged:
 //   dk_s[r][n] = c_s sum_p dS_c[p][n] u_s[r][p]   (the start of dk)
 //   ste[r][p]  = sum_n dS_c[p][n] k_s[r][n];  du_s[r][p] += c_s ste
 //   dc_s       = sum_{r, p} u_s[r][p] ste[r][p]   (a fixed tree)
-// Grid (B * nc, H, 64), block 256, dynamic shared memory R * N floats.
+// With `stage` the chunk's state gradient dS_c is read into shared memory
+// once for the group, rows padded by one, else every token reads it from
+// global memory. Grid (B * nc, H, ceil(64 / tg)), block 256 (the tree's
+// width), dynamic shared memory R * N + R * P floats, plus P * (N + 1)
+// with `stage`.
 template <typename T>
 __device__ __forceinline__ void m3mb_state_terms_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,
@@ -252,59 +256,74 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage
 ) {
     extern __shared__ float m3mb_sm[];
     __shared__ float red[256];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int s = blockIdx.z;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
     const int lc = min(M3M_CHUNK, seq - t0);
-    if (s >= lc) return;
+    const int s0 = blockIdx.z * tg;
+    if (s0 >= lc) return;
+    const int s1 = min(s0 + tg, lc);
     const int g = h / (nh / ng);
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
-    const long long row = b * seq + t0 + s;
-    const float* cf = coef + (row * nh + h) * 4;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
-    const float cfs = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    float* kt = m3mb_sm;
-    for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
-        const int r = i / ds, n = i % ds;
-        kt[i] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
-                        b_bias + ((long long)h * rank + r) * ds, n, half, na,
-                        sn + (row * nh + h) * na, cs + (row * nh + h) * na);
-    }
-    __syncthreads();
-    for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
-        const int r = i / ds, n = i % ds;
-        float acc = 0.0f;
-        for (int p = 0; p < hd; p++) {
-            const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
-            const float u = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
-            acc = __fmaf_rn(dsc[(long long)p * ds + n], u, acc);
+    float* kt = m3mb_sm;                // [R][N]
+    float* ut = kt + rank * ds;         // [R][P]
+    float* dss = ut + rank * hd;        // [P][N + 1] with stage
+    const int dld = stage ? ds + 1 : ds;
+    const float* dsr = stage ? dss : dsc;
+    if (stage) {
+        for (int i = threadIdx.x; i < hd * ds; i += blockDim.x) {
+            const int p = i / ds;
+            dss[p * (ds + 1) + i - p * ds] = dsc[i];
         }
-        dk[((row * nh + h) * rank + r) * ds + n] = __fmul_rn(cfs, acc);
     }
-    float part = 0.0f;
-    for (int i = threadIdx.x; i < rank * hd; i += blockDim.x) {
-        const int r = i / hd, p = i % hd;
-        float ste = 0.0f;
-        for (int n = 0; n < ds; n++) ste = __fmaf_rn(dsc[(long long)p * ds + n], kt[r * ds + n], ste);
-        const long long o = ((row * nh + h) * rank + r) * hd + p;
-        du[o] = __fmaf_rn(cfs, ste, du[o]);
-        const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
-        const float u = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
-        part = __fmaf_rn(u, ste, part);
+    for (int s = s0; s < s1; s++) {
+        const long long row = b * seq + t0 + s;
+        const float* cf = coef + (row * nh + h) * 4;
+        const float cfs = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+        __syncthreads();
+        for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
+            const int r = i / ds, n = i % ds;
+            kt[i] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
+                            b_bias + ((long long)h * rank + r) * ds, n, half, na,
+                            sn + (row * nh + h) * na, cs + (row * nh + h) * na);
+        }
+        for (int i = threadIdx.x; i < rank * hd; i += blockDim.x) {
+            const int r = i / hd, p = i % hd;
+            const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
+            ut[i] = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
+        }
+        __syncthreads();
+        for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
+            const int r = i / ds, n = i % ds;
+            float acc = 0.0f;
+            for (int p = 0; p < hd; p++)
+                acc = __fmaf_rn(dsr[(long long)p * dld + n], ut[r * hd + p], acc);
+            dk[((row * nh + h) * rank + r) * ds + n] = __fmul_rn(cfs, acc);
+        }
+        float part = 0.0f;
+        for (int i = threadIdx.x; i < rank * hd; i += blockDim.x) {
+            const int r = i / hd, p = i % hd;
+            float ste = 0.0f;
+            for (int n = 0; n < ds; n++)
+                ste = __fmaf_rn(dsr[(long long)p * dld + n], kt[r * ds + n], ste);
+            const long long o = ((row * nh + h) * rank + r) * hd + p;
+            du[o] = __fmaf_rn(cfs, ste, du[o]);
+            part = __fmaf_rn(ut[i], ste, part);
+        }
+        const float sum = m3mb_block_sum(part, red);
+        if (threadIdx.x == 0) dcs[row * nh + h] = sum;
     }
-    const float sum = m3mb_block_sum(part, red);
-    if (threadIdx.x == 0) dcs[row * nh + h] = sum;
 }
 
 #define DEFINE_M3MB_STATE_TERMS(NAME, T)                                        \
@@ -315,10 +334,11 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ bn, const float* __restrict__ b_bias,             \
     const float* __restrict__ coef, const float* __restrict__ sn,               \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na                   \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,          \
+    int stage                                                                   \
 ) {                                                                             \
     m3mb_state_terms_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, coef, \
-        sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na);                         \
+        sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tg, stage);              \
 }
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms, float)
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_bf16, __nv_bfloat16)
@@ -333,8 +353,9 @@ DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_f16, __half)
 //   dk_s += sum_{t, r} (w M) q_t      (global, this block's own rows)
 //   du_s += sum_{t, r} (w G) dy_t     (global, this block's own rows)
 // Every output has one owner: the block, in this loop order. Dynamic shared
-// memory: 2 tl R N + 2 tl R P + 3 (tl R)^2 + tl R N floats (queries, keys,
-// dy, u, G, M, wG, the dq tile). Grid (B * nc, H), block 256.
+// memory: tl R N + tl R (N + 1) + tl R P + tl R (P + 1) + 3 (tl R)^2
+// + tl R N floats (queries, keys, dy, u, G, M, wG, the dq tile; key and u
+// rows padded by one). Grid (B * nc, H), block 256.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_body(
     float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ du,
@@ -359,11 +380,15 @@ __device__ __forceinline__ void m3mb_pairs_body(
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
     const int tr = tl * rank;
+    // The key and u rows padded by one: the G and M dots read one key and
+    // one u row per thread, which at a stride of N or P (multiples of 32)
+    // would put a warp's reads in one bank.
+    const int kld = ds + 1, uld = hd + 1;
     float* qs = m3mb_sm;            // [tl][R][N]
-    float* ks = qs + tr * ds;       // [tl][R][N]
-    float* dys = ks + tr * ds;      // [tl][R][P]
-    float* us = dys + tr * hd;      // [tl][R][P]
-    float* gm = us + tr * hd;       // [tr][tr] G
+    float* ks = qs + tr * ds;       // [tl][R][N + 1]
+    float* dys = ks + tr * kld;     // [tl][R][P]
+    float* us = dys + tr * hd;      // [tl][R][P + 1]
+    float* gm = us + tr * uld;      // [tr][tr] G
     float* mm = gm + tr * tr;       // [tr][tr] M, then w M
     float* wg = mm + tr * tr;       // [tr][tr] w G
     float* dqs = wg + tr * tr;      // [tl][R][N]
@@ -391,7 +416,7 @@ __device__ __forceinline__ void m3mb_pairs_body(
             for (int i = tid; i < sn_ * rank * ds; i += blockDim.x) {
                 const int sk = i / (rank * ds), r = (i / ds) % rank, n = i % ds;
                 const long long row = b * seq + t0 + S0 + sk;
-                ks[i] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
+                ks[(sk * rank + r) * kld + n] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
                                 b_bias + ((long long)h * rank + r) * ds, n, half, na,
                                 sn + (row * nh + h) * na, cs + (row * nh + h) * na);
             }
@@ -399,7 +424,7 @@ __device__ __forceinline__ void m3mb_pairs_body(
                 const int sk = i / (rank * hd), r = (i / hd) % rank, p = i % hd;
                 const long long row = b * seq + t0 + S0 + sk;
                 const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
-                us[i] = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
+                us[(sk * rank + r) * uld + p] = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
             }
             __syncthreads();
             // G, M and the masked weights per (t r, s r').
@@ -409,8 +434,8 @@ __device__ __forceinline__ void m3mb_pairs_body(
                 const int t = T0 + tq, s = S0 + sk;
                 float gv = 0.0f, mv = 0.0f;
                 if (s <= t) {
-                    for (int n = 0; n < ds; n++) gv = __fmaf_rn(qs[a * ds + n], ks[bcol * ds + n], gv);
-                    for (int p = 0; p < hd; p++) mv = __fmaf_rn(dys[a * hd + p], us[bcol * hd + p], mv);
+                    for (int n = 0; n < ds; n++) gv = __fmaf_rn(qs[a * ds + n], ks[bcol * kld + n], gv);
+                    for (int p = 0; p < hd; p++) mv = __fmaf_rn(dys[a * hd + p], us[bcol * uld + p], mv);
                 }
                 gm[a * tr + bcol] = gv;
                 mm[a * tr + bcol] = mv;
@@ -452,7 +477,7 @@ __device__ __forceinline__ void m3mb_pairs_body(
                 const int a = i / ds, n = i % ds;
                 float acc = dqs[i];
                 for (int bcol = 0; bcol < sn_ * rank; bcol++)
-                    acc = __fmaf_rn(mm[a * tr + bcol], ks[bcol * ds + n], acc);
+                    acc = __fmaf_rn(mm[a * tr + bcol], ks[bcol * kld + n], acc);
                 dqs[i] = acc;
             }
             for (int i = tid; i < sn_ * rank * ds; i += blockDim.x) {

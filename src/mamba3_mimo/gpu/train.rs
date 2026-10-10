@@ -1642,13 +1642,23 @@ impl Mamba3MimoGpuTrainer {
                 "chunk dot",
                 [dot, enter, dsl, count, pn_i]
             );
+            // The state terms take the chunk's state gradient into shared
+            // memory once per group of tokens when it fits.
+            let (tg, terms_base) = (8usize, (rank * ds + rank * hd) * 4);
+            let staged = terms_base + hd * (ds + 1) * 4;
+            let (stage, terms_smem) = if staged <= k.smem_optin {
+                (1i32, staged)
+            } else {
+                (0i32, terms_base)
+            };
+            let tg_i = tg as i32;
             go!(
                 k.cb.state_terms.get(act),
-                cfg3(b * nc, nh, CHUNK, 256, rank * ds * 4),
+                cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
                 "state terms",
                 [
                     dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i,
-                    hd_i, ds_i, r_i, na_i
+                    hd_i, ds_i, r_i, na_i, tg_i, stage
                 ]
             );
             let (tl, pairs_smem) = geom.pairs;
