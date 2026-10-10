@@ -1863,6 +1863,27 @@ __device__ __forceinline__ void m2s_tile_fetch(
     m2s_cp_commit();
 }
 
+// The same copy issued by threads first .. first + count - 1 only, element
+// by element, so the other threads go on with their own work; every thread
+// commits (an empty group for those that issued nothing).
+__device__ __forceinline__ void m2s_tile_fetch_by(
+    float* __restrict__ sh, const float* __restrict__ gl, int hd, int ds, int first, int count
+) {
+    const int me = (int)threadIdx.x - first;
+    if (me >= 0 && me < count) {
+        int p = me / ds, n = me - (me / ds) * ds;
+        for (int e = me; e < hd * ds; e += count) {
+            m2s_cp4(sh + p * (ds + 1) + n, gl + e);
+            n += count;
+            while (n >= ds) {
+                n -= ds;
+                p++;
+            }
+        }
+    }
+    m2s_cp_commit();
+}
+
 // Two sums of the values of the first `n` threads (a whole number of warps)
 // through mimo-style fixed trees at once (the tree of m2s_bwd: width the
 // power of two at or above n, then red[t] += red[t + w] for w halving), the
@@ -2007,8 +2028,26 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
             }
             __syncthreads();
             // dS[p][n] += dy[p] C[n], each element its own step, over the
-            // whole block.
-            {
+            // whole block: a thread keeps one n and takes four rows at a time
+            // when the block is a whole number of rows wide.
+            if (blockDim.x % ds == 0) {
+                const int n = tid % ds, step = blockDim.x / ds;
+                const float cn = c_sm[n];
+                for (int p0 = tid / ds; p0 < hd; p0 += 4 * step) {
+                    float dv[4], yv[4];
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int p = min(p0 + u * step, hd - 1);
+                        dv[u] = dsr[p * ld + n];
+                        yv[u] = dyS[p];
+                    }
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int p = p0 + u * step;
+                        if (p < hd) dsr[p * ld + n] = __fmaf_rn(yv[u], cn, dv[u]);
+                    }
+                }
+            } else {
                 int p = tid / ds, n = tid - (tid / ds) * ds;
                 for (int e = tid; e < hd * ds; e += blockDim.x) {
                     float* d = dsr + p * ld + n;
@@ -2037,13 +2076,24 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
             __syncthreads();
             // The tile of the state after this token is free: the state
             // before the next token (the one before this) comes into it
-            // while the rest of this step runs.
+            // while the rest of this step runs, issued by the threads past
+            // the channels' two chains when the block has them.
+            const bool split = (int)blockDim.x >= lanes + hd;
+            const int helpers = (int)blockDim.x - lanes - hd;
             if (t > t0) {
-                m2s_tile_fetch(cur, slot > 1 ? rec + (bh * stride + slot - 2) * pn : ck, hd, ds);
+                const float* src = slot > 1 ? rec + (bh * stride + slot - 2) * pn : ck;
+                if (split && helpers >= 32)
+                    m2s_tile_fetch_by(cur, src, hd, ds, lanes + hd, helpers);
+                else
+                    m2s_tile_fetch(cur, src, hd, ds);
             }
+            // Per channel row the dt chain (sx = dS . B) and the alpha chain
+            // (dS . the state before the token), n ascending; with room they
+            // run on two threads (the alpha chain's sum goes through its slot
+            // of the block sums), then the whole block scales dS by alpha.
             float ddt_loc = 0.0f, dal_loc = 0.0f;
             if (own) {
-                float* drow = dsr + tid * ld;
+                const float* drow = dsr + tid * ld;
                 const float* prow = prev + tid * ld;
                 float sx = 0.0f;
                 int n = 0;
@@ -2057,24 +2107,54 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
 #pragma unroll
                         for (int j = 0; j < 4; j++) {
                             dv[j] = drow[n + j];
-                            pv[j] = prow[n + j];
+                            pv[j] = split ? 0.0f : prow[n + j];
                         }
 #pragma unroll
                         for (int j = 0; j < 4; j++) {
                             sx = __fmaf_rn(dv[j], bb[j], sx);
-                            dal_loc = __fmaf_rn(dv[j], pv[j], dal_loc);
-                            drow[n + j] = __fmul_rn(alpha, dv[j]);
+                            if (!split) dal_loc = __fmaf_rn(dv[j], pv[j], dal_loc);
                         }
                     }
                 }
                 for (; n < ds; n++) {
                     const float dsv = drow[n];
                     sx = __fmaf_rn(dsv, b_sm[n], sx);
-                    dal_loc = __fmaf_rn(dsv, prow[n], dal_loc);
-                    drow[n] = __fmul_rn(alpha, dsv);
+                    if (!split) dal_loc = __fmaf_rn(dsv, prow[n], dal_loc);
                 }
                 dxbc[xrow + (long long)h * hd + tid] = __fmaf_rn(dt, sx, __fmul_rn(dval, dyv));
                 ddt_loc = __fmul_rn(xp, sx);
+            } else if (split && tid >= lanes && tid < lanes + hd) {
+                const int p = tid - lanes;
+                const float* drow = dsr + p * ld;
+                const float* prow = prev + p * ld;
+                float dal = 0.0f;
+                int n = 0;
+                for (; n + 4 <= ds; n += 4) {
+                    float dv[4], pv[4];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        dv[j] = drow[n + j];
+                        pv[j] = prow[n + j];
+                    }
+#pragma unroll
+                    for (int j = 0; j < 4; j++) dal = __fmaf_rn(dv[j], pv[j], dal);
+                }
+                for (; n < ds; n++) dal = __fmaf_rn(drow[n], prow[n], dal);
+                red[lanes + p] = dal;
+            }
+            __syncthreads();
+            if (split && own) dal_loc = red[lanes + tid];
+            {
+                int p = tid / ds, n = tid - (tid / ds) * ds;
+                for (int e = tid; e < hd * ds; e += blockDim.x) {
+                    float* d = dsr + p * ld + n;
+                    *d = __fmul_rn(alpha, *d);
+                    n += blockDim.x;
+                    while (n >= ds) {
+                        n -= ds;
+                        p++;
+                    }
+                }
             }
             const float2 sums = m2s_block_sum2(ddt_loc, dal_loc, red, lanes);
             if (tid == 0) {
