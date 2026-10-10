@@ -345,31 +345,54 @@ DEFINE_M2_CHUNK_STATE(m2_chunk_state_f16, __half)
 // The states across chunks: the state entering chunk c replaces S_c in
 // `states`, and the carried state `ssm` ([B, H, P, N]) ends as the state
 // after the window: h_c = e^Acs_last h_{c-1} + S_c. One thread per
-// (b, h, p, n) walking the chunks. Grid (B * H, ceil(P * N / blockDim.x)).
+// (b, h, p, n) walking the chunks, the chunks' decays computed once per
+// block into shared memory (M2_PASS_WINDOW chunks at a time) and the next
+// four chunks' S loaded ahead, so a step waits on one fma rather than on
+// memory. Grid (B * H, ceil(P * N / blockDim.x)).
+#define M2_PASS_WINDOW 1024
 extern "C" __global__ void m2_state_passing(
     float* __restrict__ states,
     float* __restrict__ ssm,
     const float* __restrict__ acs,
     int batch, int seq, int nh, int hd, int ds
 ) {
+    __shared__ float decay[M2_PASS_WINDOW];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bh = blockIdx.x;
     const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * ds;
-    if (bh >= (long long)batch * nh || e >= pn) return;
+    if (bh >= (long long)batch * nh) return;
+    const bool live = e < pn;
     const long long b = bh / nh;
     const int h = (int)(bh % nh);
-    float st = ssm[bh * pn + e];
-    for (int c = 0; c < nc; c++) {
-        const int lc = min(M2_CHUNK, seq - c * M2_CHUNK);
-        const long long bc = b * nc + c;
-        const long long idx = (bc * nh + h) * pn + e;
-        const float s_c = states[idx];
-        states[idx] = st;
-        const float eacs = m2_exp(acs[(bc * nh + h) * M2_CHUNK + lc - 1]);
-        st = __fmaf_rn(eacs, st, s_c);
+    const long long cstride = (long long)nh * pn;
+    const long long base = (b * nc * nh + h) * pn + e;
+    float st = live ? ssm[bh * pn + e] : 0.0f;
+    float ring[4];
+#pragma unroll
+    for (int k = 0; k < 4; k++) ring[k] = live && k < nc ? states[base + k * cstride] : 0.0f;
+    for (int c0 = 0; c0 < nc; c0 += M2_PASS_WINDOW) {
+        const int cn = min(M2_PASS_WINDOW, nc - c0);
+        __syncthreads();
+        for (int i = threadIdx.x; i < cn; i += blockDim.x) {
+            const int c = c0 + i;
+            const int lc = min(M2_CHUNK, seq - c * M2_CHUNK);
+            decay[i] = m2_exp(acs[((b * nc + c) * nh + h) * M2_CHUNK + lc - 1]);
+        }
+        __syncthreads();
+        if (!live) continue;
+        for (int i = 0; i < cn; i++) {
+            const int c = c0 + i;
+            const float s_c = ring[0];
+            ring[0] = ring[1];
+            ring[1] = ring[2];
+            ring[2] = ring[3];
+            ring[3] = c + 4 < nc ? states[base + (c + 4) * cstride] : 0.0f;
+            states[base + c * cstride] = st;
+            st = __fmaf_rn(decay[i], st, s_c);
+        }
     }
-    ssm[bh * pn + e] = st;
+    if (live) ssm[bh * pn + e] = st;
 }
 
 // The outputs: y_t[p] = (sum_n C_t[n] h_prev[p][n]) e^Acs_t

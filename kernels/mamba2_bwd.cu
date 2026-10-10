@@ -160,27 +160,51 @@ DEFINE_M2B_DHLOC(m2b_dhloc_f16, __half)
 
 // The state passing backward, in place: dS holds dH_loc on entry and
 // dS[c] = d H_c+1 on exit, from zero after the last chunk:
-// e <- dH_loc[c] + e^Acs_last e. Grid (B * H, ceil(P * N / blockDim.x)).
+// e <- dH_loc[c] + e^Acs_last e. As m2_state_passing, the decays sit in
+// shared memory and the next four chunks are loaded ahead.
+// Grid (B * H, ceil(P * N / blockDim.x)).
 extern "C" __global__ void m2b_state_passing(
     float* __restrict__ ds,
     const float* __restrict__ acs,
     int batch, int seq, int nh, int hd, int dstate
 ) {
+    __shared__ float decay[M2_PASS_WINDOW];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bh = blockIdx.x;
     const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * dstate;
-    if (bh >= (long long)batch * nh || e >= pn) return;
+    if (bh >= (long long)batch * nh) return;
+    const bool live = e < pn;
     const long long b = bh / nh;
     const int h = (int)(bh % nh);
+    const long long cstride = (long long)nh * pn;
+    const long long base = (b * nc * nh + h) * pn + e;
     float ev = 0.0f;
-    for (int c = nc - 1; c >= 0; c--) {
-        const int lc = min(M2_CHUNK, seq - c * M2_CHUNK);
-        const long long bc = b * nc + c;
-        const long long idx = (bc * nh + h) * pn + e;
-        const float tmp = ds[idx];
-        ds[idx] = ev;
-        ev = __fmaf_rn(m2_exp(acs[(bc * nh + h) * M2_CHUNK + lc - 1]), ev, tmp);
+    float ring[4];
+#pragma unroll
+    for (int k = 0; k < 4; k++) {
+        const int c = nc - 1 - k;
+        ring[k] = live && c >= 0 ? ds[base + c * cstride] : 0.0f;
+    }
+    for (int c1 = nc; c1 > 0; c1 -= M2_PASS_WINDOW) {
+        const int c0 = max(0, c1 - M2_PASS_WINDOW);
+        __syncthreads();
+        for (int i = threadIdx.x; i < c1 - c0; i += blockDim.x) {
+            const int c = c0 + i;
+            const int lc = min(M2_CHUNK, seq - c * M2_CHUNK);
+            decay[i] = m2_exp(acs[((b * nc + c) * nh + h) * M2_CHUNK + lc - 1]);
+        }
+        __syncthreads();
+        if (!live) continue;
+        for (int c = c1 - 1; c >= c0; c--) {
+            const float tmp = ring[0];
+            ring[0] = ring[1];
+            ring[1] = ring[2];
+            ring[2] = ring[3];
+            ring[3] = c - 4 >= 0 ? ds[base + (c - 4) * cstride] : 0.0f;
+            ds[base + c * cstride] = ev;
+            ev = __fmaf_rn(decay[c - c0], ev, tmp);
+        }
     }
 }
 
