@@ -1693,23 +1693,46 @@ extern "C" __global__ void m3mb_sum_inner(
 // out[j] (+)= sum_r parts[r][j] over `rows` rows of `dim` columns: the same
 // per-thread strided sums and halving tree as the shared reduce_sum_axis0,
 // so the same bits, with 64-bit indices for windows whose rows * dim pass
-// 2^31. Grid (dim), block a power of two up to 256, its floats of shared
-// memory.
+// 2^31. That reduction's `width` threads (a power of two up to 256) each
+// sum the rows v, v + width, ... of a column; here a block takes `cw`
+// neighbouring columns (8, 16 or 32) and runs those sums for all of them,
+// a lane a column, so a warp's loads cover whole sectors of a row instead
+// of one float of 32 rows. Grid ceil(dim / cw), block 256, shared memory
+// width * cw floats.
 extern "C" __global__ void m3mb_reduce_rows(
     float* __restrict__ out, const float* __restrict__ parts,
-    long long rows, long long dim, int accumulate
+    long long rows, long long dim, int width, int cw, int accumulate
 ) {
-    extern __shared__ float m3mb_red[];
-    const long long d = blockIdx.x;
-    if (d >= dim) return;
-    const int tid = threadIdx.x;
-    float sum = 0.0f;
-    for (long long r = tid; r < rows; r += blockDim.x) sum += parts[r * dim + d];
-    m3mb_red[tid] = sum;
+    extern __shared__ float m3mb_red[];  // [width][cw]
+    const int lane = threadIdx.x & 31;
+    const int c = lane % cw;
+    const int slots = (blockDim.x >> 5) * (32 / cw);
+    const int slot = (threadIdx.x >> 5) * (32 / cw) + lane / cw;
+    const long long col = (long long)blockIdx.x * cw + c;
+    const bool live = col < dim;
+    // Eight of the thread's sums at once: their loads are independent, the
+    // adds of each stay in row order.
+    for (int v0 = slot; v0 < width; v0 += 8 * slots) {
+        float sum[8];
+#pragma unroll
+        for (int u = 0; u < 8; u++) sum[u] = 0.0f;
+        for (long long r0 = v0; r0 < rows; r0 += width) {
+#pragma unroll
+            for (int u = 0; u < 8; u++) {
+                const long long r = r0 + (long long)u * slots;
+                if (live && v0 + u * slots < width && r < rows) sum[u] += parts[r * dim + col];
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < 8; u++) {
+            const int v = v0 + u * slots;
+            if (v < width) m3mb_red[v * cw + c] = sum[u];
+        }
+    }
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) m3mb_red[tid] += m3mb_red[tid + s];
+    for (int s = width / 2; s > 0; s >>= 1) {
+        for (int v = slot; v < s; v += slots) m3mb_red[v * cw + c] += m3mb_red[(v + s) * cw + c];
         __syncthreads();
     }
-    if (tid == 0) out[d] = accumulate ? out[d] + m3mb_red[0] : m3mb_red[0];
+    if (slot == 0 && live) out[col] = accumulate ? out[col] + m3mb_red[c] : m3mb_red[c];
 }

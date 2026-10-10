@@ -1137,7 +1137,9 @@ impl Mamba3MimoGpuTrainer {
 
     /// The MIMO module's row reduction: the shared reduce_sum_axis0's
     /// order (so its bits) with 64-bit indices, since a training window's
-    /// per-row partials can pass 2^31 elements.
+    /// per-row partials can pass 2^31 elements. A block takes 32
+    /// neighbouring columns when there are enough of them to fill the GPU,
+    /// else 8, so narrow reductions still spread over blocks.
     fn reduce_rows(
         &self,
         out: u64,
@@ -1145,18 +1147,22 @@ impl Mamba3MimoGpuTrainer {
         (rows, dim): (usize, usize),
         accumulate: bool,
     ) -> Result<(), String> {
-        let block = (rows as u32).next_power_of_two().clamp(32, 256);
+        let width = (rows as u32).next_power_of_two().clamp(32, 256);
+        let cw: u32 = if dim >= 4096 { 32 } else { 8 };
         let (rows_i, dim_i, acc) = (rows as i64, dim as i64, i32::from(accumulate));
+        let (width_i, cw_i) = (width as i32, cw as i32);
         let mut bld = self.ctx.stream.launch_builder(&self.kernels.cb.reduce_rows);
         bld.arg(&out);
         bld.arg(&parts);
         bld.arg(&rows_i);
         bld.arg(&dim_i);
+        bld.arg(&width_i);
+        bld.arg(&cw_i);
         bld.arg(&acc);
         let cfg = LaunchConfig {
-            grid_dim: (dim as u32, 1, 1),
-            block_dim: (block, 1, 1),
-            shared_mem_bytes: block * 4,
+            grid_dim: ((dim as u32).div_ceil(cw), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: width * cw * 4,
         };
         unsafe { bld.launch(cfg) }
             .map(|_| ())
