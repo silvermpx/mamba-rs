@@ -4,6 +4,8 @@
 //! reference module is state-spaces/mamba `mamba_ssm/modules/mamba3.py`
 //! with `is_mimo=True`.
 
+use crate::config::ScanMode;
+
 /// Configuration for a Mamba-3 MIMO backbone.
 ///
 /// MIMO keeps one state per head but feeds it `mimo_rank` key/value pairs
@@ -43,6 +45,12 @@ pub struct Mamba3MimoConfig {
     /// The gated MLP after the mixer in every layer; 0 means no MLP. The
     /// hidden width is this value rounded up to a multiple of 128.
     pub d_intermediate: usize,
+    /// Which scan the GPU runs over a window, as for Mamba-1 and Mamba-3
+    /// SISO: the sequential recurrence (the decode step token by token) or
+    /// the chunked scan. See [`Self::prefill_parallel`] and
+    /// [`Self::train_use_parallel_scan`]. The CPU always runs the
+    /// recurrence.
+    pub scan_mode: ScanMode,
 }
 
 /// The largest rank: each state row keeps one readout accumulator per
@@ -53,6 +61,23 @@ pub const MAX_MIMO_RANK: usize = 16;
 pub const MAX_D_STATE: usize = 256;
 
 impl Mamba3MimoConfig {
+    /// Whether a prompt window of `seq_len` tokens runs the chunked scan:
+    /// `Sequential` and `Parallel` as named, `Auto` the chunked scan above
+    /// [`ScanMode::PARALLEL_SCAN_THRESHOLD`] tokens.
+    pub fn prefill_parallel(&self, seq_len: usize) -> bool {
+        match self.scan_mode {
+            ScanMode::Sequential => false,
+            ScanMode::Parallel => true,
+            ScanMode::Auto => seq_len > ScanMode::PARALLEL_SCAN_THRESHOLD,
+        }
+    }
+
+    /// Whether training runs the chunked scan: every mode but `Sequential`,
+    /// as Mamba-3 SISO resolves it.
+    pub fn train_use_parallel_scan(&self) -> bool {
+        !matches!(self.scan_mode, ScanMode::Sequential)
+    }
+
     /// The gated MLP's hidden width, 0 when the model has none.
     pub fn mlp_hidden(&self) -> usize {
         crate::mlp::mlp_hidden(self.d_intermediate)
@@ -132,8 +157,12 @@ impl Mamba3MimoConfig {
                 self.rope_fraction
             ));
         }
-        if self.a_floor.is_nan() || self.a_floor <= 0.0 {
-            return Err(format!("a_floor must be positive, got {}", self.a_floor));
+        // The reference clamps A at -A_floor; zero is legal and never clamps.
+        if self.a_floor.is_nan() || self.a_floor < 0.0 {
+            return Err(format!(
+                "a_floor must be non-negative, got {}",
+                self.a_floor
+            ));
         }
         if self.n_layers < 1 {
             return Err("n_layers must be >= 1".into());
@@ -174,6 +203,7 @@ impl Default for Mamba3MimoConfig {
             rms_norm_eps: 1e-5,
             ssm_norm_eps: 1e-5,
             d_intermediate: 0,
+            scan_mode: ScanMode::Auto,
         }
     }
 }

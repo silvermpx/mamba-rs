@@ -41,6 +41,9 @@ pub struct Mamba3MimoTape {
     seq_len: usize,
     stride: usize,
     input_dim: usize,
+    /// Set by a forward that completed, cleared when one starts: the
+    /// backward reads only a window the forward wrote whole.
+    filled: bool,
     input: Vec<f32>,
     final_in: Vec<f32>,
     layers: Vec<LayerTape>,
@@ -53,6 +56,7 @@ impl Mamba3MimoTape {
             seq_len,
             stride: stride.max(1),
             input_dim,
+            filled: false,
             input: vec![0.0; seq_len * input_dim],
             final_in: vec![0.0; seq_len * dm],
             layers: (0..cfg.n_layers)
@@ -87,6 +91,8 @@ pub struct Mamba3MimoTrainScratch {
     d_tanh: Vec<f32>,
     d_post: Vec<f32>,
     heads: Vec<HeadScratch>,
+    /// The (heads, rank, d_state, headdim, angles) `heads` was sized for.
+    head_shape: (usize, usize, usize, usize, usize),
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
 }
@@ -183,9 +189,21 @@ pub fn forward_mamba3_mimo_train(
     if cfg.is_outproj_norm {
         return Err("the gated output norm does not train on the CPU yet".into());
     }
+    let n = cfg.n_layers;
+    if w.layers.len() != n || states.len() != n || tape.layers.len() != n {
+        return Err(format!(
+            "a {n}-layer model trains with {n} layer weights, states and tape layers; got {}, \
+             {} and {}",
+            w.layers.len(),
+            states.len(),
+            tape.layers.len()
+        ));
+    }
+    tape.filled = false;
     let t_len = tape.seq_len;
     let dm = cfg.d_model;
     if t_len == 0 {
+        tape.filled = true;
         return Ok(());
     }
     tape.input.copy_from_slice(&input[..t_len * tape.input_dim]);
@@ -203,8 +221,16 @@ pub fn forward_mamba3_mimo_train(
             dm,
         );
     }
-    if s.heads.len() != cfg.nheads() {
+    let head_shape = (
+        cfg.nheads(),
+        cfg.mimo_rank,
+        cfg.d_state,
+        cfg.headdim,
+        cfg.num_rope_angles(),
+    );
+    if s.head_shape != head_shape || s.heads.len() != cfg.nheads() {
         s.heads = (0..cfg.nheads()).map(|_| HeadScratch::new(cfg)).collect();
+        s.head_shape = head_shape;
     }
     let stride = tape.stride;
     for (l, ((lw, st), lt)) in w
@@ -232,6 +258,7 @@ pub fn forward_mamba3_mimo_train(
     {
         row_norm(o, x, &w.norm_f_weight, cfg.rms_norm_eps);
     }
+    tape.filled = true;
     Ok(())
 }
 
@@ -320,18 +347,32 @@ fn row_norm_backward(d_rows: &mut [f32], x_rows: &[f32], (w, gw): (&[f32], &mut 
 /// The backward of [`forward_mamba3_mimo_train`]: `d_out` holds d loss /
 /// d (the outputs) and is used as scratch; `d_input` (empty to skip)
 /// receives d loss / d (the inputs); the weight gradients accumulate into
-/// `grads`, shaped like `w`.
+/// `grads`, shaped like `w`. The gradients stop at the states the window
+/// started from (they are inputs of the window, not parameters). A tape no
+/// completed forward filled, or one of another model, is refused.
 pub fn backward_mamba3_mimo_train(
     d_out: &mut [f32],
     d_input: &mut [f32],
     (w, grads): (&Mamba3MimoWeights, &mut Mamba3MimoWeights),
     tape: &Mamba3MimoTape,
     (cfg, s): (&Mamba3MimoConfig, &mut Mamba3MimoTrainScratch),
-) {
+) -> Result<(), String> {
+    if cfg.is_outproj_norm {
+        return Err("the gated output norm does not train on the CPU yet".into());
+    }
+    if !tape.filled {
+        return Err("the tape holds no completed forward window".into());
+    }
+    let n = cfg.n_layers;
+    if w.layers.len() != n || grads.layers.len() != n || tape.layers.len() != n {
+        return Err(format!(
+            "a {n}-layer model's backward needs {n} layer weights, gradients and tape layers"
+        ));
+    }
     let t_len = tape.seq_len;
     let dm = cfg.d_model;
     if t_len == 0 {
-        return;
+        return Ok(());
     }
     let d_rows = &mut d_out[..t_len * dm];
     row_norm_backward(
@@ -384,6 +425,7 @@ pub fn backward_mamba3_mimo_train(
     } else if !d_input.is_empty() {
         d_input[..t_len * dm].copy_from_slice(d_rows);
     }
+    Ok(())
 }
 
 /// One token of one head, as the forward ran it, with what the backward
@@ -728,8 +770,10 @@ fn layer_backward(
                 d_dt += d_gamma * rr.lam;
                 let d_a = d_alpha * rr.alpha * rr.dt;
                 d_dt += d_alpha * rr.alpha * rr.a;
-                let d_trap =
-                    d_lam * rr.lam * (1.0 - rr.lam) - d_lam_c * rr.lam_c * (1.0 - rr.lam_c);
+                // lam (1 - lam) is lam * lam_c exactly, and lam_c is computed as
+                // sigmoid(-trap) so it keeps its digits when trap is large; the
+                // subtraction from one would round the tails to zero.
+                let d_trap = (d_lam - d_lam_c) * (rr.lam * rr.lam_c);
                 let dd_a = tok.dd_a[h];
                 let unclamped = -heavy_tail(dd_a) <= -cfg.a_floor;
                 let d_dd_a = if unclamped {

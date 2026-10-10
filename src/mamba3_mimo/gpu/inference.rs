@@ -10,7 +10,10 @@
 
 use cudarc::driver::PushKernelArg;
 
-use super::kernels::{Mamba3MimoKernels, SCAN_SMEM_MAX, scan_cfg, scan_smem_bytes};
+use super::kernels::{
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, chunked_geom, scan_cfg, scan_smem_bytes,
+};
+use crate::config::ScanMode;
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
 };
@@ -18,7 +21,7 @@ use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 
@@ -70,19 +73,32 @@ pub struct Mamba3MimoGpuWindow {
     mlp_up: DtypedBuf,
     mlp_act: DtypedBuf,
     final_rows: GpuBuffer,
+    /// The chunked path's per-token scalars `[B, T, H, 4]`, angle sines and
+    /// cosines `[B, T, H, na]`, first-token lead `[B, H]`, chunk
+    /// contributions and entering states `[B, nc, H, P, N]` (one element
+    /// each when the window runs the recurrence).
+    coef: GpuBuffer,
+    sn: GpuBuffer,
+    cs: GpuBuffer,
+    e0: GpuBuffer,
+    contrib: GpuBuffer,
+    enter: GpuBuffer,
 }
 
 /// The MIMO decode and prefill engine.
 pub struct Mamba3MimoGpuEngine {
     pub kernels: Mamba3MimoKernels,
     pub ctx: GpuCtx,
-    pub cfg: Mamba3MimoConfig,
-    pub batch: usize,
-    pub input_dim: usize,
+    cfg: Mamba3MimoConfig,
+    batch: usize,
+    input_dim: usize,
     act: WeightDtype,
     layers: Vec<GpuMimoLayer>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
+    /// The chunked scan's launch geometry on this device, `None` when one
+    /// of its kernels cannot fit (the windows then run the recurrence).
+    chunked: Option<ChunkedGeom>,
 }
 
 impl Mamba3MimoGpuEngine {
@@ -118,19 +134,6 @@ impl Mamba3MimoGpuEngine {
         if cfg.is_outproj_norm {
             return Err("the gated output norm does not run on the GPU yet".into());
         }
-        let smem = scan_smem_bytes(
-            cfg.headdim,
-            cfg.d_state,
-            cfg.mimo_rank,
-            cfg.num_rope_angles(),
-        );
-        if smem > SCAN_SMEM_MAX || cfg.headdim > 1024 {
-            return Err(format!(
-                "a head of {} channels and {} states needs {smem} bytes of shared memory; \
-                 the GPU scan serves {SCAN_SMEM_MAX}",
-                cfg.headdim, cfg.d_state
-            ));
-        }
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -142,6 +145,30 @@ impl Mamba3MimoGpuEngine {
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
+        let (hd, ds, rank) = (cfg.headdim, cfg.d_state, cfg.mimo_rank);
+        if cfg.d_model < 32 {
+            return Err(format!(
+                "the GPU row norm reduces whole warps; d_model {} is below 32",
+                cfg.d_model
+            ));
+        }
+        let smem = scan_smem_bytes(hd, ds, rank, cfg.num_rope_angles());
+        if smem > kernels.smem_optin || hd > 1024 {
+            return Err(format!(
+                "a head of {hd} channels and {ds} states needs {smem} bytes of shared memory; \
+                 this GPU serves {}",
+                kernels.smem_optin
+            ));
+        }
+        let chunked = chunked_geom((hd, ds, rank), kernels.smem_optin, false);
+        if cfg.scan_mode == ScanMode::Parallel && chunked.is_none() {
+            return Err(format!(
+                "the chunked scan of a rank-{rank} head of {hd} channels and {ds} states does \
+                 not fit this GPU's {} bytes of shared memory; ScanMode::Auto runs it by the \
+                 recurrence",
+                kernels.smem_optin
+            ));
+        }
         let s = &ctx.stream;
         let up = |v: &[f32]| GpuBuffer::from_cpu(s, v);
         let typed = |v: &[f32]| -> Result<DtypedBuf, String> {
@@ -197,11 +224,59 @@ impl Mamba3MimoGpuEngine {
             layers,
             input_proj,
             norm_f_weight,
+            chunked,
         })
+    }
+
+    /// Whether a window of `t_len` tokens runs the chunked scan: the
+    /// config's choice, when the chunked kernels fit this device.
+    fn use_chunked(&self, t_len: usize) -> bool {
+        t_len > 1 && self.cfg.prefill_parallel(t_len) && self.chunked.is_some()
     }
 
     pub fn ctx(&self) -> &GpuCtx {
         &self.ctx
+    }
+
+    /// The model's configuration.
+    pub fn cfg(&self) -> &Mamba3MimoConfig {
+        &self.cfg
+    }
+
+    /// Sequences per call.
+    pub fn batch(&self) -> usize {
+        self.batch
+    }
+
+    /// Input features per token.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// A host slice must hold `rows * width` values for this engine.
+    fn check_host_len(what: &str, len: usize, want: usize) -> Result<(), String> {
+        if len == want {
+            Ok(())
+        } else {
+            Err(format!(
+                "{what} holds {len} values; this engine takes {want}"
+            ))
+        }
+    }
+
+    /// A state of this engine's batch and model: another engine's would be
+    /// read and written past its end.
+    fn check_state(&self, st: &Mamba3MimoGpuState) -> Result<(), String> {
+        let c = &self.cfg;
+        let (l, b, nh) = (c.n_layers, self.batch, c.nheads());
+        if st.ssm.len() != l * b * nh * c.headdim * c.d_state
+            || st.k.len() != l * b * nh * c.mimo_rank * c.d_state
+            || st.v.len() != l * b * nh * c.headdim
+            || st.angle.len() != (l * b * nh * c.num_rope_angles()).max(1)
+        {
+            return Err("the state was not allocated by this engine".into());
+        }
+        Ok(())
     }
 
     pub fn alloc_state(&self) -> Result<Mamba3MimoGpuState, String> {
@@ -221,10 +296,27 @@ impl Mamba3MimoGpuEngine {
     pub fn alloc_window(&self, seq_len: usize) -> Result<Mamba3MimoGpuWindow, String> {
         let c = &self.cfg;
         let rows = self.batch * seq_len;
+        let widest = [
+            self.input_dim,
+            c.in_proj_out_dim(),
+            c.bc_width(),
+            c.d_inner(),
+            2 * c.mlp_hidden(),
+            c.d_model,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        validate_rows_capacity(rows, widest)?;
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
         let typed = |n: usize| DtypedBuf::zeros(s, n.max(1), self.act);
         let hidden = c.mlp_hidden();
+        // A decode step (one token) always runs the recurrence.
+        let chunked = self.use_chunked(seq_len);
+        let ch = |n: usize| if chunked { n } else { 1 };
+        let (nh, na) = (c.nheads(), c.num_rope_angles());
+        let nc = seq_len.div_ceil(CHUNK);
         Ok(Mamba3MimoGpuWindow {
             seq_len,
             input: z(rows * self.input_dim)?,
@@ -239,6 +331,12 @@ impl Mamba3MimoGpuEngine {
             mlp_up: typed(rows * 2 * hidden)?,
             mlp_act: typed(rows * hidden)?,
             final_rows: z(rows * c.d_model)?,
+            coef: z(ch(rows * nh * 4))?,
+            sn: z(ch(rows * nh * na))?,
+            cs: z(ch(rows * nh * na))?,
+            e0: z(ch(self.batch * nh))?,
+            contrib: z(ch(self.batch * nc * nh * c.headdim * c.d_state))?,
+            enter: z(ch(self.batch * nc * nh * c.headdim * c.d_state))?,
         })
     }
 
@@ -253,6 +351,15 @@ impl Mamba3MimoGpuEngine {
         state: &mut Mamba3MimoGpuState,
         win: &mut Mamba3MimoGpuWindow,
     ) -> Result<(), String> {
+        let rows = self.batch * win.seq_len;
+        Self::check_host_len("input", input.len(), rows * self.input_dim)?;
+        Self::check_host_len("output", rows_out.len(), rows * self.cfg.d_model)?;
+        Self::check_host_len(
+            "window buffers",
+            win.input.len(),
+            (rows * self.input_dim).max(1),
+        )?;
+        self.check_state(state)?;
         win.input.upload(&self.ctx.stream, input)?;
         self.kernels_on_stream(state, win)?;
         self.ctx
@@ -318,6 +425,50 @@ impl Mamba3MimoGpuEngine {
         unsafe { bld.launch(grid_1d(n)) }
             .map(|_| ())
             .map_err(|e| format!("MIMO residual: {e:?}"))
+    }
+
+    /// One layer's scan over the window by the chunked path.
+    fn chunked_scan(
+        &self,
+        lw: &GpuMimoLayer,
+        (ssm, kst, vst, ang): (u64, u64, u64, u64),
+        win: &Mamba3MimoGpuWindow,
+        l: usize,
+    ) -> Result<(), String> {
+        let ptrs = MimoChunkedPtrs {
+            proj: win.proj.cached_ptr(),
+            bn: win.bn.cached_ptr(),
+            cn: win.cn.cached_ptr(),
+            out: win.gated.cached_ptr(),
+            y_out: 0,
+            coef: win.coef.cached_ptr(),
+            sn: win.sn.cached_ptr(),
+            cs: win.cs.cached_ptr(),
+            e0: win.e0.cached_ptr(),
+            contrib: win.contrib.cached_ptr(),
+            enter: win.enter.cached_ptr(),
+            ssm,
+            kst,
+            vst,
+            ang,
+            dt_bias: lw.dt_bias.cached_ptr(),
+            b_bias: lw.b_bias.cached_ptr(),
+            c_bias: lw.c_bias.cached_ptr(),
+            d: lw.d_param.cached_ptr(),
+            mimo_x: lw.mimo_x.cached_ptr(),
+            mimo_z: lw.mimo_z.cached_ptr(),
+            mimo_o: lw.mimo_o.cached_ptr(),
+        };
+        let x = MimoExec {
+            ctx: &self.ctx,
+            kernels: &self.kernels,
+            cfg: &self.cfg,
+            act: self.act,
+        };
+        let geom = self
+            .chunked
+            .ok_or("the chunked scan does not fit this GPU")?;
+        launch_chunked_scan(x, &ptrs, &geom, (self.batch, win.seq_len), l)
     }
 
     fn kernels_on_stream(
@@ -414,11 +565,16 @@ impl Mamba3MimoGpuEngine {
                 };
                 unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO B/C norm L{l}: {e:?}"))?;
             }
-            {
-                let ssm = state.ssm.cached_ptr() + l as u64 * per(hd * ds);
-                let kst = state.k.cached_ptr() + l as u64 * per(r * ds);
-                let vst = state.v.cached_ptr() + l as u64 * per(hd);
-                let ang = state.angle.cached_ptr() + l as u64 * per(na);
+            let states = (
+                state.ssm.cached_ptr() + l as u64 * per(hd * ds),
+                state.k.cached_ptr() + l as u64 * per(r * ds),
+                state.v.cached_ptr() + l as u64 * per(hd),
+                state.angle.cached_ptr() + l as u64 * per(na),
+            );
+            if self.use_chunked(t_len) {
+                self.chunked_scan(lw, states, win, l)?;
+            } else {
+                let (ssm, kst, vst, ang) = states;
                 let ptrs = [
                     lw.dt_bias.cached_ptr(),
                     lw.b_bias.cached_ptr(),
@@ -504,4 +660,246 @@ impl Mamba3MimoGpuEngine {
             (rows, false),
         )
     }
+}
+
+/// The context, module, shape and activation dtype a MIMO launch needs,
+/// shared by the engine and the trainer.
+#[derive(Clone, Copy)]
+pub(crate) struct MimoExec<'a> {
+    pub ctx: &'a GpuCtx,
+    pub kernels: &'a Mamba3MimoKernels,
+    pub cfg: &'a Mamba3MimoConfig,
+    pub act: WeightDtype,
+}
+
+/// One layer's chunked scan, as device pointers: its rows, its scratch,
+/// the states it carries (this layer's slices) and its weights. `y_out` (0
+/// for none) receives the readouts the training backward reads.
+#[derive(Clone, Copy)]
+pub(crate) struct MimoChunkedPtrs {
+    pub proj: u64,
+    pub bn: u64,
+    pub cn: u64,
+    pub out: u64,
+    pub y_out: u64,
+    pub coef: u64,
+    pub sn: u64,
+    pub cs: u64,
+    pub e0: u64,
+    pub contrib: u64,
+    pub enter: u64,
+    pub ssm: u64,
+    pub kst: u64,
+    pub vst: u64,
+    pub ang: u64,
+    pub dt_bias: u64,
+    pub b_bias: u64,
+    pub c_bias: u64,
+    pub d: u64,
+    pub mimo_x: u64,
+    pub mimo_z: u64,
+    pub mimo_o: u64,
+}
+
+/// One layer's scan over a window of `t_len` tokens of `b` sequences by the
+/// chunked path: the step scalars and angles, each chunk's state, the
+/// state passing (from the carried state with the first token's lead
+/// term), the outputs and the gate into `ptrs.out`, the carried keys and
+/// input.
+pub(crate) fn launch_chunked_scan(
+    x: MimoExec<'_>,
+    ptrs: &MimoChunkedPtrs,
+    geom: &ChunkedGeom,
+    (b, t_len): (usize, usize),
+    l: usize,
+) -> Result<(), String> {
+    let c = x.cfg;
+    let nc = t_len.div_ceil(CHUNK);
+    let (di, bc) = (c.d_inner(), c.bc_width());
+    let (nh, hd, ds, r, ng, na) = (
+        c.nheads(),
+        c.headdim,
+        c.d_state,
+        c.mimo_rank,
+        c.ngroups,
+        c.num_rope_angles(),
+    );
+    let heads = 2 * di + 2 * bc;
+    let ang_col = heads + 3 * nh;
+    let ld_proj = c.in_proj_out_dim() as i64;
+    let stream = &x.ctx.stream;
+    let MimoChunkedPtrs {
+        proj,
+        bn,
+        cn,
+        out: gated,
+        y_out,
+        coef,
+        sn,
+        cs,
+        e0,
+        contrib,
+        enter,
+        ssm,
+        kst,
+        vst,
+        ang,
+        dt_bias,
+        b_bias,
+        c_bias,
+        d,
+        mimo_x,
+        mimo_z,
+        mimo_o,
+    } = *ptrs;
+    let (seq_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
+        t_len as i32,
+        nh as i32,
+        ng as i32,
+        hd as i32,
+        ds as i32,
+        r as i32,
+        na as i32,
+    );
+    let (heads_i, ang_col_i, b_i) = (heads as i32, ang_col as i32, b as i32);
+    let a_floor = c.a_floor;
+    let err = |what: &'static str| move |e| format!("MIMO chunked {what} L{l}: {e:?}");
+    {
+        let dtb = dt_bias;
+        let threads = na.next_multiple_of(32).clamp(32, 1024) as u32;
+        let mut bld = stream.launch_builder(x.kernels.chunk_prep.get(x.act));
+        bld.arg(&coef);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&e0);
+        bld.arg(&ang);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&dtb);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&heads_i);
+        bld.arg(&ang_col_i);
+        bld.arg(&na_i);
+        bld.arg(&a_floor);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (b as u32, nh as u32, 1),
+            block_dim: (threads, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(cfg) }.map_err(err("prep"))?;
+    }
+    {
+        let (nt, sl, smem) = geom.state;
+        let (bb, px, nt_i, sl_i) = (b_bias, mimo_x, nt as i32, sl as i32);
+        let mut bld = stream.launch_builder(x.kernels.chunk_state.get(x.act));
+        bld.arg(&contrib);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&bn);
+        bld.arg(&coef);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&bb);
+        bld.arg(&px);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&ng_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&r_i);
+        bld.arg(&na_i);
+        bld.arg(&nt_i);
+        bld.arg(&sl_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((b * nc) as u32, nh as u32, ds.div_ceil(nt) as u32),
+            block_dim: ((nt * hd) as u32, 1, 1),
+            shared_mem_bytes: smem as u32,
+        };
+        unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;
+    }
+    {
+        let px = mimo_x;
+        let mut bld = stream.launch_builder(&x.kernels.state_pass);
+        bld.arg(&enter);
+        bld.arg(&ssm);
+        bld.arg(&contrib);
+        bld.arg(&coef);
+        bld.arg(&e0);
+        bld.arg(&kst);
+        bld.arg(&vst);
+        bld.arg(&px);
+        bld.arg(&b_i);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&r_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((b * nh) as u32, (hd * ds).div_ceil(256) as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(cfg) }.map_err(err("state passing"))?;
+    }
+    {
+        let (tt, st, smem) = geom.scan;
+        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
+        let (tt_i, st_i) = (tt as i32, st as i32);
+        let mut bld = stream.launch_builder(x.kernels.chunk_scan.get(x.act));
+        bld.arg(&gated);
+        bld.arg(&y_out);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&bn);
+        bld.arg(&cn);
+        bld.arg(&coef);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&enter);
+        for p in &w {
+            bld.arg(p);
+        }
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&ng_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&r_i);
+        bld.arg(&na_i);
+        bld.arg(&tt_i);
+        bld.arg(&st_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((b * nc) as u32, nh as u32, CHUNK.div_ceil(tt) as u32),
+            block_dim: ((tt * hd) as u32, 1, 1),
+            shared_mem_bytes: smem as u32,
+        };
+        unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
+    }
+    {
+        let bb = b_bias;
+        let mut bld = stream.launch_builder(x.kernels.chunk_writeback.get(x.act));
+        bld.arg(&kst);
+        bld.arg(&vst);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&bn);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&bb);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&ng_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&r_i);
+        bld.arg(&na_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (b as u32, nh as u32, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(cfg) }.map_err(err("writeback"))?;
+    }
+    Ok(())
 }

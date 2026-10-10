@@ -11,7 +11,7 @@ use mamba_rs::mamba3_mimo::{
 
 #[path = "common/m3_mimo_oracle.rs"]
 mod m3_mimo_oracle;
-use m3_mimo_oracle::{backbone_step64, zeros64};
+use m3_mimo_oracle::{Layer64, backbone_step64, zeros64};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);
@@ -60,14 +60,30 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
     w
 }
 
+/// The f64 copy of a carried state; the layouts are the same.
+fn state64(st: &Mamba3MimoState) -> Vec<Layer64> {
+    let f = |v: &[f32]| v.iter().map(|&x| f64::from(x)).collect::<Vec<f64>>();
+    st.layers
+        .iter()
+        .map(|l| Layer64 {
+            ssm: f(&l.ssm_state),
+            k: f(&l.k_state),
+            v: f(&l.v_state),
+            angle: f(&l.angle_state),
+        })
+        .collect()
+}
+
+/// The probed loss of a window that starts from `start`, which is an input
+/// of the window like the tokens are (the gradients stop there).
 fn loss64(
     cfg: &Mamba3MimoConfig,
     w: &Mamba3MimoWeights,
-    inputs: &[f32],
-    probe: &[f32],
+    (inputs, probe): (&[f32], &[f32]),
+    start: &[Layer64],
     input_dim: usize,
 ) -> f64 {
-    let mut st = zeros64(cfg);
+    let mut st = start.to_vec();
     inputs
         .chunks_exact(input_dim)
         .zip(probe.chunks_exact(cfg.d_model))
@@ -146,105 +162,221 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 1, groups 4",
+            Mamba3MimoConfig {
+                mimo_rank: 1,
+                ngroups: 4,
+                ..base
+            },
+        ),
+        (
+            "rank 8",
+            Mamba3MimoConfig {
+                mimo_rank: 8,
+                ..base
+            },
+        ),
+        (
+            "clamped A, saturated dt and trap",
+            Mamba3MimoConfig {
+                mimo_rank: 2,
+                a_floor: 0.5,
+                ..base
+            },
+        ),
     ]
 }
 
-/// The analytic f32 gradient of every tensor, probed at its largest entry
-/// and a spread of others, and of the inputs, against float64 central
-/// differences.
+/// Weights for a case: the drawn ones, and for the saturation case a head
+/// whose dt sits on both sides of the softplus cutoff and trap columns wide
+/// enough to reach |trap| ~ 10 (the A clamp is active through a_floor).
+fn case_weights(
+    label: &str,
+    cfg: &Mamba3MimoConfig,
+    input_dim: usize,
+    seed: u64,
+) -> Mamba3MimoWeights {
+    let mut w = drawn(cfg, input_dim, seed);
+    if label.starts_with("clamped") {
+        let (out, nh) = (cfg.in_proj_out_dim(), cfg.nheads());
+        let trap0 = 2 * cfg.d_inner() + 2 * cfg.bc_width() + 2 * nh;
+        for lw in &mut w.layers {
+            lw.dt_bias[0] = 20.0;
+            for row in lw.in_proj_w.chunks_exact_mut(out) {
+                for v in &mut row[trap0..trap0 + nh] {
+                    *v *= 25.0;
+                }
+            }
+        }
+    }
+    w
+}
+
+/// The probed entries of a gradient: its largest, a spread that does not
+/// alias onto one column, and for the structured tensors one entry of every
+/// in_proj column group and of the last rank.
+fn probe_indices(cfg: &Mamba3MimoConfig, name: &str, g: &[f32]) -> Vec<usize> {
+    let len = g.len();
+    let argmax = g
+        .iter()
+        .enumerate()
+        .fold((0, 0f32), |(bi, bv), (i, &v)| {
+            if v.abs() > bv { (i, v.abs()) } else { (bi, bv) }
+        })
+        .0;
+    let mut idx = vec![argmax];
+    idx.extend((1..5).map(|k| (k * (len / 5) + 7 * k + 3) % len));
+    let (di, bc, nh, na) = (
+        cfg.d_inner(),
+        cfg.bc_width(),
+        cfg.nheads(),
+        cfg.num_rope_angles(),
+    );
+    let (r, p, n) = (cfg.mimo_rank, cfg.headdim, cfg.d_state);
+    if name.ends_with("in_proj_w") {
+        let out = cfg.in_proj_out_dim();
+        let heads = 2 * di + 2 * bc;
+        let rows = len / out;
+        let groups = [
+            1,
+            di + 1,
+            2 * di + 1,
+            2 * di + bc + 1,
+            heads,
+            heads + nh,
+            heads + 2 * nh,
+            heads + 3 * nh,
+        ];
+        for (k, &col) in groups.iter().enumerate() {
+            if col < out && (col < heads + 3 * nh || na > 0) {
+                idx.push(((3 * k + 1) % rows) * out + col);
+            }
+        }
+    }
+    let h = 1 % nh;
+    if ["mimo_x", "mimo_z", "mimo_o"]
+        .iter()
+        .any(|t| name.ends_with(t))
+    {
+        idx.push((h * r + r - 1) * p + p / 2);
+    }
+    if name.ends_with("b_bias") || name.ends_with("c_bias") {
+        idx.push((h * r + r - 1) * n + n - 1);
+    }
+    idx
+}
+
+/// The analytic f32 gradient of every tensor (at its largest entry, a
+/// spread, every in_proj column group and the last rank) and of the inputs
+/// against float64 central differences, for windows that start from zero
+/// and from a state carried in from earlier tokens.
 #[test]
 fn m3_mimo_gradients_match_f64_central_differences() {
-    let (input_dim, seq, stride) = (12usize, 9usize, 4usize);
+    let (input_dim, seq, stride, warm) = (12usize, 9usize, 4usize, 5usize);
     for (label, cfg) in cases() {
         cfg.validate().unwrap();
-        let w = drawn(&cfg, input_dim, 31);
+        let w = case_weights(label, &cfg, input_dim, 31);
         let dm = cfg.d_model;
         let inputs = det(seq * input_dim, 77, 1.0);
         let probe = det(seq * dm, 78, 1.0);
-
-        let mut tape = Mamba3MimoTape::new(&cfg, seq, input_dim, stride);
         let mut s = Mamba3MimoTrainScratch::default();
-        let mut st = Mamba3MimoState::zeros(&cfg);
-        let mut out = vec![0f32; seq * dm];
-        forward_mamba3_mimo_train(
-            &mut out,
-            &inputs,
-            &w,
-            &mut st.layers,
-            &mut tape,
-            (&cfg, &mut s),
-        )
-        .unwrap();
-        let mut grads = w.zeros_like();
-        let mut d_out = probe.clone();
-        let mut d_in = vec![0f32; seq * input_dim];
-        backward_mamba3_mimo_train(
-            &mut d_out,
-            &mut d_in,
-            (&w, &mut grads),
-            &tape,
-            (&cfg, &mut s),
-        );
+        let mut carried = Mamba3MimoState::zeros(&cfg);
+        {
+            let mut tape = Mamba3MimoTape::new(&cfg, warm, input_dim, stride);
+            let mut out = vec![0f32; warm * dm];
+            forward_mamba3_mimo_train(
+                &mut out,
+                &det(warm * input_dim, 79, 1.0),
+                &w,
+                &mut carried.layers,
+                &mut tape,
+                (&cfg, &mut s),
+            )
+            .unwrap();
+        }
+        let carried64 = state64(&carried);
+        for (start_label, start, start64) in [
+            ("zero", Mamba3MimoState::zeros(&cfg), zeros64(&cfg)),
+            ("carried", carried, carried64),
+        ] {
+            let mut tape = Mamba3MimoTape::new(&cfg, seq, input_dim, stride);
+            let mut st = start.clone();
+            let mut out = vec![0f32; seq * dm];
+            forward_mamba3_mimo_train(
+                &mut out,
+                &inputs,
+                &w,
+                &mut st.layers,
+                &mut tape,
+                (&cfg, &mut s),
+            )
+            .unwrap();
+            let mut grads = w.zeros_like();
+            let mut d_out = probe.clone();
+            let mut d_in = vec![0f32; seq * input_dim];
+            backward_mamba3_mimo_train(
+                &mut d_out,
+                &mut d_in,
+                (&w, &mut grads),
+                &tape,
+                (&cfg, &mut s),
+            )
+            .unwrap();
 
-        let grad_tensors: Vec<(String, Vec<f32>)> = tensors(&mut grads)
-            .into_iter()
-            .map(|(n, v)| (n, v.clone()))
-            .collect();
-        let mut checked = 0usize;
-        let mut worst = 0f64;
-        for (name, g) in &grad_tensors {
-            let scale = g.iter().fold(0f32, |a, &v| a.max(v.abs()));
-            assert!(scale > 0.0, "{label}: {name} has no gradient");
-            let mut idx = vec![
-                g.iter()
-                    .enumerate()
-                    .fold((0, 0f32), |(bi, bv), (i, &v)| {
-                        if v.abs() > bv { (i, v.abs()) } else { (bi, bv) }
-                    })
-                    .0,
-            ];
-            idx.extend((1..4).map(|k| (k * g.len() / 4 + 1) % g.len()));
-            for i in idx {
-                let perturb = |sign: f32| -> (Mamba3MimoWeights, f64) {
-                    let mut wp = w.clone();
-                    let mut tp = tensors(&mut wp);
-                    let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
-                    v[i] += sign * 1e-3 * v[i].abs().max(1.0);
-                    let at = f64::from(v[i]);
-                    drop(tp);
-                    (wp, at)
-                };
-                let (plus, hp) = perturb(1.0);
-                let (minus, hm) = perturb(-1.0);
-                let fd = (loss64(&cfg, &plus, &inputs, &probe, input_dim)
-                    - loss64(&cfg, &minus, &inputs, &probe, input_dim))
-                    / (hp - hm);
-                let err = (f64::from(g[i]) - fd).abs() / fd.abs().max(0.05 * f64::from(scale));
-                worst = worst.max(err);
+            let grad_tensors: Vec<(String, Vec<f32>)> = tensors(&mut grads)
+                .into_iter()
+                .map(|(n, v)| (n, v.clone()))
+                .collect();
+            let loss = |wv: &Mamba3MimoWeights, xs: &[f32]| {
+                loss64(&cfg, wv, (xs, &probe), &start64, input_dim)
+            };
+            let mut checked = 0usize;
+            let mut worst = 0f64;
+            for (name, g) in &grad_tensors {
+                let scale = g.iter().fold(0f32, |a, &v| a.max(v.abs()));
+                assert!(scale > 0.0, "{label}: {name} has no gradient");
+                for i in probe_indices(&cfg, name, g) {
+                    let perturb = |sign: f32| -> (Mamba3MimoWeights, f64) {
+                        let mut wp = w.clone();
+                        let mut tp = tensors(&mut wp);
+                        let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
+                        v[i] += sign * 1e-3 * v[i].abs().max(1.0);
+                        let at = f64::from(v[i]);
+                        drop(tp);
+                        (wp, at)
+                    };
+                    let (plus, hp) = perturb(1.0);
+                    let (minus, hm) = perturb(-1.0);
+                    let fd = (loss(&plus, &inputs) - loss(&minus, &inputs)) / (hp - hm);
+                    let err = (f64::from(g[i]) - fd).abs() / fd.abs().max(0.05 * f64::from(scale));
+                    worst = worst.max(err);
+                    assert!(
+                        err < 5e-3,
+                        "{label}, {start_label} start: {name}[{i}] analytic {} vs fd {fd:.6e} \
+                         (rel {err:.3e})",
+                        g[i]
+                    );
+                    checked += 1;
+                }
+            }
+            for i in (0..d_in.len()).step_by(7) {
+                let mut xp = inputs.clone();
+                let mut xm = inputs.clone();
+                xp[i] += 1e-3;
+                xm[i] -= 1e-3;
+                let fd = (loss(&w, &xp) - loss(&w, &xm)) / f64::from(xp[i] - xm[i]);
+                let err = (f64::from(d_in[i]) - fd).abs() / fd.abs().max(1e-2);
                 assert!(
                     err < 5e-3,
-                    "{label}: {name}[{i}] analytic {} vs fd {fd:.6e} (rel {err:.3e})",
-                    g[i]
+                    "{label}, {start_label} start: d_input[{i}] {} vs fd {fd:.6e}",
+                    d_in[i]
                 );
-                checked += 1;
             }
-        }
-        for i in (0..d_in.len()).step_by(7) {
-            let mut xp = inputs.clone();
-            let mut xm = inputs.clone();
-            xp[i] += 1e-3;
-            xm[i] -= 1e-3;
-            let fd = (loss64(&cfg, &w, &xp, &probe, input_dim)
-                - loss64(&cfg, &w, &xm, &probe, input_dim))
-                / f64::from(xp[i] - xm[i]);
-            let err = (f64::from(d_in[i]) - fd).abs() / fd.abs().max(1e-2);
-            assert!(
-                err < 5e-3,
-                "{label}: d_input[{i}] {} vs fd {fd:.6e}",
-                d_in[i]
+            eprintln!(
+                "{label}, {start_label} start: {checked} weight probes, worst rel {worst:.2e}"
             );
         }
-        eprintln!("{label}: {checked} weight probes, worst rel {worst:.2e}");
     }
 }
 
@@ -293,7 +425,8 @@ fn m3_mimo_train_forward_is_the_prefill_and_stride_free() {
                 (&w, &mut grads),
                 &tape,
                 (&cfg, &mut s),
-            );
+            )
+            .unwrap();
             (out, st, grads)
         };
         let (out, st, g1) = run(4);

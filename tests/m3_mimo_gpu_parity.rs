@@ -359,3 +359,293 @@ fn m3_mimo_gpu_refuses_the_output_norm() {
         .unwrap();
     assert!(err.contains("output norm"), "{err}");
 }
+
+/// The chunked prefill (ScanMode::Parallel) of windows that end inside a
+/// chunk against the CPU and against the recurrence, then decode steps
+/// continuing it against the CPU chain (the carried state, keys, input and
+/// angles), in every lane; a batch row is the sequence alone.
+#[test]
+fn m3_mimo_gpu_chunked_prefill_tracks_the_recurrence() {
+    use mamba_rs::config::ScanMode;
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let (batch, seq) = (2usize, 150usize);
+    for (dtype, tol) in [
+        (WeightDtype::F32, TOL),
+        (WeightDtype::Tf32, 3e-3),
+        (WeightDtype::F16, 5e-3),
+        (WeightDtype::Bf16, 3e-2),
+    ] {
+        for (label, base) in cases() {
+            let cfg = Mamba3MimoConfig {
+                scan_mode: ScanMode::Parallel,
+                ..base
+            };
+            let seq_cfg = Mamba3MimoConfig {
+                scan_mode: ScanMode::Sequential,
+                ..base
+            };
+            let w = drawn(&cfg, input_dim, 19);
+            let dm = cfg.d_model;
+            let inputs = det(batch * seq * input_dim, 640, 1.0);
+            let e = engine(&device, &w, (cfg, input_dim, batch), dtype);
+            let mut gst = e.alloc_state().unwrap();
+            let mut win = e.alloc_window(seq).unwrap();
+            let mut rows = vec![0f32; batch * seq * dm];
+            e.run(&inputs, &mut rows, &mut gst, &mut win).unwrap();
+
+            let es = engine(&device, &w, (seq_cfg, input_dim, batch), dtype);
+            let mut sst = es.alloc_state().unwrap();
+            let mut swin = es.alloc_window(seq).unwrap();
+            let mut srows = vec![0f32; batch * seq * dm];
+            es.run(&inputs, &mut srows, &mut sst, &mut swin).unwrap();
+            let vs_seq = rel_l2(&rows, &srows);
+
+            let mut worst = 0f64;
+            let mut cpu_states = Vec::new();
+            for b in 0..batch {
+                let mut st = Mamba3MimoState::zeros(&cfg);
+                let mut ps = Mamba3MimoPrefillScratch::new(&cfg);
+                let mut want = vec![0f32; seq * dm];
+                forward_mamba3_mimo_backbone_prefill_mode(
+                    &mut want,
+                    &inputs[b * seq * input_dim..(b + 1) * seq * input_dim],
+                    &w,
+                    &mut st.layers,
+                    &mut ps,
+                    (&cfg, seq, PrefillMode::Single),
+                );
+                worst = worst.max(rel_l2(&rows[b * seq * dm..(b + 1) * seq * dm], &want));
+                cpu_states.push(st);
+            }
+            let mut one = e.alloc_window(1).unwrap();
+            let mut csc = Mamba3MimoStepScratch::new(&cfg);
+            let mut g = vec![0f32; batch * dm];
+            let mut c = vec![0f32; dm];
+            for t in 0..6u64 {
+                let xs = det(batch * input_dim, 740 + t, 1.0);
+                e.run(&xs, &mut g, &mut gst, &mut one).unwrap();
+                for (b, st) in cpu_states.iter_mut().enumerate() {
+                    mamba3_mimo_step(
+                        &mut c,
+                        &xs[b * input_dim..(b + 1) * input_dim],
+                        &mut csc,
+                        &w,
+                        &mut st.layers,
+                        &cfg,
+                    );
+                    worst = worst.max(rel_l2(&g[b * dm..(b + 1) * dm], &c));
+                }
+            }
+            eprintln!(
+                "{dtype:?} {label}: chunked prefill + decode vs CPU {worst:.2e}, vs the \
+                 recurrence {vs_seq:.2e}"
+            );
+            assert!(worst < tol, "{dtype:?} {label}: vs CPU {worst:.3e}");
+            assert!(
+                vs_seq < tol,
+                "{dtype:?} {label}: vs the recurrence {vs_seq:.3e}"
+            );
+
+            if dtype == WeightDtype::F32 {
+                let single = engine(&device, &w, (cfg, input_dim, 1), dtype);
+                let mut one_st = single.alloc_state().unwrap();
+                let mut w1 = single.alloc_window(seq).unwrap();
+                let mut alone = vec![0f32; seq * dm];
+                single
+                    .run(
+                        &inputs[seq * input_dim..2 * seq * input_dim],
+                        &mut alone,
+                        &mut one_st,
+                        &mut w1,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    &alone[..],
+                    &rows[seq * dm..2 * seq * dm],
+                    "{label}: batch row 1 against the sequence alone"
+                );
+            }
+        }
+    }
+}
+
+/// A rank-16 head of 16 channels: the chunked scan's 8-token key tile
+/// would need 156 KB of shared memory, so the geometry takes a smaller one
+/// (the same sums in the same order). The chunked prefill still tracks the
+/// CPU and the recurrence, and decode continues from it.
+#[test]
+fn m3_mimo_gpu_chunked_prefill_fits_a_wide_rank() {
+    use mamba_rs::config::ScanMode;
+    use mamba_rs::mamba3_mimo::gpu::kernels::chunked_geom;
+    let device = GpuDevice::new(0).unwrap();
+    let base = Mamba3MimoConfig {
+        d_model: 64,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        mimo_rank: 16,
+        ..Mamba3MimoConfig::default()
+    };
+    let optin = device
+        .context()
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .unwrap() as usize;
+    let geom = chunked_geom((16, 16, 16), optin, true).unwrap();
+    eprintln!("rank-16 geometry at {optin} bytes: {geom:?}");
+    assert!(geom.scan.1 < 8, "the key tile should shrink: {geom:?}");
+    let input_dim = 40usize;
+    let (batch, seq) = (2usize, 150usize);
+    for (dtype, tol) in [(WeightDtype::F32, TOL), (WeightDtype::Bf16, 3e-2)] {
+        let cfg = Mamba3MimoConfig {
+            scan_mode: ScanMode::Parallel,
+            ..base
+        };
+        let seq_cfg = Mamba3MimoConfig {
+            scan_mode: ScanMode::Sequential,
+            ..base
+        };
+        let w = drawn(&cfg, input_dim, 23);
+        let dm = cfg.d_model;
+        let inputs = det(batch * seq * input_dim, 650, 1.0);
+        let e = engine(&device, &w, (cfg, input_dim, batch), dtype);
+        let mut gst = e.alloc_state().unwrap();
+        let mut win = e.alloc_window(seq).unwrap();
+        let mut rows = vec![0f32; batch * seq * dm];
+        e.run(&inputs, &mut rows, &mut gst, &mut win).unwrap();
+        let es = engine(&device, &w, (seq_cfg, input_dim, batch), dtype);
+        let mut sst = es.alloc_state().unwrap();
+        let mut swin = es.alloc_window(seq).unwrap();
+        let mut srows = vec![0f32; batch * seq * dm];
+        es.run(&inputs, &mut srows, &mut sst, &mut swin).unwrap();
+        let vs_seq = rel_l2(&rows, &srows);
+        let mut worst = 0f64;
+        let mut cpu_states = Vec::new();
+        for b in 0..batch {
+            let mut st = Mamba3MimoState::zeros(&cfg);
+            let mut ps = Mamba3MimoPrefillScratch::new(&cfg);
+            let mut want = vec![0f32; seq * dm];
+            forward_mamba3_mimo_backbone_prefill_mode(
+                &mut want,
+                &inputs[b * seq * input_dim..(b + 1) * seq * input_dim],
+                &w,
+                &mut st.layers,
+                &mut ps,
+                (&cfg, seq, PrefillMode::Single),
+            );
+            worst = worst.max(rel_l2(&rows[b * seq * dm..(b + 1) * seq * dm], &want));
+            cpu_states.push(st);
+        }
+        let mut one = e.alloc_window(1).unwrap();
+        let mut csc = Mamba3MimoStepScratch::new(&cfg);
+        let mut g = vec![0f32; batch * dm];
+        let mut c = vec![0f32; dm];
+        for t in 0..4u64 {
+            let xs = det(batch * input_dim, 760 + t, 1.0);
+            e.run(&xs, &mut g, &mut gst, &mut one).unwrap();
+            for (b, st) in cpu_states.iter_mut().enumerate() {
+                mamba3_mimo_step(
+                    &mut c,
+                    &xs[b * input_dim..(b + 1) * input_dim],
+                    &mut csc,
+                    &w,
+                    &mut st.layers,
+                    &cfg,
+                );
+                worst = worst.max(rel_l2(&g[b * dm..(b + 1) * dm], &c));
+            }
+        }
+        eprintln!(
+            "{dtype:?} rank 16: chunked prefill + decode vs CPU {worst:.2e}, vs the recurrence \
+             {vs_seq:.2e}"
+        );
+        assert!(worst < tol, "{dtype:?}: vs CPU {worst:.3e}");
+        assert!(vs_seq < tol, "{dtype:?}: vs the recurrence {vs_seq:.3e}");
+    }
+}
+
+/// Chunked windows that start from a carried state: 20 tokens, then 150
+/// (a partial last chunk), then 128 (whole chunks only), then decode steps.
+/// The second and third windows enter with a non-zero state, previous keys
+/// and input, and angle, so the entering lead and the carried angle run on
+/// real values; each window tracks the CPU and the recurrence.
+#[test]
+fn m3_mimo_gpu_chunked_window_continues_a_carried_state() {
+    use mamba_rs::config::ScanMode;
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let batch = 2usize;
+    for (label, base) in cases().into_iter().take(3) {
+        let cfg = Mamba3MimoConfig {
+            scan_mode: ScanMode::Parallel,
+            ..base
+        };
+        let seq_cfg = Mamba3MimoConfig {
+            scan_mode: ScanMode::Sequential,
+            ..base
+        };
+        let w = drawn(&cfg, input_dim, 29);
+        let dm = cfg.d_model;
+        let e = engine(&device, &w, (cfg, input_dim, batch), WeightDtype::F32);
+        let es = engine(&device, &w, (seq_cfg, input_dim, batch), WeightDtype::F32);
+        let mut gst = e.alloc_state().unwrap();
+        let mut sst = es.alloc_state().unwrap();
+        let mut cpu: Vec<Mamba3MimoState> =
+            (0..batch).map(|_| Mamba3MimoState::zeros(&cfg)).collect();
+        let mut ps = Mamba3MimoPrefillScratch::new(&cfg);
+        let (mut worst_cpu, mut worst_seq) = (0f64, 0f64);
+        for (i, &t_len) in [20usize, 150, 128].iter().enumerate() {
+            let inputs = det(batch * t_len * input_dim, 900 + i as u64, 1.0);
+            let mut win = e.alloc_window(t_len).unwrap();
+            let mut rows = vec![0f32; batch * t_len * dm];
+            e.run(&inputs, &mut rows, &mut gst, &mut win).unwrap();
+            let mut swin = es.alloc_window(t_len).unwrap();
+            let mut srows = vec![0f32; batch * t_len * dm];
+            es.run(&inputs, &mut srows, &mut sst, &mut swin).unwrap();
+            worst_seq = worst_seq.max(rel_l2(&rows, &srows));
+            for (b, st) in cpu.iter_mut().enumerate() {
+                let mut want = vec![0f32; t_len * dm];
+                forward_mamba3_mimo_backbone_prefill_mode(
+                    &mut want,
+                    &inputs[b * t_len * input_dim..(b + 1) * t_len * input_dim],
+                    &w,
+                    &mut st.layers,
+                    &mut ps,
+                    (&cfg, t_len, PrefillMode::Single),
+                );
+                let got = &rows[b * t_len * dm..(b + 1) * t_len * dm];
+                worst_cpu = worst_cpu.max(rel_l2(got, &want));
+            }
+        }
+        let mut one = e.alloc_window(1).unwrap();
+        let mut csc = Mamba3MimoStepScratch::new(&cfg);
+        let mut g = vec![0f32; batch * dm];
+        let mut c = vec![0f32; dm];
+        for t in 0..3u64 {
+            let xs = det(batch * input_dim, 960 + t, 1.0);
+            e.run(&xs, &mut g, &mut gst, &mut one).unwrap();
+            for (b, st) in cpu.iter_mut().enumerate() {
+                mamba3_mimo_step(
+                    &mut c,
+                    &xs[b * input_dim..(b + 1) * input_dim],
+                    &mut csc,
+                    &w,
+                    &mut st.layers,
+                    &cfg,
+                );
+                worst_cpu = worst_cpu.max(rel_l2(&g[b * dm..(b + 1) * dm], &c));
+            }
+        }
+        eprintln!(
+            "{label}: carried chunked windows + decode vs CPU {worst_cpu:.2e}, vs the recurrence \
+             {worst_seq:.2e}"
+        );
+        assert!(worst_cpu < TOL, "{label}: vs CPU {worst_cpu:.3e}");
+        assert!(
+            worst_seq < TOL,
+            "{label}: vs the recurrence {worst_seq:.3e}"
+        );
+    }
+}

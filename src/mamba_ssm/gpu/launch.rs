@@ -46,6 +46,48 @@ pub fn validate_kernel_arg_capacity(
     Ok(())
 }
 
+/// The window-sized counterpart of [`validate_kernel_arg_capacity`]: a
+/// window of `rows` token rows whose widest row holds `widest` elements
+/// must stay within the 32-bit element counts the kernels take, so a
+/// window too large for them is refused when its buffers are sized rather
+/// than at a launch.
+pub fn validate_rows_capacity(rows: usize, widest: usize) -> Result<(), String> {
+    if rows == 0 {
+        return Err("a window needs at least one row".into());
+    }
+    let elems = rows
+        .checked_mul(widest)
+        .ok_or("rows * row width overflows usize")?;
+    if elems > i32::MAX as usize {
+        return Err(format!(
+            "a window of {rows} rows of up to {widest} elements holds {elems} elements, past \
+             i32::MAX; the kernels take element counts as 32-bit ints"
+        ));
+    }
+    Ok(())
+}
+
+/// Let `f` stage as much dynamic shared memory as the device's per-block
+/// `optin` leaves beside its own static stage, and return that amount.
+pub(crate) fn opt_in_dynamic_smem(
+    f: &cudarc::driver::CudaFunction,
+    optin: usize,
+    name: &str,
+) -> Result<usize, String> {
+    use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+    let fixed = f
+        .get_attribute(FnAttr::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+        .map_err(|e| format!("static shared memory of {name}: {e:?}"))?
+        .max(0) as usize;
+    let dynamic = optin.saturating_sub(fixed);
+    f.set_attribute(
+        FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        dynamic as i32,
+    )
+    .map_err(|e| format!("shared-memory opt-in for {name}: {e:?}"))?;
+    Ok(dynamic)
+}
+
 /// Launch config for 1D element-wise kernel on `n` elements.
 ///
 /// Grid: `ceil(n / 256)` blocks of 256 threads.

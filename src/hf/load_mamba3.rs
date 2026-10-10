@@ -185,6 +185,7 @@ impl HfMamba3Config {
             // The reference fixes the mixer's norms at 1e-5.
             ssm_norm_eps: 1e-5,
             d_intermediate: c.d_intermediate,
+            scan_mode: c.scan_mode,
         };
         cfg.validate()?;
         Ok(Some(cfg))

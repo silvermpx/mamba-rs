@@ -11,6 +11,7 @@ use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoLayerWeights, Mamba3Mimo
 // for MIMO. Plain loops in f64, written from the reference, not from the
 // crate's kernels.
 
+#[derive(Clone)]
 pub struct Layer64 {
     pub ssm: Vec<f64>,
     pub k: Vec<f64>,
