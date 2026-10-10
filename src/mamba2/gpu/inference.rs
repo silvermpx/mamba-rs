@@ -13,7 +13,9 @@ use cudarc::driver::PushKernelArg;
 
 use cudarc::driver::LaunchConfig;
 
-use super::kernels::{CHUNK, Mamba2Kernels, gated_norm_cfg, step_cfg};
+use super::kernels::{
+    CHUNK, Mamba2Kernels, gated_norm_cfg, gated_norm_smem_bytes, step_cfg, step_rows,
+};
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
 };
@@ -21,7 +23,7 @@ use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::ops::portable_math::exp_portable;
@@ -138,6 +140,44 @@ pub(crate) struct WindowPtrs {
     /// none), written every `stride` tokens.
     pub ckpt: u64,
     pub stride: usize,
+}
+
+/// What a model needs of this device beyond its config's own envelope: the
+/// scans' state tiles, the gated norm's group, the grid's y and z extents,
+/// and the shared row norm's warp (it reduces whole warps of the model
+/// width).
+pub(crate) fn check_device_envelope(
+    cfg: &Mamba2Config,
+    kernels: &Mamba2Kernels,
+) -> Result<(), String> {
+    let (hd, ds, nh, ng) = (cfg.headdim, cfg.d_state, cfg.nheads(), cfg.ngroups);
+    let optin = kernels.smem_optin;
+    if cfg.d_model < 32 {
+        return Err(format!(
+            "the GPU row norm reduces whole warps; d_model {} is below 32",
+            cfg.d_model
+        ));
+    }
+    if step_rows(hd, ds, optin).is_none() {
+        return Err(format!(
+            "a scan channel of {ds} states does not fit this GPU's {optin} bytes of shared memory"
+        ));
+    }
+    if cfg.rmsnorm && gated_norm_smem_bytes(cfg.ssm_dim(), ng, hd) > optin {
+        return Err(format!(
+            "a gated-norm group of {} channels needs {} bytes of shared memory; this GPU serves \
+             {optin}",
+            cfg.ssm_dim() / ng,
+            gated_norm_smem_bytes(cfg.ssm_dim(), ng, hd)
+        ));
+    }
+    let grid_limit = 65_535usize;
+    if nh > grid_limit || ng > grid_limit || (hd * ds).div_ceil(256) > grid_limit {
+        return Err(format!(
+            "{nh} heads, {ng} groups or {hd}x{ds} state rows pass the GPU's grid extents"
+        ));
+    }
+    Ok(())
 }
 
 /// What the engine and the trainer share to launch a layer: the context,
@@ -394,39 +434,46 @@ impl M2Exec<'_> {
             let (z_off_i, dt_off_seq) = ((2 * d_mlp) as i32, (xbc_col + cd) as i32);
             let flags: i32 = d_per_channel | (limited << 2);
             let (ckpt, stride_i) = (w.ckpt, w.stride as i32);
-            return launch(step_cfg(b, nh, hd, ds), "sequential scan", l, &|g| unsafe {
-                let kernel = if ckpt == 0 {
-                    &self.kernels.seq_fwd
-                } else {
-                    &self.kernels.seq_fwd_ckpt
-                };
-                let mut bld = stream.launch_builder(kernel.get(self.act));
-                bld.arg(&y);
-                bld.arg(&ssm);
-                bld.arg(&xbc);
-                bld.arg(&proj);
-                bld.arg(&dtb);
-                bld.arg(&an);
-                bld.arg(&dp);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.arg(&cd_i);
-                bld.arg(&ip_i);
-                bld.arg(&z_off_i);
-                bld.arg(&dt_off_seq);
-                bld.arg(&flags);
-                bld.arg(&lo);
-                bld.arg(&hi);
-                if ckpt != 0 {
-                    bld.arg(&ckpt);
-                    bld.arg(&stride_i);
-                }
-                bld.launch(g).map(|_| ())
-            });
+            let rows = step_rows(hd, ds, self.kernels.smem_optin)
+                .ok_or("the sequential scan does not fit this GPU's shared memory")?;
+            return launch(
+                step_cfg(b, nh, (hd, ds), rows),
+                "sequential scan",
+                l,
+                &|g| unsafe {
+                    let kernel = if ckpt == 0 {
+                        &self.kernels.seq_fwd
+                    } else {
+                        &self.kernels.seq_fwd_ckpt
+                    };
+                    let mut bld = stream.launch_builder(kernel.get(self.act));
+                    bld.arg(&y);
+                    bld.arg(&ssm);
+                    bld.arg(&xbc);
+                    bld.arg(&proj);
+                    bld.arg(&dtb);
+                    bld.arg(&an);
+                    bld.arg(&dp);
+                    bld.arg(&b_i);
+                    bld.arg(&t_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&ng_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&cd_i);
+                    bld.arg(&ip_i);
+                    bld.arg(&z_off_i);
+                    bld.arg(&dt_off_seq);
+                    bld.arg(&flags);
+                    bld.arg(&lo);
+                    bld.arg(&hi);
+                    if ckpt != 0 {
+                        bld.arg(&ckpt);
+                        bld.arg(&stride_i);
+                    }
+                    bld.launch(g).map(|_| ())
+                },
+            );
         }
         let dt_cfg = LaunchConfig {
             grid_dim: ((b * nc) as u32, nh.div_ceil(32) as u32, 1),
@@ -574,9 +621,9 @@ pub struct Mamba2GpuScratch {
 pub struct Mamba2GpuInferenceEngine {
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
-    pub cfg: Mamba2Config,
-    pub batch: usize,
-    pub input_dim: usize,
+    cfg: Mamba2Config,
+    batch: usize,
+    input_dim: usize,
     /// The activation dtype: f32 for f32 and tf32 storage, else the half
     /// type.
     act: WeightDtype,
@@ -655,6 +702,7 @@ impl Mamba2GpuInferenceEngine {
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba2Kernels::compile(device.context(), arch)?;
+        check_device_envelope(&cfg, &kernels)?;
         let layers = w
             .layers
             .iter()
@@ -695,6 +743,44 @@ impl Mamba2GpuInferenceEngine {
         &self.ctx
     }
 
+    /// The model's configuration.
+    pub fn cfg(&self) -> &Mamba2Config {
+        &self.cfg
+    }
+
+    /// Sequences per call.
+    pub fn batch(&self) -> usize {
+        self.batch
+    }
+
+    /// Input features per token.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// A host slice must hold `rows * width` values for this engine.
+    fn check_host_len(what: &str, len: usize, want: usize) -> Result<(), String> {
+        if len == want {
+            Ok(())
+        } else {
+            Err(format!(
+                "{what} holds {len} values; this engine takes {want}"
+            ))
+        }
+    }
+
+    /// A state of this engine's batch and model: another engine's would be
+    /// read and written past its end.
+    fn check_state(&self, state: &Mamba2GpuState) -> Result<(), String> {
+        let (b, l, c) = (self.batch, self.cfg.n_layers, &self.cfg);
+        if state.conv.len() != l * b * c.conv_dim() * c.d_conv
+            || state.ssm.len() != l * b * c.nheads() * c.headdim * c.d_state
+        {
+            return Err("the state was not allocated by this engine".into());
+        }
+        Ok(())
+    }
+
     pub fn alloc_state(&self) -> Result<Mamba2GpuState, String> {
         let (b, l, c) = (self.batch, self.cfg.n_layers, &self.cfg);
         Ok(Mamba2GpuState {
@@ -730,6 +816,11 @@ impl Mamba2GpuInferenceEngine {
         state: &mut Mamba2GpuState,
         scratch: &mut Mamba2GpuScratch,
     ) -> Result<(), String> {
+        let b = self.batch;
+        Self::check_host_len("step input", input.len(), b * self.input_dim)?;
+        Self::check_host_len("step output", output.len(), b * self.cfg.d_model)?;
+        Self::check_host_len("step scratch", scratch.input.len(), b * self.input_dim)?;
+        self.check_state(state)?;
         scratch.input.upload(&self.ctx.stream, input)?;
         self.step_kernels(state, scratch)?;
         self.ctx
@@ -851,7 +942,9 @@ impl Mamba2GpuInferenceEngine {
                 bld.arg(&flags);
                 bld.arg(&lo);
                 bld.arg(&hi);
-                unsafe { bld.launch(step_cfg(b, nh, hd, ds)) }
+                let rows = step_rows(hd, ds, self.kernels.smem_optin)
+                    .ok_or("the decode step does not fit this GPU's shared memory")?;
+                unsafe { bld.launch(step_cfg(b, nh, (hd, ds), rows)) }
                     .map_err(|e| format!("Mamba-2 step L{l}: {e:?}"))?;
             }
             self.exec().gate_out_residual(
@@ -881,10 +974,17 @@ impl Mamba2GpuInferenceEngine {
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<Mamba2GpuPrefill, String> {
         let c = &self.cfg;
         let rows = self.batch * seq_len;
+        let widest = [self.input_dim, c.in_proj_out_dim(), c.d_inner(), c.d_model]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        validate_rows_capacity(rows, widest)?;
         let nc = seq_len.div_ceil(CHUNK);
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
         let typed = |n: usize| DtypedBuf::zeros(s, n.max(1), self.act);
+        // The chunked scan's scratch only when this window runs it.
+        let ch = |n: usize| if c.prefill_parallel(seq_len) { n } else { 1 };
         Ok(Mamba2GpuPrefill {
             seq_len,
             input: z(rows * self.input_dim)?,
@@ -894,10 +994,10 @@ impl Mamba2GpuInferenceEngine {
             proj: typed(rows * c.in_proj_out_dim())?,
             xbc: typed(rows * c.conv_dim())?,
             conv_next: z(self.batch * c.conv_dim() * c.d_conv)?,
-            dt: z(self.batch * nc * c.nheads() * CHUNK)?,
-            acs: z(self.batch * nc * c.nheads() * CHUNK)?,
-            cb: z(self.batch * nc * c.ngroups * CHUNK * (CHUNK + 1) / 2)?,
-            states: z(self.batch * nc * c.nheads() * c.headdim * c.d_state)?,
+            dt: z(ch(self.batch * nc * c.nheads() * CHUNK))?,
+            acs: z(ch(self.batch * nc * c.nheads() * CHUNK))?,
+            cb: z(ch(self.batch * nc * c.ngroups * CHUNK * (CHUNK + 1) / 2))?,
+            states: z(ch(self.batch * nc * c.nheads() * c.headdim * c.d_state))?,
             y: z(rows * c.ssm_dim())?,
             gated: typed(rows * c.d_inner())?,
             out: typed(rows * c.d_model)?,
@@ -916,6 +1016,15 @@ impl Mamba2GpuInferenceEngine {
         state: &mut Mamba2GpuState,
         pf: &mut Mamba2GpuPrefill,
     ) -> Result<(), String> {
+        let rows = self.batch * pf.seq_len;
+        Self::check_host_len("prefill input", input.len(), rows * self.input_dim)?;
+        Self::check_host_len("prefill output", rows_out.len(), rows * self.cfg.d_model)?;
+        Self::check_host_len(
+            "prefill buffers",
+            pf.input.len(),
+            (rows * self.input_dim).max(1),
+        )?;
+        self.check_state(state)?;
         pf.input.upload(&self.ctx.stream, input)?;
         self.prefill_kernels(state, pf)?;
         self.ctx

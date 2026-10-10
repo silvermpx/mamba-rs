@@ -8,9 +8,11 @@ use mamba_rs::mamba2::{Mamba2Config, Mamba2LayerWeights, Mamba2Weights};
 // (mamba_ssm/modules/mamba2.py), `selective_state_update`
 // (ops/triton/selective_state_update.py) and `RMSNormGated`
 // (ops/triton/layernorm_gated.py) at state-spaces/mamba e9594ce: the conv
-// window rolled and weighted, softplus and the dt clamp, the state as
-// state dA + dt B x, y = state C + D x, the grouped gated norm.
+// window rolled and weighted, softplus, the state as state dA + dt B x,
+// y = state C + D x, the grouped gated norm. The dt clamp is the chunked
+// forward's (ssd_chunk_state.py); the reference step has none.
 
+#[derive(Clone)]
 pub struct Layer64 {
     pub conv: Vec<Vec<f64>>,
     pub ssm: Vec<f64>,

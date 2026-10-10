@@ -22,9 +22,10 @@ impl SimpleRng {
 /// The reference Linear init: `nn.Linear`'s default `reset_parameters`
 /// is `kaiming_uniform_(a=sqrt(5))`, i.e. gain 1/sqrt(3) and bound
 /// 1/sqrt(fan_in) — NOT the gain-1 bound sqrt(3/fan_in). The official
-/// `_init_weights` never re-touches these projections, so the PyTorch
-/// default IS the shipped Mamba-3 init; our previous gain-1 bound gave
-/// every projection 3x the reference variance.
+/// `_init_weights` never re-touches these projections' weights, so the
+/// PyTorch default IS the shipped Mamba-3 init; our previous gain-1 bound
+/// gave every projection 3x the reference variance. It zeroes their biases,
+/// so a linear bias is not drawn with this.
 pub(crate) fn linear_default_uniform(buf: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
     let bound = (1.0 / fan_in as f64).sqrt() as f32;
     for v in buf.iter_mut() {

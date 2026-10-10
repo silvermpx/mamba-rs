@@ -406,6 +406,24 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
             losses[0],
             losses[11]
         );
+        // The GEMMs read half copies of the matrices: after the steps they
+        // must be the stepped weights, so the trainer's forward tracks a CPU
+        // forward of the weights it reports.
+        let moved = tr.weights().unwrap();
+        tr.reset_state().unwrap();
+        tr.forward(&inputs, &mut out).unwrap();
+        let (want, _, _) = cpu_reference(&cfg, &moved, (&inputs, &target), (input_dim, batch, seq));
+        let drift = rel_l2(&out, &want);
+        let tol = if dtype == WeightDtype::F16 {
+            5e-3
+        } else {
+            3e-2
+        };
+        eprintln!("{dtype:?} after AdamW: forward vs CPU of the stepped weights {drift:.2e}");
+        assert!(
+            drift < tol,
+            "{dtype:?}: forward after the steps {drift:.3e}"
+        );
     }
 }
 
@@ -480,4 +498,250 @@ fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
             );
         }
     }
+}
+
+fn worst_gradient(got: &Mamba2Weights, want: &Mamba2Weights) -> (f64, String) {
+    let mut worst = (0f64, String::new());
+    for ((name, g), (_, w)) in named(got).into_iter().zip(named(want)) {
+        if w.is_empty() {
+            continue;
+        }
+        let e = rel_l2(g, w);
+        if e > worst.0 {
+            worst = (e, name);
+        }
+    }
+    worst
+}
+
+/// Two windows in a row without a reset, on both paths: the second starts
+/// from the conv history and SSM state the first left, so the entering
+/// state, the first token's previous state and the conv history all carry
+/// values. One shape runs groups with the norm before the gate over exactly
+/// two chunks; the other the gated norm with an inner MLP, a head whose dt
+/// sits past the softplus cutoff, over three chunks. The GPU matches the
+/// CPU trainer carrying the same state.
+#[test]
+fn m2_gpu_train_continues_a_carried_state() {
+    use mamba_rs::config::ScanMode;
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    let device = GpuDevice::new(0).unwrap();
+    let (input_dim, batch) = (40usize, 2usize);
+    let base = cases()[0].1;
+    let shapes = [
+        (
+            "groups 2, norm before gate, 128 tokens",
+            Mamba2Config {
+                ngroups: 2,
+                norm_before_gate: true,
+                d_conv: 3,
+                ..base
+            },
+            128usize,
+        ),
+        (
+            "norm with an inner MLP, softplus past its cutoff, 150 tokens",
+            Mamba2Config { d_ssm: 64, ..base },
+            150usize,
+        ),
+    ];
+    for mode in [ScanMode::Auto, ScanMode::Sequential] {
+        for (label, shape, seq) in shapes {
+            let cfg = Mamba2Config {
+                scan_mode: mode,
+                ..shape
+            };
+            let mut w = drawn(&cfg, input_dim, 17);
+            if label.contains("softplus") {
+                for lw in &mut w.layers {
+                    lw.dt_bias[0] = 20.0;
+                }
+            }
+            let dm = cfg.d_model;
+            let x1 = det(batch * seq * input_dim, 600, 1.0);
+            let x2 = det(batch * seq * input_dim, 601, 1.0);
+            let d_out = det(batch * seq * dm, 602, 1.0);
+
+            let mut want_rows = vec![0f32; batch * seq * dm];
+            let mut want_d_in = vec![0f32; batch * seq * input_dim];
+            let mut want_grads = w.zeros_like();
+            let mut s = Mamba2TrainScratch::default();
+            for b in 0..batch {
+                let span = |v: &[f32], n: usize| v[b * seq * n..(b + 1) * seq * n].to_vec();
+                let mut st = Mamba2State::zeros(&cfg);
+                let mut first = Mamba2Tape::new(&cfg, seq, input_dim, 16);
+                let mut rows1 = vec![0f32; seq * dm];
+                forward_mamba2_train(
+                    &mut rows1,
+                    &span(&x1, input_dim),
+                    &w,
+                    &mut st.layers,
+                    &mut first,
+                    (&cfg, &mut s),
+                );
+                let mut tape = Mamba2Tape::new(&cfg, seq, input_dim, 16);
+                forward_mamba2_train(
+                    &mut want_rows[b * seq * dm..(b + 1) * seq * dm],
+                    &span(&x2, input_dim),
+                    &w,
+                    &mut st.layers,
+                    &mut tape,
+                    (&cfg, &mut s),
+                );
+                let mut d = span(&d_out, dm);
+                backward_mamba2_train(
+                    &mut d,
+                    &mut want_d_in[b * seq * input_dim..(b + 1) * seq * input_dim],
+                    (&w, &mut want_grads),
+                    &tape,
+                    (&cfg, &mut s),
+                );
+            }
+            let mut tr = Mamba2GpuTrainer::new_with_dtype(
+                &device,
+                &w,
+                (cfg, input_dim, batch, seq),
+                WeightDtype::F32,
+            )
+            .unwrap();
+            let mut rows = vec![0f32; batch * seq * dm];
+            tr.forward(&x1, &mut rows).unwrap();
+            tr.forward(&x2, &mut rows).unwrap();
+            let mut d_in = vec![0f32; batch * seq * input_dim];
+            tr.backward(&d_out, Some(&mut d_in)).unwrap();
+            let grads = tr.grads().unwrap();
+            let fwd = rel_l2(&rows, &want_rows);
+            let din = rel_l2(&d_in, &want_d_in);
+            let worst = worst_gradient(&grads, &want_grads);
+            eprintln!(
+                "{mode:?} {label}: carried window forward {fwd:.2e}, input gradient {din:.2e}, \
+                 worst weight gradient {:.2e} ({})",
+                worst.0, worst.1
+            );
+            assert!(fwd < 5e-5, "{mode:?} {label}: forward {fwd:.3e}");
+            assert!(din < 5e-4, "{mode:?} {label}: input gradient {din:.3e}");
+            assert!(
+                worst.0 < 5e-4,
+                "{mode:?} {label}: gradient {} {:.3e}",
+                worst.1,
+                worst.0
+            );
+        }
+    }
+}
+
+/// The identity input (no input projection, what the checkpoint loader
+/// builds) on both paths, in f32 and bf16, against the CPU trainer.
+#[test]
+fn m2_gpu_train_identity_input() {
+    use mamba_rs::config::ScanMode;
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    let device = GpuDevice::new(0).unwrap();
+    let base = cases()[2].1;
+    let (batch, seq) = (2usize, 100usize);
+    let input_dim = base.d_model;
+    for mode in [ScanMode::Auto, ScanMode::Sequential] {
+        for (dtype, fwd_tol, grad_tol) in [
+            (WeightDtype::F32, 5e-5, 5e-4),
+            (WeightDtype::Bf16, 3e-2, 2e-1),
+        ] {
+            let cfg = Mamba2Config {
+                scan_mode: mode,
+                ..base
+            };
+            let mut w = drawn(&cfg, input_dim, 19);
+            w.input_proj_w.clear();
+            w.input_proj_b.clear();
+            let dm = cfg.d_model;
+            let inputs = det(batch * seq * input_dim, 540, 1.0);
+            let d_out = det(batch * seq * dm, 541, 1.0);
+            let (want_rows, want_grads, want_d_in) =
+                cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
+            let mut tr =
+                Mamba2GpuTrainer::new_with_dtype(&device, &w, (cfg, input_dim, batch, seq), dtype)
+                    .unwrap();
+            let mut rows = vec![0f32; batch * seq * dm];
+            tr.forward(&inputs, &mut rows).unwrap();
+            let mut d_in = vec![0f32; batch * seq * input_dim];
+            tr.backward(&d_out, Some(&mut d_in)).unwrap();
+            let grads = tr.grads().unwrap();
+            let fwd = rel_l2(&rows, &want_rows);
+            let din = rel_l2(&d_in, &want_d_in);
+            let worst = worst_gradient(&grads, &want_grads);
+            eprintln!(
+                "{mode:?} {dtype:?} identity input: forward {fwd:.2e}, input gradient {din:.2e}, \
+                 worst weight gradient {:.2e} ({})",
+                worst.0, worst.1
+            );
+            assert!(fwd < fwd_tol, "{mode:?} {dtype:?}: forward {fwd:.3e}");
+            assert!(
+                din < grad_tol,
+                "{mode:?} {dtype:?}: input gradient {din:.3e}"
+            );
+            assert!(
+                worst.0 < grad_tol,
+                "{mode:?} {dtype:?}: gradient {:.3e}",
+                worst.0
+            );
+        }
+    }
+}
+
+/// An f16 window whose loss scale overflows: the step is skipped (weights
+/// untouched), the scale halves, a second step on the same gradients is
+/// refused, and the next clean backward steps. A backward with no forward
+/// and slices of the wrong length are refused, not run.
+#[test]
+fn m2_gpu_train_f16_overflow_skips_the_step() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    let device = GpuDevice::new(0).unwrap();
+    let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
+    let cfg = cases()[0].1;
+    let w = drawn(&cfg, input_dim, 33);
+    let dm = cfg.d_model;
+    let inputs = det(batch * seq * input_dim, 910, 1.0);
+    let d_out = det(batch * seq * dm, 911, 1.0);
+    let mut tr = Mamba2GpuTrainer::new_with_dtype(
+        &device,
+        &w,
+        (cfg, input_dim, batch, seq),
+        WeightDtype::F16,
+    )
+    .unwrap();
+    assert!(
+        tr.backward(&d_out, None).is_err(),
+        "a backward with no forward ran"
+    );
+    let mut out = vec![0f32; batch * seq * dm];
+    assert!(
+        tr.forward(&inputs[1..], &mut out).is_err(),
+        "a short input ran"
+    );
+    let before = tr.weights().unwrap();
+    // The scaler's ceiling, 2^24, takes an output gradient of order one
+    // past f16's 65504.
+    tr.load_scaler_state(2f32.powi(24), 0);
+    let loaded = tr.scaler_state().map(|s| s.0);
+    tr.forward(&inputs, &mut out).unwrap();
+    tr.backward(&d_out, None).unwrap();
+    assert!(tr.overflowed(), "a 2^24 loss scale did not overflow f16");
+    assert!(!tr.apply_adamw().unwrap(), "an overflowed step was applied");
+    assert!(
+        tr.weights().unwrap() == before,
+        "a skipped step moved the weights"
+    );
+    assert_eq!(tr.scaler_state().map(|s| s.0), loaded.map(|s| s / 2.0));
+    assert!(
+        tr.apply_adamw().is_err(),
+        "the same gradients stepped twice"
+    );
+    tr.load_scaler_state(256.0, 0);
+    tr.forward(&inputs, &mut out).unwrap();
+    tr.backward(&d_out, None).unwrap();
+    assert!(!tr.overflowed());
+    assert!(tr.apply_adamw().unwrap(), "a clean step was skipped");
+    assert!(
+        tr.weights().unwrap() != before,
+        "a clean step did not move the weights"
+    );
 }

@@ -136,7 +136,8 @@ extern "C" __global__ void NAME(                                               \
         if (t < lc) {                                                          \
             float raw = to_f(proj[(b * seq + t0 + t) * ld_proj + dt_off + h]); \
             float dt = m2_softplus(__fadd_rn(raw, dt_bias[h]));                \
-            if (has_limit) dt = fminf(fmaxf(dt, dt_min), dt_max);              \
+            /* A NaN dt stays NaN, as the CPU's clamp leaves it. */            \
+            if (has_limit && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max); \
             acc = __fadd_rn(acc, __fmul_rn(dt, a_neg[h]));                     \
             dt_out[o + t] = dt;                                                \
             acs_out[o + t] = acc;                                              \

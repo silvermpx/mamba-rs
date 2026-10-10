@@ -11,6 +11,7 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 use crate::mamba_ssm::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::mamba_ssm::gpu::kernel_identity as ki;
 use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
+use crate::mamba_ssm::gpu::launch::opt_in_dynamic_smem;
 
 /// The compiled Mamba-2 kernels.
 pub struct Mamba2Kernels {
@@ -40,6 +41,10 @@ pub struct Mamba2Kernels {
     pub chunk_scan: TypedKernel,
     /// The training backward, f32.
     pub bwd: Mamba2BwdKernels,
+    /// The dynamic shared memory each opted-in kernel (the scans, the gated
+    /// norms, the sequential backward) may stage: the device's per-block
+    /// opt-in less the largest static stage among them.
+    pub smem_optin: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
 }
@@ -75,35 +80,56 @@ pub struct Mamba2BwdKernels {
     pub bias_grad: HalfKernel,
 }
 
-/// The threads of one decode-step block: one warp, one channel each. Its
-/// shared state tile is `32 * (d_state + 1)` floats, 33 KB at d_state 256.
-pub const STEP_THREADS: u32 = 32;
+/// The scan's shared memory for a block of `rows` channels: B and C, the
+/// step scalars and the rows' state tile, each row padded by one.
+pub fn step_smem_bytes(rows: usize, ds: usize) -> usize {
+    (2 * ds + 4 + rows * (ds + 1)) * 4
+}
 
-/// Launch geometry of [`Mamba2Kernels::step_fwd`].
-pub fn step_cfg(batch: usize, nh: usize, hd: usize, ds: usize) -> LaunchConfig {
-    let rows = (STEP_THREADS as usize).min(hd);
+/// The channels per block of the decode and sequential scans: a warp when
+/// its state tile fits `cap` bytes, fewer otherwise. Each thread keeps one
+/// channel's state and sums its readout alone, so the block size never
+/// changes a value. `None` when even one channel does not fit.
+pub fn step_rows(hd: usize, ds: usize, cap: usize) -> Option<usize> {
+    [32usize, 16, 8, 4, 2, 1]
+        .into_iter()
+        .map(|r| r.min(hd.max(1)))
+        .find(|&r| step_smem_bytes(r, ds) <= cap)
+}
+
+/// Launch geometry of the decode and sequential scans with `rows` channels
+/// per block (see [`step_rows`]).
+pub fn step_cfg(batch: usize, nh: usize, (hd, ds): (usize, usize), rows: usize) -> LaunchConfig {
     LaunchConfig {
-        grid_dim: (
-            batch as u32,
-            nh as u32,
-            hd.div_ceil(STEP_THREADS as usize) as u32,
-        ),
-        block_dim: (STEP_THREADS, 1, 1),
-        shared_mem_bytes: ((2 * ds + 4 + rows * (ds + 1)) * 4) as u32,
+        grid_dim: (batch as u32, nh as u32, hd.div_ceil(rows) as u32),
+        block_dim: (rows as u32, 1, 1),
+        shared_mem_bytes: step_smem_bytes(rows, ds) as u32,
     }
 }
 
 /// Tokens per SSD chunk.
 pub const CHUNK: usize = 64;
 
+/// The gated norm's shared memory: the group and its per-head sums.
+pub fn gated_norm_smem_bytes(d_ssm: usize, ng: usize, hd: usize) -> usize {
+    let gs = d_ssm / ng;
+    (gs + gs / hd) * 4
+}
+
+/// The gated norm backward's shared memory: the group twice and its
+/// per-head sums.
+pub fn gated_norm_bwd_smem_bytes(d_ssm: usize, ng: usize, hd: usize) -> usize {
+    let gs = d_ssm / ng;
+    (2 * gs + gs / hd) * 4
+}
+
 /// Launch geometry of the gated norm: one block per (row, group), its
 /// group and per-head sums staged in shared memory.
 pub fn gated_norm_cfg(rows: usize, d_ssm: usize, ng: usize, hd: usize) -> LaunchConfig {
-    let gs = d_ssm / ng;
     LaunchConfig {
         grid_dim: (rows as u32, ng as u32, 1),
         block_dim: (256, 1, 1),
-        shared_mem_bytes: ((gs + gs / hd) * 4) as u32,
+        shared_mem_bytes: gated_norm_smem_bytes(d_ssm, ng, hd) as u32,
     }
 }
 
@@ -142,7 +168,13 @@ impl Mamba2Kernels {
                 f16: get(&format!("{base}_f16"))?,
             })
         };
-        let kernels = Self {
+        let smem_optin = ctx
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )
+            .map_err(|e| format!("query opt-in shared memory: {e:?}"))?
+            .max(0) as usize;
+        let mut kernels = Self {
             step_fwd: typed("m2_step_fwd")?,
             seq_fwd: typed("m2_seq_fwd")?,
             seq_fwd_ckpt: typed("m2_seq_fwd_ckpt")?,
@@ -184,28 +216,30 @@ impl Mamba2Kernels {
                     f16: get("m2b_bias_grad_f16")?,
                 },
             },
+            smem_optin,
             compiler_identity,
             artifact_identity,
         };
-        {
-            use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
-            let k = &kernels.bwd.seq_bwd;
-            for f in [&k.f32, &k.bf16, &k.f16] {
-                // A refused opt-in leaves the default 48 KB; an oversized
-                // launch then fails loudly with its own error.
-                let _ = f.set_attribute(
-                    FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    SEQ_BWD_SMEM_MAX as i32,
-                );
+        kernels.smem_optin = {
+            let optin = kernels.smem_optin;
+            let mut budget = optin;
+            for (k, name) in [
+                (&kernels.step_fwd, "step"),
+                (&kernels.seq_fwd, "sequential scan"),
+                (&kernels.seq_fwd_ckpt, "checkpointing scan"),
+                (&kernels.gated_norm_fwd, "gated norm"),
+                (&kernels.bwd.gated_norm, "gated norm backward"),
+                (&kernels.bwd.seq_bwd, "sequential backward"),
+            ] {
+                for f in [&k.f32, &k.bf16, &k.f16] {
+                    budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
+                }
             }
-        }
+            budget
+        };
         Ok(kernels)
     }
 }
-
-/// The per-block opt-in the sequential backward may use: consumer parts
-/// cap it near 99 KB.
-pub const SEQ_BWD_SMEM_MAX: usize = 99 * 1024;
 
 /// The sequential backward's shared memory for a head: the replay state
 /// rows and the state-gradient rows (each padded by one), B and C, the step

@@ -6,8 +6,9 @@
 //! a head's channels and the conv along the channels of a token, so no sum
 //! crosses SIMD lanes, and the result does not depend on the instruction
 //! set. The order follows the reference's step: conv bias first, SiLU as
-//! `v / (1 + e^-v)`, dt clamped after the softplus, `B * (x dt)`, the state
-//! as `s dA + B x dt`, D last.
+//! `v / (1 + e^-v)`, `B * (x dt)`, the state as `s dA + B x dt`, D last.
+//! The dt clamp after the softplus comes from the reference's chunked
+//! forward (its step has none), so decode and prefill clamp alike.
 
 use pulp::{Arch, Simd, WithSimd};
 

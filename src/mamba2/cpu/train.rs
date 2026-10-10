@@ -317,7 +317,9 @@ fn d_skip<'a>(lw: &'a Mamba2LayerWeights, cfg: &Mamba2Config, h: usize) -> DSkip
 /// The backward of [`forward_mamba2_train`]. `d_out` holds d loss / d (the
 /// outputs) and is used as scratch; `d_input` (`[seq_len, input_dim]`, may
 /// be empty to skip it) receives d loss / d (the inputs). The weight
-/// gradients accumulate into `grads`, a container shaped like `w`.
+/// gradients accumulate into `grads`, a container shaped like `w`. The
+/// gradients stop at the conv history and SSM state the window started
+/// from: they are inputs of the window, as on the GPU.
 pub fn backward_mamba2_train(
     d_out: &mut [f32],
     d_input: &mut [f32],

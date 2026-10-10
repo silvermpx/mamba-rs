@@ -5,8 +5,9 @@
 // explicit round-to-nearest intrinsics: the module is PTX that the driver
 // compiles per architecture, and a bare a*b+c may be fused differently by
 // ptxas on another board. The decode evaluates the chunked prefill's
-// formula at a chunk of one token, so a prefill of whole chunks followed by
-// a decode step gives the bits of a prefill one token longer:
+// formula at a chunk of one token, so a chunked prefill of whole chunks
+// followed by a decode step gives the bits of a chunked prefill one token
+// longer (a sequential prefill and its decode are one recurrence already):
 //
 //   dt   = softplus(raw + dt_bias)            clamped only with a dt limit
 //   acs  = 0 + dt * A                         (A = -exp(A_log), host side)
@@ -53,7 +54,9 @@ __device__ __forceinline__ void m2_step_scalars(
     if (threadIdx.x != 0) return;
     float raw = to_f(proj_row[dt_off + h]);
     float dt = m2_softplus(__fadd_rn(raw, dt_bias[h]));
-    if (flags & M2_FLAG_DT_LIMIT) dt = fminf(fmaxf(dt, dt_min), dt_max);
+    // A NaN dt stays NaN, as the CPU's clamp leaves it; fminf and fmaxf
+    // would return the bound and hide a corrupt step.
+    if ((flags & M2_FLAG_DT_LIMIT) && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);
     float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));
     float cb = 0.0f;
     for (int n = 0; n < ds; n++) cb = __fmaf_rn(c_sm[n], b_sm[n], cb);

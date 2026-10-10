@@ -111,7 +111,8 @@ impl Mamba2Weights {
         linear_default_uniform(&mut w.input_proj_w, input_dim, &mut rng);
         for lw in &mut w.layers {
             linear_default_uniform(&mut lw.in_proj_w, d, &mut rng);
-            linear_default_uniform(&mut lw.in_proj_b, d, &mut rng);
+            // The reference model's own init zeroes every linear bias.
+            lw.in_proj_b.fill(0.0);
             linear_default_uniform(&mut lw.conv_w, cfg.d_conv, &mut rng);
             linear_default_uniform(&mut lw.conv_b, cfg.d_conv, &mut rng);
             dt_bias_init(&mut lw.dt_bias, &mut rng);
@@ -122,7 +123,7 @@ impl Mamba2Weights {
             for v in &mut lw.out_proj_w {
                 *v *= rescale;
             }
-            linear_default_uniform(&mut lw.out_proj_b, di, &mut rng);
+            lw.out_proj_b.fill(0.0);
         }
         let hidden = cfg.mlp_hidden();
         for m in &mut w.mlp {

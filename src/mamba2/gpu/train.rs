@@ -25,8 +25,9 @@
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
+use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
-use super::kernels::{CHUNK, Mamba2Kernels, SEQ_BWD_SMEM_MAX, seq_bwd_smem_bytes};
+use super::kernels::{CHUNK, Mamba2Kernels, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes};
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
 use crate::mamba_ssm::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
@@ -36,7 +37,7 @@ use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use crate::mamba_ssm::gpu::context::{GemmRole, GpuCtx};
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm, validate_rows_capacity};
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -297,10 +298,10 @@ struct BwdScratch {
 pub struct Mamba2GpuTrainer {
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
-    pub cfg: Mamba2Config,
-    pub batch: usize,
-    pub seq_len: usize,
-    pub input_dim: usize,
+    cfg: Mamba2Config,
+    batch: usize,
+    seq_len: usize,
+    input_dim: usize,
     dtype: WeightDtype,
     act: WeightDtype,
     /// The sequential scan (ScanMode::Sequential) instead of the chunked
@@ -334,6 +335,10 @@ pub struct Mamba2GpuTrainer {
     /// The last backward's gradients overflowed (f16), so the next AdamW
     /// step is skipped.
     overflowed: bool,
+    /// Set by a completed forward, cleared when one starts.
+    forwarded: bool,
+    /// Set by a completed backward, consumed by the next optimizer step.
+    fresh_grads: bool,
 }
 
 const PAIRS: usize = CHUNK * (CHUNK + 1) / 2;
@@ -380,17 +385,6 @@ impl Mamba2GpuTrainer {
         }
         let seq_mode = !cfg.train_use_parallel_scan();
         let stride = SEQ_STRIDE.min(seq_len);
-        if seq_mode {
-            let threads = cfg.headdim.next_multiple_of(32);
-            let smem = seq_bwd_smem_bytes(cfg.headdim, cfg.d_state, threads);
-            if smem > SEQ_BWD_SMEM_MAX || threads > 1024 {
-                return Err(format!(
-                    "the sequential backward of a {}-channel head with {} states needs {smem} \
-                     bytes of shared memory; the GPU serves {SEQ_BWD_SMEM_MAX}",
-                    cfg.headdim, cfg.d_state
-                ));
-            }
-        }
         let ctx = GpuCtx::new_from_env_with_state_cap_and_role(device, 64, GemmRole::triad(dtype))?;
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
@@ -398,6 +392,28 @@ impl Mamba2GpuTrainer {
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba2Kernels::compile(device.context(), arch)?;
+        check_device_envelope(&cfg, &kernels)?;
+        let optin = kernels.smem_optin;
+        if seq_mode {
+            let threads = cfg.headdim.next_multiple_of(32);
+            let smem = seq_bwd_smem_bytes(cfg.headdim, cfg.d_state, threads);
+            if smem > optin || threads > 1024 {
+                return Err(format!(
+                    "the sequential backward of a {}-channel head with {} states needs {smem} \
+                     bytes of shared memory; this GPU serves {optin}",
+                    cfg.headdim, cfg.d_state
+                ));
+            }
+        }
+        if cfg.rmsnorm && gated_norm_bwd_smem_bytes(cfg.ssm_dim(), cfg.ngroups, cfg.headdim) > optin
+        {
+            return Err(format!(
+                "the gated-norm backward of a {}-channel group needs {} bytes of shared memory; \
+                 this GPU serves {optin}",
+                cfg.ssm_dim() / cfg.ngroups,
+                gated_norm_bwd_smem_bytes(cfg.ssm_dim(), cfg.ngroups, cfg.headdim)
+            ));
+        }
         let layout = Layout::of(w);
         let s = &ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -412,6 +428,10 @@ impl Mamba2GpuTrainer {
             c.d_inner(),
         );
         let (nh, hd, ds) = (c.nheads(), c.headdim, c.d_state);
+        validate_rows_capacity(
+            rows,
+            [input_dim, ip, cd, di, dm].into_iter().max().unwrap_or(0),
+        )?;
         let per_chunk = batch * nc * nh;
         let nseg = seq_len.div_ceil(stride);
         // The chunked path's per-chunk buffers, or the sequential path's
@@ -448,15 +468,15 @@ impl Mamba2GpuTrainer {
             rec: z(sequential(batch * nh * stride * hd * ds))?,
             db_h: z(sequential(rows * nh * ds))?,
             dc_h: z(sequential(rows * nh * ds))?,
-            acc: z(rows * d_ssm)?,
-            ste: z(rows * d_ssm)?,
-            yi: z(rows * d_ssm)?,
-            dcbh: z(per_chunk * PAIRS)?,
-            mm: z(per_chunk * PAIRS)?,
-            ddtx: z(per_chunk * CHUNK)?,
-            qv: z(per_chunk * CHUNK)?,
-            inter: z(per_chunk * CHUNK)?,
-            dot: z(per_chunk)?,
+            acc: z(chunked(rows * d_ssm))?,
+            ste: z(chunked(rows * d_ssm))?,
+            yi: z(chunked(rows * d_ssm))?,
+            dcbh: z(chunked(per_chunk * PAIRS))?,
+            mm: z(chunked(per_chunk * PAIRS))?,
+            ddtx: z(chunked(per_chunk * CHUNK))?,
+            qv: z(chunked(per_chunk * CHUNK))?,
+            inter: z(chunked(per_chunk * CHUNK))?,
+            dot: z(chunked(per_chunk))?,
             da_parts: z(per_chunk)?,
             dbias_parts: z(per_chunk)?,
             d_parts: z(per_chunk * hd)?,
@@ -494,6 +514,8 @@ impl Mamba2GpuTrainer {
             Some(DtypedBuf::zeros(s, copy_at.max(1), act)?)
         };
         let mut trainer = Self {
+            forwarded: false,
+            fresh_grads: false,
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
             adamw: GpuAdamW::new(s, layout.total)?,
@@ -536,6 +558,38 @@ impl Mamba2GpuTrainer {
     }
 
     /// The storage dtype this trainer runs.
+    /// The model's configuration.
+    pub fn cfg(&self) -> &Mamba2Config {
+        &self.cfg
+    }
+
+    /// Sequences per window.
+    pub fn batch(&self) -> usize {
+        self.batch
+    }
+
+    /// Tokens per window.
+    pub fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    /// Input features per token.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// A host slice of a window must hold `width` values per token row.
+    fn check_window_len(&self, what: &str, len: usize, width: usize) -> Result<(), String> {
+        let want = self.batch * self.seq_len * width;
+        if len == want {
+            Ok(())
+        } else {
+            Err(format!(
+                "{what} holds {len} values; this trainer's window takes {want}"
+            ))
+        }
+    }
+
     pub fn dtype(&self) -> WeightDtype {
         self.dtype
     }
@@ -577,16 +631,20 @@ impl Mamba2GpuTrainer {
 
     /// The half copy of a master matrix, or the master itself in the f32
     /// lanes.
-    fn gemm_weight(&self, span: Span) -> u64 {
+    /// The matrix a GEMM reads: the f32 master, or its half copy in the
+    /// half lanes. A span with no half copy is an error, never another
+    /// matrix's copy.
+    fn gemm_weight(&self, span: Span) -> Result<u64, String> {
         match &self.mirror {
-            None => at(self.master.cached_ptr(), span),
+            None => Ok(at(self.master.cached_ptr(), span)),
             Some(m) => {
                 let dst = self
                     .mirror_pairs
                     .iter()
                     .find(|(src, _)| src.off == span.off)
-                    .map_or(0, |(_, dst)| dst.off);
-                m.cached_ptr() + (dst * 2) as u64
+                    .map(|(_, dst)| dst.off)
+                    .ok_or("a GEMM matrix has no half copy")?;
+                Ok(m.cached_ptr() + (dst * 2) as u64)
             }
         }
     }
@@ -614,7 +672,8 @@ impl Mamba2GpuTrainer {
     /// The gradients of the last backward, shaped like the weights.
     pub fn grads(&self) -> Result<Mamba2Weights, String> {
         let flat = self.grads.to_cpu(&self.ctx.stream)?;
-        Ok(self.layout.unflatten(&flat, &self.template))
+        // Fields the trainer does not train come out zero, not as weights.
+        Ok(self.layout.unflatten(&flat, &self.template.zeros_like()))
     }
 
     /// Back to the empty conv and SSM states.
@@ -622,11 +681,11 @@ impl Mamba2GpuTrainer {
         self.state.reset(&self.ctx)
     }
 
-    fn layer_ptrs(&self, l: usize) -> LayerPtrs {
+    fn layer_ptrs(&self, l: usize) -> Result<LayerPtrs, String> {
         let (base, ls) = (self.master.cached_ptr(), &self.layout.layers[l]);
-        LayerPtrs {
+        Ok(LayerPtrs {
             norm_w: at(base, ls.norm_weight),
-            in_w: self.gemm_weight(ls.in_proj_w),
+            in_w: self.gemm_weight(ls.in_proj_w)?,
             in_b: opt_at(base, ls.in_proj_b),
             conv_w: at(base, ls.conv_w),
             conv_b: opt_at(base, ls.conv_b).unwrap_or(self.conv_zero_b.cached_ptr()),
@@ -634,9 +693,9 @@ impl Mamba2GpuTrainer {
             a_neg: self.a_neg.cached_ptr() + (l * self.cfg.nheads() * 4) as u64,
             d: at(base, ls.d_param),
             gate_w: opt_at(base, ls.gate_norm_weight),
-            out_w: self.gemm_weight(ls.out_proj_w),
+            out_w: self.gemm_weight(ls.out_proj_w)?,
             out_b: opt_at(base, ls.out_proj_b),
-        }
+        })
     }
 
     fn copy(&self, dst: u64, src: u64, n: usize, what: &str) -> Result<(), String> {
@@ -661,6 +720,15 @@ impl Mamba2GpuTrainer {
     /// input_dim]`, `out` (`[batch, seq_len, d_model]`) receives every
     /// position's final-norm output. The states carry from the last call.
     pub fn forward(&mut self, input: &[f32], out: &mut [f32]) -> Result<(), String> {
+        self.check_window_len("forward input", input.len(), self.input_dim)?;
+        self.check_window_len("forward output", out.len(), self.cfg.d_model)?;
+        self.forwarded = false;
+        self.forward_unchecked(input, out)?;
+        self.forwarded = true;
+        Ok(())
+    }
+
+    fn forward_unchecked(&mut self, input: &[f32], out: &mut [f32]) -> Result<(), String> {
         let c = self.cfg;
         let (b, t_len) = (self.batch, self.seq_len);
         let rows = b * t_len;
@@ -702,7 +770,7 @@ impl Mamba2GpuTrainer {
         let ssm_per_layer = b * nh * c.headdim * c.d_state;
         let x = self.exec();
         for (l, a) in self.acts.iter().enumerate() {
-            let lp = self.layer_ptrs(l);
+            let lp = self.layer_ptrs(l)?;
             self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
             x.norm_in_proj(
                 &lp,
@@ -870,7 +938,30 @@ impl Mamba2GpuTrainer {
     /// (its outputs), `[batch, seq_len, d_model]`. The gradients are
     /// overwritten (see [`Self::grads`]); `d_input`, when given, receives d
     /// loss / d (the inputs), `[batch, seq_len, input_dim]`.
+    ///
+    /// A window the forward did not complete is refused. After an f16
+    /// overflow (see [`Self::overflowed`]) the gradients and `d_input` are
+    /// not finite: the next [`Self::apply_adamw`] skips its step, and a
+    /// caller training anything upstream must skip that step too.
     pub fn backward(&mut self, d_out: &[f32], d_input: Option<&mut [f32]>) -> Result<(), String> {
+        if !self.forwarded {
+            return Err("backward needs a completed forward of this window".into());
+        }
+        self.check_window_len("backward d_out", d_out.len(), self.cfg.d_model)?;
+        if let Some(d) = d_input.as_deref() {
+            self.check_window_len("backward d_input", d.len(), self.input_dim)?;
+        }
+        self.fresh_grads = false;
+        self.backward_unchecked(d_out, d_input)?;
+        self.fresh_grads = true;
+        Ok(())
+    }
+
+    fn backward_unchecked(
+        &mut self,
+        d_out: &[f32],
+        d_input: Option<&mut [f32]>,
+    ) -> Result<(), String> {
         let c = self.cfg;
         let rows = self.batch * self.seq_len;
         let dm = c.d_model;
@@ -977,7 +1068,7 @@ impl Mamba2GpuTrainer {
             c.ngroups,
         );
         let ls = self.layout.layers[l];
-        let lp = self.layer_ptrs(l);
+        let lp = self.layer_ptrs(l)?;
         let g_base = self.grads.cached_ptr();
         let stream = self.ctx.stream.clone();
         let act = self.act;
@@ -1081,11 +1172,11 @@ impl Mamba2GpuTrainer {
         // The gate (with or without the norm) and the inner MLP gate.
         if let Some(w) = lp.gate_w {
             let dw_parts = s.dw_parts.cached_ptr();
-            let (gs, eps, nbg) = (d_ssm / ng, c.gated_norm_eps, i32::from(c.norm_before_gate));
+            let (eps, nbg) = (c.gated_norm_eps, i32::from(c.norm_before_gate));
             let cfg = LaunchConfig {
                 grid_dim: (rows as u32, ng as u32, 1),
                 block_dim: (128, 1, 1),
-                shared_mem_bytes: ((2 * gs + gs / hd) * 4) as u32,
+                shared_mem_bytes: gated_norm_bwd_smem_bytes(d_ssm, ng, hd) as u32,
             };
             let d_ssm_i = d_ssm as i32;
             go!(
@@ -1476,7 +1567,18 @@ impl Mamba2GpuTrainer {
     /// projection, in_proj, the conv and out_proj weights) decay. Returns
     /// false when the f16 gradients overflowed: the step is skipped and the
     /// loss scale backs off.
+    ///
+    /// Each backward's gradients take one step: a second call before the
+    /// next backward is refused rather than applying them twice.
     pub fn apply_adamw(&mut self) -> Result<bool, String> {
+        if !self.fresh_grads {
+            return Err("no new gradients since the last optimizer step".into());
+        }
+        self.fresh_grads = false;
+        self.apply_adamw_unchecked()
+    }
+
+    fn apply_adamw_unchecked(&mut self) -> Result<bool, String> {
         if let Some(scaler) = self.scaler.as_mut() {
             scaler.update(self.overflowed);
             if self.overflowed {
