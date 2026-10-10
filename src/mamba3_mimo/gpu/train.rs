@@ -29,7 +29,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan};
 use super::kernels::{
     CHUNK, ChunkedGeom, Mamba3MimoKernels, chunked_geom, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_cfg,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_cfg,
 };
 use crate::config::ScanMode;
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
@@ -471,7 +471,7 @@ impl Mamba3MimoGpuTrainer {
                      ScanMode::Auto trains it by the recurrence"
                 ));
             }
-            let smem = scan_bwd_smem_bytes((hd, ds, rank, na), threads);
+            let smem = scan_bwd_smem_bytes((hd, ds, rank, na));
             if smem > optin {
                 return Err(format!(
                     "a head of {hd} channels and {ds} states needs {smem} bytes of shared \
@@ -1860,11 +1860,10 @@ impl Mamba3MimoGpuTrainer {
                     at(base, ls.mimo_z),
                     at(base, ls.mimo_o),
                 ];
-                let threads = hd.next_multiple_of(32);
                 let cfg = LaunchConfig {
                     grid_dim: (b as u32, nh as u32, 1),
-                    block_dim: (threads as u32, 1, 1),
-                    shared_mem_bytes: scan_bwd_smem_bytes((hd, ds, rank, na), threads) as u32,
+                    block_dim: (scan_bwd_threads(hd) as u32, 1, 1),
+                    shared_mem_bytes: scan_bwd_smem_bytes((hd, ds, rank, na)) as u32,
                 };
                 let mut bld = stream.launch_builder(k.scan_bwd.get(act));
                 bld.arg(&d_proj);

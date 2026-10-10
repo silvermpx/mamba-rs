@@ -283,12 +283,16 @@ pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize) -> usize {
 /// and queries, the key and query gradients, the previous keys' carry and
 /// the bias accumulators, three [P, R] tiles, three angle arrays (the
 /// token's angle gradient, its carry and tanh_pi) and three reduction slots
-/// per thread.
-pub fn scan_bwd_smem_bytes(
-    (hd, ds, rank, na): (usize, usize, usize, usize),
-    threads: usize,
-) -> usize {
-    (2 * hd * (ds + 1) + 8 * rank * ds + 3 * hd * rank + 3 * na + 3 * threads) * 4
+/// per channel thread (the channels rounded up to a warp).
+pub fn scan_bwd_smem_bytes((hd, ds, rank, na): (usize, usize, usize, usize)) -> usize {
+    (2 * hd * (ds + 1) + 8 * rank * ds + 3 * hd * rank + 3 * na + 3 * hd.next_multiple_of(32)) * 4
+}
+
+/// The training backward's block: a thread per channel, and at least 256
+/// threads, since its loops over state elements and (r, n) pairs spread
+/// over the whole block while only the channel threads walk the rows.
+pub fn scan_bwd_threads(hd: usize) -> usize {
+    hd.next_multiple_of(32).max(256)
 }
 
 /// Tokens per chunk of the chunked path.

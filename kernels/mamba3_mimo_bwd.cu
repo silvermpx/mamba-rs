@@ -34,16 +34,17 @@ __device__ __forceinline__ float mimo_silu_grad(float v) {
     return __fmul_rn(sg, __fmaf_rn(v, __fsub_rn(1.0f, sg), 1.0f));
 }
 
-// A block-wide sum of one value per thread: per-thread values into `red`,
-// then a fixed tree over the next power of two.
-__device__ __forceinline__ float mimo_block_sum(float v, float* red) {
-    red[threadIdx.x] = v;
+// A block-wide sum of the values of the first `n` threads: their values
+// into `red`, then a fixed tree over the next power of two. Every thread
+// of the block calls it.
+__device__ __forceinline__ float mimo_block_sum_n(float v, float* red, int n) {
+    const int t = threadIdx.x;
+    if (t < n) red[t] = v;
     __syncthreads();
     int width = 1;
-    while (width < (int)blockDim.x) width <<= 1;
+    while (width < n) width <<= 1;
     for (int w = width >> 1; w > 0; w >>= 1) {
-        if (threadIdx.x < w && threadIdx.x + w < blockDim.x)
-            red[threadIdx.x] = __fadd_rn(red[threadIdx.x], red[threadIdx.x + w]);
+        if (t < w && t + w < n) red[t] = __fadd_rn(red[t], red[t + w]);
         __syncthreads();
     }
     float out = red[0];
@@ -51,16 +52,24 @@ __device__ __forceinline__ float mimo_block_sum(float v, float* red) {
     return out;
 }
 
-// Three block-wide sums at once, each through mimo_block_sum's fixed tree
-// in its own third of `red` (3 blockDim floats), the result in thread 0
-// only: the levels above a warp in shared memory, the last five as
-// shuffles in warp 0, which pair the same operands in the same order (the
-// block is at least a warp). `red` is free again after the next barrier.
-__device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, float* red) {
-    const int n = blockDim.x, t = threadIdx.x;
-    red[t] = a;
-    red[n + t] = b;
-    red[2 * n + t] = c;
+// The sum of one value per thread of the block.
+__device__ __forceinline__ float mimo_block_sum(float v, float* red) {
+    return mimo_block_sum_n(v, red, blockDim.x);
+}
+
+// Three sums of the values of the first `n` threads (at least a warp) at
+// once, each through mimo_block_sum_n's fixed tree in its own third of
+// `red` (3 n floats), the result in thread 0 only: the levels above a warp
+// in shared memory, the last five as shuffles in warp 0, which pair the
+// same operands in the same order. `red` is free again after the next
+// barrier.
+__device__ __forceinline__ float3 mimo_block_sum3(float a, float b, float c, float* red, int n) {
+    const int t = threadIdx.x;
+    if (t < n) {
+        red[t] = a;
+        red[n + t] = b;
+        red[2 * n + t] = c;
+    }
     __syncthreads();
     int width = 1;
     while (width < n) width <<= 1;
@@ -164,7 +173,11 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     float* dth = gxS + hd * rank;              // this token's angle gradient
     float* dthc = dth + na;                    // the angle gradient carry
     float* tpn = dthc + na;                    // tanh_pi of the token
-    float* red = tpn + na;                     // 3 blockDim
+    float* red = tpn + na;                     // 3 lanes
+    // The channel threads, a warp multiple: the width of the block sums.
+    // The block may be wider, the rest of its threads joining only the
+    // loops over state elements and (r, n) pairs.
+    const int lanes = (hd + 31) & ~31;
 
     const bool own = tid < hd;
     float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
@@ -365,32 +378,21 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             }
             mimo_cp_wait();
             __syncthreads();
-            // The dS row takes sum_r dy q_r, the state indices in batches as in
-            // mimo_tok_row, the channel's dy held in registers.
-            if (own) {
-                float* __restrict__ drow = dsr + tid * (ds + 1);
-                const float* __restrict__ qr_ = qv;
-                float dyv[MIMO_RA(RK)];
-                _Pragma("unroll") for (int r = 0; r < R; r++) dyv[r] = dyS[tid * rank + r];
-                int n = 0;
-                for (; RB > 1 && n + RB <= ds; n += RB) {
-                    float acc[RB], qb[RB][MIMO_RA(RK)];
-                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
-                        acc[j] = drow[n + j];
-                        _Pragma("unroll") for (int r = 0; r < R; r++)
-                            qb[j][r] = qr_[r * ds + n + j];
-                    }
-                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
-                        _Pragma("unroll") for (int r = 0; r < R; r++)
-                            acc[j] = __fmaf_rn(dyv[r], qb[j][r], acc[j]);
-                        drow[n + j] = acc[j];
-                    }
-                }
-                for (; n < ds; n++) {
-                    float acc = drow[n];
+            // dS[p][n] += sum_r dy[p][r] q_r[n], each element its own chain,
+            // the elements spread over the whole block.
+            {
+                int p = tid / ds, n = tid - (tid / ds) * ds;
+                for (int e = tid; e < hd * ds; e += blockDim.x) {
+                    float* d = dsr + p * (ds + 1) + n;
+                    float acc = *d;
                     _Pragma("unroll") for (int r = 0; r < R; r++)
-                        acc = __fmaf_rn(dyv[r], qr_[r * ds + n], acc);
-                    drow[n] = acc;
+                        acc = __fmaf_rn(dyS[p * rank + r], qv[r * ds + n], acc);
+                    *d = acc;
+                    n += blockDim.x;
+                    while (n >= ds) {
+                        n -= ds;
+                        p++;
+                    }
                 }
             }
             __syncthreads();
@@ -398,31 +400,59 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             // rows already hold: the replay leaves the segment's last state
             // there, and every earlier token's is the state before the token
             // walked just before it.
-            for (int i = tid; i < rn; i += blockDim.x) {
-                const int r = i / ds, n = i % ds;
-                float aq = 0.0f;
-                for (int p = 0; p < hd; p++)
-                    aq = __fmaf_rn(dyS[p * rank + r], st[p * (ds + 1) + n], aq);
-                dq[i] = aq;
+            // Two pairs a thread, their chains interleaved.
+            for (int i0 = tid; i0 < rn; i0 += 2 * blockDim.x) {
+                const int i1 = i0 + blockDim.x;
+                const bool two = i1 < rn;
+                const int r0 = i0 / ds, n0 = i0 % ds;
+                const int r1 = two ? i1 / ds : r0, n1 = two ? i1 % ds : n0;
+                float aq0 = 0.0f, aq1 = 0.0f;
+                for (int p = 0; p < hd; p++) {
+                    const float* srow = st + p * (ds + 1);
+                    aq0 = __fmaf_rn(dyS[p * rank + r0], srow[n0], aq0);
+                    aq1 = __fmaf_rn(dyS[p * rank + r1], srow[n1], aq1);
+                }
+                dq[i0] = aq0;
+                if (two) dq[i1] = aq1;
             }
             __syncthreads();
             // The state before the token into the replay rows, while the key
             // gradients and the rotation run.
-            for (int p = 0; p < hd; p++)
-                for (int n = tid; n < ds; n += blockDim.x)
-                    mimo_cp4(st + p * (ds + 1) + n, s_prev + (long long)p * ds + n);
-            mimo_cp_commit();
-            // Per (r, n): the previous keys' gradient and the key gradient.
-            for (int i = tid; i < rn; i += blockDim.x) {
-                const int r = i / ds, n = i % ds;
-                float akp = 0.0f, akc = dkcar[i];
-                for (int p = 0; p < hd; p++) {
-                    const float dsv = dsr[p * (ds + 1) + n];
-                    akp = __fmaf_rn(dsv, bvS[p * rank + r], akp);
-                    akc = __fmaf_rn(dsv, gxS[p * rank + r], akc);
+            {
+                int p = tid / ds, n = tid - (tid / ds) * ds;
+                for (int e = tid; e < hd * ds; e += blockDim.x) {
+                    mimo_cp4(st + p * (ds + 1) + n, s_prev + e);
+                    n += blockDim.x;
+                    while (n >= ds) {
+                        n -= ds;
+                        p++;
+                    }
                 }
-                dkc[i] = akc;
-                dkcar[i] = akp;
+            }
+            mimo_cp_commit();
+            // Per (r, n): the previous keys' gradient and the key gradient,
+            // two pairs a thread with their chains interleaved.
+            for (int i0 = tid; i0 < rn; i0 += 2 * blockDim.x) {
+                const int i1 = i0 + blockDim.x;
+                const bool two = i1 < rn;
+                const int r0 = i0 / ds, n0 = i0 % ds;
+                const int r1 = two ? i1 / ds : r0, n1 = two ? i1 % ds : n0;
+                float akp0 = 0.0f, akc0 = dkcar[i0];
+                float akp1 = 0.0f, akc1 = two ? dkcar[i1] : 0.0f;
+                for (int p = 0; p < hd; p++) {
+                    const float* drow_ = dsr + p * (ds + 1);
+                    const float dsv0 = drow_[n0], dsv1 = drow_[n1];
+                    akp0 = __fmaf_rn(dsv0, bvS[p * rank + r0], akp0);
+                    akc0 = __fmaf_rn(dsv0, gxS[p * rank + r0], akc0);
+                    akp1 = __fmaf_rn(dsv1, bvS[p * rank + r1], akp1);
+                    akc1 = __fmaf_rn(dsv1, gxS[p * rank + r1], akc1);
+                }
+                dkc[i0] = akc0;
+                dkcar[i0] = akp0;
+                if (two) {
+                    dkc[i1] = akc1;
+                    dkcar[i1] = akp1;
+                }
             }
             __syncthreads();
             // The rotation back to the biased keys and queries, and dtheta.
@@ -519,7 +549,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 d_bn_h[(row * nh + h) * rn + i] = dkc[i];
                 d_cn_h[(row * nh + h) * rn + i] = dq[i];
             }
-            const float3 sums = mimo_block_sum3(da_loc, db_loc, dg_loc, red);
+            const float3 sums = mimo_block_sum3(da_loc, db_loc, dg_loc, red, lanes);
             const float d_alpha_s = sums.x, d_beta = sums.y, d_gamma = sums.z;
             if (tid == 0) {
                 float d_dt = 0.0f;
@@ -568,7 +598,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
         g_bb[bh * rn + i] = gbb[i];
         g_cb[bh * rn + i] = gcb[i];
     }
-    const float gd = mimo_block_sum(gd_loc, red);
+    const float gd = mimo_block_sum_n(gd_loc, red, lanes);
     if (tid == 0) {
         g_d[bh] = gd;
         g_dtb[bh] = gdtb_loc;
