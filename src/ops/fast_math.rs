@@ -1,7 +1,9 @@
 //! Vectorized f32 exp() using the Cephes degree-7 polynomial (Moshier).
 //!
 //! Provides SIMD-accelerated exp() for NEON (AArch64) and AVX2 (x86_64),
-//! plus a scalar fallback. Max relative error: ~1.7e-7 (~1.4 ULP).
+//! plus a scalar fallback, all three the same sequence of rounded
+//! operations: a SIMD lane gives the scalar version's bits on every
+//! machine. Max relative error: ~1.7e-7 (~1.4 ULP).
 //!
 //! Algorithm (identical to Cephes expf.c, Eigen pexp_float, sse_mathfun):
 //!   1. Cody-Waite range reduction: x = n * ln(2) + r
@@ -73,8 +75,9 @@ pub fn fast_exp_scalar(x: f32) -> f32 {
     p * pow2n
 }
 
-/// Apply fast exp() to each element in a slice (in-place).
-/// Dispatches to SIMD when available: NEON (AArch64, 4-wide), AVX2+FMA (x86_64, 8-wide).
+/// Apply fast exp() to each element in a slice (in-place), the bits of
+/// [`fast_exp_scalar`] on every element.
+/// Dispatches to SIMD when available: NEON (AArch64, 4-wide), AVX2 (x86_64, 8-wide).
 ///
 /// On x86_64 the AVX2+FMA feature check is resolved ONCE into a cached
 /// function pointer: this function is called per channel per timestep per
@@ -153,17 +156,23 @@ fn fast_exp_neon(buf: &mut [f32]) {
             // avoids double-rounding hazard of floor(x * log2e + 0.5)
             let n_f = vrndnq_f32(vmulq_f32(x, v_log2ef));
 
+            // Every step below is the scalar version's own rounded multiply
+            // or add, never a fused one, so a lane gives fast_exp_scalar's
+            // bits and the result does not depend on the instruction set.
             // r = x - n * ln2_hi - n * ln2_lo (Cody-Waite)
-            let r = vfmsq_f32(vfmsq_f32(x, n_f, v_ln2_hi), n_f, v_ln2_lo);
+            let r = vsubq_f32(
+                vsubq_f32(x, vmulq_f32(n_f, v_ln2_hi)),
+                vmulq_f32(n_f, v_ln2_lo),
+            );
 
             // Cephes degree-7: P(r) * r^2 + r + 1.0
             let r2 = vmulq_f32(r, r);
-            let p = vfmaq_f32(v_p1, v_p0, r);
-            let p = vfmaq_f32(v_p2, p, r);
-            let p = vfmaq_f32(v_p3, p, r);
-            let p = vfmaq_f32(v_p4, p, r);
-            let p = vfmaq_f32(v_p5, p, r);
-            let p = vfmaq_f32(r, p, r2);
+            let p = vaddq_f32(vmulq_f32(v_p0, r), v_p1);
+            let p = vaddq_f32(vmulq_f32(p, r), v_p2);
+            let p = vaddq_f32(vmulq_f32(p, r), v_p3);
+            let p = vaddq_f32(vmulq_f32(p, r), v_p4);
+            let p = vaddq_f32(vmulq_f32(p, r), v_p5);
+            let p = vaddq_f32(vmulq_f32(p, r2), r);
             let p = vaddq_f32(p, v_one);
 
             // 2^n via exponent bit shift
@@ -216,8 +225,9 @@ unsafe fn fast_exp_avx2(buf: &mut [f32]) {
             let off = i * 8;
             let x = _mm256_loadu_ps(ptr.add(off));
 
-            // Clamp
-            let x = _mm256_min_ps(_mm256_max_ps(x, v_lo), v_hi);
+            // Clamp; the bound first, so a NaN passes through as in
+            // f32::clamp (min and max return their second operand then).
+            let x = _mm256_min_ps(v_hi, _mm256_max_ps(v_lo, x));
 
             // n = round(x * log2e) — using roundps (round to nearest even)
             // avoids double-rounding hazard of floor(x * log2e + 0.5)
@@ -231,14 +241,16 @@ unsafe fn fast_exp_avx2(buf: &mut [f32]) {
                 _mm256_mul_ps(n_f, v_ln2_lo),
             );
 
-            // Cephes degree-7: P(r) * r^2 + r + 1.0
+            // Cephes degree-7: P(r) * r^2 + r + 1.0, each step the scalar
+            // version's rounded multiply then add (no fused step), so a lane
+            // gives fast_exp_scalar's bits.
             let r2 = _mm256_mul_ps(r, r);
-            let p = _mm256_fmadd_ps(v_p0, r, v_p1);
-            let p = _mm256_fmadd_ps(p, r, v_p2);
-            let p = _mm256_fmadd_ps(p, r, v_p3);
-            let p = _mm256_fmadd_ps(p, r, v_p4);
-            let p = _mm256_fmadd_ps(p, r, v_p5);
-            let p = _mm256_fmadd_ps(p, r2, r);
+            let p = _mm256_add_ps(_mm256_mul_ps(v_p0, r), v_p1);
+            let p = _mm256_add_ps(_mm256_mul_ps(p, r), v_p2);
+            let p = _mm256_add_ps(_mm256_mul_ps(p, r), v_p3);
+            let p = _mm256_add_ps(_mm256_mul_ps(p, r), v_p4);
+            let p = _mm256_add_ps(_mm256_mul_ps(p, r), v_p5);
+            let p = _mm256_add_ps(_mm256_mul_ps(p, r2), r);
             let p = _mm256_add_ps(p, v_one);
 
             // 2^n via exponent bit shift
@@ -306,6 +318,24 @@ mod tests {
                 assert!(
                     rel_err < 2e-7,
                     "fast_exp_inplace[{i}]: fast={fast}, exact={exact}, rel_err={rel_err:.2e}",
+                );
+            }
+        }
+    }
+
+    /// The SIMD path gives the scalar version's bits on every element,
+    /// across whole vectors and the scalar tails of every length.
+    #[test]
+    fn test_fast_exp_inplace_is_the_scalar_bits() {
+        let vals: Vec<f32> = (-1200..=1000).map(|i| i as f32 * 0.0937).collect();
+        for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, vals.len()] {
+            let mut buf = vals[..len].to_vec();
+            fast_exp_inplace(&mut buf);
+            for (i, (&got, &x)) in buf.iter().zip(&vals[..len]).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    fast_exp_scalar(x).to_bits(),
+                    "len {len}, element {i}: x={x}"
                 );
             }
         }
