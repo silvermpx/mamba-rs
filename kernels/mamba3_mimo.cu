@@ -28,6 +28,11 @@
 #define MIMO_R(RK, rank) ((RK) > 0 ? (RK) : (rank))
 #define MIMO_RA(RK) ((RK) > 0 ? (RK) : MIMO_MAX_RANK)
 
+// The state indices a batch of a channel's row loop takes: four at ranks
+// up to 4, two at rank 8, so a batch's rank arrays stay in registers; one
+// (no batching) at a runtime rank.
+#define MIMO_ROW_BATCH(RK) ((RK) == 0 ? 1 : ((RK) <= 4 ? 4 : 2))
+
 // Run the statement with `RK` bound to the runtime rank when it is one of
 // the compiled ranks, else to 0.
 #define MIMO_RANK_DISPATCH(rank, ...)                                          \
@@ -160,13 +165,18 @@ __device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
 
 // One channel's row: u_r = Psi_r x, up_r = Psi_r x_prev, the state row
 // s = alpha s + sum_r (gamma u_r kc_r + beta up_r kp_r), and the readouts
-// y_r = s . q_r + D u_r.
+// y_r = s . q_r + D u_r. At a compiled rank the state indices go in
+// batches, every load of a batch issued before its chains run: the row's
+// own store would otherwise hold the next index's loads back a round trip.
+// The chains are the same, n ascending.
 template <int RK>
 __device__ __forceinline__ void mimo_tok_row(
-    float* srow, float* y, float* u, float* up, const float* px, float x, float v_prev,
-    const float* kc, const float* kp, const float* qv,
+    float* __restrict__ srow, float* y, float* u, float* up, const float* px, float x,
+    float v_prev, const float* __restrict__ kc, const float* __restrict__ kp,
+    const float* __restrict__ qv,
     float alpha, float beta, float gamma, float dval, int rank, int ds
 ) {
+    constexpr int J = MIMO_ROW_BATCH(RK);
     const int R = MIMO_R(RK, rank);
     float bv[MIMO_RA(RK)], gx[MIMO_RA(RK)];
 #pragma unroll
@@ -177,7 +187,35 @@ __device__ __forceinline__ void mimo_tok_row(
         bv[r] = __fmul_rn(beta, up[r]);
         y[r] = 0.0f;
     }
-    for (int n = 0; n < ds; n++) {
+    int n = 0;
+    for (; J > 1 && n + J <= ds; n += J) {
+        float sv[J], kcv[J][MIMO_RA(RK)], kpv[J][MIMO_RA(RK)], qvv[J][MIMO_RA(RK)];
+#pragma unroll
+        for (int j = 0; j < J; j++) {
+            sv[j] = srow[n + j];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                kcv[j][r] = kc[r * ds + n + j];
+                kpv[j][r] = kp[r * ds + n + j];
+                qvv[j][r] = qv[r * ds + n + j];
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < J; j++) {
+            float inner = __fmul_rn(gx[0], kcv[j][0]);
+            inner = __fmaf_rn(bv[0], kpv[j][0], inner);
+#pragma unroll
+            for (int r = 1; r < R; r++) {
+                inner = __fmaf_rn(gx[r], kcv[j][r], inner);
+                inner = __fmaf_rn(bv[r], kpv[j][r], inner);
+            }
+            const float s = __fmaf_rn(alpha, sv[j], inner);
+            srow[n + j] = s;
+#pragma unroll
+            for (int r = 0; r < R; r++) y[r] = __fmaf_rn(s, qvv[j][r], y[r]);
+        }
+    }
+    for (; n < ds; n++) {
         float inner = __fmul_rn(gx[0], kc[n]);
         inner = __fmaf_rn(bv[0], kp[n], inner);
 #pragma unroll

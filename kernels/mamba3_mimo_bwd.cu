@@ -142,6 +142,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const int rgn = rank * ng * ds;
     const int rn = rank * ds;
     const int R = MIMO_R(RK, rank);
+    constexpr int RB = MIMO_ROW_BATCH(RK);
     const int heads = 2 * di + 2 * rgn;
     const int ang_col = heads + 3 * nh;
     const long long bh = (long long)b * nh + h;
@@ -160,14 +161,10 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     float* dyS = gcb + rn;                     // [P][R]
     float* bvS = dyS + hd * rank;
     float* gxS = bvS + hd * rank;
-    float* sn = gxS + hd * rank;
-    float* cs = sn + na;
-    float* angw = cs + na;                     // replay angles
-    float* dth = angw + na;                    // this token's angle gradient
+    float* dth = gxS + hd * rank;              // this token's angle gradient
     float* dthc = dth + na;                    // the angle gradient carry
     float* tpn = dthc + na;                    // tanh_pi of the token
-    float* scal = tpn + na;                    // 8
-    float* red = scal + 8;                     // 3 blockDim
+    float* red = tpn + na;                     // 3 blockDim
 
     const bool own = tid < hd;
     float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
@@ -368,12 +365,31 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             }
             mimo_cp_wait();
             __syncthreads();
+            // The dS row takes sum_r dy q_r, the state indices in batches as in
+            // mimo_tok_row, the channel's dy held in registers.
             if (own) {
-                float* drow = dsr + tid * (ds + 1);
-                for (int n = 0; n < ds; n++) {
+                float* __restrict__ drow = dsr + tid * (ds + 1);
+                const float* __restrict__ qr_ = qv;
+                float dyv[MIMO_RA(RK)];
+                _Pragma("unroll") for (int r = 0; r < R; r++) dyv[r] = dyS[tid * rank + r];
+                int n = 0;
+                for (; RB > 1 && n + RB <= ds; n += RB) {
+                    float acc[RB], qb[RB][MIMO_RA(RK)];
+                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
+                        acc[j] = drow[n + j];
+                        _Pragma("unroll") for (int r = 0; r < R; r++)
+                            qb[j][r] = qr_[r * ds + n + j];
+                    }
+                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
+                        _Pragma("unroll") for (int r = 0; r < R; r++)
+                            acc[j] = __fmaf_rn(dyv[r], qb[j][r], acc[j]);
+                        drow[n + j] = acc[j];
+                    }
+                }
+                for (; n < ds; n++) {
                     float acc = drow[n];
                     _Pragma("unroll") for (int r = 0; r < R; r++)
-                        acc = __fmaf_rn(dyS[tid * rank + r], qv[r * ds + n], acc);
+                        acc = __fmaf_rn(dyv[r], qr_[r * ds + n], acc);
                     drow[n] = acc;
                 }
             }
@@ -436,18 +452,52 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             __syncthreads();
             // The recurrence's scalars and the rank inputs; dS takes alpha.
             float da_loc = 0.0f, db_loc = 0.0f, dg_loc = 0.0f;
+            // The chains over n ascending, the state indices in batches and
+            // the channel's rank inputs held in registers.
             if (own) {
-                float* drow = dsr + tid * (ds + 1);
-                const float* prow = st + tid * (ds + 1);
-                for (int n = 0; n < ds; n++) {
+                float* __restrict__ drow = dsr + tid * (ds + 1);
+                const float* __restrict__ prow = st + tid * (ds + 1);
+                const float* __restrict__ kpr = kp;
+                const float* __restrict__ kcr = kc;
+                float upv[MIMO_RA(RK)], uv[MIMO_RA(RK)];
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
+                    upv[r] = r_up[tid * rank + r];
+                    uv[r] = r_u[tid * rank + r];
+                }
+                int n = 0;
+                for (; RB > 1 && n + RB <= ds; n += RB) {
+                    float dsb[RB], pb[RB], kpb[RB][MIMO_RA(RK)], kcb[RB][MIMO_RA(RK)];
+                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
+                        dsb[j] = drow[n + j];
+                        pb[j] = prow[n + j];
+                        _Pragma("unroll") for (int r = 0; r < R; r++) {
+                            kpb[j][r] = kpr[r * ds + n + j];
+                            kcb[j][r] = kcr[r * ds + n + j];
+                        }
+                    }
+                    _Pragma("unroll") for (int j = 0; j < RB; j++) {
+                        const float dsv = dsb[j];
+                        da_loc = __fmaf_rn(dsv, pb[j], da_loc);
+                        _Pragma("unroll") for (int r = 0; r < R; r++) {
+                            const float dbv = __fmul_rn(dsv, kpb[j][r]);
+                            const float dgx = __fmul_rn(dsv, kcb[j][r]);
+                            db_loc = __fmaf_rn(dbv, upv[r], db_loc);
+                            dup[r] = __fmaf_rn(dbv, beta, dup[r]);
+                            dg_loc = __fmaf_rn(dgx, uv[r], dg_loc);
+                            du[r] = __fmaf_rn(dgx, gamma, du[r]);
+                        }
+                        drow[n + j] = __fmul_rn(alpha, dsv);
+                    }
+                }
+                for (; n < ds; n++) {
                     const float dsv = drow[n];
                     da_loc = __fmaf_rn(dsv, prow[n], da_loc);
                     _Pragma("unroll") for (int r = 0; r < R; r++) {
-                        const float dbv = __fmul_rn(dsv, kp[r * ds + n]);
-                        const float dgx = __fmul_rn(dsv, kc[r * ds + n]);
-                        db_loc = __fmaf_rn(dbv, r_up[tid * rank + r], db_loc);
+                        const float dbv = __fmul_rn(dsv, kpr[r * ds + n]);
+                        const float dgx = __fmul_rn(dsv, kcr[r * ds + n]);
+                        db_loc = __fmaf_rn(dbv, upv[r], db_loc);
                         dup[r] = __fmaf_rn(dbv, beta, dup[r]);
-                        dg_loc = __fmaf_rn(dgx, r_u[tid * rank + r], dg_loc);
+                        dg_loc = __fmaf_rn(dgx, uv[r], dg_loc);
                         du[r] = __fmaf_rn(dgx, gamma, du[r]);
                     }
                     drow[n] = __fmul_rn(alpha, dsv);
