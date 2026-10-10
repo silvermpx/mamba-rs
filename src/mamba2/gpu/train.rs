@@ -29,6 +29,7 @@ use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
 use super::kernels::{
     CHUNK, Mamba2Kernels, dx_tiles_geom, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes,
+    seq_bwd_tiles_smem_bytes,
 };
 use crate::mamba_ssm::gpu::adamw::GpuAdamW;
 use crate::mamba_ssm::gpu::blas::{
@@ -270,6 +271,8 @@ struct BwdScratch {
     ds: GpuBuffer,
     /// The sequential path's replay records and per-head dB and dC.
     rec: GpuBuffer,
+    /// The sequential backward's step scalars, [rows, H, 3].
+    seq_scal: GpuBuffer,
     db_h: GpuBuffer,
     dc_h: GpuBuffer,
     acc: GpuBuffer,
@@ -313,6 +316,9 @@ pub struct Mamba2GpuTrainer {
     /// The fused dx and token sums' (state indices per pass, shared bytes)
     /// on the chunked path when the head fits; else the two kernels run.
     dx_tiles: Option<(usize, usize)>,
+    /// The sequential backward keeps the token's states in shared memory
+    /// when the head fits; else the states come from global memory.
+    seq_tiles: bool,
     template: Mamba2Weights,
     layout: Layout,
     master: GpuBuffer,
@@ -450,6 +456,8 @@ impl Mamba2GpuTrainer {
             dx_tiles_geom(hd, ds, optin)
         };
         let unfused = |n: usize| if dx_tiles.is_some() { 1 } else { chunked(n) };
+        let seq_tiles =
+            seq_mode && seq_bwd_tiles_smem_bytes(hd, ds, hd.next_multiple_of(32)) <= optin;
         let acts = (0..c.n_layers)
             .map(|_| -> Result<LayerActs, String> {
                 Ok(LayerActs {
@@ -478,6 +486,7 @@ impl Mamba2GpuTrainer {
             dxbc: z(rows * cd)?,
             ds: z(chunked(per_chunk * hd * ds))?,
             rec: z(sequential(batch * nh * stride * hd * ds))?,
+            seq_scal: z(if seq_tiles { rows * nh * 3 } else { 1 })?,
             db_h: z(sequential(rows * nh * ds))?,
             dc_h: z(sequential(rows * nh * ds))?,
             acc: z(unfused(rows * d_ssm))?,
@@ -565,6 +574,7 @@ impl Mamba2GpuTrainer {
             seq_mode,
             stride,
             dx_tiles,
+            seq_tiles,
         };
         trainer.refresh_mirror()?;
         Ok(trainer)
@@ -1430,11 +1440,6 @@ impl Mamba2GpuTrainer {
             }
         } else {
             let threads = hd.next_multiple_of(32);
-            let cfg = LaunchConfig {
-                grid_dim: (b as u32, nh as u32, 1),
-                block_dim: (threads as u32, 1, 1),
-                shared_mem_bytes: seq_bwd_smem_bytes(hd, ds, threads) as u32,
-            };
             let (db_h, dc_h, rec, ckpt) = (
                 s.db_h.cached_ptr(),
                 s.dc_h.cached_ptr(),
@@ -1447,39 +1452,96 @@ impl Mamba2GpuTrainer {
             let limited = i32::from(c.dt_limit != (0.0, f32::INFINITY));
             let flags: i32 = i32::from(c.d_has_hdim) | (limited << 2);
             let (stride_i, cd_i) = (self.stride as i32, cd as i32);
-            go!(
-                k.seq_bwd.get(act),
-                cfg,
-                "sequential scan",
-                [
-                    dxbc,
-                    d_proj,
-                    ld_proj,
-                    dt_off,
-                    db_h,
-                    dc_h,
-                    da_parts,
-                    dbias_parts,
-                    rec,
-                    dy,
-                    xbc,
-                    proj,
-                    ckpt,
-                    dt_bias,
-                    a_neg,
-                    d,
-                    t_i,
-                    stride_i,
-                    nh_i,
-                    ng_i,
-                    hd_i,
-                    ds_i,
-                    cd_i,
-                    flags,
-                    lo,
-                    hi
-                ]
-            );
+            if self.seq_tiles {
+                let scal = s.seq_scal.cached_ptr();
+                go!(
+                    k.seq_scalars.get(act),
+                    grid_1d(rows * nh),
+                    "sequential step scalars",
+                    [
+                        scal, xbc, proj, ld_proj, dt_off, dt_bias, a_neg, rows_l, nh_i, ng_i, hd_i,
+                        ds_i, cd_i, flags, lo, hi
+                    ]
+                );
+                let cfg = LaunchConfig {
+                    grid_dim: (b as u32, nh as u32, 1),
+                    block_dim: (threads as u32, 1, 1),
+                    shared_mem_bytes: seq_bwd_tiles_smem_bytes(hd, ds, threads) as u32,
+                };
+                go!(
+                    k.seq_bwd_tiles.get(act),
+                    cfg,
+                    "sequential scan",
+                    [
+                        dxbc,
+                        d_proj,
+                        ld_proj,
+                        dt_off,
+                        db_h,
+                        dc_h,
+                        da_parts,
+                        dbias_parts,
+                        rec,
+                        dy,
+                        xbc,
+                        proj,
+                        ckpt,
+                        scal,
+                        dt_bias,
+                        a_neg,
+                        d,
+                        t_i,
+                        stride_i,
+                        nh_i,
+                        ng_i,
+                        hd_i,
+                        ds_i,
+                        cd_i,
+                        flags,
+                        lo,
+                        hi
+                    ]
+                );
+            } else {
+                let cfg = LaunchConfig {
+                    grid_dim: (b as u32, nh as u32, 1),
+                    block_dim: (threads as u32, 1, 1),
+                    shared_mem_bytes: seq_bwd_smem_bytes(hd, ds, threads) as u32,
+                };
+                go!(
+                    k.seq_bwd.get(act),
+                    cfg,
+                    "sequential scan",
+                    [
+                        dxbc,
+                        d_proj,
+                        ld_proj,
+                        dt_off,
+                        db_h,
+                        dc_h,
+                        da_parts,
+                        dbias_parts,
+                        rec,
+                        dy,
+                        xbc,
+                        proj,
+                        ckpt,
+                        dt_bias,
+                        a_neg,
+                        d,
+                        t_i,
+                        stride_i,
+                        nh_i,
+                        ng_i,
+                        hd_i,
+                        ds_i,
+                        cd_i,
+                        flags,
+                        lo,
+                        hi
+                    ]
+                );
+            }
             let n = rows * ng * ds * 2;
             go!(
                 &k.seq_bc_groups,

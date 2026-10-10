@@ -81,6 +81,10 @@ pub struct Mamba2BwdKernels {
     /// The sequential path's backward of the recurrence (replay per
     /// segment) and the group sums of its dB and dC.
     pub seq_bwd: TypedKernel,
+    /// `m2s_bwd` with the token's states in shared memory and its step
+    /// scalars from `seq_scalars`, when [`seq_bwd_tiles_smem_bytes`] fits.
+    pub seq_bwd_tiles: TypedKernel,
+    pub seq_scalars: TypedKernel,
     pub seq_bc_groups: CudaFunction,
     /// A bias gradient from bf16 or f16 rows.
     pub bias_grad: HalfKernel,
@@ -221,6 +225,8 @@ impl Mamba2Kernels {
                 conv_dx: typed("m2b_conv_dx")?,
                 conv_dw: typed("m2b_conv_dw")?,
                 seq_bwd: typed("m2s_bwd")?,
+                seq_bwd_tiles: typed("m2s_bwd_tiles")?,
+                seq_scalars: typed("m2s_scalars")?,
                 seq_bc_groups: get("m2s_bc_groups")?,
                 bias_grad: HalfKernel {
                     bf16: get("m2b_bias_grad_bf16")?,
@@ -241,6 +247,7 @@ impl Mamba2Kernels {
                 (&kernels.gated_norm_fwd, "gated norm"),
                 (&kernels.bwd.gated_norm, "gated norm backward"),
                 (&kernels.bwd.seq_bwd, "sequential backward"),
+                (&kernels.bwd.seq_bwd_tiles, "sequential backward tiles"),
                 (&kernels.chunk_scan_tiles, "chunk scan tiles"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
             ] {
@@ -284,6 +291,13 @@ pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize) -> Option<(usize, usize)>
     std::iter::successors(Some(ds), |&nk| (nk > 1).then(|| nk.div_ceil(2)))
         .find(|&nk| bytes(nk) <= cap)
         .map(|nk| (nk, bytes(nk)))
+}
+
+/// The tiled sequential backward's shared memory for a head: the states
+/// after and before the token and dS (each row padded by one), B and C, x
+/// and dy of the token, two reduction slots per thread.
+pub fn seq_bwd_tiles_smem_bytes(hd: usize, ds: usize, threads: usize) -> usize {
+    (3 * hd * (ds + 1) + 2 * ds + 2 * hd + 2 * threads) * 4
 }
 
 /// The sequential backward's shared memory for a head: the replay state

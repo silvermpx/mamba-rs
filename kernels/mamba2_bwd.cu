@@ -1574,6 +1574,291 @@ DEFINE_M2S_BWD(m2s_bwd, float)
 DEFINE_M2S_BWD(m2s_bwd_bf16, __nv_bfloat16)
 DEFINE_M2S_BWD(m2s_bwd_f16, __half)
 
+// The step scalars of every (row, head) for the sequential backward, with
+// m2_step_scalars' own expressions: [rows, H, 3] = (e^acs, (C.B) e^0 dt,
+// e^0 dt). One thread per (row, head); grid 1-D over rows * H.
+template <typename T>
+__device__ __forceinline__ void m2s_scalars_body(
+    float* __restrict__ out,
+    const T* __restrict__ xbc, const T* __restrict__ proj, long long ld_proj, int dt_off,
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
+    long long rows, int nh, int ng, int hd, int ds, int conv_dim,
+    int flags, float dt_min, float dt_max
+) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows * nh) return;
+    const long long row = i / nh;
+    const int h = (int)(i % nh);
+    const int g = h / (nh / ng);
+    const long long base = row * conv_dim + (long long)nh * hd;
+    const T* bv = xbc + base + (long long)g * ds;
+    const T* cv = xbc + base + (long long)(ng + g) * ds;
+    float dt = m2_softplus(__fadd_rn(to_f(proj[row * ld_proj + dt_off + h]), dt_bias[h]));
+    if ((flags & M2_FLAG_DT_LIMIT) && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);
+    const float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));
+    float cb = 0.0f;
+    for (int n = 0; n < ds; n++) cb = __fmaf_rn(to_f(cv[n]), to_f(bv[n]), cb);
+    const float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));
+    out[i * 3] = m2_exp(acs);
+    out[i * 3 + 1] = __fmul_rn(__fmul_rn(cb, e0), dt);
+    out[i * 3 + 2] = __fmul_rn(e0, dt);
+}
+
+#define DEFINE_M2S_SCALARS(NAME, T)                                             \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ out,                                                    \
+    const T* __restrict__ xbc, const T* __restrict__ proj, long long ld_proj,   \
+    int dt_off, const float* __restrict__ dt_bias,                              \
+    const float* __restrict__ a_neg, long long rows, int nh, int ng, int hd,    \
+    int ds, int conv_dim, int flags, float dt_min, float dt_max                 \
+) {                                                                             \
+    m2s_scalars_body<T>(out, xbc, proj, ld_proj, dt_off, dt_bias, a_neg, rows,  \
+        nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max);                       \
+}
+DEFINE_M2S_SCALARS(m2s_scalars, float)
+DEFINE_M2S_SCALARS(m2s_scalars_bf16, __nv_bfloat16)
+DEFINE_M2S_SCALARS(m2s_scalars_f16, __half)
+
+// A 4-byte asynchronous copy into shared memory and its fences.
+__device__ __forceinline__ void m2s_cp4(float* dst, const float* src) {
+    const unsigned s = (unsigned)__cvta_generic_to_shared(dst);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"(s), "l"(src));
+}
+__device__ __forceinline__ void m2s_cp_commit() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+__device__ __forceinline__ void m2s_cp_wait() {
+    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+}
+
+// A head's state from dense global rows into shared rows padded to N + 1,
+// row by row, asynchronously.
+__device__ __forceinline__ void m2s_tile_fetch(
+    float* __restrict__ sh, const float* __restrict__ gl, int hd, int ds
+) {
+    for (int p = 0; p < hd; p++)
+        for (int n = threadIdx.x; n < ds; n += blockDim.x)
+            m2s_cp4(sh + p * (ds + 1) + n, gl + (long long)p * ds + n);
+    m2s_cp_commit();
+}
+
+// Two block sums through mimo-style fixed trees at once (the tree of
+// m2s_bwd: width the power of two at or above the block, then
+// red[t] += red[t + w] for w halving), the levels above a warp in shared
+// memory and the last five by shuffles in warp 0, which pair the same
+// operands in the same order. The sums land in thread 0.
+__device__ __forceinline__ float2 m2s_block_sum2(float a, float b, float* red) {
+    const int n = blockDim.x, t = threadIdx.x;
+    red[t] = a;
+    red[n + t] = b;
+    __syncthreads();
+    int width = 1;
+    while (width < n) width <<= 1;
+    for (int w = width >> 1; w >= 32; w >>= 1) {
+        if (t < w && t + w < n) {
+            red[t] = __fadd_rn(red[t], red[t + w]);
+            red[n + t] = __fadd_rn(red[n + t], red[n + t + w]);
+        }
+        __syncthreads();
+    }
+    float2 out = make_float2(0.0f, 0.0f);
+    if (t < 32) {
+        float x = red[t], y = red[n + t];
+#pragma unroll
+        for (int w = 16; w > 0; w >>= 1) {
+            const float xo = __shfl_down_sync(0xffffffffu, x, w);
+            const float yo = __shfl_down_sync(0xffffffffu, y, w);
+            if (t < w && t + w < n) {
+                x = __fadd_rn(x, xo);
+                y = __fadd_rn(y, yo);
+            }
+        }
+        out = make_float2(x, y);
+    }
+    return out;
+}
+
+// m2s_bwd with the token's states in shared memory: three padded tiles
+// (the state after the token, the state before it, dS), the scalars read
+// from m2s_scalars' rows. The replay runs m2_row_step on the first tile
+// and records each state as m2s_bwd does; the walk back reads the state
+// after the token from its tile (the replay's last state, then the tile the
+// previous step loaded) and fetches the state before the next token
+// asynchronously into the tile it just finished with. Every chain and both
+// trees are m2s_bwd's, so the bits are its own. Dynamic shared memory:
+// 3 P (N + 1) + 2 N + 2 P + 2 blockDim floats.
+template <typename T>
+__device__ __forceinline__ void m2s_bwd_tiles_body(
+    float* __restrict__ dxbc,
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,
+    float* __restrict__ db_h, float* __restrict__ dc_h,
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,
+    float* __restrict__ rec,
+    const float* __restrict__ dy,
+    const T* __restrict__ xbc, const T* __restrict__ proj,
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
+    const float* __restrict__ D,
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,
+    int flags, float dt_min, float dt_max
+) {
+    extern __shared__ float m2sb_sm[];
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int g = h / (nh / ng);
+    const long long d_ssm = (long long)nh * hd;
+    const long long bh = (long long)b * nh + h;
+    const int nseg = (seq + stride - 1) / stride;
+    const long long pn = (long long)hd * ds;
+    const int ld = ds + 1;
+    float* tile0 = m2sb_sm;
+    float* tile1 = tile0 + hd * ld;
+    float* dsr = tile1 + hd * ld;
+    float* b_sm = dsr + hd * ld;
+    float* c_sm = b_sm + ds;
+    float* xS = c_sm + ds;
+    float* dyS = xS + hd;
+    float* red = dyS + hd;
+    const bool own = tid < hd;
+    const float dval = own ? ((flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + tid] : D[h]) : 0.0f;
+    float da_acc = 0.0f, dbias_acc = 0.0f;
+    for (int p = 0; p < hd; p++)
+        for (int n = tid; n < ds; n += blockDim.x) dsr[p * ld + n] = 0.0f;
+    __syncthreads();
+    for (int seg = nseg - 1; seg >= 0; seg--) {
+        const int t0 = seg * stride;
+        const int t1 = min(t0 + stride, seq);
+        const float* ck = ckpt + (((long long)b * nseg + seg) * nh + h) * pn;
+        float* st = tile0;
+        m2_tile_load(st, ck, hd, ds);
+        __syncthreads();
+        for (int t = t0; t < t1; t++) {
+            const long long row = (long long)b * seq + t;
+            const long long xrow = row * conv_dim;
+            for (int n = tid; n < ds; n += blockDim.x) {
+                b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
+                c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+            }
+            __syncthreads();
+            if (own) {
+                const float* sc = scal3 + (row * nh + h) * 3;
+                const float xp = to_f(xbc[xrow + (long long)h * hd + tid]);
+                m2_row_step(st + tid * ld, b_sm, c_sm, sc[0], sc[1], sc[2], xp, ds);
+            }
+            __syncthreads();
+            m2_tile_store(rec + (bh * stride + (t - t0)) * pn, st, hd, ds);
+        }
+        // The state before the last token into the other tile; the replay's
+        // last state is the one after it.
+        float* cur = tile0;
+        float* prev = tile1;
+        const int last = t1 - 1 - t0;
+        m2s_tile_fetch(prev, last > 0 ? rec + (bh * stride + last - 1) * pn : ck, hd, ds);
+        m2s_cp_wait();
+        __syncthreads();
+        for (int t = t1 - 1; t >= t0; t--) {
+            const long long row = (long long)b * seq + t;
+            const long long xrow = row * conv_dim;
+            const int slot = t - t0;
+            for (int n = tid; n < ds; n += blockDim.x) {
+                b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
+                c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+            }
+            const float* sc = scal3 + (row * nh + h) * 3;
+            const float alpha = sc[0], dt = sc[2];
+            __syncthreads();
+            float dyv = 0.0f, xp = 0.0f;
+            if (own) {
+                dyv = dy[row * d_ssm + (long long)h * hd + tid];
+                xp = to_f(xbc[xrow + (long long)h * hd + tid]);
+                xS[tid] = xp;
+                dyS[tid] = dyv;
+                float* drow = dsr + tid * ld;
+                for (int n = 0; n < ds; n++) drow[n] = __fmaf_rn(dyv, c_sm[n], drow[n]);
+            }
+            __syncthreads();
+            for (int n = tid; n < ds; n += blockDim.x) {
+                float dc = 0.0f, db = 0.0f;
+                for (int p = 0; p < hd; p++) {
+                    dc = __fmaf_rn(dyS[p], cur[p * ld + n], dc);
+                    db = __fmaf_rn(dsr[p * ld + n], xS[p], db);
+                }
+                dc_h[(row * nh + h) * ds + n] = dc;
+                db_h[(row * nh + h) * ds + n] = __fmul_rn(db, dt);
+            }
+            __syncthreads();
+            // The tile of the state after this token is free: the state
+            // before the next token (the one before this) comes into it
+            // while the rest of this step runs.
+            if (t > t0) {
+                m2s_tile_fetch(cur, slot > 1 ? rec + (bh * stride + slot - 2) * pn : ck, hd, ds);
+            }
+            float ddt_loc = 0.0f, dal_loc = 0.0f;
+            if (own) {
+                float* drow = dsr + tid * ld;
+                const float* prow = prev + tid * ld;
+                float sx = 0.0f;
+                for (int n = 0; n < ds; n++) {
+                    const float dsv = drow[n];
+                    sx = __fmaf_rn(dsv, b_sm[n], sx);
+                    dal_loc = __fmaf_rn(dsv, prow[n], dal_loc);
+                    drow[n] = __fmul_rn(alpha, dsv);
+                }
+                dxbc[xrow + (long long)h * hd + tid] = __fmaf_rn(dt, sx, __fmul_rn(dval, dyv));
+                ddt_loc = __fmul_rn(xp, sx);
+            }
+            const float2 sums = m2s_block_sum2(ddt_loc, dal_loc, red);
+            if (tid == 0) {
+                const float ddt_x = sums.x, dalpha = sums.y;
+                const float da = __fmul_rn(dalpha, alpha);
+                float ddt = __fmaf_rn(da, a_neg[h], ddt_x);
+                da_acc = __fmaf_rn(da, dt, da_acc);
+                const float v = __fadd_rn(to_f(proj[row * ld_proj + dt_off + h]), dt_bias[h]);
+                if (flags & M2_FLAG_DT_LIMIT) {
+                    const float sp = m2_softplus(v);
+                    if (sp < dt_min || sp > dt_max) ddt = 0.0f;
+                }
+                const float draw = v > 20.0f ? ddt : __fmul_rn(ddt, m2b_sigmoid(v));
+                m2b_put(&d_proj[row * ld_proj + dt_off + h], draw);
+                dbias_acc = __fadd_rn(dbias_acc, draw);
+            }
+            m2s_cp_wait();
+            __syncthreads();
+            float* freed = cur;
+            cur = prev;
+            prev = freed;
+        }
+    }
+    if (tid == 0) {
+        da_parts[bh] = da_acc;
+        dbias_parts[bh] = dbias_acc;
+    }
+}
+
+#define DEFINE_M2S_BWD_TILES(NAME, T)                                           \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ dxbc,                                                   \
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,                      \
+    float* __restrict__ db_h, float* __restrict__ dc_h,                         \
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,              \
+    float* __restrict__ rec,                                                    \
+    const float* __restrict__ dy,                                               \
+    const T* __restrict__ xbc, const T* __restrict__ proj,                      \
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,            \
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,         \
+    const float* __restrict__ D,                                                \
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,          \
+    int flags, float dt_min, float dt_max                                       \
+) {                                                                             \
+    m2s_bwd_tiles_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts,  \
+        dbias_parts, rec, dy, xbc, proj, ckpt, scal3, dt_bias, a_neg, D, seq,   \
+        stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max);               \
+}
+DEFINE_M2S_BWD_TILES(m2s_bwd_tiles, float)
+DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_bf16, __nv_bfloat16)
+DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_f16, __half)
+
 // dB and dC of the sequential path into the B and C columns of dxbc: the
 // group's heads summed ascending. Grid 1-D over rows * G * N * 2.
 extern "C" __global__ void m2s_bc_groups(
