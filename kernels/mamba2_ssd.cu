@@ -239,6 +239,28 @@ DEFINE_M2_BMM(m2_bmm_chunk, float)
 DEFINE_M2_BMM(m2_bmm_chunk_bf16, __nv_bfloat16)
 DEFINE_M2_BMM(m2_bmm_chunk_f16, __half)
 
+// Stages `count` values into shared memory through load(i) and put(i, v),
+// four indices a thread at a time with every load of the four issued before
+// any store, so a thread waits one round trip a batch rather than one a
+// value. The values are load's, unchanged.
+template <class LF, class PF>
+__device__ __forceinline__ void m2_stage4(int count, LF load, PF put) {
+    const int nthr = blockDim.x;
+    for (int i0 = threadIdx.x; i0 < count; i0 += 4 * nthr) {
+        float v[4];
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+            const int i = i0 + k * nthr;
+            v[k] = i < count ? load(i) : 0.0f;
+        }
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+            const int i = i0 + k * nthr;
+            if (i < count) put(i, v[k]);
+        }
+    }
+}
+
 // Each chunk's own state S[p][n] = sum_t B_t[n] xw[t][p], from zero, t
 // ascending: [B, nc, H, P, N], with xw = x (e^min(Acs_last - Acs_t, 0) dt_t).
 // Register tiles: a warp takes 4 channels p and a lane the state indices
@@ -277,16 +299,21 @@ __device__ __forceinline__ void m2_chunk_state_body(
     for (int t = tid; t < lc; t += blockDim.x)
         ws[t] = __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t]);
     __syncthreads();
-    for (int t = warp; t < lc; t += nw) {
-        const long long r = (b * seq + t0 + t) * ld_xbc;
-        const float w = ws[t];
-        for (int p = lane; p < p4; p += 32)
-            xs[t * p4 + p] = p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), w) : 0.0f;
-        for (int ni = lane; ni < NT; ni += 32) {
-            const int n = n0 + ni;
-            bs[t * NT + ni] = n < ds ? to_f(xbc[r + b_col + (long long)g * ds + n]) : 0.0f;
-        }
-    }
+    m2_stage4(lc * p4,
+              [&](int i) {
+                  const int t = i / p4, p = i - t * p4;
+                  const long long r = (b * seq + t0 + t) * ld_xbc;
+                  return p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t]) : 0.0f;
+              },
+              [&](int i, float v) { xs[i] = v; });
+    m2_stage4(lc * NT,
+              [&](int i) {
+                  const int t = i / NT, ni = i - t * NT;
+                  const int n = n0 + ni;
+                  const long long r = (b * seq + t0 + t) * ld_xbc;
+                  return n < ds ? to_f(xbc[r + b_col + (long long)g * ds + n]) : 0.0f;
+              },
+              [&](int i, float v) { bs[i] = v; });
     __syncthreads();
     for (int p0 = 4 * warp; p0 < hd; p0 += 4 * nw) {
         float acc[4][JC];
@@ -494,31 +521,39 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     float* ws = cs + M2_SCAN_TT * ds;          // [TT][64]
     float* xs = ws + M2_SCAN_TT * M2_CHUNK;    // [64][P]
     const float* hg = states + (bc * nh + h) * (long long)hd * ds;
-    for (int i = threadIdx.x; i < hd * ds; i += blockDim.x) {
-        const int p = i / ds;
-        hs[p * hld + i - p * ds] = hg[i];
-    }
-    for (int i = threadIdx.x; i < tn * ds; i += blockDim.x) {
-        const int t = i / ds, n = i % ds;
-        cs[i] = to_f(xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col + (long long)g * ds + n]);
-    }
-    for (int i = threadIdx.x; i < tn * M2_CHUNK; i += blockDim.x) {
-        const int tl = i / M2_CHUNK, s = i % M2_CHUNK;
-        const int t = tile0 + tl;
-        float w = 0.0f;
-        if (s <= t) {
-            const float acs_t = acs[sc + t];
-            w = __fmul_rn(
-                __fmul_rn(cb[tri + (long long)t * (t + 1) / 2 + s],
-                          m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),
-                dt[sc + s]);
-        }
-        ws[i] = w;
-    }
-    for (int i = threadIdx.x; i < send * hd; i += blockDim.x) {
-        const int s = i / hd, p = i % hd;
-        xs[i] = to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + p]);
-    }
+    m2_stage4(hd * ds, [&](int i) { return hg[i]; },
+              [&](int i, float v) {
+                  const int p = i / ds;
+                  hs[p * hld + i - p * ds] = v;
+              });
+    m2_stage4(tn * ds,
+              [&](int i) {
+                  const int t = i / ds, n = i - t * ds;
+                  return to_f(
+                      xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col + (long long)g * ds + n]);
+              },
+              [&](int i, float v) { cs[i] = v; });
+    m2_stage4(tn * M2_CHUNK,
+              [&](int i) {
+                  const int tl = i / M2_CHUNK, s = i - tl * M2_CHUNK;
+                  const int t = tile0 + tl;
+                  float w = 0.0f;
+                  if (s <= t) {
+                      const float acs_t = acs[sc + t];
+                      w = __fmul_rn(
+                          __fmul_rn(cb[tri + (long long)t * (t + 1) / 2 + s],
+                                    m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),
+                          dt[sc + s]);
+                  }
+                  return w;
+              },
+              [&](int i, float v) { ws[i] = v; });
+    m2_stage4(send * hd,
+              [&](int i) {
+                  const int s = i / hd, p = i - s * hd;
+                  return to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + p]);
+              },
+              [&](int i, float v) { xs[i] = v; });
     __syncthreads();
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
     if (warp >= nw) return;
