@@ -170,6 +170,7 @@
 "m3_gpu_prefill_parity" = "gate"
 "m3_kernel_identity_cuda" = "gate"
 "m3_kernels_isolated_bench" = "bench"
+"m3_grad_oracle" = "host"
 "m3_mimo_grad_oracle" = "host"
 "m3_mimo_gpu_parity" = "gate"
 "m3_mimo_gpu_train_parity" = "gate"
