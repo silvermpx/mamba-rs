@@ -91,22 +91,10 @@ fn mamba1(device_ordinal: usize, dtype: WeightDtype) -> Row {
         ..MambaConfig::default()
     };
     let w = MambaWeights::init(&cfg, D_MODEL, 7);
-    // The half-precision Mamba-1 decode engine serves only the language-model
-    // path, with no input projection; its rows run that way.
-    let half_decode_weights = (dtype != WeightDtype::F32).then(|| {
-        let mut lm = w.clone();
-        lm.input_proj_w.clear();
-        lm.input_proj_b.clear();
-        lm
-    });
-    if half_decode_weights.is_some() {
-        println!("  M1     {dtype:?} decode without the input projection (LM path)");
-    }
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
-        let dw = half_decode_weights.as_ref().unwrap_or(&w);
         let mut bb =
-            GpuMambaBackbone::new_with_dtype(device_ordinal, dw, cfg, D_MODEL, b, dtype).unwrap();
+            GpuMambaBackbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
         let input = det(b * D_MODEL, 12);
         let mut out = vec![0f32; b * D_MODEL];
         bb.step(&input, &mut out).unwrap();
@@ -138,22 +126,10 @@ fn siso(device_ordinal: usize, dtype: WeightDtype) -> Row {
         ..Mamba3Config::default()
     };
     let w = Mamba3Weights::init(&cfg, D_MODEL, 7);
-    // As for Mamba-1, the half-precision SISO decode engine serves only the
-    // language-model path, with no input projection.
-    let half_decode_weights = (dtype != WeightDtype::F32).then(|| {
-        let mut lm = w.clone();
-        lm.input_proj_w.clear();
-        lm.input_proj_b.clear();
-        lm
-    });
-    if half_decode_weights.is_some() {
-        println!("  SISO   {dtype:?} decode and prompt without the input projection (LM path)");
-    }
-    let dw = half_decode_weights.as_ref().unwrap_or(&w);
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
         let mut bb =
-            GpuMamba3Backbone::new_with_dtype(device_ordinal, dw, cfg, D_MODEL, b, dtype).unwrap();
+            GpuMamba3Backbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
         let input = det(b * D_MODEL, 12);
         let mut out = vec![0f32; b * D_MODEL];
         bb.step(&input, &mut out).unwrap();
@@ -162,7 +138,7 @@ fn siso(device_ordinal: usize, dtype: WeightDtype) -> Row {
     }
     let prompt = {
         let mut bb =
-            GpuMamba3Backbone::new_with_dtype(device_ordinal, dw, cfg, D_MODEL, 1, dtype).unwrap();
+            GpuMamba3Backbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, 1, dtype).unwrap();
         bb.supports_prefill().then(|| {
             let mut pf = bb.alloc_prefill(PROMPT).unwrap();
             let host = det(PROMPT * D_MODEL, 11);

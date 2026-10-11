@@ -1921,9 +1921,25 @@ impl Mamba3GpuInferenceMixed {
         }
     }
 
+    /// Size the staging and upcast buffers a decode graph freezes. Call it
+    /// before the eager step a capture follows: the manifest that step
+    /// records includes each GEMM's operand pointers, so a staging buffer
+    /// that grew between the step and the capture (the input projection
+    /// reads its downcast input from there) turns the same work into a
+    /// different launch set and the capture is refused. Idempotent.
+    pub fn prepare_graph_scratch(&self) -> Result<(), String> {
+        self.engine.ctx.presize_bi_scratch()?;
+        self.engine.ctx.presize_mixed_graph_scratch_m3(
+            &self.engine.prefill_dims(1),
+            self.mixed_weights.bulk_dtype,
+        )
+    }
+
     /// Capture the native half pipeline after a successful eager step on these
     /// fixed buffers. Consumes its GEMM-only manifest and rejects missing work,
     /// changed mode/family, or changed bindings. H2D/D2H stay outside the graph.
+    /// The eager step must follow [`Self::prepare_graph_scratch`] when the
+    /// model has an input projection.
     ///
     /// # Safety
     ///
@@ -1938,11 +1954,7 @@ impl Mamba3GpuInferenceMixed {
         let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
             "M3 mixed inference graph capture requires a successful eager step".to_string()
         })?;
-        self.engine.ctx.presize_bi_scratch()?;
-        self.engine.ctx.presize_mixed_graph_scratch_m3(
-            &self.engine.prefill_dims(1),
-            self.mixed_weights.bulk_dtype,
-        )?;
+        self.prepare_graph_scratch()?;
         let snap_state = state.ssm_state.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
@@ -2221,6 +2233,9 @@ impl GpuMamba3Backbone {
                 (er.input_dim, er.batch, er.cfg.d_model)
             }
         };
+        if let M3BackboneEngine::Mixed(e) = &self.engine {
+            e.prepare_graph_scratch()?;
+        }
         let input = vec![0.0f32; batch * input_dim];
         let mut output = vec![0.0f32; batch * d_model];
         self.step(&input, &mut output)?;

@@ -2,7 +2,8 @@
 
 //! A half-precision decode of a model with its own input projection (an
 //! input wider or narrower than d_model, the RL shape) runs, stays within
-//! the storage precision of the f32 decode, and repeats its bits.
+//! the storage precision of the f32 decode, repeats its bits, and replays
+//! them from a captured graph.
 
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -63,9 +64,8 @@ fn tolerance(dtype: WeightDtype) -> f32 {
     }
 }
 
-#[test]
-fn half_inproj_m1_decode() {
-    let cfg = MambaConfig {
+fn m1_config() -> MambaConfig {
+    MambaConfig {
         d_model: 64,
         n_layers: 2,
         d_state: 16,
@@ -73,7 +73,25 @@ fn half_inproj_m1_decode() {
         expand: 2,
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
-    };
+    }
+}
+
+fn siso_config() -> Mamba3Config {
+    Mamba3Config {
+        d_model: 64,
+        d_state: 16,
+        expand: 2,
+        headdim: 16,
+        ngroups: 1,
+        n_layers: 2,
+        rope_fraction: 0.5,
+        ..Mamba3Config::default()
+    }
+}
+
+#[test]
+fn half_inproj_m1_decode() {
+    let cfg = m1_config();
     let w = MambaWeights::init(&cfg, INPUT_DIM, 0x4D31);
     let run = |dtype| {
         let mut m = GpuMambaBackbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
@@ -89,16 +107,7 @@ fn half_inproj_m1_decode() {
 }
 
 fn m3_siso_case(input_dim: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-    let cfg = Mamba3Config {
-        d_model: 64,
-        d_state: 16,
-        expand: 2,
-        headdim: 16,
-        ngroups: 1,
-        n_layers: 2,
-        rope_fraction: 0.5,
-        ..Mamba3Config::default()
-    };
+    let cfg = siso_config();
     let mut w = Mamba3Weights::init(&cfg, input_dim, seed);
     if input_dim == cfg.d_model {
         w.input_proj_w.clear();
@@ -133,5 +142,38 @@ fn half_inproj_m3_siso_decode() {
             eb < tolerance(WeightDtype::Bf16) && eh < tolerance(WeightDtype::F16),
             "SISO {what} against f32: bf16 {eb}, f16 {eh}"
         );
+    }
+}
+
+/// A decode graph replays the eager steps bit for bit when the model has its
+/// own input projection. That projection reads its downcast input from the
+/// context's staging buffer, so the capture holds only if the buffer is at
+/// its graph size before the eager step whose GEMM launches the capture must
+/// reproduce.
+#[test]
+fn half_inproj_decode_graph_replays_the_eager_steps() {
+    let cfg = m1_config();
+    let w = MambaWeights::init(&cfg, INPUT_DIM, 0x4D31);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let new = || GpuMambaBackbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
+        let mut eager = new();
+        let want = decode(cfg.d_model, |x, y| eager.step(x, y));
+        let mut graphed = new();
+        graphed.capture_graph().unwrap();
+        let got = decode(cfg.d_model, |x, y| graphed.step(x, y));
+        assert_eq!(bits(&got), bits(&want), "M1 {dtype:?} graph replay");
+    }
+
+    let cfg = siso_config();
+    let w = Mamba3Weights::init(&cfg, INPUT_DIM, 0x4D33);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let new =
+            || GpuMamba3Backbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
+        let mut eager = new();
+        let want = decode(cfg.d_model, |x, y| eager.step(x, y));
+        let mut graphed = new();
+        graphed.capture_graph().unwrap();
+        let got = decode(cfg.d_model, |x, y| graphed.step(x, y));
+        assert_eq!(bits(&got), bits(&want), "SISO {dtype:?} graph replay");
     }
 }

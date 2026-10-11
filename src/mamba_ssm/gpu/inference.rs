@@ -2179,10 +2179,25 @@ impl GpuMambaInferenceMixed {
         )
     }
 
+    /// Size the staging and upcast buffers a decode graph freezes. Call it
+    /// before the eager step a capture follows: the manifest that step
+    /// records includes each GEMM's operand pointers, so a staging buffer
+    /// that grew between the step and the capture (the input projection
+    /// reads its downcast input from there) turns the same work into a
+    /// different launch set and the capture is refused. Idempotent.
+    pub fn prepare_graph_scratch(&self) -> Result<(), String> {
+        self.engine.ctx.presize_bi_scratch()?;
+        self.engine
+            .ctx
+            .presize_mixed_graph_scratch_m1(&self.engine.dims(1), self.mixed_weights.bulk_dtype)
+    }
+
     /// Capture a CUDA Graph for the mixed-native pipeline.
     /// Requires and consumes this path's successful eager manifest. Mode or
     /// family drift and mismatching GEMM inventories are rejected. Transfers
-    /// remain outside the body; the manifest inventories GEMMs only.
+    /// remain outside the body; the manifest inventories GEMMs only. The
+    /// eager step must follow [`Self::prepare_graph_scratch`] when the model
+    /// has an input projection.
     ///
     /// # Safety
     ///
@@ -2201,10 +2216,7 @@ impl GpuMambaInferenceMixed {
                 "M1 mixed-native inference graph capture requires a successful eager step"
                     .to_string()
             })?;
-        self.engine.ctx.presize_bi_scratch()?;
-        self.engine
-            .ctx
-            .presize_mixed_graph_scratch_m1(&self.engine.dims(1), self.mixed_weights.bulk_dtype)?;
+        self.prepare_graph_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
@@ -2241,6 +2253,8 @@ impl GpuMambaInferenceMixed {
     /// eager legacy step on these fixed buffers. Consumes that path's GEMM-only
     /// manifest and rejects missing or changed work or GEMM policy. Native
     /// entries cannot replay this graph. H2D/D2H remain outside the graph.
+    /// The eager step must follow [`Self::prepare_graph_scratch`]: every GEMM
+    /// of this path reads its downcast input from the staging buffer.
     ///
     /// # Safety
     ///
@@ -2255,10 +2269,7 @@ impl GpuMambaInferenceMixed {
         let manifest = self.eager_legacy_gemm_manifest.take().ok_or_else(|| {
             "M1 legacy mixed inference graph capture requires a successful eager step".to_string()
         })?;
-        self.engine.ctx.presize_bi_scratch()?;
-        self.engine
-            .ctx
-            .presize_mixed_graph_scratch_m1(&self.engine.dims(1), self.mixed_weights.bulk_dtype)?;
+        self.prepare_graph_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
@@ -2625,6 +2636,9 @@ impl GpuMambaBackbone {
                 e.engine_ref().cfg.d_model,
             ),
         };
+        if let BackboneEngine::Mixed(e) = &self.engine {
+            e.prepare_graph_scratch()?;
+        }
         let input = vec![0.0f32; batch * input_dim];
         let mut output = vec![0.0f32; batch * d_model];
         self.step(&input, &mut output)?;
