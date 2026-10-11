@@ -469,7 +469,7 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&dc_i);
         let x_stride = (2 * di) as i32;
         builder.arg(&x_stride);
-        unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+        unsafe { builder.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
             .map_err(|e| format!("conv1d_burnin_fwd_tiled mamba: {:?}", e))?;
     }
 
@@ -942,7 +942,7 @@ pub fn gpu_forward_mamba_target_burnin(
             builder.arg(&dc_i);
             let x_stride = (2 * di) as i32;
             builder.arg(&x_stride);
-            unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+            unsafe { builder.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_nosave_tiled target L{layer_idx}: {:?}", e))?;
         }
 

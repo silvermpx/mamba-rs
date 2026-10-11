@@ -296,10 +296,6 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
     }
 }
 
-/// Tiled conv1d grid: x covers (b * d_inner) threads at 256/block, y covers
-/// T in CONV1D_TILE_T=128 tiles. The serial per-(b,d) walk left 146 SMs
-/// idle at the production shape (24 blocks); tiling fills the machine while
-/// every output element keeps the identical 4-tap arithmetic.
 /// Tile depth of `gather_bc_cols_tmajor_tiled` (must match GBC_TILE_T in
 /// mamba_ssm_elementwise.cu). One block per (t-tile, b); dynamic smem
 /// carries the B and C tiles at `[d_state][GBC_TILE_T + 1]` each (+1 pad
@@ -320,6 +316,27 @@ pub fn grid_gather_bc_tiled(
     }
 }
 
+/// Grid of the tiled conv forward kernels, the saving and the inference
+/// one: x covers (b * d_inner) threads at 256/block, y covers T in tiles of
+/// CONV1D_FWD_TILE_T = 32 (kernels/conv1d.cu). The serial per-(b,d) walk
+/// left 146 SMs idle at the production shape (24 blocks); a tile walks from
+/// a halo window exactly as the serial walk would, so the tile depth never
+/// changes an output, and shallow tiles keep more blocks in flight.
+pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
+    const TILE_T: usize = 32;
+    LaunchConfig {
+        grid_dim: (
+            ((batch * d_inner) as u32).div_ceil(256),
+            (t as u32).div_ceil(TILE_T as u32),
+            1,
+        ),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+/// Grid of the tiled conv backward: tiles of CONV1D_TILE_T = 128, the depth
+/// that also fixes how many partial rows the tap gradients reduce.
 pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
     const TILE_T: usize = 128;
     LaunchConfig {

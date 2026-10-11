@@ -607,7 +607,7 @@ fn prefill_body<W: MambaWeightsView>(
             builder.arg(&xs_i);
             // T-tiled: 3 blocks at B=1 became ~111 - the serial T=4621
             // walk was the single largest prefill stage.
-            unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+            unsafe { builder.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
 
@@ -1020,7 +1020,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             bld.arg(&dc_i);
             let xs_i = (2 * di) as i32;
             bld.arg(&xs_i);
-            unsafe { bld.launch(super::launch::grid_conv_tiled(b, di, t)) }
+            unsafe { bld.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
 

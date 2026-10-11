@@ -21,7 +21,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::launch::grid_conv_tiled;
+use mamba_rs::mamba_ssm::gpu::launch::{grid_conv_fwd_tiled, grid_conv_tiled};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -94,7 +94,7 @@ fn run(dtype: WeightDtype) {
         bld.arg(&dii);
         bld.arg(&dci);
         bld.arg(&dii); // x row stride: a contiguous x here
-        unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
+        unsafe { bld.launch(grid_conv_fwd_tiled(b, di, t)) }.unwrap();
     }
     {
         let mut bld = ctx

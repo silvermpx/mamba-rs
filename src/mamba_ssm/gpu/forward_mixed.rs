@@ -520,7 +520,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&dc_i);
             let x_stride = (2 * di) as i32;
             bld.arg(&x_stride);
-            unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
+            unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_burnin_tiled L{layer_idx}: {e:?}"))?;
         }
 

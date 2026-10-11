@@ -167,13 +167,54 @@ DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
 // their window from x_branch halo loads — the SAME values the serial walk
 // would hold, so every output element is bit-identical. Only the tile
 // containing t = T-1 writes the carry-out state.
+//
+// The forward tiles are CONV1D_FWD_TILE_T deep; the backward keeps
+// CONV1D_TILE_T, which also sets its partial-row count and with it the bits
+// of the tap gradients. Within a forward tile the walk loads the inputs of
+// CONV1D_FWD_BATCH steps before it computes and stores them: each step's
+// load no longer waits for the previous step's store, and the taps and bias
+// sit in registers. The usual four-tap window is unrolled at compile time
+// so it stays in registers too; any other d_conv walks the same chain with
+// a runtime bound. The arithmetic is the serial walk's in every case.
 // ============================================================================
 #define CONV1D_TILE_T 128
+#define CONV1D_FWD_TILE_T 32
+#define CONV1D_FWD_BATCH 8
+
+// The walk of one forward tile over [t0, t_end): WIN holds the window
+// before t0, W takes the taps and bias_d is the bias of channel d. The
+// four-tap walk gets arrays of its own: an array indexed by a runtime bound
+// anywhere lives in local memory everywhere.
+#define CONV1D_FWD_WALK(DC, FROM_F, WIN, W)                                   \
+    for (int k = 0; k < (DC); k++) W[k] = weight[d * d_conv + k];            \
+    for (int tb = t0; tb < t_end; tb += CONV1D_FWD_BATCH) {                  \
+        float xs[CONV1D_FWD_BATCH];                                          \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < CONV1D_FWD_BATCH; j++) {                         \
+            int t = tb + j;                                                  \
+            xs[j] = (t < t_end)                                              \
+                ? to_f(x_branch[(b * T_len + t) * x_stride + d]) : 0.0f;     \
+        }                                                                    \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < CONV1D_FWD_BATCH; j++) {                         \
+            int t = tb + j;                                                  \
+            if (t < t_end) {                                                 \
+                for (int k = 0; k < (DC) - 1; k++) WIN[k] = WIN[k + 1];      \
+                WIN[(DC) - 1] = xs[j];                                       \
+                float val = bias_d;                                          \
+                for (int k = 0; k < (DC); k++) val += WIN[k] * W[k];         \
+                u_out[(b * T_len + t) * d_inner + d] =                       \
+                    FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+            }                                                                \
+        }                                                                    \
+    }
 
 #define DEFINE_CONV1D_BURNIN_TILED(SUFFIX, TY, FROM_F)                        \
 extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
-    TY* u_out, float* state, float* conv_states_saved,                        \
-    const TY* x_branch, const float* weight, const float* bias,              \
+    TY* __restrict__ u_out, float* __restrict__ state,                       \
+    float* __restrict__ conv_states_saved,                                   \
+    const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
+    const float* __restrict__ bias,                                          \
     int batch, int T_len, int d_inner, int d_conv,                            \
     int x_stride /* row stride of x_branch: d_inner, or 2*d_inner when        \
                     reading the in_proj output directly */                    \
@@ -184,9 +225,9 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     if (d_conv > 8) return;                                                  \
     int b = idx / d_inner;                                                   \
     int d = idx % d_inner;                                                   \
-    int t0 = blockIdx.y * CONV1D_TILE_T;                                     \
+    int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
-    int t_end = min(t0 + CONV1D_TILE_T, T_len);                              \
+    int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
     int state_base = (b * d_inner + d) * d_conv;                             \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
@@ -214,21 +255,20 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     } else {                                                                 \
         /* Halo: the serial walk's window after step t0-1 holds           \
          * win[k] = x[t0 - d_conv + k] (win[0] is about to shift out).   \
-         * t0 >= CONV1D_TILE_T > d_conv, so the halo never underruns. */ \
+         * t0 >= CONV1D_FWD_TILE_T > d_conv, so the halo never underruns. */ \
         for (int k = 0; k < d_conv; k++) {                                   \
             int th = t0 - d_conv + k;                                        \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
-    for (int t = t0; t < t_end; t++) {                                       \
-        int bt_di = (b * T_len + t) * d_inner + d;                           \
-        for (int k = 0; k < d_conv - 1; k++) win[k] = win[k + 1];            \
-        win[d_conv - 1] = to_f(x_branch[(b * T_len + t) * x_stride + d]);     \
-        float val = bias[d];                                                 \
-        for (int k = 0; k < d_conv; k++) {                                   \
-            val += win[k] * weight[d * d_conv + k];                          \
-        }                                                                    \
-        u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+    float bias_d = bias[d];                                                  \
+    if (d_conv == 4) {                                                       \
+        float win4[4] = {win[0], win[1], win[2], win[3]};                    \
+        float w4[4];                                                         \
+        CONV1D_FWD_WALK(4, FROM_F, win4, w4)                                 \
+    } else {                                                                 \
+        float w[8];                                                          \
+        CONV1D_FWD_WALK(d_conv, FROM_F, win, w)                              \
     }                                                                        \
 }
 
@@ -243,8 +283,9 @@ DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
 // so a continued prefill sees exactly the serial walk's final window.
 #define DEFINE_CONV1D_BURNIN_NOSAVE_TILED(SUFFIX, TY, FROM_F)                 \
 extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
-    TY* u_out, float* state,                                                 \
-    const TY* x_branch, const float* weight, const float* bias,              \
+    TY* __restrict__ u_out, float* __restrict__ state,                       \
+    const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
+    const float* __restrict__ bias,                                          \
     int batch, int T_len, int d_inner, int d_conv,                           \
     int x_stride /* row stride of x_branch; d_inner, or 2*d_inner when     \
                     reading the in_proj output directly */                   \
@@ -255,9 +296,9 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
     if (d_conv > 8) return;                                                  \
     int b = idx / d_inner;                                                   \
     int d = idx % d_inner;                                                   \
-    int t0 = blockIdx.y * CONV1D_TILE_T;                                     \
+    int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
-    int t_end = min(t0 + CONV1D_TILE_T, T_len);                              \
+    int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
     int state_base = (b * d_inner + d) * d_conv;                             \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
@@ -285,15 +326,14 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
-    for (int t = t0; t < t_end; t++) {                                       \
-        int bt_di = (b * T_len + t) * d_inner + d;                           \
-        for (int k = 0; k < d_conv - 1; k++) win[k] = win[k + 1];            \
-        win[d_conv - 1] = to_f(x_branch[(b * T_len + t) * x_stride + d]);    \
-        float val = bias[d];                                                 \
-        for (int k = 0; k < d_conv; k++) {                                   \
-            val += win[k] * weight[d * d_conv + k];                          \
-        }                                                                    \
-        u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+    float bias_d = bias[d];                                                  \
+    if (d_conv == 4) {                                                       \
+        float win4[4] = {win[0], win[1], win[2], win[3]};                    \
+        float w4[4];                                                         \
+        CONV1D_FWD_WALK(4, FROM_F, win4, w4)                                 \
+    } else {                                                                 \
+        float w[8];                                                          \
+        CONV1D_FWD_WALK(d_conv, FROM_F, win, w)                              \
     }                                                                        \
 }
 
