@@ -272,10 +272,11 @@ pub fn chunked_geom(
 }
 
 /// The scan's shared memory for a head: the state rows padded by one, the
-/// keys of the previous and the current token and the queries, the keys
-/// starting on 16 bytes. The angles stay in their threads' registers.
+/// keys starting on 16 bytes in three buffers (the previous token's, the
+/// current one's and the next one's while it is built), the queries and
+/// the step scalars in two. The angles stay in their threads' registers.
 pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize) -> usize {
-    ((hd * (ds + 1)).next_multiple_of(4) + 3 * rank * ds) * 4
+    ((hd * (ds + 1)).next_multiple_of(4) + 5 * rank * ds + 8) * 4
 }
 
 /// The training backward's shared memory for a head: the replay state rows

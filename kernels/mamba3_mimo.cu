@@ -471,6 +471,180 @@ __device__ __forceinline__ void mimo_scan_body(
     if (angle_owner) ang[bh * na + tid] = theta;
 }
 
+// The scan with the keys of the next token built while the channels run
+// the current one, when the block has threads past the channels (at least
+// one per angle): those threads (the builders) compute token t + 1's step
+// scalars, turn its key and query pairs and bias the rest, into the next
+// of three key buffers and two query and scalar buffers, while the channel
+// threads run token t's row and gate; a token costs one barrier. Every
+// value is mimo_scan_body's expression, so the bits are its own. The angle
+// of builder a is the angle mimo_scan_body keeps in thread a; with CKPT a
+// builder writes the angle before token t when it builds token t.
+// Dynamic shared memory: the state rows (padded to 16 bytes), 5 R N floats
+// for the keys and queries and 8 for the scalars.
+template <typename TI, bool CKPT, int RK>
+__device__ __forceinline__ void mimo_scan_pipe_body(
+    TI* __restrict__ out,
+    float* __restrict__ ssm, float* __restrict__ kst,
+    float* __restrict__ vst, float* __restrict__ ang,
+    const TI* __restrict__ proj, long long ld_proj,
+    const float* __restrict__ bn, const float* __restrict__ cn,
+    const float* __restrict__ dt_bias,
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,
+    const float* __restrict__ D,
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
+    const float* __restrict__ mimo_o,
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, float a_floor,
+    float* __restrict__ ck_ssm, float* __restrict__ ck_k,
+    float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride
+) {
+    extern __shared__ float mimo_sm[];
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int g = h / (nh / ng);
+    const int di = nh * hd;
+    const int rgn = rank * ng * ds;
+    const int rn = rank * ds;
+    float* st = mimo_sm;
+    float* kbuf = st + ((hd * (ds + 1) + 3) & ~3);  // [3][R N], 16-byte aligned
+    float* qbuf = kbuf + 3 * rn;                     // [2][R N]
+    float* scal = qbuf + 2 * rn;                     // [2][4]: alpha, beta, gamma
+    const long long bh = (long long)b * nh + h;
+    const int lanes = (hd + 31) & ~31;
+    const bool own = tid < hd;
+    const bool builder = tid >= lanes;
+    const int btid = tid - lanes, bcount = (int)blockDim.x - lanes;
+    const bool angle_owner = builder && btid < na;
+    mimo_state_load(st, ssm + bh * hd * ds, hd, ds);
+    for (int i = tid; i < rn; i += blockDim.x) kbuf[2 * rn + i] = kst[bh * rn + i];
+    float v_prev = own ? vst[bh * hd + tid] : 0.0f;
+    const int R = MIMO_R(RK, rank);
+    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+        const long long o = ((long long)h * rank + r) * hd + tid;
+        px[r] = own ? mimo_x[o] : 0.0f;
+        pz[r] = own ? mimo_z[o] : 0.0f;
+        po[r] = own ? mimo_o[o] : 0.0f;
+    }
+    const float dval = D[h];
+    const int heads = 2 * di + 2 * rgn;
+    const int ang_col = heads + 3 * nh;
+    const int half = ds / 2;
+    const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
+    float theta = angle_owner ? ang[bh * na + btid] : 0.0f;
+    const float dtb = dt_bias[h];
+    // Token t's keys, queries and scalars into their buffers (builders).
+    auto build = [&](int t) {
+        const long long row = (long long)b * seq + t;
+        const TI* pr = proj + row * ld_proj;
+        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor);
+        float* kd = kbuf + (t % 3) * rn;
+        float* qd = qbuf + (t % 2) * rn;
+        if (btid == 0) {
+            float* sd = scal + (t % 2) * 4;
+            sd[0] = sc.alpha;
+            sd[1] = sc.beta;
+            sd[2] = sc.gamma;
+        }
+        const float* bnr = bn + row * rgn;
+        const float* cnr = cn + row * rgn;
+        if (angle_owner) {
+            const int a = btid;
+            if (CKPT && t % stride == 0)
+                ck_ang[(((long long)b * nseg + t / stride) * nh + h) * na + a] = theta;
+            theta = mimo_wrap_add(theta, __fmul_rn(mimo_tanh_pi(pr, ang_col, a), sc.dt));
+            float sa, ca;
+            sincosf(theta, &sa, &ca);
+            for (int r = 0; r < rank; r++) {
+                const long long src = ((long long)r * ng + g) * ds;
+                const long long bias = ((long long)h * rank + r) * ds;
+                const float k0 = __fadd_rn(bnr[src + a], b_bias[bias + a]);
+                const float k1 = __fadd_rn(bnr[src + a + half], b_bias[bias + a + half]);
+                const float2 kr = mimo_rot_pair(k0, k1, sa, ca);
+                kd[r * ds + a] = kr.x;
+                kd[r * ds + a + half] = kr.y;
+                const float q0 = __fadd_rn(cnr[src + a], c_bias[bias + a]);
+                const float q1 = __fadd_rn(cnr[src + a + half], c_bias[bias + a + half]);
+                const float2 qr = mimo_rot_pair(q0, q1, sa, ca);
+                qd[r * ds + a] = qr.x;
+                qd[r * ds + a + half] = qr.y;
+            }
+        }
+        for (int i = btid; i < rn; i += bcount) {
+            const int r = i / ds, n = i - r * ds;
+            if (n < na || (n >= half && n - half < na)) continue;
+            const long long src = ((long long)r * ng + g) * ds + n;
+            const long long bias = ((long long)h * rank + r) * ds + n;
+            kd[i] = __fadd_rn(bnr[src], b_bias[bias]);
+            qd[i] = __fadd_rn(cnr[src], c_bias[bias]);
+        }
+    };
+    if (builder && seq > 0) build(0);
+    __syncthreads();
+    for (int t = 0; t < seq; t++) {
+        const long long row = (long long)b * seq + t;
+        if (CKPT && t % stride == 0) {
+            const long long q = ((long long)b * nseg + t / stride) * nh + h;
+            mimo_state_store(ck_ssm + q * hd * ds, st, hd, ds);
+            const float* kprev = kbuf + ((t + 2) % 3) * rn;
+            for (int i = tid; i < rn; i += blockDim.x) ck_k[q * rn + i] = kprev[i];
+            if (own) ck_v[q * hd + tid] = v_prev;
+            __syncthreads();
+        }
+        if (own) {
+            const TI* pr = proj + row * ld_proj;
+            const float* sd = scal + (t % 2) * 4;
+            const float x = to_f(pr[di + h * hd + tid]);
+            const float z = to_f(pr[h * hd + tid]);
+            float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
+                             kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
+                             qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+            mimo_put(&out[row * di + h * hd + tid], mimo_tok_gate<RK>(y, pz, po, z, rank));
+            v_prev = x;
+        } else if (builder && t + 1 < seq) {
+            build(t + 1);
+        }
+        __syncthreads();
+    }
+    mimo_state_store(ssm + bh * hd * ds, st, hd, ds);
+    const float* klast = kbuf + ((seq + 2) % 3) * rn;
+    for (int i = tid; i < rn; i += blockDim.x) kst[bh * rn + i] = klast[i];
+    if (own) vst[bh * hd + tid] = v_prev;
+    if (angle_owner) ang[bh * na + btid] = theta;
+}
+
+// The scan of a head: the pipelined body when the block has a builder for
+// every angle past the channels, else the plain one.
+template <typename TI, bool CKPT, int RK>
+__device__ __forceinline__ void mimo_scan_any(
+    TI* __restrict__ out,
+    float* __restrict__ ssm, float* __restrict__ kst,
+    float* __restrict__ vst, float* __restrict__ ang,
+    const TI* __restrict__ proj, long long ld_proj,
+    const float* __restrict__ bn, const float* __restrict__ cn,
+    const float* __restrict__ dt_bias,
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,
+    const float* __restrict__ D,
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
+    const float* __restrict__ mimo_o,
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, float a_floor,
+    float* __restrict__ ck_ssm, float* __restrict__ ck_k,
+    float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride
+) {
+    const int spare = (int)blockDim.x - ((hd + 31) & ~31);
+    if (spare >= 32 && spare >= na)
+        mimo_scan_pipe_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
+            dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride);
+    else
+        mimo_scan_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
+            dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride);
+}
+
 #define DEFINE_MIMO_SCAN(NAME, TI)                                             \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
@@ -486,7 +660,7 @@ extern "C" __global__ void NAME(                                               \
     int seq, int nh, int ng, int hd, int ds, int rank, int na,                 \
     float a_floor                                                              \
 ) {                                                                            \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_body<TI, false, RK>(out, ssm, kst, vst, \
+    MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, false, RK>(out, ssm, kst, vst,  \
         ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
         mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, nullptr,       \
         nullptr, nullptr, nullptr, 1))                                         \
@@ -515,7 +689,7 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,                      \
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride           \
 ) {                                                                            \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_body<TI, true, RK>(out, ssm, kst, vst,  \
+    MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, true, RK>(out, ssm, kst, vst,   \
         ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
         mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k,  \
         ck_v, ck_ang, stride))                                                 \
