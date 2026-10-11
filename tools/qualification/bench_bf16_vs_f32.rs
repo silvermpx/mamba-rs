@@ -43,11 +43,11 @@ fn bench_m1_dtype(
     label: &str,
     use_graph: bool,
 ) {
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
 
     let t_load = Instant::now();
-    let mut lm = GpuMambaLM::from_hf_with_dtype(dir, 0, dtype).unwrap();
+    let mut lm = MambaGpuLM::from_hf(dir, 1, GpuOptions::default().dtype(dtype)).unwrap();
     let load_ms = t_load.elapsed().as_millis();
 
     if use_graph {
@@ -167,8 +167,8 @@ fn bench_m3_dtype(
     use_graph: bool,
 ) {
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-    use mamba_rs::module::gpu_lm3::GpuMamba3LM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, Mamba3GpuBackbone, MambaGpuLM};
 
     let cfg = m3_bench_cfg();
     let vocab_size = 256;
@@ -190,9 +190,15 @@ fn bench_m3_dtype(
         seed ^= seed << 17;
         *v = (((seed & 0xFFFFFF) as f32 / 16777216.0) - 0.5) * 0.1;
     }
-    let mut lm =
-        GpuMamba3LM::from_weights_with_dtype(&weights, cfg, embed, None, vocab_size, 0, dtype)
-            .unwrap();
+    let mut lm = Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        1,
+        GpuOptions::default().dtype(dtype),
+    )
+    .and_then(|backbone| MambaGpuLM::new(backbone, embed, None, vocab_size))
+    .unwrap();
     let build_ms = t_build.elapsed().as_millis();
 
     if use_graph {

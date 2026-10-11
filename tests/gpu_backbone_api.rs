@@ -1,0 +1,427 @@
+//! The GPU surface every family shares.
+//!
+//! A prompt run in one pass continues like the same tokens stepped one by
+//! one, across two prompts in a row; a captured graph replays the eager
+//! steps bit for bit; the trait and the run-time enum reach the family's
+//! own methods; and the GPU language model of every family gives the CPU
+//! one's logits.
+#![cfg(feature = "cuda")]
+
+use mamba_rs::config::ScanMode;
+use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+use mamba_rs::{
+    AnyGpuBackbone, GpuBackbone, GpuOptions, Mamba2Config, Mamba2GpuBackbone, Mamba2Weights,
+    Mamba3Config, Mamba3GpuBackbone, Mamba3MimoConfig, Mamba3MimoGpuBackbone, Mamba3MimoWeights,
+    Mamba3Weights, MambaConfig, MambaGpuBackbone, MambaWeights, ModelFamily, WeightDtype,
+};
+
+const BATCH: usize = 2;
+const D_MODEL: usize = 32;
+/// Wider than the model, so every family runs its input projection.
+const INPUT_DIM: usize = 24;
+
+fn m1_cfg() -> MambaConfig {
+    MambaConfig {
+        d_model: D_MODEL,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        n_layers: 2,
+        scan_mode: ScanMode::Auto,
+        rms_norm_eps: 1e-5,
+    }
+}
+
+fn m2_cfg() -> Mamba2Config {
+    Mamba2Config {
+        d_model: D_MODEL,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        ..Mamba2Config::default()
+    }
+}
+
+fn siso_cfg() -> Mamba3Config {
+    Mamba3Config {
+        d_model: D_MODEL,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 2,
+        ..Mamba3Config::default()
+    }
+}
+
+fn mimo_cfg() -> Mamba3MimoConfig {
+    Mamba3MimoConfig {
+        d_model: D_MODEL,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        ..Mamba3MimoConfig::default()
+    }
+}
+
+/// One backbone of every family, `input_dim` wide, in `dtype`.
+fn every_family(input_dim: usize, dtype: WeightDtype) -> Vec<AnyGpuBackbone> {
+    let opts = GpuOptions::default().dtype(dtype);
+    let m1 = MambaWeights::init(&m1_cfg(), input_dim, 11);
+    let m2 = Mamba2Weights::init(&m2_cfg(), input_dim, 12);
+    let siso = Mamba3Weights::init(&siso_cfg(), input_dim, 13);
+    let mimo = Mamba3MimoWeights::init(&mimo_cfg(), input_dim, 14);
+    vec![
+        MambaGpuBackbone::new(&m1, m1_cfg(), input_dim, BATCH, opts)
+            .unwrap()
+            .into(),
+        Mamba2GpuBackbone::new(&m2, m2_cfg(), input_dim, BATCH, opts)
+            .unwrap()
+            .into(),
+        Mamba3GpuBackbone::new(&siso, siso_cfg(), input_dim, BATCH, opts)
+            .unwrap()
+            .into(),
+        Mamba3MimoGpuBackbone::new(&mimo, mimo_cfg(), input_dim, BATCH, opts)
+            .unwrap()
+            .into(),
+    ]
+}
+
+/// Deterministic values in [-1, 1).
+fn values(n: usize, seed: u32) -> Vec<f32> {
+    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+        })
+        .collect()
+}
+
+/// Step `t` of host rows `[batch, seq_len, width]`: rows `[batch, width]`.
+fn step_rows(rows: &[f32], seq_len: usize, width: usize, t: usize) -> Vec<f32> {
+    (0..BATCH)
+        .flat_map(|b| {
+            let at = (b * seq_len + t) * width;
+            rows[at..at + width].iter().copied()
+        })
+        .collect()
+}
+
+/// Two prompts `[batch, len, width]` concatenated along time.
+fn concat_in_time(a: &[f32], a_len: usize, b: &[f32], b_len: usize, width: usize) -> Vec<f32> {
+    (0..BATCH)
+        .flat_map(|s| {
+            let pa = &a[s * a_len * width..(s + 1) * a_len * width];
+            let pb = &b[s * b_len * width..(s + 1) * b_len * width];
+            pa.iter().chain(pb).copied()
+        })
+        .collect()
+}
+
+fn max_rel_diff(got: &[f32], want: &[f32]) -> f32 {
+    let scale = want.iter().fold(1e-3f32, |m, v| m.max(v.abs()));
+    got.iter()
+        .zip(want)
+        .fold(0.0f32, |m, (g, w)| m.max((g - w).abs()))
+        / scale
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// Two prompts in one pass each, against every token stepped: the rows
+/// after the prompts and the step after them agree in every family. The
+/// second prompt continues from the state the first one left, so the
+/// state crosses a prompt seam the way it crosses a step.
+#[test]
+fn prompts_continue_like_steps_in_every_family() {
+    let (t1, t2) = (100, 37);
+    let first = values(BATCH * t1 * INPUT_DIM, 1);
+    let second = values(BATCH * t2 * INPUT_DIM, 2);
+    let whole = concat_in_time(&first, t1, &second, t2, INPUT_DIM);
+    let next = values(BATCH * INPUT_DIM, 3);
+    for mut bb in every_family(INPUT_DIM, WeightDtype::F32) {
+        let family = bb.family();
+        let rows = BATCH * bb.d_model();
+
+        bb.reset().unwrap();
+        let mut stepped = vec![0.0f32; rows];
+        for t in 0..t1 + t2 {
+            bb.step(&step_rows(&whole, t1 + t2, INPUT_DIM, t), &mut stepped)
+                .unwrap();
+        }
+        let mut after_steps = vec![0.0f32; rows];
+        bb.step(&next, &mut after_steps).unwrap();
+
+        bb.reset().unwrap();
+        bb.prefill(&first, t1).unwrap();
+        bb.prefill(&second, t2).unwrap();
+        let mut prefilled = vec![0.0f32; rows];
+        bb.download_temporal(&mut prefilled).unwrap();
+        let mut after_prefill = vec![0.0f32; rows];
+        bb.step(&next, &mut after_prefill).unwrap();
+
+        let (last, then) = (
+            max_rel_diff(&prefilled, &stepped),
+            max_rel_diff(&after_prefill, &after_steps),
+        );
+        eprintln!("{family:?}: prompt rows {last:.2e}, next step {then:.2e}");
+        assert!(last < 1e-3, "{family:?}: prompt rows differ by {last}");
+        assert!(then < 1e-3, "{family:?}: the step after differs by {then}");
+    }
+}
+
+/// A captured graph replays the eager steps bit for bit, and a prompt as
+/// long as one run before the capture still runs after it.
+#[test]
+fn graph_replays_eager_steps_in_every_family() {
+    let t = 64;
+    let prompt = values(BATCH * t * D_MODEL, 4);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        for mut bb in every_family(D_MODEL, dtype) {
+            let family = bb.family();
+            let rows = BATCH * bb.d_model();
+            let steps: Vec<Vec<f32>> = (0..5).map(|i| values(BATCH * D_MODEL, 10 + i)).collect();
+            let run = |bb: &mut AnyGpuBackbone| -> Vec<Vec<u32>> {
+                bb.reset().unwrap();
+                steps
+                    .iter()
+                    .map(|input| {
+                        let mut out = vec![0.0f32; rows];
+                        bb.step(input, &mut out).unwrap();
+                        bits(&out)
+                    })
+                    .collect()
+            };
+            let prompt_rows = |bb: &mut AnyGpuBackbone| -> Vec<u32> {
+                bb.reset().unwrap();
+                bb.prefill(&prompt, t).unwrap();
+                let mut out = vec![0.0f32; rows];
+                bb.download_temporal(&mut out).unwrap();
+                bits(&out)
+            };
+            let eager = run(&mut bb);
+            let eager_prompt = prompt_rows(&mut bb);
+            bb.capture_graph().unwrap();
+            assert!(bb.has_graph(), "{family:?} {dtype:?}: no graph");
+            assert_eq!(run(&mut bb), eager, "{family:?} {dtype:?}: replay");
+            assert_eq!(
+                prompt_rows(&mut bb),
+                eager_prompt,
+                "{family:?} {dtype:?}: the prompt after the capture"
+            );
+        }
+    }
+}
+
+/// A captured graph does not stop a prompt longer than any run before it:
+/// the prompt runs eagerly and gives the bits of a backbone that never
+/// captured.
+#[test]
+fn a_longer_prompt_runs_after_the_capture_in_every_family() {
+    let t = 600;
+    let prompt = values(BATCH * t * D_MODEL, 9);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        let captured = every_family(D_MODEL, dtype);
+        let plain = every_family(D_MODEL, dtype);
+        for (mut a, mut b) in captured.into_iter().zip(plain) {
+            let family = a.family();
+            let rows = BATCH * a.d_model();
+            a.capture_graph().unwrap();
+            let after = a.prefill(&prompt, t);
+            assert!(
+                after.is_ok(),
+                "{family:?} {dtype:?}: a long prompt after the capture: {after:?}"
+            );
+            b.prefill(&prompt, t).unwrap();
+            let (mut ra, mut rb) = (vec![0.0f32; rows], vec![0.0f32; rows]);
+            a.download_temporal(&mut ra).unwrap();
+            b.download_temporal(&mut rb).unwrap();
+            assert_eq!(bits(&ra), bits(&rb), "{family:?} {dtype:?}");
+        }
+    }
+}
+
+/// The trait and the enum hand every call to the family's own method: the
+/// same model driven through both gives the same bits and reports the
+/// same shape.
+#[test]
+fn trait_and_enum_reach_the_family_methods() {
+    let mut own = every_family(INPUT_DIM, WeightDtype::F32);
+    let mut via = every_family(INPUT_DIM, WeightDtype::F32);
+    let want = [
+        ModelFamily::Mamba1,
+        ModelFamily::Mamba2,
+        ModelFamily::Mamba3,
+        ModelFamily::Mamba3Mimo,
+    ];
+    let input = values(BATCH * INPUT_DIM, 5);
+    for ((a, b), family) in own.iter_mut().zip(via.iter_mut()).zip(want) {
+        assert_eq!(a.family(), family);
+        let rows = BATCH * a.d_model();
+        let mut by_family = vec![0.0f32; rows];
+        let mut by_trait = vec![0.0f32; rows];
+        match a {
+            AnyGpuBackbone::M1(bb) => bb.step(&input, &mut by_family),
+            AnyGpuBackbone::M2(bb) => bb.step(&input, &mut by_family),
+            AnyGpuBackbone::M3(bb) => bb.step(&input, &mut by_family),
+            AnyGpuBackbone::M3Mimo(bb) => bb.step(&input, &mut by_family),
+        }
+        .unwrap();
+        let dynamic: &mut dyn GpuBackbone = b;
+        dynamic.step(&input, &mut by_trait).unwrap();
+        assert_eq!(bits(&by_trait), bits(&by_family), "{family:?}");
+        assert_eq!(
+            (dynamic.batch(), dynamic.input_dim(), dynamic.d_model()),
+            (BATCH, INPUT_DIM, D_MODEL),
+            "{family:?}"
+        );
+        assert_eq!(dynamic.dtype(), WeightDtype::F32, "{family:?}");
+        assert!(!dynamic.has_graph(), "{family:?}");
+    }
+}
+
+/// A SISO prompt continued from a zeroed state gives the bits of the
+/// stateless window: the language models reset before a prompt, and the
+/// continued window's boundary fold must add nothing there.
+#[test]
+fn siso_prompt_from_zero_state_matches_the_stateless_window() {
+    let t = 300;
+    let cfg = siso_cfg();
+    let weights = Mamba3Weights::init(&cfg, D_MODEL, 21);
+    let prompt = values(BATCH * t * D_MODEL, 6);
+    let next = values(BATCH * D_MODEL, 7);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        let opts = GpuOptions::default().dtype(dtype);
+        let mut bb = Mamba3GpuBackbone::new(&weights, cfg, D_MODEL, BATCH, opts).unwrap();
+        let rows = BATCH * D_MODEL;
+        let finish = |bb: &mut Mamba3GpuBackbone| -> (Vec<u32>, Vec<u32>) {
+            let mut last = vec![0.0f32; rows];
+            bb.download_temporal(&mut last).unwrap();
+            let mut after = vec![0.0f32; rows];
+            bb.step(&next, &mut after).unwrap();
+            (bits(&last), bits(&after))
+        };
+
+        bb.reset().unwrap();
+        bb.prefill(&prompt, t).unwrap();
+        let continued = finish(&mut bb);
+
+        bb.reset().unwrap();
+        let mut pf = bb.alloc_prefill(t).unwrap();
+        let rows_in = GpuBuffer::from_cpu(bb.stream(), &prompt).unwrap();
+        bb.prefill_sequence(&mut pf, &rows_in, t, false).unwrap();
+        let stateless = finish(&mut bb);
+
+        assert_eq!(
+            continued.0, stateless.0,
+            "{dtype:?}: the prompt's last rows"
+        );
+        assert_eq!(continued.1, stateless.1, "{dtype:?}: the step after it");
+    }
+}
+
+#[cfg(feature = "hf")]
+mod language_model {
+    use super::*;
+    use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{
+        Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone, MambaGpuLM, MambaLM,
+    };
+
+    const VOCAB: usize = 90;
+    /// The embedding rows, the vocabulary padded the way the loaders pad.
+    const VOCAB_ROWS: usize = 96;
+
+    fn models(opts: GpuOptions) -> Vec<(MambaLM, MambaGpuLM)> {
+        let embed = values(VOCAB_ROWS * D_MODEL, 30);
+        let lm = |cpu: Result<MambaLM, String>, gpu: Result<MambaGpuLM, String>| {
+            (cpu.unwrap(), gpu.unwrap())
+        };
+        let mut m1 = MambaWeights::init(&m1_cfg(), D_MODEL, 31);
+        m1.input_proj_w.clear();
+        m1.input_proj_b.clear();
+        let m2 = Mamba2Weights::init(&m2_cfg(), D_MODEL, 32);
+        let siso = Mamba3Weights::init(&siso_cfg(), D_MODEL, 33);
+        let mimo = Mamba3MimoWeights::init(&mimo_cfg(), D_MODEL, 34);
+        vec![
+            lm(
+                MambaBackbone::new(m1.clone(), m1_cfg(), D_MODEL)
+                    .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
+                MambaGpuBackbone::new(&m1, m1_cfg(), D_MODEL, 1, opts)
+                    .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
+            ),
+            lm(
+                Mamba2Backbone::new(m2.clone(), m2_cfg(), D_MODEL)
+                    .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
+                Mamba2GpuBackbone::new(&m2, m2_cfg(), D_MODEL, 1, opts)
+                    .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
+            ),
+            lm(
+                Mamba3Backbone::new(siso.clone(), siso_cfg(), D_MODEL)
+                    .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
+                Mamba3GpuBackbone::new(&siso, siso_cfg(), D_MODEL, 1, opts)
+                    .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
+            ),
+            lm(
+                Mamba3MimoBackbone::new(mimo.clone(), mimo_cfg(), D_MODEL)
+                    .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
+                Mamba3MimoGpuBackbone::new(&mimo, mimo_cfg(), D_MODEL, 1, opts)
+                    .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
+            ),
+        ]
+    }
+
+    /// The logits after a short prompt (fed token by token) and after a
+    /// long one (one pass) match the CPU model's in every family.
+    #[test]
+    fn gpu_language_model_gives_the_cpu_logits_in_every_family() {
+        let params = SampleParams {
+            max_tokens: 0,
+            ..SampleParams::default()
+        };
+        for (mut cpu, mut gpu) in models(GpuOptions::default()) {
+            assert_eq!(cpu.family(), gpu.family());
+            for len in [12, 300] {
+                let prompt: Vec<u32> = (0..len).map(|i| (i * 37 % VOCAB) as u32).collect();
+                cpu.generate(&prompt, &params);
+                gpu.generate(&prompt, &params).unwrap();
+                let diff = max_rel_diff(gpu.last_logits(0), cpu.last_logits(0));
+                eprintln!("{:?} prompt {len}: logits {diff:.2e}", gpu.family());
+                assert!(diff < 1e-3, "{:?} prompt {len}: {diff}", gpu.family());
+            }
+        }
+    }
+
+    /// Generation runs with a captured graph in every family, and a graph
+    /// does not change the tokens: after a short prompt fed token by token,
+    /// and after a long one, run in one pass by a model that captured its
+    /// graph before it ever saw a prompt that long.
+    #[test]
+    fn gpu_language_model_generates_with_a_graph_in_every_family() {
+        let params = SampleParams {
+            temperature: 0.0,
+            max_tokens: 8,
+            ..SampleParams::default()
+        };
+        let short: Vec<u32> = (0..9).map(|i| (i * 11 % VOCAB) as u32).collect();
+        let long: Vec<u32> = (0..300).map(|i| (i * 13 % VOCAB) as u32).collect();
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+            let opts = GpuOptions::default().dtype(dtype);
+            for ((_, mut graphed), (_, mut eager)) in models(opts).into_iter().zip(models(opts)) {
+                let family = graphed.family();
+                graphed.capture_graph().unwrap();
+                for prompt in [&short, &long] {
+                    let n = prompt.len();
+                    let want = eager.generate(prompt, &params).unwrap();
+                    let got = graphed.generate(prompt, &params);
+                    assert!(got.is_ok(), "{family:?} {dtype:?} prompt {n}: {got:?}");
+                    assert_eq!(got.unwrap(), want, "{family:?} {dtype:?} prompt {n}");
+                    assert_eq!(want.len(), 8, "{family:?} {dtype:?}");
+                }
+            }
+        }
+    }
+}

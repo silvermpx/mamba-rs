@@ -23,8 +23,9 @@
 //! Windows carry the conv and SSM states from one call to the next, and
 //! the gradients stop at the states a window starts from.
 
+use crate::mamba_ssm::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::mamba_ssm::gpu::options::GpuOptions;
-use crate::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use crate::mamba_ssm::gpu::trainer::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::check_device_envelope;
@@ -352,6 +353,8 @@ pub struct Mamba2GpuTrainer {
     forwarded: bool,
     /// Set by a completed backward, consumed by the next optimizer step.
     fresh_grads: bool,
+    /// The accumulation window and the clip of [`Self::backward_step`].
+    window: GradWindow,
 }
 
 const PAIRS: usize = CHUNK * (CHUNK + 1) / 2;
@@ -545,6 +548,7 @@ impl Mamba2GpuTrainer {
         let mut trainer = Self {
             forwarded: false,
             fresh_grads: false,
+            window: GradWindow::new(s)?,
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
             adamw: GpuAdamW::new(s, layout.total)?
@@ -696,8 +700,114 @@ impl Mamba2GpuTrainer {
         &mut self.adamw
     }
 
-    /// The current weights.
-    pub fn weights(&self) -> Result<Mamba2Weights, String> {
+    /// Set the AdamW learning rate for the next steps.
+    pub fn set_lr(&mut self, lr: f32) -> Result<(), String> {
+        if !lr.is_finite() || lr <= 0.0 {
+            return Err(format!("set_lr: invalid learning rate {lr}"));
+        }
+        self.adamw.lr = lr;
+        Ok(())
+    }
+
+    /// The AdamW learning rate.
+    pub fn lr(&self) -> f32 {
+        self.adamw.lr
+    }
+
+    /// The CUDA context: the GEMM mode and route live here.
+    pub fn ctx(&self) -> &GpuCtx {
+        &self.ctx
+    }
+
+    /// Width of the model, the rows `forward` writes.
+    pub fn d_model(&self) -> usize {
+        self.cfg.d_model
+    }
+
+    /// One training step on a window: [`Self::forward`] of `input`
+    /// (`[batch, seq_len, input_dim]`) without the download, then
+    /// [`Self::backward_step`] of `d_temporal` (`[batch, seq_len, d_model]`,
+    /// d loss / d the final rows of every position) with the default
+    /// options.
+    pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        self.check_window_len("step input", input.len(), self.input_dim)?;
+        self.forwarded = false;
+        self.forward_unchecked(input, None)?;
+        self.forwarded = true;
+        let m = self.backward_step(d_temporal, BackwardOpts::default())?;
+        Ok(StepMetrics {
+            step: m.step,
+            graph_replayed: false,
+            loss_scale: m.loss_scale,
+            overflow_skipped: m.overflow_skipped,
+        })
+    }
+
+    /// The backward of the last [`Self::forward`] for `d_temporal`
+    /// (`[batch, seq_len, d_model]`), then the optimizer tail `opts` asks
+    /// for: the global-norm clip, the skip of a window whose norm spikes,
+    /// and the AdamW step. With `opts.accumulate_only` the gradient joins
+    /// the open accumulation window instead and the optimizer waits; the
+    /// next applying call steps on the window's sum. Scale `d_temporal` by
+    /// `1 / micro_batches` for a mean.
+    ///
+    /// f16 cannot accumulate, a clip belongs on the applying call, and the
+    /// control-channel clip is not implemented here: those are errors.
+    pub fn backward_step(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        check_backward_opts(&opts, self.dtype, "Mamba-2 trainer", false)?;
+        let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        self.backward(d_temporal, None)?;
+        if opts.accumulate_only {
+            self.window.accumulate(&self.ctx, &self.grads)?;
+            self.fresh_grads = false;
+            return Ok(BackwardMetrics {
+                step: self.adamw.step,
+                optimizer_stepped: false,
+                grad_norm: None,
+                loss_scale: None,
+                overflow_skipped: None,
+            });
+        }
+        self.window.fold_into(&self.ctx, &mut self.grads)?;
+        let grad_norm = match opts.clip_max_norm {
+            Some(c) if !self.overflowed => Some(self.window.clip(&self.ctx, &mut self.grads, c)?),
+            _ => None,
+        };
+        // A window whose norm before the clip passes the threshold is
+        // dropped whole: no AdamW step, and the loss scale counts it as a
+        // clean step.
+        if let (Some(norm), Some(limit)) = (grad_norm, opts.step_skip_above)
+            && norm > limit
+        {
+            self.fresh_grads = false;
+            if let Some(scaler) = self.scaler.as_mut() {
+                scaler.update(false);
+            }
+            return Ok(BackwardMetrics {
+                step: self.adamw.step,
+                optimizer_stepped: false,
+                grad_norm,
+                loss_scale,
+                overflow_skipped: loss_scale.map(|_| false),
+            });
+        }
+        let overflowed = self.overflowed;
+        let stepped = self.apply_adamw()?;
+        Ok(BackwardMetrics {
+            step: self.adamw.step,
+            optimizer_stepped: stepped,
+            grad_norm,
+            loss_scale,
+            overflow_skipped: loss_scale.map(|_| overflowed),
+        })
+    }
+
+    /// Download the f32 master weights for a checkpoint or the CPU model.
+    pub fn snapshot_master(&self) -> Result<Mamba2Weights, String> {
         let flat = self.master.to_cpu(&self.ctx.stream)?;
         Ok(self.layout.unflatten(&flat, &self.template))
     }
@@ -756,12 +866,13 @@ impl Mamba2GpuTrainer {
         self.check_window_len("forward input", input.len(), self.input_dim)?;
         self.check_window_len("forward output", out.len(), self.cfg.d_model)?;
         self.forwarded = false;
-        self.forward_unchecked(input, out)?;
+        self.forward_unchecked(input, Some(out))?;
         self.forwarded = true;
         Ok(())
     }
 
-    fn forward_unchecked(&mut self, input: &[f32], out: &mut [f32]) -> Result<(), String> {
+    /// The forward kernels; `out`, when given, receives the final rows.
+    fn forward_unchecked(&mut self, input: &[f32], out: Option<&mut [f32]>) -> Result<(), String> {
         let c = self.cfg;
         let (b, t_len) = (self.batch, self.seq_len);
         let rows = b * t_len;
@@ -858,6 +969,9 @@ impl Mamba2GpuTrainer {
             ),
             (rows, false),
         )?;
+        let Some(out) = out else {
+            return Ok(());
+        };
         self.sync("forward")?;
         self.final_out.download(&stream, out)?;
         self.sync("forward")
@@ -976,6 +1090,9 @@ impl Mamba2GpuTrainer {
     /// (its outputs), `[batch, seq_len, d_model]`. The gradients are
     /// overwritten (see [`Self::grads`]); `d_input`, when given, receives d
     /// loss / d (the inputs), `[batch, seq_len, input_dim]`.
+    /// [`Self::backward_step`] is this backward with the optimizer step;
+    /// this split with [`Self::apply_adamw`] is for a caller that trains
+    /// something upstream on `d_input`.
     ///
     /// A window the forward did not complete is refused. After an f16
     /// overflow (see [`Self::overflowed`]) the gradients and `d_input` are

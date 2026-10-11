@@ -6,6 +6,7 @@ use clap::Parser;
 use hf_hub::{HFClientSync, split_id};
 use tokenizers::Tokenizer;
 
+use mamba_rs::ModelFamily;
 use mamba_rs::module::sample::SampleParams;
 
 #[derive(Parser)]
@@ -82,8 +83,12 @@ fn main() {
         None => download_model(&args.model_id, &args.revision),
     };
 
-    let tokenizer = load_tokenizer(&model_dir, &args);
-    let mamba3 = is_mamba3_checkpoint(&model_dir);
+    let family = mamba_rs::hf::read_family(&model_dir).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+    let tokenizer = load_tokenizer(&model_dir, &args, family);
+    let mamba3 = matches!(family, ModelFamily::Mamba3 | ModelFamily::Mamba3Mimo);
 
     let encoding = tokenizer
         .encode(args.prompt.as_str(), false)
@@ -148,22 +153,18 @@ fn run_cpu(
     tokenizer: &Tokenizer,
 ) {
     let t_load = Instant::now();
-    let loaded = if is_mamba2_checkpoint(model_dir) {
-        load_mamba2_cpu(model_dir)
-    } else if is_mamba3_checkpoint(model_dir) {
-        load_mamba3_cpu(model_dir)
-    } else {
-        mamba_rs::module::lm::MambaLM::from_hf(model_dir)
-    };
-    let mut lm = loaded.unwrap_or_else(|e| {
+    let mut lm = mamba_rs::MambaLM::from_hf(model_dir).unwrap_or_else(|e| {
         eprintln!("error: failed to load model: {e}");
         std::process::exit(1);
     });
     let load_ms = t_load.elapsed().as_millis();
 
     eprintln!(
-        "model: {} (CPU) | d_model={} vocab={} | loaded in {load_ms}ms",
-        args.model_id, lm.d_model, lm.vocab_size
+        "model: {} (CPU, {:?}) | d_model={} vocab={} | loaded in {load_ms}ms",
+        args.model_id,
+        lm.family(),
+        lm.d_model,
+        lm.vocab_size
     );
     eprintln!("prompt: {n_prompt} tokens");
 
@@ -187,45 +188,9 @@ fn run_cpu(
     print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
 }
 
-/// A checkpoint in the original mamba_ssm format whose mixer is Mamba-3.
-fn is_mamba3_checkpoint(model_dir: &Path) -> bool {
-    std::fs::read(model_dir.join("config.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .is_some_and(|c| c["ssm_cfg"]["layer"].as_str() == Some("Mamba3"))
-}
-
-/// A checkpoint in the original mamba_ssm format whose mixer is Mamba-2.
-fn is_mamba2_checkpoint(model_dir: &Path) -> bool {
-    std::fs::read(model_dir.join("config.json"))
-        .is_ok_and(|b| mamba_rs::hf::load_mamba2::is_mamba2_config(&b))
-}
-
-fn load_mamba2_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
-    let m = mamba_rs::hf::load_mamba2::load_hf_mamba2(model_dir)?;
-    let d = m.cfg.d_model;
-    let backbone = mamba_rs::module::Mamba2Backbone::from_weights(m.weights, m.cfg, d)?;
-    mamba_rs::module::lm::MambaLM::from_mamba2(backbone, m.embed, None, m.vocab_size)
-}
-
-fn load_mamba3_cpu(model_dir: &Path) -> Result<mamba_rs::module::lm::MambaLM, String> {
-    use mamba_rs::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo, read_mamba3_config};
-    use mamba_rs::module::lm::MambaLM;
-    if read_mamba3_config(model_dir)?.mimo_rank.is_some() {
-        let m = load_hf_mamba3_mimo(model_dir)?;
-        let d = m.cfg.d_model;
-        let backbone = mamba_rs::module::Mamba3MimoBackbone::from_weights(m.weights, m.cfg, d)?;
-        return MambaLM::from_mamba3_mimo(backbone, m.embed, None, m.vocab_size);
-    }
-    let m = load_hf_mamba3(model_dir)?;
-    let d = m.cfg.d_model;
-    let backbone = mamba_rs::module::Mamba3Backbone::from_weights(m.weights, m.cfg, d)?;
-    MambaLM::from_mamba3(backbone, m.embed, None, m.vocab_size)
-}
-
 #[cfg(feature = "cuda")]
-fn parse_dtype(s: &str) -> mamba_rs::mamba_ssm::gpu::dtype::WeightDtype {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+fn parse_dtype(s: &str) -> mamba_rs::WeightDtype {
+    use mamba_rs::WeightDtype;
     match s.to_lowercase().as_str() {
         "f32" | "fp32" | "float32" => WeightDtype::F32,
         "tf32" => WeightDtype::Tf32,
@@ -248,89 +213,11 @@ fn run_gpu(
     tokenizer: &Tokenizer,
 ) {
     let dtype = parse_dtype(&args.dtype);
-    if is_mamba2_checkpoint(model_dir) {
-        eprintln!("error: Mamba-2 checkpoints run on the CPU for now (drop --gpu)");
-        std::process::exit(1);
-    }
-    if is_mamba3_checkpoint(model_dir) {
-        let mimo = mamba_rs::hf::load_mamba3::read_mamba3_config(model_dir)
-            .is_ok_and(|c| c.mimo_rank.is_some());
-        if mimo {
-            eprintln!("error: Mamba-3 MIMO checkpoints run on the CPU for now (drop --gpu)");
-            std::process::exit(1);
-        }
-        run_gpu_mamba3(model_dir, args, prompt_ids, n_prompt, params, tokenizer);
-        return;
-    }
+    let opts = mamba_rs::GpuOptions::default()
+        .device(args.gpu_device)
+        .dtype(dtype);
     let t_load = Instant::now();
-    let mut lm =
-        mamba_rs::module::gpu_lm::GpuMambaLM::from_hf_with_dtype(model_dir, args.gpu_device, dtype)
-            .unwrap_or_else(|e| {
-                eprintln!("error: failed to load GPU model: {e}");
-                std::process::exit(1);
-            });
-    lm.capture_graph().unwrap_or_else(|e| {
-        eprintln!("warning: CUDA Graph capture failed ({e}), running without graph");
-    });
-    let load_ms = t_load.elapsed().as_millis();
-
-    eprintln!(
-        "model: {} (GPU:{} {}) | d_model={} vocab={} | loaded in {load_ms}ms",
-        args.model_id,
-        args.gpu_device,
-        dtype.as_str(),
-        lm.d_model,
-        lm.vocab_size
-    );
-    eprintln!("prompt: {n_prompt} tokens");
-
-    let mut stdout = std::io::stdout().lock();
-    let mut n_generated = 0u64;
-    let mut byte_buf = Vec::new();
-    let t_start = Instant::now();
-    let mut ttft: Option<u128> = None;
-
-    lm.generate_streaming(prompt_ids, params, |token_id, _| {
-        if ttft.is_none() {
-            ttft = Some(t_start.elapsed().as_millis());
-        }
-        n_generated += 1;
-        if let Some(piece) = decode_token(tokenizer, token_id, &mut byte_buf) {
-            let _ = stdout.write_all(piece.as_bytes());
-            let _ = stdout.flush();
-        }
-    })
-    .unwrap_or_else(|e| {
-        eprintln!("\nerror: generation failed: {e}");
-        std::process::exit(1);
-    });
-
-    print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
-}
-
-#[cfg(feature = "cuda")]
-fn run_gpu_mamba3(
-    model_dir: &Path,
-    args: &Args,
-    prompt_ids: &[u32],
-    n_prompt: usize,
-    params: &SampleParams,
-    tokenizer: &Tokenizer,
-) {
-    let dtype = parse_dtype(&args.dtype);
-    let t_load = Instant::now();
-    let loaded = mamba_rs::hf::load_mamba3::load_hf_mamba3(model_dir).and_then(|m| {
-        mamba_rs::module::gpu_lm3::GpuMamba3LM::from_weights_with_dtype(
-            &m.weights,
-            m.cfg,
-            m.embed,
-            None,
-            m.vocab_size,
-            args.gpu_device,
-            dtype,
-        )
-    });
-    let mut lm = loaded.unwrap_or_else(|e| {
+    let mut lm = mamba_rs::MambaGpuLM::from_hf(model_dir, 1, opts).unwrap_or_else(|e| {
         eprintln!("error: failed to load GPU model: {e}");
         std::process::exit(1);
     });
@@ -338,11 +225,13 @@ fn run_gpu_mamba3(
         eprintln!("warning: CUDA Graph capture failed ({e}), running without graph");
     });
     let load_ms = t_load.elapsed().as_millis();
+
     eprintln!(
-        "model: {} (GPU:{} {}, Mamba-3) | d_model={} vocab={} | loaded in {load_ms}ms",
+        "model: {} (GPU:{} {}, {:?}) | d_model={} vocab={} | loaded in {load_ms}ms",
         args.model_id,
         args.gpu_device,
         dtype.as_str(),
+        lm.family(),
         lm.d_model,
         lm.vocab_size
     );
@@ -353,6 +242,7 @@ fn run_gpu_mamba3(
     let mut byte_buf = Vec::new();
     let t_start = Instant::now();
     let mut ttft: Option<u128> = None;
+
     lm.generate_streaming(prompt_ids, params, |token_id, _| {
         if ttft.is_none() {
             ttft = Some(t_start.elapsed().as_millis());
@@ -367,6 +257,7 @@ fn run_gpu_mamba3(
         eprintln!("\nerror: generation failed: {e}");
         std::process::exit(1);
     });
+
     print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
 }
 
@@ -449,7 +340,7 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
     model_dir
 }
 
-fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
+fn load_tokenizer(model_dir: &Path, args: &Args, family: ModelFamily) -> Tokenizer {
     if let Some(path) = &args.tokenizer {
         return Tokenizer::from_file(path).unwrap_or_else(|e| {
             eprintln!("error: cannot load {}: {e}", path.display());
@@ -463,14 +354,14 @@ fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
             std::process::exit(1);
         })
     } else {
-        if is_mamba3_checkpoint(model_dir) {
+        if matches!(family, ModelFamily::Mamba3 | ModelFamily::Mamba3Mimo) {
             eprintln!(
                 "error: the official Mamba-3 repositories ship no tokenizer; pass \
                  --tokenizer with the Llama-3.1 tokenizer.json"
             );
             std::process::exit(1);
         }
-        if is_mamba2_checkpoint(model_dir) {
+        if family == ModelFamily::Mamba2 {
             eprintln!(
                 "error: the official Mamba-2 repositories ship no tokenizer; pass \
                  --tokenizer with the GPT-NeoX (EleutherAI/gpt-neox-20b) tokenizer.json"

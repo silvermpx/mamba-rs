@@ -14,5 +14,5 @@ pub mod load_mamba3;
 pub mod pickle;
 pub mod torch_zip;
 
-pub use config_json::ModelFamily;
+pub use config_json::{ModelFamily, read_family};
 pub use load::load_hf;

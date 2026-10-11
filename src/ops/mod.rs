@@ -8,5 +8,6 @@ pub(crate) mod init;
 pub mod norms;
 pub mod packed;
 pub mod portable_math;
+pub(crate) mod st_io;
 
 pub use dims::{MambaDims, MambaRecurrentState};

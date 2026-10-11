@@ -1,16 +1,10 @@
 //! HuggingFace config.json parsing for Mamba models.
 
+use std::path::Path;
+
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelFamily {
-    Mamba1,
-    Mamba2,
-    /// Detected so the loader can REJECT it with a precise message (the HF
-    /// loader serves Mamba-1 only; native M3 checkpoints use
-    /// `mamba3_siso::serialize`, not this path).
-    Mamba3,
-}
+pub use crate::config::ModelFamily;
 
 /// Raw HF config.json — supports both HF-native and original formats.
 #[derive(Deserialize)]
@@ -55,6 +49,7 @@ struct RawConfig {
 #[derive(Deserialize)]
 struct RawSsmCfg {
     layer: Option<String>,
+    is_mimo: Option<bool>,
 }
 
 /// Parsed and validated Mamba config for HF loading.
@@ -132,19 +127,37 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     })
 }
 
+/// The family a checkpoint directory's `config.json` names, without the
+/// checks a loader makes on the rest of the file.
+pub fn read_family(dir: &Path) -> Result<ModelFamily, String> {
+    let json = std::fs::read(dir.join("config.json"))
+        .map_err(|e| format!("cannot read config.json: {e}"))?;
+    let raw: RawConfig =
+        serde_json::from_slice(&json).map_err(|e| format!("config.json parse error: {e}"))?;
+    detect_family(&raw)
+}
+
 fn detect_family(raw: &RawConfig) -> Result<ModelFamily, String> {
+    // A Mamba-3 config marks a MIMO mixer under ssm_cfg.
+    let mamba3 = || {
+        if raw.ssm_cfg.as_ref().and_then(|c| c.is_mimo) == Some(true) {
+            ModelFamily::Mamba3Mimo
+        } else {
+            ModelFamily::Mamba3
+        }
+    };
     if let Some(mt) = &raw.model_type {
         match mt.as_str() {
             "mamba" | "falcon_mamba" => Ok(ModelFamily::Mamba1),
             "mamba2" => Ok(ModelFamily::Mamba2),
-            "mamba3" | "mamba3_siso" => Ok(ModelFamily::Mamba3),
+            "mamba3" | "mamba3_siso" => Ok(mamba3()),
             other => Err(format!("unsupported model_type: {other}")),
         }
     } else if raw.d_model.is_some() {
         match raw.ssm_cfg.as_ref().and_then(|c| c.layer.as_deref()) {
             None | Some("Mamba1") => Ok(ModelFamily::Mamba1),
             Some("Mamba2") => Ok(ModelFamily::Mamba2),
-            Some("Mamba3") => Ok(ModelFamily::Mamba3),
+            Some("Mamba3") => Ok(mamba3()),
             Some(other) => Err(format!("unsupported ssm_cfg.layer: {other}")),
         }
     } else {
@@ -185,6 +198,13 @@ mod tests {
         assert_eq!(parse_config_json(m3).unwrap().family, ModelFamily::Mamba3);
         let m1 = br#"{"d_model":768,"n_layer":24,"vocab_size":50277,"ssm_cfg":{}}"#;
         assert_eq!(parse_config_json(m1).unwrap().family, ModelFamily::Mamba1);
+        let mimo = br#"{"d_model":768,"n_layer":12,"vocab_size":128256,"ssm_cfg":{"layer":"Mamba3","is_mimo":true,"mimo_rank":4}}"#;
+        assert_eq!(
+            parse_config_json(mimo).unwrap().family,
+            ModelFamily::Mamba3Mimo
+        );
+        let siso = br#"{"d_model":768,"n_layer":12,"vocab_size":128256,"ssm_cfg":{"layer":"Mamba3","is_mimo":false}}"#;
+        assert_eq!(parse_config_json(siso).unwrap().family, ModelFamily::Mamba3);
     }
 
     #[test]

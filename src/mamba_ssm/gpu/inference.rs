@@ -2442,6 +2442,51 @@ pub struct MambaGpuBackbone {
     engine: BackboneEngine,
     state: MambaGpuState,
     scratch: BackboneScratch,
+    prompt: Option<BackbonePrompt>,
+}
+
+/// The buffers of one prompt length, kept for the next prompt of that
+/// length: the host rows on the device, their input projection when the
+/// model has one, and the prefill scratch of the engine's precision.
+struct BackbonePrompt {
+    seq_len: usize,
+    input: GpuBuffer,
+    projected: Option<GpuBuffer>,
+    scratch: PromptScratch,
+}
+
+enum PromptScratch {
+    F32(super::backward::GpuMambaTargetScratch),
+    Mixed(super::backward::GpuMambaTargetMixedScratch),
+}
+
+/// The prompt rows the layers read: the uploaded rows themselves when the
+/// model has no input projection, else their projection over every prompt
+/// row, the GEMM a step makes over its rows.
+fn project_prompt<'a, W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    (weights, identity): (&W, bool),
+    input: &'a GpuBuffer,
+    projected: &'a mut Option<GpuBuffer>,
+    (rows, input_dim, d_model): (usize, usize, usize),
+) -> Result<&'a GpuBuffer, String> {
+    if identity {
+        return Ok(input);
+    }
+    let Some(out) = projected.as_mut() else {
+        return Err("prefill projection buffer missing".into());
+    };
+    let (ipw_ptr, ipw_dtype) = weights.input_proj_w();
+    gpu_gemm_forward_dispatch(
+        ctx,
+        out,
+        input,
+        ipw_ptr,
+        ipw_dtype,
+        Some(weights.input_proj_b()),
+        (rows, input_dim, d_model),
+    )?;
+    Ok(out)
 }
 
 impl MambaGpuBackbone {
@@ -2575,6 +2620,7 @@ impl MambaGpuBackbone {
             engine,
             state,
             scratch,
+            prompt: None,
         })
     }
 
@@ -2638,6 +2684,7 @@ impl MambaGpuBackbone {
         }
     }
 
+    /// The model's configuration.
     pub fn config(&self) -> &MambaConfig {
         match &self.engine {
             BackboneEngine::F32(e) => e.config(),
@@ -2645,6 +2692,7 @@ impl MambaGpuBackbone {
         }
     }
 
+    /// Sequences per step.
     pub fn batch(&self) -> usize {
         match &self.engine {
             BackboneEngine::F32(e) => e.batch(),
@@ -2652,11 +2700,149 @@ impl MambaGpuBackbone {
         }
     }
 
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        match &self.engine {
+            BackboneEngine::F32(e) => e.input_dim,
+            BackboneEngine::Mixed(e) => e.engine_ref().input_dim,
+        }
+    }
+
+    /// Width of an output row.
+    pub fn d_model(&self) -> usize {
+        self.config().d_model
+    }
+
+    /// Whether steps replay a captured graph.
     pub fn has_graph(&self) -> bool {
         match &self.engine {
             BackboneEngine::F32(e) => e.has_graph(),
             BackboneEngine::Mixed(e) => e.has_graph(),
         }
+    }
+
+    /// A prompt of `seq_len` tokens per sequence in one pass, from host
+    /// rows `[batch, seq_len, input_dim]`, continuing from the current
+    /// state. Afterwards the state holds the position after the prompt and
+    /// [`Self::temporal_ptr`] the prompt's last position, as after a step.
+    /// The buffers of the last prompt length are kept for the next call.
+    /// Run the longest prompt before [`Self::capture_graph`]: afterwards
+    /// the GEMM staging can no longer grow.
+    pub fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
+        let (input_dim, d_model) = (self.input_dim(), self.d_model());
+        let rows = self.batch() * seq_len;
+        if input.len() != rows * input_dim {
+            return Err(format!(
+                "prefill input len {} != batch*seq_len*input_dim = {}",
+                input.len(),
+                rows * input_dim
+            ));
+        }
+        if rows == 0 {
+            return Ok(());
+        }
+        // A prompt of another length frees the old buffers before the new
+        // ones are allocated.
+        let kept = self.prompt.take().filter(|p| p.seq_len == seq_len);
+        let mut prompt = match kept {
+            Some(prompt) => prompt,
+            None => self.alloc_prompt(seq_len)?,
+        };
+        let result = self.run_prompt(&mut prompt, input, (rows, input_dim, d_model));
+        self.prompt = Some(prompt);
+        result
+    }
+
+    /// Upload a prompt's rows, project them when the model has an input
+    /// projection, and run the prefill of the engine's precision.
+    fn run_prompt(
+        &mut self,
+        prompt: &mut BackbonePrompt,
+        input: &[f32],
+        shape: (usize, usize, usize),
+    ) -> Result<(), String> {
+        use super::prefill::{
+            PrefillInputs, gpu_forward_inference_prefill, gpu_forward_inference_prefill_mixed,
+        };
+        let BackbonePrompt {
+            input: rows_in,
+            projected,
+            scratch: prompt_scratch,
+            ..
+        } = prompt;
+        match (&self.engine, &mut self.scratch, prompt_scratch) {
+            (BackboneEngine::F32(e), BackboneScratch::F32(sc), PromptScratch::F32(pf)) => {
+                rows_in.upload(&e.ctx.stream, input)?;
+                let ip_out = project_prompt(
+                    &e.ctx,
+                    (&e.weights, e.identity_proj),
+                    rows_in,
+                    projected,
+                    shape,
+                )?;
+                gpu_forward_inference_prefill(
+                    &e.ctx,
+                    &mut sc.temporal,
+                    PrefillInputs {
+                        ip_out_flat: ip_out,
+                        weights: &e.weights,
+                        a_neg_all: &e.a_neg_all,
+                    },
+                    &mut self.state,
+                    pf,
+                )
+            }
+            (BackboneEngine::Mixed(e), BackboneScratch::Mixed(sc), PromptScratch::Mixed(pf)) => {
+                rows_in.upload(e.stream(), input)?;
+                let ip_out = project_prompt(
+                    e.ctx(),
+                    (e.weights_mixed_ref(), e.engine_ref().identity_proj),
+                    rows_in,
+                    projected,
+                    shape,
+                )?;
+                gpu_forward_inference_prefill_mixed(
+                    e.ctx(),
+                    &sc.temporal,
+                    PrefillInputs {
+                        ip_out_flat: ip_out,
+                        weights: e.weights_mixed_ref(),
+                        a_neg_all: e.a_neg_all_ref(),
+                    },
+                    &mut self.state,
+                    pf,
+                )
+            }
+            _ => Err("engine/scratch dtype mismatch (internal invariant)".to_string()),
+        }
+    }
+
+    /// The buffers a prompt of `seq_len` tokens per sequence runs on.
+    fn alloc_prompt(&self, seq_len: usize) -> Result<BackbonePrompt, String> {
+        let (input_dim, d_model) = (self.input_dim(), self.d_model());
+        let rows = self.batch() * seq_len;
+        let stream = self.stream();
+        let (identity, scratch) = match &self.engine {
+            BackboneEngine::F32(e) => (
+                e.identity_proj,
+                PromptScratch::F32(self.alloc_prefill_scratch(seq_len)?),
+            ),
+            BackboneEngine::Mixed(e) => (
+                e.engine_ref().identity_proj,
+                PromptScratch::Mixed(self.alloc_prefill_mixed_scratch(seq_len)?),
+            ),
+        };
+        let projected = if identity {
+            None
+        } else {
+            Some(GpuBuffer::zeros(stream, rows * d_model)?)
+        };
+        Ok(BackbonePrompt {
+            seq_len,
+            input: GpuBuffer::zeros(stream, rows * input_dim)?,
+            projected,
+            scratch,
+        })
     }
 
     /// Access the backbone's GPU execution context.
@@ -2749,19 +2935,13 @@ impl MambaGpuBackbone {
         }
     }
 
-    /// Run parallel prefill over T tokens using burnin kernels.
-    ///
-    /// `ip_out_flat`: `[B * T * d_model]` of pre-embedded prompt tokens (f32).
-    /// After this call, the backbone's recurrent state holds position T, and
-    /// the temporal buffer (accessible via `temporal_ptr()`) contains the
-    /// last-timestep hidden state (ready for lm_head). Dtype matches
-    /// `temporal_dtype()`.
-    ///
-    /// - F32 engine: uses `gpu_forward_inference_prefill` (f32 path).
-    /// - Mixed engine: uses `gpu_forward_inference_prefill_mixed` — bf16/f16
-    ///   activations end-to-end with f32 residual stream. Caller must pass a
-    ///   `GpuMambaTargetMixedScratch` via the parallel `prefill_sequence_mixed`
-    ///   entry point (f32 `GpuMambaTargetScratch` here is the F32-only path).
+    /// The prefill of an f32 backbone on rows already on the device and
+    /// past the input projection (`ip_out_flat`, `[B * T * d_model]`), with
+    /// scratch the caller keeps ([`Self::alloc_prefill_scratch`]). A bf16 or
+    /// f16 backbone takes [`Self::prefill_sequence_mixed`].
+    /// [`Self::prefill`] takes host rows of either precision and keeps its
+    /// own buffers. Afterwards the state holds position T and
+    /// [`Self::temporal_ptr`] the last position's rows.
     pub fn prefill_sequence(
         &mut self,
         ip_out_flat: &GpuBuffer,
@@ -2789,7 +2969,8 @@ impl MambaGpuBackbone {
         }
     }
 
-    /// Mixed-native prefill. Requires a Mixed backbone and matching mixed scratch.
+    /// [`Self::prefill_sequence`] for a bf16 or f16 backbone, with scratch
+    /// from [`Self::alloc_prefill_mixed_scratch`].
     pub fn prefill_sequence_mixed(
         &mut self,
         ip_out_flat: &GpuBuffer,
@@ -2814,7 +2995,8 @@ impl MambaGpuBackbone {
         }
     }
 
-    /// Allocate a mixed-native prefill scratch matching this backbone.
+    /// Scratch for [`Self::prefill_sequence_mixed`] at `seq_len` tokens per
+    /// sequence.
     pub fn alloc_prefill_mixed_scratch(
         &self,
         seq_len: usize,
@@ -2825,8 +3007,28 @@ impl MambaGpuBackbone {
                 return Err("alloc_prefill_mixed_scratch: backbone is F32".to_string());
             }
         };
+        super::backward::GpuMambaTargetMixedScratch::new(
+            self.stream(),
+            &self.prompt_dims(seq_len),
+            dtype,
+        )
+    }
+
+    /// Scratch for [`Self::prefill_sequence`] at `seq_len` tokens per
+    /// sequence.
+    pub fn alloc_prefill_scratch(
+        &self,
+        seq_len: usize,
+    ) -> Result<super::backward::GpuMambaTargetScratch, String> {
+        super::backward::GpuMambaTargetScratch::new(self.stream(), &self.prompt_dims(seq_len))
+    }
+
+    /// The prefill shape of a prompt of `seq_len` tokens per sequence. The
+    /// prefill reads rows after the input projection, so its input width is
+    /// `d_model`.
+    fn prompt_dims(&self, seq_len: usize) -> super::forward::GpuMambaDims {
         let cfg = self.config();
-        let dims = super::forward::GpuMambaDims {
+        super::forward::GpuMambaDims {
             batch: self.batch(),
             seq_len,
             n_layers: cfg.n_layers,
@@ -2839,31 +3041,7 @@ impl MambaGpuBackbone {
             mamba_input_dim: cfg.d_model,
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
-        };
-        super::backward::GpuMambaTargetMixedScratch::new(self.stream(), &dims, dtype)
-    }
-
-    /// Build a target scratch allocated for this backbone + seq_len.
-    pub fn alloc_prefill_scratch(
-        &self,
-        seq_len: usize,
-    ) -> Result<super::backward::GpuMambaTargetScratch, String> {
-        let cfg = self.config();
-        let dims = super::forward::GpuMambaDims {
-            batch: self.batch(),
-            seq_len,
-            n_layers: cfg.n_layers,
-            d_model: cfg.d_model,
-            d_inner: cfg.d_inner(),
-            d_state: cfg.d_state,
-            d_conv: cfg.d_conv,
-            dt_rank: cfg.dt_rank(),
-            xdbl_dim: cfg.xdbl_dim(),
-            mamba_input_dim: cfg.d_model, // HF LLM path: no input_proj, input_dim == d_model
-            scan_mode: cfg.scan_mode,
-            rms_norm_eps: cfg.rms_norm_eps,
-        };
-        super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
+        }
     }
 }
 

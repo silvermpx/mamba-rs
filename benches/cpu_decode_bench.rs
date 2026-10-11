@@ -78,11 +78,7 @@ fn main() {
         let mut bb = Mamba2Backbone::init(cfg, D_MODEL, 2).unwrap();
         let time = |bb: &Mamba2Backbone| {
             let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
-            time_steps(
-                |x, y| bb.forward_step(x, y, &mut sc.step, &mut st.layers),
-                runs,
-                steps,
-            )
+            time_steps(|x, y| bb.forward_step(x, y, &mut st, &mut sc), runs, steps)
         };
         let plain = time(&bb);
         bb.pack_for_decode();
@@ -97,11 +93,7 @@ fn main() {
         let mut bb = Mamba3Backbone::init(cfg, D_MODEL, 3);
         let time = |bb: &Mamba3Backbone| {
             let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
-            time_steps(
-                |x, y| bb.forward_step(x, y, &mut sc, &mut st.layers),
-                runs,
-                steps,
-            )
+            time_steps(|x, y| bb.forward_step(x, y, &mut st, &mut sc), runs, steps)
         };
         let plain = time(&bb);
         bb.pack_for_decode();
@@ -116,11 +108,7 @@ fn main() {
         let mut bb = Mamba3MimoBackbone::init(cfg, D_MODEL, 4).unwrap();
         let time = |bb: &Mamba3MimoBackbone| {
             let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
-            time_steps(
-                |x, y| bb.forward_step(x, y, &mut sc.step, &mut st.layers),
-                runs,
-                steps,
-            )
+            time_steps(|x, y| bb.forward_step(x, y, &mut st, &mut sc), runs, steps)
         };
         let plain = time(&bb);
         bb.pack_for_decode();

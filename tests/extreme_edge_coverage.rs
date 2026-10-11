@@ -22,8 +22,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
 #[cfg(feature = "hf")]
+use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
@@ -34,8 +34,8 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 #[cfg(feature = "hf")]
 mod hf {
     use super::*;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
     use std::path::PathBuf;
 
     // Lives inside the hf module: its only callers are hf-gated, and a
@@ -115,7 +115,8 @@ mod hf {
         // GEMM kernel's contract — an OPT-IN path — so enable it explicitly
         // (without the flag, cuBLAS algorithm heuristics give bf16 KL ~1e-3
         // by design).
-        let mut lm1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("b=1 load");
+        let mut lm1 =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("b=1 load");
         lm1.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         lm1.generate(prompt, &params).expect("b=1 gen");
         let ref_logits = lm1.last_logits(0).to_vec();
@@ -124,7 +125,7 @@ mod hf {
         // for every other slot (so max_prompt equals slot-0 length and
         // slot-0 decodes exactly 1 token matching the b=1 reference).
         let mut lm_large =
-            GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, batch).expect("b=N load");
+            MambaGpuLM::from_hf(&dir, batch, GpuOptions::default().dtype(dtype)).expect("b=N load");
         lm_large
             .ctx()
             .set_gemm_mode(GemmMode::Deterministic)
@@ -191,7 +192,8 @@ mod hf {
                 return;
             }
         };
-        let mut lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype).expect("load LM");
+        let mut lm =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("load LM");
         // 256-token prompt (tokens 100..356) + 768 generated = 1024 total.
         let prompt: Vec<u32> = (100..356).collect();
         let params = SampleParams {

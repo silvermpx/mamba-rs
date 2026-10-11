@@ -42,6 +42,7 @@ pub mod gemm_bi_inference;
 pub mod gemm_bi_triad;
 mod gemm_mode;
 pub mod grad_clip;
+pub(crate) mod grad_window;
 pub mod graph_capture;
 pub mod inference;
 pub mod kernel_identity;

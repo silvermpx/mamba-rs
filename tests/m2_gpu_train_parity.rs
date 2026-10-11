@@ -309,7 +309,10 @@ fn m2_gpu_train_adamw_lowers_a_loss() {
         losses[0],
         losses[11]
     );
-    assert!(tr.weights().unwrap() != w, "the weights did not move");
+    assert!(
+        tr.snapshot_master().unwrap() != w,
+        "the weights did not move"
+    );
 }
 
 /// tf32, bf16 and f16 training against the f32 CPU trainer: the forward
@@ -435,7 +438,7 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
         // The GEMMs read half copies of the matrices: after the steps they
         // must be the stepped weights, so the trainer's forward tracks a CPU
         // forward of the weights it reports.
-        let moved = tr.weights().unwrap();
+        let moved = tr.snapshot_master().unwrap();
         tr.reset_state().unwrap();
         tr.forward(&inputs, &mut out).unwrap();
         let (want, _, _) = cpu_reference(&cfg, &moved, (&inputs, &target), (input_dim, batch, seq));
@@ -747,7 +750,7 @@ fn m2_gpu_train_f16_overflow_skips_the_step() {
         tr.forward(&inputs[1..], &mut out).is_err(),
         "a short input ran"
     );
-    let before = tr.weights().unwrap();
+    let before = tr.snapshot_master().unwrap();
     // The scaler's ceiling, 2^24, takes an output gradient of order one
     // past f16's 65504.
     tr.load_scaler_state(2f32.powi(24), 0);
@@ -757,7 +760,7 @@ fn m2_gpu_train_f16_overflow_skips_the_step() {
     assert!(tr.overflowed(), "a 2^24 loss scale did not overflow f16");
     assert!(!tr.apply_adamw().unwrap(), "an overflowed step was applied");
     assert!(
-        tr.weights().unwrap() == before,
+        tr.snapshot_master().unwrap() == before,
         "a skipped step moved the weights"
     );
     assert_eq!(tr.scaler_state().map(|s| s.0), loaded.map(|s| s / 2.0));
@@ -771,7 +774,7 @@ fn m2_gpu_train_f16_overflow_skips_the_step() {
     assert!(!tr.overflowed());
     assert!(tr.apply_adamw().unwrap(), "a clean step was skipped");
     assert!(
-        tr.weights().unwrap() != before,
+        tr.snapshot_master().unwrap() != before,
         "a clean step did not move the weights"
     );
 }

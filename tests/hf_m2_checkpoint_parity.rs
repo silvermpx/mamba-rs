@@ -20,7 +20,6 @@
 
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load_mamba2::load_hf_mamba2;
-use mamba_rs::mamba_ssm::gpu::WeightDtype;
 use mamba_rs::mamba2::{
     Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, forward_mamba2_backbone_prefill,
     mamba2_step,
@@ -154,6 +153,7 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba2_130m_gpu_matches_the_f64_oracle() {
+    use mamba_rs::mamba_ssm::gpu::WeightDtype;
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
     use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 

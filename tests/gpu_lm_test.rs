@@ -23,7 +23,7 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 fn test_gpu_lm_130m() {
     let dir = find_model_dir("mamba-130m-hf").expect("model not in cache");
 
-    let mut lm = mamba_rs::module::gpu_lm::GpuMambaLM::from_hf(&dir, 0).unwrap();
+    let mut lm = mamba_rs::MambaGpuLM::from_hf(&dir, 1, mamba_rs::GpuOptions::default()).unwrap();
 
     let params = mamba_rs::module::sample::SampleParams {
         temperature: 0.0,

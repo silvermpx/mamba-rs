@@ -206,7 +206,7 @@ fn test_serialize_inference_parity() {
     mamba_rs::mamba_ssm::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
     let (loaded_w, loaded_cfg, loaded_input_dim) =
         mamba_rs::mamba_ssm::serialize::load(&path).unwrap();
-    let bb2 = MambaBackbone::from_weights(loaded_cfg, loaded_w).unwrap();
+    let bb2 = MambaBackbone::new(loaded_w, loaded_cfg, loaded_input_dim).unwrap();
     assert_eq!(bb2.input_dim(), loaded_input_dim);
 
     // Run 10 steps on both, compare outputs
@@ -1551,7 +1551,7 @@ fn test_training_forward_matches_inference() {
     let train_last = &temporal[(seq_len - 1) * dm..seq_len * dm];
 
     // Method 2: inference step-by-step
-    let bb = MambaBackbone::from_weights(cfg, weights).unwrap();
+    let bb = MambaBackbone::new(weights, cfg, input_dim).unwrap();
     let mut state = bb.alloc_state();
     let mut scratch = bb.alloc_scratch();
     let mut inf_out = vec![0.0f32; dm];

@@ -15,8 +15,12 @@ use super::backbone3::Mamba3Backbone;
 use super::backbone3_mimo::{Mamba3MimoBackbone, Mamba3MimoScratch};
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
 
+use crate::config::ModelFamily;
 use crate::hf::embed::{embed_lookup, lm_head_logits, lm_head_logits_untied};
 use crate::hf::load::{HfModel, load_hf};
+use crate::hf::load_mamba2::load_hf_mamba2;
+use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
+use crate::hf::read_family;
 
 // ---------------------------------------------------------------------------
 // AnyBackbone / AnyState / AnyScratch — enum dispatch
@@ -56,6 +60,16 @@ pub enum AnyScratch {
 }
 
 impl AnyBackbone {
+    /// The family of the backbone held.
+    pub fn family(&self) -> ModelFamily {
+        match self {
+            Self::M1(_) => ModelFamily::Mamba1,
+            Self::M2(_) => ModelFamily::Mamba2,
+            Self::M3(_) => ModelFamily::Mamba3,
+            Self::M3Mimo(_) => ModelFamily::Mamba3Mimo,
+        }
+    }
+
     /// Pack the backbone's projections for decode (see
     /// [`MambaBackbone::pack_for_decode`]): the same outputs without a BLAS,
     /// faster on large layers, at the memory of a second copy of them.
@@ -68,6 +82,8 @@ impl AnyBackbone {
         }
     }
 
+    /// One token through the backbone held; see each backbone's
+    /// `forward_step`.
     pub fn forward_step(
         &self,
         input: &[f32],
@@ -77,16 +93,16 @@ impl AnyBackbone {
     ) {
         match (self, state, scratch) {
             (Self::M1(bb), AnyState::M1(st), AnyScratch::M1(sc)) => {
-                bb.forward_step(input, output, st, sc);
+                bb.forward_step(input, output, st, sc)
             }
             (Self::M2(bb), AnyState::M2(st), AnyScratch::M2(sc)) => {
-                bb.forward_step(input, output, &mut sc.step, &mut st.layers);
+                bb.forward_step(input, output, st, sc)
             }
             (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
-                bb.forward_step(input, output, sc, &mut st.layers);
+                bb.forward_step(input, output, st, sc)
             }
             (Self::M3Mimo(bb), AnyState::M3Mimo(st), AnyScratch::M3Mimo(sc)) => {
-                bb.forward_step(input, output, &mut sc.step, &mut st.layers);
+                bb.forward_step(input, output, st, sc)
             }
             _ => panic!("backbone/state/scratch type mismatch"),
         }
@@ -119,6 +135,8 @@ impl AnyBackbone {
         }
     }
 
+    /// `seq_len` tokens through the backbone held; see each backbone's
+    /// `forward_sequence`.
     pub fn forward_sequence(
         &self,
         inputs: &[f32],
@@ -129,24 +147,43 @@ impl AnyBackbone {
     ) {
         match (self, state, scratch) {
             (Self::M1(bb), AnyState::M1(st), AnyScratch::M1(sc)) => {
-                bb.forward_sequence(inputs, outputs, st, sc, seq_len);
+                bb.forward_sequence(inputs, outputs, st, sc, seq_len)
             }
             (Self::M2(bb), AnyState::M2(st), AnyScratch::M2(sc)) => {
-                bb.forward_sequence((inputs, outputs, seq_len), &mut sc.prefill, &mut st.layers);
+                bb.forward_sequence(inputs, outputs, st, sc, seq_len)
             }
             (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
-                let dm = bb.d_model();
-                for t in 0..seq_len {
-                    let inp = &inputs[t * dm..(t + 1) * dm];
-                    let out = &mut outputs[t * dm..(t + 1) * dm];
-                    bb.forward_step(inp, out, sc, &mut st.layers);
-                }
+                bb.forward_sequence(inputs, outputs, st, sc, seq_len)
             }
             (Self::M3Mimo(bb), AnyState::M3Mimo(st), AnyScratch::M3Mimo(sc)) => {
-                bb.forward_sequence((inputs, outputs, seq_len), &mut sc.prefill, &mut st.layers);
+                bb.forward_sequence(inputs, outputs, st, sc, seq_len)
             }
             _ => panic!("backbone/state/scratch type mismatch"),
         }
+    }
+}
+
+impl From<MambaBackbone> for AnyBackbone {
+    fn from(b: MambaBackbone) -> Self {
+        Self::M1(b)
+    }
+}
+
+impl From<Mamba2Backbone> for AnyBackbone {
+    fn from(b: Mamba2Backbone) -> Self {
+        Self::M2(b)
+    }
+}
+
+impl From<Mamba3Backbone> for AnyBackbone {
+    fn from(b: Mamba3Backbone) -> Self {
+        Self::M3(b)
+    }
+}
+
+impl From<Mamba3MimoBackbone> for AnyBackbone {
+    fn from(b: Mamba3MimoBackbone) -> Self {
+        Self::M3Mimo(b)
     }
 }
 
@@ -171,50 +208,64 @@ pub struct MambaLM {
 }
 
 impl MambaLM {
+    /// Load a checkpoint directory of any family. The family comes from
+    /// the checkpoint's `config.json`.
     pub fn from_hf(dir: &Path) -> Result<Self, String> {
-        let HfModel {
-            backbone,
-            embed,
-            lm_head,
-            vocab_size,
-            vocab_size_padded,
-            d_model,
-        } = load_hf(dir)?;
-
-        let any = AnyBackbone::M1(backbone);
-        let state = any.alloc_state();
-        let scratch = any.alloc_scratch();
-        let temporal = vec![0.0f32; d_model];
-        let logits = vec![0.0f32; vocab_size];
-        let logits_scratch = vec![0.0f32; vocab_size_padded];
-
-        Ok(Self {
-            backbone: any,
-            state,
-            scratch,
-            temporal,
-            prefill_inputs: Vec::new(),
-            prefill_outputs: Vec::new(),
-            embed,
-            lm_head,
-            logits,
-            logits_scratch,
-            vocab_size,
-            vocab_size_padded,
-            d_model,
-        })
+        match read_family(dir)? {
+            ModelFamily::Mamba1 => {
+                let HfModel {
+                    backbone,
+                    embed,
+                    lm_head,
+                    vocab_size,
+                    ..
+                } = load_hf(dir)?;
+                Self::new(backbone, embed, lm_head, vocab_size)
+            }
+            ModelFamily::Mamba2 => {
+                let m = load_hf_mamba2(dir)?;
+                let d_model = m.cfg.d_model;
+                let backbone = Mamba2Backbone::new(m.weights, m.cfg, d_model)?;
+                Self::new(backbone, m.embed, None, m.vocab_size)
+            }
+            ModelFamily::Mamba3 => {
+                let m = load_hf_mamba3(dir)?;
+                let d_model = m.cfg.d_model;
+                let backbone = Mamba3Backbone::new(m.weights, m.cfg, d_model)?;
+                Self::new(backbone, m.embed, None, m.vocab_size)
+            }
+            ModelFamily::Mamba3Mimo => {
+                let m = load_hf_mamba3_mimo(dir)?;
+                let d_model = m.cfg.d_model;
+                let backbone = Mamba3MimoBackbone::new(m.weights, m.cfg, d_model)?;
+                Self::new(backbone, m.embed, None, m.vocab_size)
+            }
+        }
     }
 
-    /// Build an LM around a Mamba-3 backbone with a caller-provided
-    /// embedding table (row-major `[vocab_rows, d_model]`, possibly padded
-    /// beyond `vocab_size`) and an optional untied lm_head (flat
-    /// `[d_model, vocab_size]`, see [`crate::hf::embed::lm_head_logits_untied`]).
+    /// The family of the backbone.
+    pub fn family(&self) -> ModelFamily {
+        self.backbone.family()
+    }
+
+    /// Wrap a CPU backbone of any family with its embedding and head.
     ///
-    /// The weights come from an official checkpoint
-    /// (`hf::load_mamba3::load_hf_mamba3`), local training
-    /// (`Mamba3GpuTrainer::snapshot_master`) or
-    /// `mamba3_siso::serialize::load_mamba3`, through
-    /// [`Mamba3Backbone::from_weights`].
+    /// `embed` is row-major `[vocab_rows, d_model]`, possibly padded past
+    /// `vocab_size`. `lm_head` is an untied head `[d_model, vocab_size]`
+    /// (see [`crate::hf::embed::lm_head_logits_untied`]); `None` ties the
+    /// head to the embedding. The weights come from a checkpoint (the
+    /// loaders under [`crate::hf`]), a trainer's `snapshot_master` or a
+    /// family's serializer, through the backbone's `new`.
+    pub fn new(
+        backbone: impl Into<AnyBackbone>,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+    ) -> Result<Self, String> {
+        Self::from_backbone(backbone.into(), embed, lm_head, vocab_size)
+    }
+
+    #[deprecated(since = "0.8.0", note = "use `MambaLM::new`, which takes every family")]
     pub fn from_mamba3(
         backbone: Mamba3Backbone,
         embed: Vec<f32>,
@@ -222,28 +273,6 @@ impl MambaLM {
         vocab_size: usize,
     ) -> Result<Self, String> {
         Self::from_backbone(AnyBackbone::M3(backbone), embed, lm_head, vocab_size)
-    }
-
-    /// Wrap a Mamba-2 backbone, e.g. an official checkpoint from
-    /// `hf::load_mamba2::load_hf_mamba2`, with its embedding.
-    pub fn from_mamba2(
-        backbone: Mamba2Backbone,
-        embed: Vec<f32>,
-        lm_head: Option<Vec<f32>>,
-        vocab_size: usize,
-    ) -> Result<Self, String> {
-        Self::from_backbone(AnyBackbone::M2(backbone), embed, lm_head, vocab_size)
-    }
-
-    /// Wrap a Mamba-3 MIMO backbone, e.g. an official checkpoint from
-    /// `hf::load_mamba3::load_hf_mamba3_mimo`, with its embedding.
-    pub fn from_mamba3_mimo(
-        backbone: Mamba3MimoBackbone,
-        embed: Vec<f32>,
-        lm_head: Option<Vec<f32>>,
-        vocab_size: usize,
-    ) -> Result<Self, String> {
-        Self::from_backbone(AnyBackbone::M3Mimo(backbone), embed, lm_head, vocab_size)
     }
 
     fn from_backbone(
@@ -294,10 +323,9 @@ impl MambaLM {
         })
     }
 
-    /// Last computed logits for batch slot `b` (MambaLM is single-batch,
-    /// so the `b` parameter exists only for API symmetry with
-    /// `GpuMambaLM::last_logits`). Valid after the last `generate` /
-    /// `generate_streaming` call; `b` must be 0.
+    /// The logits of the last step. `MambaLM` generates one sequence, so
+    /// `b` must be 0; the argument mirrors `MambaGpuLM::last_logits`.
+    /// Valid after a `generate` call.
     pub fn last_logits(&self, b: usize) -> &[f32] {
         assert_eq!(b, 0, "MambaLM is single-batch");
         &self.logits

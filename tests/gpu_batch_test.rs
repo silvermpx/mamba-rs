@@ -21,10 +21,11 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 fn test_gpu_batch_generation() {
     let dir = find_model_dir("mamba-130m-hf").expect("model not in cache");
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
 
-    let mut lm = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::F32, 2).unwrap();
+    let mut lm =
+        MambaGpuLM::from_hf(&dir, 2, GpuOptions::default().dtype(WeightDtype::F32)).unwrap();
     assert_eq!(lm.batch, 2);
 
     let p1 = SampleParams {
@@ -54,7 +55,8 @@ fn test_gpu_batch_generation() {
     assert_eq!(outs[0], outs[1], "same prompt+params must give same tokens");
 
     // Verify matches batch=1 baseline.
-    let mut lm1 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::F32).unwrap();
+    let mut lm1 =
+        MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::F32)).unwrap();
     let out_single = lm1.generate(prompt1, &p1).unwrap();
     eprintln!("batch=1: {:?}", out_single);
     assert_eq!(

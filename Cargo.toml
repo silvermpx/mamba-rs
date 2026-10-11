@@ -384,6 +384,16 @@ path = "tests/gemm_model_mode_api.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "gpu_backbone_api"
+path = "tests/gpu_backbone_api.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "gpu_trainer_api"
+path = "tests/gpu_trainer_api.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_tied_f32_output"
 path = "tests/gemm_tied_f32_output.rs"
 required-features = ["cuda"]
@@ -991,7 +1001,7 @@ required-features = ["qualification", "cuda"]
 [[test]]
 name = "gemm_bi_sm89_exact_f32_d128_selector_qualification"
 path = "tools/qualification/gemm_bi_sm89_exact_f32_d128_selector_qualification.rs"
-required-features = ["qualification"]
+required-features = ["qualification", "cuda"]
 
 [[test]]
 name = "gemm_bi_sm89_exact_f32_module_qualification"

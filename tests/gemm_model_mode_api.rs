@@ -23,9 +23,7 @@ use std::process::Command;
 #[cfg(feature = "hf")]
 use hf_synthetic::write_synthetic_checkpoint;
 #[cfg(feature = "hf")]
-use mamba_rs::module::gpu_lm::GpuMambaLM;
-#[cfg(feature = "hf")]
-use mamba_rs::module::gpu_lm3::{GpuMamba3LM, Mamba3LmBuild};
+use mamba_rs::MambaGpuLM;
 
 const CHILD_CASE: &str = "MAMBA_RS_TEST_MODEL_MODE_CASE";
 /// The one variable the crate reads, and the seven it used to read: the
@@ -456,14 +454,19 @@ fn explicit_overloads_bypass_conflicting_environment() {
 fn exercise_lm_overloads() {
     let checkpoint = tempfile::tempdir().expect("synthetic checkpoint dir");
     write_synthetic_checkpoint(checkpoint.path(), false);
-    let m1_f32 = GpuMambaLM::from_hf_with_mode(checkpoint.path(), 0, GemmMode::CublasFast)
-        .expect("M1 LM f32 explicit");
-    assert_route(m1_f32.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
-    let m1_bf16 = GpuMambaLM::from_hf_with_dtype_and_mode(
+    let m1_f32 = MambaGpuLM::from_hf(
         checkpoint.path(),
-        0,
-        WeightDtype::Bf16,
-        GemmMode::CublasPedantic,
+        1,
+        GpuOptions::default().mode(GemmMode::CublasFast),
+    )
+    .expect("M1 LM f32 explicit");
+    assert_route(m1_f32.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
+    let m1_bf16 = MambaGpuLM::from_hf(
+        checkpoint.path(),
+        1,
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("M1 LM bf16 explicit");
     assert_route(
@@ -471,12 +474,12 @@ fn exercise_lm_overloads() {
         GemmMode::CublasPedantic,
         BiGemmFamily::Inference,
     );
-    let m1_f16 = GpuMambaLM::from_hf_with_dtype_batch_and_mode(
+    let m1_f16 = MambaGpuLM::from_hf(
         checkpoint.path(),
-        0,
-        WeightDtype::F16,
         1,
-        GemmMode::CublasFast,
+        GpuOptions::default()
+            .dtype(WeightDtype::F16)
+            .mode(GemmMode::CublasFast),
     )
     .expect("M1 LM f16 explicit");
     assert_route(m1_f16.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
@@ -485,48 +488,30 @@ fn exercise_lm_overloads() {
     let weights = m3_weights(&cfg, true);
     let vocab = 16;
     let embed = vec![0.01; vocab * cfg.d_model];
-    let m3_f32 = GpuMamba3LM::from_weights_with_mode(
-        &weights,
-        cfg,
-        embed.clone(),
-        None,
-        vocab,
-        0,
-        GemmMode::CublasPedantic,
-    )
-    .expect("M3 LM f32 explicit");
+    // The SISO language model in each storage precision, the mode given
+    // in code through the options its backbone is built with.
+    let m3_lm = |opts: GpuOptions| {
+        Mamba3GpuBackbone::new(&weights, cfg, cfg.d_model, 1, opts)
+            .and_then(|backbone| MambaGpuLM::new(backbone, embed.clone(), None, vocab))
+    };
+    let m3_f32 =
+        m3_lm(GpuOptions::default().mode(GemmMode::CublasPedantic)).expect("M3 LM f32 explicit");
     assert_route(
         m3_f32.ctx(),
         GemmMode::CublasPedantic,
         BiGemmFamily::Inference,
     );
-    let m3_f16 = GpuMamba3LM::build_with_mode(
-        Mamba3LmBuild {
-            cpu_weights: &weights,
-            cfg,
-            embed: embed.clone(),
-            lm_head: None,
-            vocab_size: vocab,
-            gpu_ordinal: 0,
-            dtype: WeightDtype::F16,
-            batch: 1,
-        },
-        GemmMode::CublasFast,
+    let m3_f16 = m3_lm(
+        GpuOptions::default()
+            .dtype(WeightDtype::F16)
+            .mode(GemmMode::CublasFast),
     )
     .expect("M3 LM f16 explicit");
     assert_route(m3_f16.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
-    let m3_bf16 = GpuMamba3LM::build_with_mode(
-        Mamba3LmBuild {
-            cpu_weights: &weights,
-            cfg,
-            embed,
-            lm_head: None,
-            vocab_size: vocab,
-            gpu_ordinal: 0,
-            dtype: WeightDtype::Bf16,
-            batch: 1,
-        },
-        GemmMode::CublasFast,
+    let m3_bf16 = m3_lm(
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasFast),
     )
     .expect("M3 LM bf16 explicit");
     assert_route(m3_bf16.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);

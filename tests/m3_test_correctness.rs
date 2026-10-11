@@ -471,7 +471,7 @@ fn test_m3_serialize_roundtrip() {
     let cfg = Mamba3Config::default();
     let w = Mamba3Weights::init(&cfg, 128, 42);
     let tmp = std::env::temp_dir().join("mamba3_roundtrip_test.safetensors");
-    mamba_rs::mamba3_siso::serialize::save_mamba3(&tmp, &w, &cfg, 128).unwrap();
+    mamba_rs::mamba3_siso::serialize::save(&tmp, &w, &cfg, 128).unwrap();
     let (w2, input_dim) = mamba_rs::mamba3_siso::serialize::load_mamba3(&tmp, &cfg).unwrap();
     std::fs::remove_file(&tmp).ok();
 
@@ -494,7 +494,7 @@ fn test_m3_serialize_inference_parity() {
 
     // Save + load
     let tmp = std::env::temp_dir().join("mamba3_parity_test.safetensors");
-    mamba_rs::mamba3_siso::serialize::save_mamba3(&tmp, &w, &cfg, 128).unwrap();
+    mamba_rs::mamba3_siso::serialize::save(&tmp, &w, &cfg, 128).unwrap();
     let (w2, _) = mamba_rs::mamba3_siso::serialize::load_mamba3(&tmp, &cfg).unwrap();
     std::fs::remove_file(&tmp).ok();
 

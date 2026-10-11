@@ -300,6 +300,12 @@ impl Drop for GemmRouteRecordingGuard<'_> {
     }
 }
 
+/// One half staging overflow buffer and its device address.
+type HalfOverflow = (
+    cudarc::driver::CudaSlice<u8>,
+    cudarc::driver::sys::CUdeviceptr,
+);
+
 /// GPU execution context — holds everything needed for kernel launches.
 ///
 /// Created once at init, passed by reference to all GPU functions.
@@ -315,6 +321,13 @@ pub struct GpuCtxResources {
     half_staging_ptr: RefCell<cudarc::driver::sys::CUdeviceptr>,
     half_staging_bytes: RefCell<usize>,
     bi_upcast_scratch: [RefCell<Option<super::buffers::GpuBuffer>>; 3],
+    /// Staging for eager calls that need more than the half staging a
+    /// captured graph froze. No graph records it, since a capture that
+    /// would need it is refused, so it grows as the staging did before the
+    /// freeze while the graph keeps its own buffer.
+    half_overflow: RefCell<Option<HalfOverflow>>,
+    /// The same for the three upcast scratch slots.
+    bi_upcast_overflow: [RefCell<Option<super::buffers::GpuBuffer>>; 3],
 }
 
 /// GPU execution context — holds everything needed for kernel launches.
@@ -626,6 +639,8 @@ impl GpuCtx {
                 half_staging_ptr: RefCell::new(0),
                 half_staging_bytes: RefCell::new(0),
                 bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
+                half_overflow: RefCell::new(None),
+                bi_upcast_overflow: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
             }),
             gemm_route_recorder: RefCell::new(None),
             f32_prepared_launches: RefCell::new(F32PreparedLaunchCache::default()),
@@ -699,11 +714,7 @@ impl GpuCtx {
             .zip(&sizes)
             .any(|(cell, &need)| cell.borrow().as_ref().map_or(0, |b| b.len()) < need.max(1));
         if needs_growth && self.graph_scratch_frozen.get() {
-            return Err(
-                "batch-invariant upcast scratch cannot grow after CUDA graph capture; \
-                 destroy the context or pre-size the largest shape before capture"
-                    .into(),
-            );
+            return self.with_bi_upcast_overflow(sizes, f);
         }
         for (cell, &need) in self.bi_upcast_scratch.iter().zip(&sizes) {
             let mut slot = cell.borrow_mut();
@@ -721,6 +732,51 @@ impl GpuCtx {
             b.as_mut().expect("bi_upcast_scratch[1] sized above"),
             c.as_mut().expect("bi_upcast_scratch[2] sized above"),
         )
+    }
+
+    /// `with_bi_upcast_scratch` for an eager call that needs more than the
+    /// slots a captured graph froze: the overflow buffers, which no graph
+    /// records. A capture in progress is refused, so it never allocates
+    /// and never sees them.
+    fn with_bi_upcast_overflow<R>(
+        &self,
+        sizes: [usize; 3],
+        f: impl FnOnce(
+            &mut super::buffers::GpuBuffer,
+            &mut super::buffers::GpuBuffer,
+            &mut super::buffers::GpuBuffer,
+        ) -> Result<R, String>,
+    ) -> Result<R, String> {
+        self.refuse_during_capture("the batch-invariant upcast scratch")?;
+        for (cell, &need) in self.bi_upcast_overflow.iter().zip(&sizes) {
+            let mut slot = cell.borrow_mut();
+            let need = need.max(1);
+            if slot.as_ref().map_or(0, |b| b.len()) < need {
+                *slot = Some(super::buffers::GpuBuffer::zeros(&self.stream, need)?);
+            }
+        }
+        let mut a = self.bi_upcast_overflow[0].borrow_mut();
+        let mut b = self.bi_upcast_overflow[1].borrow_mut();
+        let mut c = self.bi_upcast_overflow[2].borrow_mut();
+        match (a.as_mut(), b.as_mut(), c.as_mut()) {
+            (Some(a), Some(b), Some(c)) => f(a, b, c),
+            _ => Err("the upcast overflow scratch was not sized".into()),
+        }
+    }
+
+    /// Refuses `what` to grow while the stream is being captured.
+    fn refuse_during_capture(&self, what: &str) -> Result<(), String> {
+        let status = self
+            .stream
+            .capture_status()
+            .map_err(|error| format!("query CUDA stream capture state: {error:?}"))?;
+        if status != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
+            return Err(format!(
+                "{what} cannot grow inside a CUDA graph capture; pre-size the largest shape \
+                 before capturing"
+            ));
+        }
+        Ok(())
     }
 
     /// Current device pointers of the three `bi_upcast_scratch` slots
@@ -1888,6 +1944,40 @@ impl GpuCtx {
 
     pub fn half_staging_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
         *self.half_staging_ptr.borrow()
+    }
+
+    /// A half staging span of at least `bytes` for the call about to run:
+    /// the half staging while it is large enough or may still grow, and
+    /// once a captured graph froze it, an overflow buffer no graph records.
+    /// So a prompt longer than any before still runs after a capture, and
+    /// the graph keeps its own buffer.
+    pub fn half_staging_for(
+        &self,
+        bytes: usize,
+    ) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+        if *self.half_staging_bytes.borrow() >= bytes || !self.graph_scratch_frozen.get() {
+            self.ensure_half_staging(bytes)?;
+            return Ok(self.half_staging_ptr());
+        }
+        self.refuse_during_capture("the half-precision staging")?;
+        let mut slot = self.half_overflow.borrow_mut();
+        if slot.as_ref().map_or(0, |(buf, _)| buf.len()) < bytes {
+            let page = 4096;
+            let size = bytes.div_ceil(page) * page;
+            let buf = self
+                .stream
+                .alloc_zeros::<u8>(size)
+                .map_err(|e| format!("half staging overflow alloc {size}B failed: {e:?}"))?;
+            let ptr = {
+                use cudarc::driver::DevicePtr;
+                let (p, _g) = buf.device_ptr(&self.stream);
+                p
+            };
+            *slot = Some((buf, ptr));
+        }
+        slot.as_ref()
+            .map(|&(_, ptr)| ptr)
+            .ok_or_else(|| "the half staging overflow was not sized".into())
     }
 }
 

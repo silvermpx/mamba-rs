@@ -11,7 +11,7 @@
 //!    single-slot batch=1 generation would produce on the same prompt.
 //!
 //! 2. **CPU ↔ GPU inference parity** — `MambaBackbone` (CPU reference)
-//!    vs `GpuMambaLM` on identical HF weights. Greedy top-1 should
+//!    vs `MambaGpuLM` on identical HF weights. Greedy top-1 should
 //!    agree on ≥ 18/20 tokens and final-logit KL < 5e-3. Catches any
 //!    silent divergence between the CPU oracle and the GPU production
 //!    path (which is important because several parity tests build on
@@ -28,9 +28,9 @@ use std::path::PathBuf;
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::lm::MambaLM;
 use mamba_rs::module::sample::SampleParams;
+use mamba_rs::{GpuOptions, MambaGpuLM};
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
     for base in [
@@ -139,7 +139,8 @@ fn run_batch_parity(dtype: WeightDtype) {
     let mut tokens_b1: Vec<Vec<u32>> = Vec::with_capacity(4);
     let mut last_logits_b1: Vec<Vec<f32>> = Vec::with_capacity(4);
     for p in &prompts_b4 {
-        let mut lm = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("load batch=1");
+        let mut lm =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("load batch=1");
         let toks = lm.generate(p, &params).expect("b=1 generate");
         last_logits_b1.push(lm.last_logits(0).to_vec());
         tokens_b1.push(toks);
@@ -155,7 +156,8 @@ fn run_batch_parity(dtype: WeightDtype) {
     let _ = prompts_b1;
 
     // --- Same prompts at batch=4 ---
-    let mut lm_b4 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 4).expect("load batch=4");
+    let mut lm_b4 =
+        MambaGpuLM::from_hf(&dir, 4, GpuOptions::default().dtype(dtype)).expect("load batch=4");
     let params_b4: Vec<SampleParams> = (0..4).map(|_| params.clone()).collect();
     let tokens_b4 = lm_b4
         .generate_batch(&prompts_b4, &params_b4)
@@ -214,7 +216,7 @@ fn run_batch_parity(dtype: WeightDtype) {
 /// slot between the batch=1 reference logits and the batch=4 final
 /// logits. Also returns the greedy-match count per slot as diagnostic.
 fn gather_kl_per_slot(
-    lm_b4: &GpuMambaLM,
+    lm_b4: &MambaGpuLM,
     ref_logits: &[Vec<f32>],
     batch: usize,
 ) -> (Vec<f32>, Vec<f32>) {
@@ -257,7 +259,7 @@ fn hf_batch_parity_f16() {
 // CPU ↔ GPU inference parity on real HF weights
 // =====================================================================
 
-/// CPU reference (`MambaLM` / `MambaBackbone`) vs GPU f32 (`GpuMambaLM`)
+/// CPU reference (`MambaLM` / `MambaBackbone`) vs GPU f32 (`MambaGpuLM`)
 /// on the SAME HF checkpoint. Asserts ≥ 90% greedy-match and KL < 5e-3
 /// on the final logit distribution.
 ///
@@ -294,7 +296,8 @@ fn hf_cpu_vs_gpu_inference_f32() {
     );
 
     // GPU f32 reference.
-    let mut gpu_lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::F32).expect("GpuMambaLM");
+    let mut gpu_lm = MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::F32))
+        .expect("MambaGpuLM");
     let gpu_tokens = gpu_lm.generate(prompt, &params).expect("gpu generate");
     assert_eq!(gpu_tokens.len(), 20);
     let gpu_logits: Vec<f32> = gpu_lm.last_logits(0).to_vec();
@@ -366,15 +369,15 @@ fn bf16_batch_divergence_known() {
         ..Default::default()
     };
 
-    let mut lm_b1 =
-        GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 1).expect("load bf16 b=1");
+    let mut lm_b1 = MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16))
+        .expect("load bf16 b=1");
     let toks_b1 = lm_b1
         .generate(&[100, 101, 102, 103, 104], &params)
         .expect("b=1 gen");
     let logits_b1 = lm_b1.last_logits(0).to_vec();
 
-    let mut lm_b4 =
-        GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 4).expect("load bf16 b=4");
+    let mut lm_b4 = MambaGpuLM::from_hf(&dir, 4, GpuOptions::default().dtype(WeightDtype::Bf16))
+        .expect("load bf16 b=4");
     let prompts: [&[u32]; 4] = [
         &[1, 2, 3, 4, 5],
         &[10, 20, 30, 40, 50],
@@ -451,7 +454,8 @@ fn bf16_multi_length_parity() {
         // batch-invariant GEMM kernel's contract — an OPT-IN path, so
         // enable it explicitly (without the flag, cuBLAS heuristics give
         // bf16 cross-batch KL ~1e-3 by design).
-        let mut lm1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 1).unwrap();
+        let mut lm1 =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16)).unwrap();
         lm1.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         let toks_b1 = lm1.generate(&p, &params).expect("b=1");
         let ref_logits = lm1.last_logits(0).to_vec();
@@ -461,7 +465,8 @@ fn bf16_multi_length_parity() {
         // the batch=1 reference. Using shorter fillers would inflate
         // `max_prompt` → slot 0 decodes extra tokens → last_logits(0)
         // is the N-th decoded logits instead of the 1st.
-        let mut lm4 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 4).unwrap();
+        let mut lm4 =
+            MambaGpuLM::from_hf(&dir, 4, GpuOptions::default().dtype(WeightDtype::Bf16)).unwrap();
         lm4.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         let filler_a: Vec<u32> = (200..200 + len as u32).collect();
         let filler_b: Vec<u32> = (300..300 + len as u32).collect();
@@ -518,8 +523,8 @@ fn hf_cpu_vs_gpu_inference_bf16() {
     let cpu_logits: Vec<f32> = cpu_lm.last_logits(0).to_vec();
     let _ = cpu_logits.iter().all(|v: &f32| v.is_finite()); // type hint
 
-    let mut gpu_lm =
-        GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16).expect("GpuMambaLM bf16");
+    let mut gpu_lm = MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16))
+        .expect("MambaGpuLM bf16");
     let gpu_tokens = gpu_lm.generate(prompt, &params).expect("gpu bf16 generate");
     let gpu_logits: Vec<f32> = gpu_lm.last_logits(0).to_vec();
 

@@ -6,7 +6,7 @@ use crate::mamba2::cpu::inference::{
     Mamba2PackedLinears, Mamba2StepScratch, mamba2_step, mamba2_step_packed,
 };
 use crate::mamba2::cpu::prefill::{Mamba2PrefillScratch, forward_mamba2_backbone_prefill};
-use crate::mamba2::state::{Mamba2LayerState, Mamba2State};
+use crate::mamba2::state::Mamba2State;
 use crate::mamba2::weights::Mamba2Weights;
 
 /// Mamba-2 backbone for CPU inference. The recurrent state is owned by the
@@ -17,6 +17,8 @@ pub struct Mamba2Backbone {
     /// The projections packed for decode by [`Self::pack_for_decode`]; the
     /// weights never change after construction, so the copy stays current.
     packed: Option<Mamba2PackedLinears>,
+    /// Width of an input row.
+    input_dim: usize,
 }
 
 impl Mamba2Backbone {
@@ -27,11 +29,13 @@ impl Mamba2Backbone {
             weights: Mamba2Weights::init(&cfg, input_dim, seed),
             cfg,
             packed: None,
+            input_dim,
         })
     }
 
-    /// Wrap loaded weights after checking every tensor against `cfg`.
-    pub fn from_weights(
+    /// Wrap loaded weights for input rows `input_dim` wide, after checking
+    /// every tensor against `cfg`.
+    pub fn new(
         weights: Mamba2Weights,
         cfg: Mamba2Config,
         input_dim: usize,
@@ -41,17 +45,26 @@ impl Mamba2Backbone {
             weights,
             cfg,
             packed: None,
+            input_dim,
         })
     }
 
+    /// The weights.
     pub fn weights(&self) -> &Mamba2Weights {
         &self.weights
     }
 
+    /// The model's configuration.
     pub fn config(&self) -> &Mamba2Config {
         &self.cfg
     }
 
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Width of an output row.
     pub fn d_model(&self) -> usize {
         self.cfg.d_model
     }
@@ -73,25 +86,26 @@ impl Mamba2Backbone {
         self.packed.is_some()
     }
 
-    /// One token: reads `input`, writes `temporal[..d_model]` and advances
-    /// every layer's state.
+    /// One token: reads `input` (`input_dim` wide), writes `output`
+    /// (`d_model` wide) and advances every layer's state.
     pub fn forward_step(
         &self,
         input: &[f32],
-        temporal: &mut [f32],
-        scratch: &mut Mamba2StepScratch,
-        states: &mut [Mamba2LayerState],
+        output: &mut [f32],
+        state: &mut Mamba2State,
+        scratch: &mut Mamba2Scratch,
     ) {
+        let (states, scratch) = (&mut state.layers, &mut scratch.step);
         match &self.packed {
             Some(p) => mamba2_step_packed(
-                temporal,
+                output,
                 input,
                 scratch,
                 (&self.weights, p),
                 states,
                 &self.cfg,
             ),
-            None => mamba2_step(temporal, input, scratch, &self.weights, states, &self.cfg),
+            None => mamba2_step(output, input, scratch, &self.weights, states, &self.cfg),
         }
     }
 
@@ -99,10 +113,13 @@ impl Mamba2Backbone {
     /// every row.
     pub fn forward_sequence(
         &self,
-        (inputs, outputs, seq_len): (&[f32], &mut [f32], usize),
-        scratch: &mut Mamba2PrefillScratch,
-        states: &mut [Mamba2LayerState],
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut Mamba2State,
+        scratch: &mut Mamba2Scratch,
+        seq_len: usize,
     ) {
+        let (states, scratch) = (&mut state.layers, &mut scratch.prefill);
         forward_mamba2_backbone_prefill(
             outputs,
             inputs,
@@ -113,6 +130,7 @@ impl Mamba2Backbone {
         );
     }
 
+    /// A zeroed recurrent state, the start of a sequence.
     pub fn alloc_state(&self) -> Mamba2State {
         Mamba2State::zeros(&self.cfg)
     }
@@ -175,8 +193,8 @@ mod tests {
         let (mut o0, mut o1) = (vec![0f32; cfg.d_model], vec![0f32; cfg.d_model]);
         for t in 0..12u64 {
             let x = det(input_dim, 100 + t);
-            plain.forward_step(&x, &mut o0, &mut c0.step, &mut s0.layers);
-            packed.forward_step(&x, &mut o1, &mut c1.step, &mut s1.layers);
+            plain.forward_step(&x, &mut o0, &mut s0, &mut c0);
+            packed.forward_step(&x, &mut o1, &mut s1, &mut c1);
             if NO_BLAS {
                 assert_eq!(o0, o1, "step {t}");
             }

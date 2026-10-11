@@ -1,5 +1,5 @@
 //! Mamba-3 MIMO backbone wrapper (CPU), the MIMO peer of
-//! [`crate::module::Mamba3Backbone`]: inference only, T=1 steps.
+//! [`crate::module::Mamba3Backbone`]: inference, single steps and windows.
 
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::cpu::inference::{
@@ -8,7 +8,7 @@ use crate::mamba3_mimo::cpu::inference::{
 use crate::mamba3_mimo::cpu::prefill::{
     Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill,
 };
-use crate::mamba3_mimo::state::{Mamba3MimoLayerState, Mamba3MimoState};
+use crate::mamba3_mimo::state::Mamba3MimoState;
 use crate::mamba3_mimo::weights::Mamba3MimoWeights;
 
 /// Mamba-3 MIMO backbone for CPU inference. The recurrent state is owned
@@ -19,6 +19,8 @@ pub struct Mamba3MimoBackbone {
     /// The projections packed for decode by [`Self::pack_for_decode`]; the
     /// weights never change after construction, so the copy stays current.
     packed: Option<Mamba3MimoPackedLinears>,
+    /// Width of an input row.
+    input_dim: usize,
 }
 
 impl Mamba3MimoBackbone {
@@ -29,11 +31,13 @@ impl Mamba3MimoBackbone {
             weights: Mamba3MimoWeights::init(&cfg, input_dim, seed),
             cfg,
             packed: None,
+            input_dim,
         })
     }
 
-    /// Wrap loaded weights after checking every tensor against `cfg`.
-    pub fn from_weights(
+    /// Wrap loaded weights for input rows `input_dim` wide, after checking
+    /// every tensor against `cfg`.
+    pub fn new(
         weights: Mamba3MimoWeights,
         cfg: Mamba3MimoConfig,
         input_dim: usize,
@@ -43,17 +47,26 @@ impl Mamba3MimoBackbone {
             weights,
             cfg,
             packed: None,
+            input_dim,
         })
     }
 
+    /// The weights.
     pub fn weights(&self) -> &Mamba3MimoWeights {
         &self.weights
     }
 
+    /// The model's configuration.
     pub fn config(&self) -> &Mamba3MimoConfig {
         &self.cfg
     }
 
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Width of an output row.
     pub fn d_model(&self) -> usize {
         self.cfg.d_model
     }
@@ -75,25 +88,26 @@ impl Mamba3MimoBackbone {
         self.packed.is_some()
     }
 
-    /// One token: reads `input`, writes `temporal[..d_model]` and advances
-    /// every layer's state.
+    /// One token: reads `input` (`input_dim` wide), writes `output`
+    /// (`d_model` wide) and advances every layer's state.
     pub fn forward_step(
         &self,
         input: &[f32],
-        temporal: &mut [f32],
-        scratch: &mut Mamba3MimoStepScratch,
-        states: &mut [Mamba3MimoLayerState],
+        output: &mut [f32],
+        state: &mut Mamba3MimoState,
+        scratch: &mut Mamba3MimoScratch,
     ) {
+        let (states, scratch) = (&mut state.layers, &mut scratch.step);
         match &self.packed {
             Some(p) => mamba3_mimo_step_packed(
-                temporal,
+                output,
                 input,
                 scratch,
                 (&self.weights, p),
                 states,
                 &self.cfg,
             ),
-            None => mamba3_mimo_step(temporal, input, scratch, &self.weights, states, &self.cfg),
+            None => mamba3_mimo_step(output, input, scratch, &self.weights, states, &self.cfg),
         }
     }
 
@@ -102,10 +116,13 @@ impl Mamba3MimoBackbone {
     /// chain's bits on every row.
     pub fn forward_sequence(
         &self,
-        (inputs, outputs, seq_len): (&[f32], &mut [f32], usize),
-        scratch: &mut Mamba3MimoPrefillScratch,
-        states: &mut [Mamba3MimoLayerState],
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut Mamba3MimoState,
+        scratch: &mut Mamba3MimoScratch,
+        seq_len: usize,
     ) {
+        let (states, scratch) = (&mut state.layers, &mut scratch.prefill);
         forward_mamba3_mimo_backbone_prefill(
             outputs,
             inputs,
@@ -116,6 +133,7 @@ impl Mamba3MimoBackbone {
         );
     }
 
+    /// A zeroed recurrent state, the start of a sequence.
     pub fn alloc_state(&self) -> Mamba3MimoState {
         Mamba3MimoState::zeros(&self.cfg)
     }
@@ -178,8 +196,8 @@ mod tests {
         let (mut o0, mut o1) = (vec![0f32; cfg.d_model], vec![0f32; cfg.d_model]);
         for t in 0..12u64 {
             let x = det(input_dim, 100 + t);
-            plain.forward_step(&x, &mut o0, &mut c0.step, &mut s0.layers);
-            packed.forward_step(&x, &mut o1, &mut c1.step, &mut s1.layers);
+            plain.forward_step(&x, &mut o0, &mut s0, &mut c0);
+            packed.forward_step(&x, &mut o1, &mut s1, &mut c1);
             if NO_BLAS {
                 assert_eq!(o0, o1, "step {t}");
             }

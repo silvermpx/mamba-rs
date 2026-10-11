@@ -2027,6 +2027,15 @@ pub struct Mamba3GpuBackbone {
     engine: M3BackboneEngine,
     state: Mamba3GpuState,
     scratch: M3BackboneScratch,
+    prompt: Option<M3BackbonePrompt>,
+}
+
+/// The buffers of one prompt length, kept for the next prompt of that
+/// length: the host rows on the device and the prefill executor.
+struct M3BackbonePrompt {
+    seq_len: usize,
+    input: GpuBuffer,
+    prefill: super::prefill::Mamba3Prefill,
 }
 
 impl Mamba3GpuBackbone {
@@ -2160,9 +2169,11 @@ impl Mamba3GpuBackbone {
             engine,
             state,
             scratch,
+            prompt: None,
         })
     }
 
+    /// Storage precision of the weights.
     pub fn dtype(&self) -> WeightDtype {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.ctx.f32_storage_dtype(),
@@ -2170,14 +2181,20 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// The final-norm rows of the last step or prompt, `[batch, d_model]`,
+    /// on the device, in [`Self::temporal_dtype`].
     pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
         self.scratch.temporal_ptr()
     }
 
+    /// The precision of [`Self::temporal_ptr`]'s rows: f32 on an f32
+    /// backbone, the storage precision on a bf16 or f16 one.
     pub fn temporal_dtype(&self) -> WeightDtype {
         self.scratch.temporal_dtype()
     }
 
+    /// One token for every sequence: `input` is `[batch, input_dim]`,
+    /// `output` (`[batch, d_model]`) receives the final-norm rows.
     pub fn step(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
         match (&self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
@@ -2190,6 +2207,8 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// [`Self::step`] without the download: the rows stay on the device
+    /// for a consumer on the GPU.
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
         match (&self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
@@ -2202,6 +2221,7 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// Zero the recurrent state, the start of new sequences.
     pub fn reset(&mut self) -> Result<(), String> {
         let stream = match &self.engine {
             M3BackboneEngine::F32(e) => e.ctx.stream.clone(),
@@ -2210,6 +2230,10 @@ impl Mamba3GpuBackbone {
         self.state.reset(&stream)
     }
 
+    /// Capture the decode step as one CUDA graph: an eager step on zero
+    /// input, a reset, then the capture. Later steps replay the graph.
+    /// Run the longest prompt before capturing: afterwards the GEMM staging
+    /// can no longer grow.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         let (input_dim, batch, d_model) = match &self.engine {
             M3BackboneEngine::F32(e) => (e.input_dim, e.batch, e.cfg.d_model),
@@ -2238,6 +2262,7 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// The model's configuration.
     pub fn config(&self) -> &Mamba3Config {
         match &self.engine {
             M3BackboneEngine::F32(e) => &e.cfg,
@@ -2245,6 +2270,7 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// Sequences per step.
     pub fn batch(&self) -> usize {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.batch,
@@ -2252,6 +2278,20 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        match &self.engine {
+            M3BackboneEngine::F32(e) => e.input_dim,
+            M3BackboneEngine::Mixed(e) => e.engine_ref().input_dim,
+        }
+    }
+
+    /// Width of an output row.
+    pub fn d_model(&self) -> usize {
+        self.config().d_model
+    }
+
+    /// Whether steps replay a captured graph.
     pub fn has_graph(&self) -> bool {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.has_graph(),
@@ -2259,6 +2299,44 @@ impl Mamba3GpuBackbone {
         }
     }
 
+    /// A prompt of `seq_len` tokens per sequence in one pass, from host
+    /// rows `[batch, seq_len, input_dim]`, continuing from the current
+    /// state. Afterwards the state holds the position after the prompt and
+    /// [`Self::temporal_ptr`] the prompt's last position, as after a step.
+    /// The buffers of the last prompt length are kept for the next call.
+    /// Run the longest prompt before [`Self::capture_graph`]: afterwards
+    /// the GEMM staging can no longer grow.
+    pub fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
+        let rows = self.batch() * seq_len;
+        let want = rows * self.input_dim();
+        if input.len() != want {
+            return Err(format!(
+                "M3 prefill input len {} != batch*seq_len*input_dim = {want}",
+                input.len()
+            ));
+        }
+        if rows == 0 {
+            return Ok(());
+        }
+        // A prompt of another length frees the old buffers before the new
+        // ones are allocated.
+        let kept = self.prompt.take().filter(|p| p.seq_len == seq_len);
+        let mut prompt = match kept {
+            Some(prompt) => prompt,
+            None => M3BackbonePrompt {
+                seq_len,
+                input: GpuBuffer::zeros(self.stream(), want)?,
+                prefill: self.alloc_prefill(seq_len)?,
+            },
+        };
+        let result = prompt.input.upload(self.stream(), input).and_then(|()| {
+            self.prefill_sequence(&mut prompt.prefill, &prompt.input, seq_len, true)
+        });
+        self.prompt = Some(prompt);
+        result
+    }
+
+    /// The stream every launch goes to.
     pub fn stream(&self) -> &Stream {
         match &self.engine {
             M3BackboneEngine::F32(e) => &e.ctx.stream,

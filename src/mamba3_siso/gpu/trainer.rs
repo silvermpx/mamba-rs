@@ -75,6 +75,8 @@ enum Trainer3Inner {
 /// struct, one method per operation, dtype dispatch happens internally.
 pub struct Mamba3GpuTrainer {
     inner: Trainer3Inner,
+    /// Width of an input row, from the session.
+    input_dim: usize,
 }
 
 impl Mamba3GpuTrainer {
@@ -203,7 +205,10 @@ impl Mamba3GpuTrainer {
                 Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype, mode)?,
             )),
         };
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            input_dim: session.input_dim,
+        })
     }
 
     /// Weight storage dtype the trainer was constructed with.
@@ -228,6 +233,24 @@ impl Mamba3GpuTrainer {
             Trainer3Inner::F32(t) => t.dims.seq_len,
             Trainer3Inner::Mixed(t) => t.dims.seq_len,
         }
+    }
+
+    /// The model's configuration.
+    pub fn config(&self) -> &Mamba3Config {
+        match &self.inner {
+            Trainer3Inner::F32(t) => &t.cfg,
+            Trainer3Inner::Mixed(t) => &t.cfg,
+        }
+    }
+
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Width of the model, the rows `forward` writes.
+    pub fn d_model(&self) -> usize {
+        self.config().d_model
     }
 
     /// Access the trainer's GPU execution context.

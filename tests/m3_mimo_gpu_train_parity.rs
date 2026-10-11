@@ -371,7 +371,7 @@ fn m3_mimo_gpu_train_adamw_lowers_a_loss() {
             losses[0],
             losses[11]
         );
-        let moved = tr.weights().unwrap();
+        let moved = tr.snapshot_master().unwrap();
         assert!(moved != w, "{dtype:?}: the weights did not move");
         // The GEMMs read half copies in the half lanes: after the steps they
         // must be the stepped weights, so the trainer's forward tracks a CPU
@@ -666,7 +666,7 @@ fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
         tr.forward(&inputs[1..], &mut out).is_err(),
         "a short input ran"
     );
-    let before = tr.weights().unwrap();
+    let before = tr.snapshot_master().unwrap();
     // The scaler's ceiling, 2^24, takes an output gradient of order one
     // past f16's 65504.
     tr.load_scaler_state(2f32.powi(24), 0);
@@ -676,7 +676,7 @@ fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
     assert!(tr.overflowed(), "a 2^24 loss scale did not overflow f16");
     assert!(!tr.apply_adamw().unwrap(), "an overflowed step was applied");
     assert!(
-        tr.weights().unwrap() == before,
+        tr.snapshot_master().unwrap() == before,
         "a skipped step moved the weights"
     );
     assert_eq!(tr.scaler_state().map(|s| s.0), loaded.map(|s| s / 2.0));
@@ -690,7 +690,7 @@ fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
     assert!(!tr.overflowed());
     assert!(tr.apply_adamw().unwrap(), "a clean step was skipped");
     assert!(
-        tr.weights().unwrap() != before,
+        tr.snapshot_master().unwrap() != before,
         "a clean step did not move the weights"
     );
 }

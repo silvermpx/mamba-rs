@@ -344,8 +344,8 @@ mod llm {
     #[ignore]
     fn llm_prefill_vs_decode_all_models() {
         use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-        use mamba_rs::module::gpu_lm::GpuMambaLM;
         use mamba_rs::module::sample::SampleParams;
+        use mamba_rs::{GpuOptions, MambaGpuLM};
 
         eprintln!("\n=== LLM prefill vs decode: prompt=128, decode=100 tokens, bf16 ===");
         eprintln!(
@@ -365,7 +365,9 @@ mod llm {
                     continue;
                 }
             };
-            let mut lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16).unwrap();
+            let mut lm =
+                MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16))
+                    .unwrap();
             lm.capture_graph().unwrap();
 
             // Warmup
@@ -427,8 +429,8 @@ mod llm {
     #[ignore]
     fn llm_long_context_prefill() {
         use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-        use mamba_rs::module::gpu_lm::GpuMambaLM;
         use mamba_rs::module::sample::SampleParams;
+        use mamba_rs::{GpuOptions, MambaGpuLM};
 
         let name = "mamba-370m-hf";
         let dir = match find_model_dir(name) {
@@ -445,7 +447,9 @@ mod llm {
             "tokens", "prefill (ms)", "us/prefill-tok"
         );
         for &t in &[64usize, 256, 1024, 4096] {
-            let mut lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16).unwrap();
+            let mut lm =
+                MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16))
+                    .unwrap();
             lm.capture_graph().unwrap();
 
             // Warmup with same shape so the graph is valid.
@@ -492,8 +496,8 @@ mod llm {
     #[ignore]
     fn llm_batched_step_throughput() {
         use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-        use mamba_rs::module::gpu_lm::GpuMambaLM;
         use mamba_rs::module::sample::SampleParams;
+        use mamba_rs::{GpuOptions, MambaGpuLM};
 
         let name = "mamba-130m-hf";
         let dir = match find_model_dir(name) {
@@ -517,7 +521,8 @@ mod llm {
         let prompt: &[u32] = &[1, 2, 3, 4, 5];
         for &batch in &[1usize, 2, 4, 8, 16] {
             let mut lm =
-                GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, batch).unwrap();
+                MambaGpuLM::from_hf(&dir, batch, GpuOptions::default().dtype(WeightDtype::Bf16))
+                    .unwrap();
             let params = SampleParams {
                 temperature: 0.0,
                 max_tokens: 50,
@@ -552,8 +557,8 @@ mod llm {
     #[ignore]
     fn llm_dtype_throughput_all_sizes() {
         use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-        use mamba_rs::module::gpu_lm::GpuMambaLM;
         use mamba_rs::module::sample::SampleParams;
+        use mamba_rs::{GpuOptions, MambaGpuLM};
 
         eprintln!("\n=== LLM dtype throughput sweep (graph-captured) ===");
         eprintln!(
@@ -578,7 +583,7 @@ mod llm {
                 (WeightDtype::Bf16, "bf16"),
                 (WeightDtype::F16, "f16 "),
             ] {
-                let mut lm = match GpuMambaLM::from_hf_with_dtype(&dir, 0, dt) {
+                let mut lm = match MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dt)) {
                     Ok(lm) => lm,
                     Err(e) => {
                         eprintln!("{name:>14} | {label} | ERR {e}");

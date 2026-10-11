@@ -1,0 +1,124 @@
+//! What the Mamba-2 and MIMO safetensors serializers share: building the
+//! tensor list with shapes, reading an f32 tensor back byte by byte, and
+//! reading the configuration from the file's metadata.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::str::FromStr;
+
+use safetensors::serialize_to_file;
+use safetensors::tensor::{SafeTensors, TensorView};
+
+/// The tensors of one checkpoint, named, in the order they are written.
+pub(crate) struct TensorList<'a> {
+    tensors: Vec<(String, TensorView<'a>)>,
+}
+
+impl<'a> TensorList<'a> {
+    pub(crate) fn new() -> Self {
+        Self {
+            tensors: Vec::new(),
+        }
+    }
+
+    /// Add `data` under `name` with `shape`, whose product must be its
+    /// length. An empty tensor (an absent bias, an identity projection)
+    /// is written with one dimension of zero.
+    pub(crate) fn push(
+        &mut self,
+        name: String,
+        data: &'a [f32],
+        shape: &[usize],
+    ) -> Result<(), String> {
+        let shape: Vec<usize> = if data.is_empty() {
+            vec![0]
+        } else {
+            shape.to_vec()
+        };
+        if shape.iter().product::<usize>() != data.len() {
+            return Err(format!(
+                "tensor '{name}': {} values do not fill the shape {shape:?}",
+                data.len()
+            ));
+        }
+        // The views borrow `data`; safetensors writes them little-endian,
+        // which is the f32 layout in memory on every target this crate
+        // builds for.
+        let bytes: &'a [u8] = bytemuck_f32(data);
+        let view = TensorView::new(safetensors::Dtype::F32, shape, bytes)
+            .map_err(|e| format!("tensor '{name}': {e:?}"))?;
+        self.tensors.push((name, view));
+        Ok(())
+    }
+
+    /// Write the tensors and `meta` to `path`.
+    pub(crate) fn save(self, meta: HashMap<String, String>, path: &Path) -> Result<(), String> {
+        serialize_to_file(self.tensors, Some(meta), path)
+            .map_err(|e| format!("safetensors save failed: {e:?}"))
+    }
+}
+
+/// The bytes of an f32 slice.
+fn bytemuck_f32(data: &[f32]) -> &[u8] {
+    // SAFETY: any f32 is four initialized bytes, u8 has alignment one, and
+    // the length covers exactly the slice's memory.
+    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
+}
+
+/// An f32 tensor of `st` as a vector. Decoded byte by byte: the format does
+/// not promise four-byte alignment of the data section.
+pub(crate) fn read_f32(st: &SafeTensors<'_>, name: &str) -> Result<Vec<f32>, String> {
+    let t = st
+        .tensor(name)
+        .map_err(|e| format!("tensor '{name}': {e:?}"))?;
+    if t.dtype() != safetensors::Dtype::F32 {
+        return Err(format!(
+            "tensor '{name}': dtype {:?}, expected F32",
+            t.dtype()
+        ));
+    }
+    let bytes = t.data();
+    if bytes.len() % 4 != 0 {
+        return Err(format!(
+            "tensor '{name}': byte length {} is not a multiple of 4",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect())
+}
+
+/// The metadata of a safetensors file.
+pub(crate) fn read_meta(data: &[u8]) -> Result<HashMap<String, String>, String> {
+    let (_, header) = SafeTensors::read_metadata(data).map_err(|e| format!("metadata: {e}"))?;
+    header
+        .metadata()
+        .clone()
+        .ok_or_else(|| "the checkpoint carries no metadata".to_string())
+}
+
+/// A required metadata value, parsed.
+pub(crate) fn meta<T: FromStr>(meta: &HashMap<String, String>, key: &str) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    meta.get(key)
+        .ok_or_else(|| format!("missing '{key}' in the checkpoint metadata"))?
+        .parse()
+        .map_err(|e| format!("parse '{key}': {e}"))
+}
+
+/// The scan mode as the metadata spells it.
+pub(crate) fn scan_mode(meta: &HashMap<String, String>) -> Result<crate::config::ScanMode, String> {
+    use crate::config::ScanMode;
+    match meta.get("scan_mode").map(String::as_str) {
+        Some("Sequential") => Ok(ScanMode::Sequential),
+        Some("Parallel") => Ok(ScanMode::Parallel),
+        Some("Auto") | None => Ok(ScanMode::Auto),
+        Some(other) => Err(format!("unknown scan_mode '{other}' in the metadata")),
+    }
+}

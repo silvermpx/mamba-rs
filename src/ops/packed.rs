@@ -270,6 +270,11 @@ fn panel_rows<S: Simd, const R: usize, const V: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the comparison with the BLAS-free product reads it.
+    #[cfg(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )))]
     use crate::ops::blas::sgemm_forward;
 
     fn det(n: usize, seed: u64) -> Vec<f32> {

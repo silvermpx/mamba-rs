@@ -1,328 +1,228 @@
-//! Unified GPU-accelerated language model wrapper.
-//!
-//! Single `GpuMambaLM` struct supports f32 / bf16 / f16 weight storage.
-//! Compute is always f32 (CUBLAS_COMPUTE_32F for GEMMs, f32 for custom kernels).
-//! Dtype is chosen at construction via `from_hf_with_dtype`.
+//! The language model on the GPU, for every family: the embedding, a GPU
+//! backbone, and a head tied to the embedding or held on its own.
 
-use crate::mamba_ssm::gpu::GpuOptions;
 use std::path::Path;
+use std::sync::Arc;
 
+use cudarc::driver::{CudaStream, PushKernelArg};
+use rayon::prelude::*;
+
+use crate::config::ModelFamily;
+use crate::hf::embed::embed_lookup;
+use crate::hf::load::{HfModel, load_hf};
+use crate::hf::load_mamba2::load_hf_mamba2;
+use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
+use crate::hf::read_family;
+use crate::mamba_ssm::gpu::GpuOptions;
 use crate::mamba_ssm::gpu::blas::{
     TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
     gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
 };
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::GemmMode;
+use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::inference::MambaGpuBackbone;
+use crate::mamba_ssm::gpu::launch::grid_1d;
+use crate::mamba2::gpu::Mamba2GpuBackbone;
+use crate::mamba3_mimo::gpu::Mamba3MimoGpuBackbone;
+use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 
-/// Threshold: if a prompt has more tokens than this, use the parallel prefill
-/// path (single kernel launch per layer over all T tokens) instead of the
-/// step-by-step loop. Lower values favor parallel; typical LLM prompts ≥ 8
-/// already benefit. Conservative default is 4 — parallel scan within a layer
-/// amortizes the per-layer kernel-launch overhead over T tokens.
-/// Minimum prompt length before `generate_streaming` (batch=1) switches
-/// from per-token step-by-step prefill to the parallel prefill kernel.
-///
-/// HISTORY: was `4`, which meant a 5-token prompt used parallel prefill
-/// at batch=1 while the same prompt in `generate_batch` (batch > 1)
-/// always uses step-by-step. The two paths are mathematically equivalent
-/// but have different numerical precision at bf16 — parallel scan and
-/// sequential scan reduce the K-dim in different orders, producing sub-
-/// ULP differences that amplify through 24 SSM layers on adversarial
-/// prompts (KL ≈ 2.7 on [100..104], originally reported in
-/// `bf16_batch_divergence_known`).
-///
-/// Raised to 64 so typical chat-style prompts (≤ 63 tokens) go through
-/// the identical step-by-step path as batched generation, restoring
-/// batch-invariant inference at bf16. Longer prompts (documents, RAG
-/// contexts) still get the parallel-scan perf win where it matters.
-/// For a 5-token prompt the step-by-step path is ~2 ms slower on 130m
-/// at bf16 — negligible for any realistic latency budget.
-/// Threshold above which a single-batch prefill uses the parallel
-/// (T-batched) SSM kernel instead of per-step (T=1) decode. Above this
-/// threshold, prefill is faster but uses a different SSM implementation
-/// from per-step decode — resulting in a tiny bf16 rounding divergence
-/// between `b=1` prefill and `b>1` per-step at the same prompt. Kept
-/// high enough that mainstream decode tests stay on the unified T=1
-/// path (bit-identical cross-batch); long-context prefills (≥256)
-/// trade that for parallel-prefill speed.
+use super::gpu_backbone::{AnyGpuBackbone, GpuBackbone};
+use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
+
+/// Prompts of at least this many tokens run through the one-pass prefill,
+/// shorter ones token by token. The two routes reduce in different orders,
+/// so at bf16 the same prompt can end a few ulps apart. Below this length a
+/// single sequence takes the step route batched generation always takes,
+/// and generation stays batch-invariant; long prompts trade that for the
+/// prefill's speed.
 const PREFILL_PARALLEL_THRESHOLD: usize = 256;
 
-use crate::hf::embed::embed_lookup;
-use crate::hf::load::{HfModel, load_hf};
-
-use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
-use rayon::prelude::*;
-
-/// Threshold for parallelizing per-slot sampling in `generate_batch`. Below
-/// this batch size the rayon job-submit overhead beats the per-slot
-/// `sample_token` cost (greedy ≈ 12 µs, top-k+top-p ≈ 30-60 µs).
+/// Below this many sequences the per-slot sampling stays on the calling
+/// thread: the rayon hand-off costs more than sampling a slot (about 12 µs
+/// greedy, 30 to 60 µs with top-k and top-p).
 const SAMPLE_PARALLEL_THRESHOLD: usize = 8;
 
-/// Internal: embed + optional lm_head storage. F32 uses GpuBuffer (f32 typed);
-/// bf16/f16 use GpuByteBuffer (raw bytes, typed via dtype field).
-enum EmbedStorage {
-    F32 {
-        embed: GpuBuffer,
-        lm_head: Option<GpuBuffer>,
-    },
-    Half {
-        embed: GpuByteBuffer,
-        lm_head: Option<GpuByteBuffer>,
-        dtype: WeightDtype,
-    },
+/// The embedding and the untied head on the device, in the storage
+/// precision (f32 bits for f32 and tf32).
+struct HeadWeights {
+    embed: DtypedBuf,
+    lm_head: Option<DtypedBuf>,
+    dtype: WeightDtype,
 }
 
-/// Unified GPU Mamba language model.
+/// A language model on the GPU for any of the four families.
 ///
-/// Same API regardless of storage dtype:
-/// - `from_hf(dir, gpu)` — f32 storage (default, maximum accuracy)
-/// - `from_hf_with_dtype(dir, gpu, dtype)` — f32 / bf16 / f16 storage
+/// [`MambaGpuLM::from_hf`] loads a checkpoint directory and reads its family
+/// from `config.json`; [`MambaGpuLM::new`] wraps a GPU backbone built in code
+/// with its embedding and head. The storage precision, device and GEMM mode
+/// are the backbone's.
 ///
 /// ```rust,no_run
-/// use mamba_rs::module::gpu_lm::GpuMambaLM;
 /// use mamba_rs::module::sample::SampleParams;
-/// use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+/// use mamba_rs::{GpuOptions, MambaGpuLM, WeightDtype};
 /// use std::path::Path;
 ///
-/// // f32 (default)
-/// let mut lm = GpuMambaLM::from_hf(Path::new("./mamba-130m-hf"), 0).unwrap();
-///
-/// // bf16 (half VRAM)
-/// let mut lm_bf16 = GpuMambaLM::from_hf_with_dtype(
-///     Path::new("./mamba-130m-hf"), 0, WeightDtype::Bf16
-/// ).unwrap();
-///
+/// let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
+/// let mut lm = MambaGpuLM::from_hf(Path::new("./mamba2-130m"), 1, opts).unwrap();
 /// lm.capture_graph().unwrap();
 /// let tokens = lm.generate(&[1, 2, 3], &SampleParams::default()).unwrap();
 /// ```
-pub struct GpuMambaLM {
-    backbone: MambaGpuBackbone,
-    embed_storage: EmbedStorage,
-    /// CPU mirror of embed table for per-token lookup → host scratch buffer.
+pub struct MambaGpuLM {
+    backbone: AnyGpuBackbone,
+    head: HeadWeights,
+    /// The backbone's f32 rows cast to the head's half precision, for the
+    /// engines that leave f32 rows (Mamba-2, MIMO) under a half head. The
+    /// head reads a live allocation of its own, never the context staging.
+    head_rows: Option<DtypedBuf>,
+    /// The embedding on the host, read for every token fed in.
     embed_cpu: Vec<f32>,
-    /// Pre-allocated staging for embed_lookup result (fed into backbone).
+    /// One step's input rows, `[batch, d_model]`.
     input_cpu: Vec<f32>,
-    /// GPU logits output (f32).
+    /// A prompt's rows for the one-pass prefill, grown to the longest
+    /// prompt seen.
+    prompt_cpu: Vec<f32>,
     gpu_logits: GpuBuffer,
-    /// GPU f32 hidden staging (used only by untied-lm_head half path).
-    /// CPU mirror of logits (padded).
     logits_padded_cpu: Vec<f32>,
-    /// CPU logits clamped to real vocab_size.
     logits_cpu: Vec<f32>,
-    /// Vocabulary size — the number of valid token IDs.
+    /// Vocabulary size, the number of valid token ids.
     pub vocab_size: usize,
     vocab_size_padded: usize,
-    /// Backbone hidden width (`d_model` in the paper).
+    /// Backbone width (`d_model`).
     pub d_model: usize,
-    /// Batch size (number of parallel sequences).
+    /// Sequences generated side by side.
     pub batch: usize,
 }
 
-impl GpuMambaLM {
-    /// CUDA context of the underlying backbone.
-    ///
-    /// Inspect the selected execution policy with
-    /// [`crate::mamba_ssm::gpu::context::GpuCtx::gemm_mode`] and
-    /// [`crate::mamba_ssm::gpu::context::GpuCtx::bi_gemm_family`]. Storage is
-    /// reported separately by [`Self::dtype`]. Graph capture binds this route.
-    pub fn ctx(&self) -> &crate::mamba_ssm::gpu::context::GpuCtx {
-        self.backbone.ctx()
-    }
-
-    /// Access the last-computed logits for batch slot `b`.
-    /// Length = `vocab_size`. Valid after `generate` / `generate_batch`.
-    pub fn last_logits(&self, b: usize) -> &[f32] {
-        &self.logits_cpu[b * self.vocab_size..(b + 1) * self.vocab_size]
-    }
-}
-
-impl GpuMambaLM {
-    /// Load an HF model with f32 storage and a batch of one, in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
-    ///
-    /// Use [`Self::from_hf_with_mode`] to pick the mode in code and [`Self::ctx`]
-    /// to inspect the route that graph capture binds. Errors match
-    /// [`Self::from_hf_with_dtype_batch`].
-    pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
-    }
-
-    /// Load an HF model with f32 storage, a batch of one, and an explicit GEMM mode.
-    ///
-    /// `MAMBA_RS_GEMM_MODE` is ignored. Loading, validation, CUDA setup, upload,
-    /// and allocation failures are returned.
-    pub fn from_hf_with_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, WeightDtype::F32, 1, Some(mode))
-    }
-
-    /// Load an HF model with an explicit storage precision, in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
-    ///
-    /// `dtype` controls storage independently of the mode (`Tf32` stores f32 with
-    /// deterministic TF32 products). See [`Self::from_hf_with_dtype_and_mode`] for
-    /// an explicit mode; other errors match [`Self::from_hf_with_dtype_batch`].
-    pub fn from_hf_with_dtype(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch(dir, gpu_ordinal, dtype, 1)
-    }
-
-    /// Load an HF model with an explicit storage precision and GEMM mode, a batch of one.
-    ///
-    /// Storage precision and GEMM execution are independent; `MAMBA_RS_GEMM_MODE`
-    /// is ignored. Errors match [`Self::from_hf_with_dtype`].
-    pub fn from_hf_with_dtype_and_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, 1, Some(mode))
-    }
-
-    /// Load an HF model with an explicit storage precision and batch size.
-    ///
-    /// `batch > 1` enables parallel generation of multiple independent sequences
-    /// sharing the same weights. Each batch slot has its own recurrent state.
-    /// Storage is independent of the GEMM mode, which `MAMBA_RS_GEMM_MODE` names
-    /// (`deterministic` when unset). Use [`Self::generate_batch`] to drive the
-    /// result and [`Self::ctx`] to inspect its route.
+impl MambaGpuLM {
+    /// Load a checkpoint directory of any family for `batch` sequences, on
+    /// the device, in the storage precision and in the GEMM mode `opts`
+    /// names. The family comes from the checkpoint's `config.json`.
     ///
     /// # Errors
     ///
-    /// Returns checkpoint, configuration, `MAMBA_RS_GEMM_MODE`, CUDA, upload, or
-    /// batch-dependent allocation failures.
-    pub fn from_hf_with_dtype_batch(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-    ) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, batch, None)
+    /// Checkpoint, configuration, `MAMBA_RS_GEMM_MODE`, CUDA, upload and
+    /// allocation failures.
+    pub fn from_hf(dir: &Path, batch: usize, opts: GpuOptions) -> Result<Self, String> {
+        match read_family(dir)? {
+            ModelFamily::Mamba1 => {
+                let HfModel {
+                    backbone,
+                    embed,
+                    lm_head,
+                    vocab_size,
+                    d_model,
+                    ..
+                } = load_hf(dir)?;
+                let cfg = *backbone.config();
+                let gpu = MambaGpuBackbone::new(backbone.weights(), cfg, d_model, batch, opts)?;
+                Self::new(gpu, embed, lm_head, vocab_size)
+            }
+            ModelFamily::Mamba2 => {
+                let m = load_hf_mamba2(dir)?;
+                let d_model = m.cfg.d_model;
+                let gpu = Mamba2GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
+                Self::new(gpu, m.embed, None, m.vocab_size)
+            }
+            ModelFamily::Mamba3 => {
+                let m = load_hf_mamba3(dir)?;
+                let d_model = m.cfg.d_model;
+                let gpu = Mamba3GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
+                Self::new(gpu, m.embed, None, m.vocab_size)
+            }
+            ModelFamily::Mamba3Mimo => {
+                let m = load_hf_mamba3_mimo(dir)?;
+                let d_model = m.cfg.d_model;
+                let gpu = Mamba3MimoGpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
+                Self::new(gpu, m.embed, None, m.vocab_size)
+            }
+        }
     }
 
-    /// Load an HF model with an explicit storage precision, batch size, and GEMM mode.
+    /// Wrap a GPU backbone with its embedding and head.
     ///
-    /// `dtype` controls storage and `mode` independently controls GEMM execution;
-    /// `MAMBA_RS_GEMM_MODE` is ignored. Invalid checkpoints, model configuration,
-    /// batch-dependent allocation, CUDA setup, or upload failures are returned.
-    /// Graph capture remains tied to the complete route.
-    pub fn from_hf_with_dtype_batch_and_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-        mode: GemmMode,
+    /// `embed` is row-major `[vocab_rows, d_model]`, possibly padded past
+    /// `vocab_size`; the rows past it never win sampling. `lm_head` is an
+    /// untied head `[d_model, vocab_size]`; `None` ties the head to the
+    /// embedding. The backbone reads embeddings directly, so its input
+    /// width must be `d_model`. The embedding and head are stored in the
+    /// backbone's precision.
+    pub fn new(
+        backbone: impl Into<AnyGpuBackbone>,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
     ) -> Result<Self, String> {
-        Self::from_hf_with_dtype_batch_inner(dir, gpu_ordinal, dtype, batch, Some(mode))
-    }
-
-    fn from_hf_with_dtype_batch_inner(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-        mode: Option<GemmMode>,
-    ) -> Result<Self, String> {
-        let HfModel {
-            backbone: cpu_backbone,
-            embed,
+        let backbone = backbone.into();
+        let d_model = backbone.d_model();
+        if backbone.input_dim() != d_model {
+            return Err(format!(
+                "the embedding feeds the backbone directly, so its input width {} must be \
+                 d_model {d_model}",
+                backbone.input_dim()
+            ));
+        }
+        if d_model == 0 || !embed.len().is_multiple_of(d_model) {
+            return Err(format!(
+                "embed length {} is not a multiple of d_model {d_model}",
+                embed.len()
+            ));
+        }
+        let vocab_size_padded = embed.len() / d_model;
+        if vocab_size == 0 || vocab_size > vocab_size_padded {
+            return Err(format!(
+                "vocab_size {vocab_size} out of range (embed holds {vocab_size_padded} rows)"
+            ));
+        }
+        if let Some(lm) = &lm_head
+            && lm.len() != d_model * vocab_size
+        {
+            return Err(format!(
+                "lm_head length {} != d_model*vocab_size {}",
+                lm.len(),
+                d_model * vocab_size
+            ));
+        }
+        let batch = backbone.batch();
+        let stream = backbone.stream().clone();
+        let dtype = backbone.dtype();
+        let upload = |rows: &[f32]| -> Result<DtypedBuf, String> {
+            let buf = DtypedBuf::zeros(&stream, rows.len(), dtype)?;
+            buf.upload_f32(&stream, rows)?;
+            Ok(buf)
+        };
+        // The untied head gets the padded width too, so its GEMM writes the
+        // logits at the row stride the tied head uses.
+        let lm_head = match lm_head {
+            Some(lm) if vocab_size != vocab_size_padded => Some(upload(&pad_lm_head_rows(
+                &lm,
+                d_model,
+                vocab_size,
+                vocab_size_padded,
+            ))?),
+            Some(lm) => Some(upload(&lm)?),
+            None => None,
+        };
+        let head = HeadWeights {
+            embed: upload(&embed)?,
             lm_head,
-            vocab_size,
-            vocab_size_padded,
-            d_model,
-        } = load_hf(dir)?;
-
-        let cfg = *cpu_backbone.config();
-        let backbone = match mode {
-            Some(mode) => MambaGpuBackbone::new(
-                cpu_backbone.weights(),
-                cfg,
-                d_model,
-                batch,
-                GpuOptions::default()
-                    .device(gpu_ordinal)
-                    .dtype(dtype)
-                    .mode(mode),
-            )?,
-            None => MambaGpuBackbone::new(
-                cpu_backbone.weights(),
-                cfg,
-                d_model,
-                batch,
-                GpuOptions::default().device(gpu_ordinal).dtype(dtype),
-            )?,
+            dtype,
         };
-        let stream = backbone.stream();
-
-        // Pad the untied lm_head to `vocab_size_padded` columns so the
-        // untied GEMM can write into `gpu_logits` with the SAME row stride
-        // (`vocab_size_padded`) as the tied path. Without padding, the
-        // GEMM writes contiguous rows of `vocab_size` while the CPU reads
-        // with stride `vocab_size_padded`, silently producing wrong logits
-        // for every batch slot beyond the first when `vocab_size` is not
-        // already 64-aligned (e.g. HF mamba-130m's 50280 vs padded 50304).
-        let lm_head_padded: Option<Vec<f32>> = lm_head.as_ref().map(|lm| {
-            if vocab_size == vocab_size_padded {
-                lm.clone()
-            } else {
-                pad_lm_head_rows(lm, d_model, vocab_size, vocab_size_padded)
-            }
-        });
-
-        // Upload embed + optional lm_head in requested dtype.
-        let embed_storage = match dtype {
-            WeightDtype::F32 | WeightDtype::Tf32 => {
-                let mut e = GpuBuffer::zeros(stream, vocab_size_padded * d_model)?;
-                e.upload(stream, &embed)?;
-                let lm = if let Some(ref lm_w) = lm_head_padded {
-                    let mut b = GpuBuffer::zeros(stream, lm_w.len())?;
-                    b.upload(stream, lm_w)?;
-                    Some(b)
-                } else {
-                    None
-                };
-                EmbedStorage::F32 {
-                    embed: e,
-                    lm_head: lm,
-                }
-            }
-            WeightDtype::Bf16 | WeightDtype::F16 => {
-                let embed_bytes = embed.len() * dtype.size_bytes();
-                let e = GpuByteBuffer::zeros(stream, embed_bytes)?;
-                upload_f32_as_dtype(stream, &e, 0, &embed, embed.len(), dtype)?;
-
-                let lm = if let Some(ref lm_w) = lm_head_padded {
-                    let lm_bytes = lm_w.len() * dtype.size_bytes();
-                    let b = GpuByteBuffer::zeros(stream, lm_bytes)?;
-                    upload_f32_as_dtype(stream, &b, 0, lm_w, lm_w.len(), dtype)?;
-                    Some(b)
-                } else {
-                    None
-                };
-                EmbedStorage::Half {
-                    embed: e,
-                    lm_head: lm,
-                    dtype,
-                }
-            }
+        let head_rows = if matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16)
+            && backbone.temporal_dtype() != dtype
+        {
+            Some(DtypedBuf::zeros(&stream, batch * d_model, dtype)?)
+        } else {
+            None
         };
-
-        let gpu_logits = GpuBuffer::zeros(stream, batch * vocab_size_padded)?;
-
+        let gpu_logits = GpuBuffer::zeros(&stream, batch * vocab_size_padded)?;
         Ok(Self {
             backbone,
-            embed_storage,
+            head,
+            head_rows,
             embed_cpu: embed,
             input_cpu: vec![0.0; batch * d_model],
+            prompt_cpu: Vec::new(),
             gpu_logits,
             logits_padded_cpu: vec![0.0; batch * vocab_size_padded],
             logits_cpu: vec![0.0; batch * vocab_size],
@@ -333,116 +233,96 @@ impl GpuMambaLM {
         })
     }
 
-    /// Storage dtype (f32 / bf16 / f16).
-    pub fn dtype(&self) -> WeightDtype {
-        match &self.embed_storage {
-            EmbedStorage::F32 { .. } => self.backbone.dtype(),
-            EmbedStorage::Half { dtype, .. } => *dtype,
-        }
+    /// The family of the backbone.
+    pub fn family(&self) -> ModelFamily {
+        self.backbone.family()
     }
 
-    /// Capture the backbone's per-step CUDA Graph for accelerated decode.
-    /// Run at least one warmup [`Self::generate`] (or any single backbone
-    /// step) before capture so cuBLAS settles. The lm_head GEMM runs
-    /// eagerly outside the graph; only the backbone step is captured.
+    /// The GPU backbone.
+    pub fn backbone(&self) -> &AnyGpuBackbone {
+        &self.backbone
+    }
+
+    /// The CUDA context: the GEMM mode and route live here, and a captured
+    /// graph binds them.
+    pub fn ctx(&self) -> &GpuCtx {
+        self.backbone.ctx()
+    }
+
+    /// Storage precision of the weights.
+    pub fn dtype(&self) -> WeightDtype {
+        self.head.dtype
+    }
+
+    /// The logits of the last step for sequence `b`, `vocab_size` long.
+    /// Valid after a `generate` call.
+    pub fn last_logits(&self, b: usize) -> &[f32] {
+        &self.logits_cpu[b * self.vocab_size..(b + 1) * self.vocab_size]
+    }
+
+    /// Capture the backbone's decode step as one CUDA graph; the head runs
+    /// after it, outside the graph. Reserves the head's scratch first,
+    /// because nothing can grow once the graph is captured.
     pub fn capture_graph(&mut self) -> Result<(), String> {
-        if let EmbedStorage::Half {
-            lm_head: None,
-            dtype,
-            ..
-        } = &self.embed_storage
-        {
-            presize_tied_lm_head_scratch(
-                self.backbone.ctx(),
-                *dtype,
-                TiedLmDims {
-                    batch: self.batch,
-                    d_model: self.d_model,
-                    vocab_padded: self.vocab_size_padded,
-                },
-            )?;
+        let dtype = self.head.dtype;
+        if matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16) {
+            let ctx = self.backbone.ctx();
+            if self.head.lm_head.is_none() {
+                presize_tied_lm_head_scratch(
+                    ctx,
+                    dtype,
+                    TiedLmDims {
+                        batch: self.batch,
+                        d_model: self.d_model,
+                        vocab_padded: self.vocab_size_padded,
+                    },
+                )?;
+            }
         }
         self.backbone.capture_graph()
     }
 
-    /// Download the backbone's temporal buffer (last-layer hidden state, last
-    /// timestep) as f32 regardless of storage dtype. Intended for debugging /
-    /// parity harnesses.
-    #[doc(hidden)]
-    pub fn debug_download_temporal(&self, out: &mut [f32]) -> Result<(), String> {
-        self.backbone.download_temporal(out)
-    }
-
-    /// Debug-only: reset state, embed `token`, run the backbone but stop after
-    /// `layer_limit` layers, and download the post-layer residual to `out`.
-    /// Always returns f32 regardless of storage dtype. For step-by-step
-    /// f32-vs-bf16 parity bisection.
-    #[doc(hidden)]
-    pub fn debug_step_one_token(
-        &mut self,
-        token: u32,
-        layer_limit: usize,
-        out: &mut [f32],
-    ) -> Result<(), String> {
-        self.backbone.reset()?;
-        let emb =
-            crate::hf::embed::embed_lookup(&self.embed_cpu, token, self.d_model, self.vocab_size);
-        self.input_cpu[..self.d_model].copy_from_slice(emb);
-        self.backbone
-            .debug_step_partial(&self.input_cpu[..self.d_model], layer_limit, out)
-    }
-
-    /// Reset the backbone's recurrent SSM + conv states to zero. Call
-    /// between independent prompts so state from the previous generation
-    /// does not leak.
+    /// Zero the recurrent state. Each `generate` call starts from it.
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
     }
 
-    /// Greedy / sampled generation. Returns the full sequence of newly
-    /// generated tokens (excludes `prompt`). Equivalent to collecting
-    /// the callback output of [`Self::generate_streaming`]. Requires
-    /// `batch = 1`; for parallel batched decoding use
-    /// [`Self::generate_batch`].
+    /// Greedy or sampled generation for a batch of one: the new tokens,
+    /// without the prompt. [`Self::generate_batch`] serves larger batches.
     pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
-        self.generate_streaming(prompt, params, |tok, _| {
-            tokens.push(tok);
-        })?;
+        self.generate_streaming(prompt, params, |tok, _| tokens.push(tok))?;
         Ok(tokens)
     }
 
-    /// Streaming variant of [`Self::generate`]: invokes `cb(token, "")`
-    /// for each newly generated token as it is produced, allowing the
-    /// caller to print-as-you-go or stop early. Requires `batch = 1`.
+    /// [`Self::generate`] that hands every new token to `cb` as it is
+    /// produced (the text argument is empty).
     pub fn generate_streaming(
         &mut self,
         prompt: &[u32],
         params: &SampleParams,
         mut cb: impl FnMut(u32, &str),
     ) -> Result<(), String> {
-        assert_eq!(
-            self.batch, 1,
-            "generate_streaming requires batch=1; use generate_batch for batch>1"
-        );
+        if self.batch != 1 {
+            return Err(format!(
+                "generate takes a batch of one, this model has {}; use generate_batch",
+                self.batch
+            ));
+        }
+        if prompt.is_empty() {
+            return Err("an empty prompt leaves no position to continue from".into());
+        }
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
-
-        // Prefill: parallel (one kernel per layer over all T) if long enough;
-        // otherwise step-by-step (lower overhead for small T).
         if prompt.len() >= PREFILL_PARALLEL_THRESHOLD {
-            self.prefill_parallel(prompt)?;
+            self.prefill_prompt(prompt)?;
         } else {
-            for &token_id in prompt {
-                let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
-                self.input_cpu[..self.d_model].copy_from_slice(emb);
-                self.backbone
-                    .step_gpu_only(&self.input_cpu[..self.d_model])?;
+            for &token in prompt {
+                self.step_token(token)?;
             }
         }
         self.compute_logits()?;
 
-        // Decode loop.
         let mut seen: Vec<u32> = prompt.to_vec();
         for _ in 0..params.max_tokens {
             let next = sample_token(&mut self.logits_cpu, params, &seen, &mut rng);
@@ -451,93 +331,84 @@ impl GpuMambaLM {
             }
             seen.push(next);
             cb(next, "");
-            let emb = embed_lookup(&self.embed_cpu, next, self.d_model, self.vocab_size);
-            self.input_cpu[..self.d_model].copy_from_slice(emb);
-            self.backbone
-                .step_gpu_only(&self.input_cpu[..self.d_model])?;
+            self.step_token(next)?;
             self.compute_logits()?;
         }
         Ok(())
     }
 
-    /// Batch generation: generate N sequences in parallel.
+    /// Generate for every sequence of the batch side by side.
     ///
-    /// `prompts.len()` must equal `self.batch`. All prompts may have different
-    /// lengths; shorter prompts are padded with their last token during prefill
-    /// (this affects nothing since their output is discarded until they finish
-    /// prefill). Each slot uses per-slot RNG seeded from `params[i].seed` and
-    /// its own EOS token list from `params[i].eos_token_ids`.
-    ///
-    /// Returns one token vector per slot, up to each slot's `max_tokens` or
-    /// EOS, whichever is first. Generation stops when ALL slots are finished.
+    /// `prompts` and `params` hold one entry per sequence. The prompts are
+    /// fed token by token, so they may differ in length; a sequence starts
+    /// sampling when its prompt ends, with its own seed and end tokens.
+    /// Each sequence stops at an end token or at its `max_tokens`, and the
+    /// call returns when all have stopped.
     pub fn generate_batch(
         &mut self,
         prompts: &[&[u32]],
         params: &[SampleParams],
     ) -> Result<Vec<Vec<u32>>, String> {
-        assert_eq!(prompts.len(), self.batch, "prompts.len() != batch");
-        assert_eq!(params.len(), self.batch, "params.len() != batch");
-
+        let b = self.batch;
+        if prompts.len() != b || params.len() != b {
+            return Err(format!(
+                "generate_batch takes one prompt and one parameter set per sequence: \
+                 batch {b}, {} prompts, {} parameter sets",
+                prompts.len(),
+                params.len()
+            ));
+        }
         self.backbone.reset()?;
         let mut rngs: Vec<Xoshiro256PlusPlus> = params
             .iter()
             .map(|p| Xoshiro256PlusPlus::new(p.seed))
             .collect();
 
-        let b = self.batch;
         let d = self.d_model;
         let vocab_size = self.vocab_size;
         let max_prompt = prompts.iter().map(|p| p.len()).max().unwrap_or(0);
         let max_tokens = params.iter().map(|p| p.max_tokens).max().unwrap_or(0);
 
-        // Per-slot state for streaming generation loop.
-        let mut prompt_pos = vec![0usize; b]; // how many prompt tokens consumed
+        // How many prompt tokens each sequence has fed, whether it stopped,
+        // what it produced, and the token it feeds next.
+        let mut prompt_pos = vec![0usize; b];
         let mut finished = vec![false; b];
-        let mut outputs: Vec<Vec<u32>> = (0..b).map(|_| Vec::new()).collect();
-        // `last_token[slot]` = token to feed next step for this slot.
+        let mut outputs: Vec<Vec<u32>> = vec![Vec::new(); b];
         let mut last_token = vec![0u32; b];
-
-        // Initial input: first prompt token per slot.
         for i in 0..b {
-            if prompts[i].is_empty() {
-                finished[i] = true;
-                continue;
+            match prompts[i].first() {
+                Some(&first) => {
+                    last_token[i] = first;
+                    prompt_pos[i] = 1;
+                }
+                None => finished[i] = true,
             }
-            last_token[i] = prompts[i][0];
-            prompt_pos[i] = 1; // we will feed this token in first step
         }
 
-        let total_steps = max_prompt + max_tokens;
-
-        for _step in 0..total_steps {
+        for _ in 0..max_prompt + max_tokens {
             if finished.iter().all(|&f| f) {
                 break;
             }
-
-            // Build input batch [b * d_model]: embed lookup per slot.
             for i in 0..b {
+                let row = &mut self.input_cpu[i * d..(i + 1) * d];
                 if finished[i] {
-                    // Feed zero vector for finished slots (their state update is discarded).
-                    self.input_cpu[i * d..(i + 1) * d].fill(0.0);
+                    // A stopped sequence still steps; its rows are ignored.
+                    row.fill(0.0);
                 } else {
-                    let emb = embed_lookup(&self.embed_cpu, last_token[i], d, vocab_size);
-                    self.input_cpu[i * d..(i + 1) * d].copy_from_slice(emb);
+                    row.copy_from_slice(embed_lookup(
+                        &self.embed_cpu,
+                        last_token[i],
+                        d,
+                        vocab_size,
+                    ));
                 }
             }
-
-            // GPU step (all slots in parallel).
             self.backbone.step_gpu_only(&self.input_cpu)?;
-
-            // Compute logits [b * vocab_size_padded] → download to CPU.
             self.compute_logits()?;
 
-            // Per-slot decision. Sampling for decode-phase slots is
-            // parallelized across rayon workers when batch is large enough;
-            // each slot has disjoint logits (par_chunks_mut), an independent
-            // RNG, and read-only access to its own params/outputs. The
-            // resulting tokens are applied to per-slot mutable state in a
-            // serial pass below (cheap scalar updates, no contention).
-            let need_decode_for_slot: Vec<bool> = (0..b)
+            // Sequences past their prompt sample from their own logits with
+            // their own generator, side by side when the batch is large.
+            let sampling: Vec<bool> = (0..b)
                 .map(|i| !finished[i] && prompt_pos[i] >= prompts[i].len())
                 .collect();
             let new_tokens: Vec<Option<u32>> = if b >= SAMPLE_PARALLEL_THRESHOLD {
@@ -545,29 +416,17 @@ impl GpuMambaLM {
                     .par_chunks_mut(vocab_size)
                     .zip(rngs.par_iter_mut())
                     .enumerate()
-                    .map(|(i, (slot_logits, rng))| {
-                        if need_decode_for_slot[i] {
-                            Some(sample_token(slot_logits, &params[i], &outputs[i], rng))
-                        } else {
-                            None
-                        }
+                    .map(|(i, (logits, rng))| {
+                        sampling[i].then(|| sample_token(logits, &params[i], &outputs[i], rng))
                     })
                     .collect()
             } else {
-                (0..b)
-                    .map(|i| {
-                        if need_decode_for_slot[i] {
-                            let slot_logits =
-                                &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
-                            Some(sample_token(
-                                slot_logits,
-                                &params[i],
-                                &outputs[i],
-                                &mut rngs[i],
-                            ))
-                        } else {
-                            None
-                        }
+                self.logits_cpu
+                    .chunks_mut(vocab_size)
+                    .zip(rngs.iter_mut())
+                    .enumerate()
+                    .map(|(i, (logits, rng))| {
+                        sampling[i].then(|| sample_token(logits, &params[i], &outputs[i], rng))
                     })
                     .collect()
             };
@@ -577,12 +436,13 @@ impl GpuMambaLM {
                     continue;
                 }
                 if prompt_pos[i] < prompts[i].len() {
-                    // Still prefilling — feed next prompt token; sampler skipped.
                     last_token[i] = prompts[i][prompt_pos[i]];
                     prompt_pos[i] += 1;
                     continue;
                 }
-                let next = new_tokens[i].expect("decode-phase slot must have a sampled token");
+                let Some(next) = new_tokens[i] else {
+                    return Err(format!("sequence {i} sampled no token"));
+                };
                 if params[i].eos_token_ids.contains(&next)
                     || outputs[i].len() >= params[i].max_tokens
                 {
@@ -593,153 +453,119 @@ impl GpuMambaLM {
                 last_token[i] = next;
             }
         }
-
         Ok(outputs)
     }
 
-    /// Parallel prefill: uploads all T prompt embeddings to GPU at once and
-    /// runs one burnin forward per layer (vs T step calls). After this call,
-    /// backbone state is at position T and temporal holds the last timestep
-    /// hidden state — ready for lm_head + decode.
-    fn prefill_parallel(&mut self, prompt: &[u32]) -> Result<(), String> {
-        let t = prompt.len();
+    /// Feed one token of the single sequence.
+    fn step_token(&mut self, token: u32) -> Result<(), String> {
         let d = self.d_model;
-        let b = self.batch;
-        let stream = self.backbone.stream().clone();
-
-        // Build flat embed input [B*T*d_model] on CPU (batch=1 for now; batched
-        // prefill with different prompt lengths per slot uses step-by-step).
-        let mut embed_flat = vec![0.0f32; b * t * d];
-        for ti in 0..t {
-            let emb = embed_lookup(&self.embed_cpu, prompt[ti], d, self.vocab_size);
-            // batch=1 case: sample 0, timestep ti
-            embed_flat[ti * d..(ti + 1) * d].copy_from_slice(emb);
-        }
-
-        // Upload to GPU.
-        let mut ip_out_flat = GpuBuffer::zeros(&stream, b * t * d)?;
-        ip_out_flat.upload(&stream, &embed_flat)?;
-
-        // Allocate prefill scratch and dispatch on backbone dtype.
-        // Mixed backbone → native bf16/f16 prefill (DtypedBuf scratch).
-        // F32 backbone → f32 prefill (GpuBuffer scratch).
-        match self.backbone.dtype() {
-            WeightDtype::F32 | WeightDtype::Tf32 => {
-                let mut prefill_scratch = self.backbone.alloc_prefill_scratch(t)?;
-                self.backbone
-                    .prefill_sequence(&ip_out_flat, &mut prefill_scratch)?;
-            }
-            WeightDtype::Bf16 | WeightDtype::F16 => {
-                let mut prefill_scratch = self.backbone.alloc_prefill_mixed_scratch(t)?;
-                self.backbone
-                    .prefill_sequence_mixed(&ip_out_flat, &mut prefill_scratch)?;
-            }
-        }
-
-        Ok(())
+        let emb = embed_lookup(&self.embed_cpu, token, d, self.vocab_size);
+        self.input_cpu[..d].copy_from_slice(emb);
+        self.backbone.step_gpu_only(&self.input_cpu[..d])
     }
 
+    /// Feed a whole prompt of the single sequence in one pass.
+    fn prefill_prompt(&mut self, prompt: &[u32]) -> Result<(), String> {
+        let d = self.d_model;
+        self.prompt_cpu.clear();
+        self.prompt_cpu.reserve(prompt.len() * d);
+        for &token in prompt {
+            self.prompt_cpu.extend_from_slice(embed_lookup(
+                &self.embed_cpu,
+                token,
+                d,
+                self.vocab_size,
+            ));
+        }
+        self.backbone.prefill(&self.prompt_cpu, prompt.len())
+    }
+
+    /// The head over the backbone's last rows, then the logits on the host.
     fn compute_logits(&mut self) -> Result<(), String> {
         let ctx = self.backbone.ctx();
-        let stream = self.backbone.stream().clone();
+        let stream: Arc<CudaStream> = self.backbone.stream().clone();
         let temporal_ptr = self.backbone.temporal_ptr();
-        let b = self.batch;
-        let d = self.d_model;
+        let (b, d, vp) = (self.batch, self.d_model, self.vocab_size_padded);
+        let HeadWeights {
+            embed,
+            lm_head,
+            dtype,
+        } = &self.head;
 
-        match &self.embed_storage {
-            EmbedStorage::F32 { embed, lm_head } => {
-                if let Some(lm) = lm_head {
-                    // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
-                    // The hidden state already lives on the GPU (temporal_ptr)
-                    // — feed it directly; the old path bounced it through host
-                    // memory (D2H + H2D) on every decoded token.
-                    gpu_gemm_bi_forward_ptr(
-                        ctx,
-                        &mut self.gpu_logits,
-                        temporal_ptr,
-                        lm.cached_ptr(),
-                        None,
-                        (b, d, self.vocab_size_padded),
-                    )?;
-                } else {
-                    // Tied: logits[B,V] = temporal[B,D] @ embed^T[D,V]
-                    // Single SGEMM via OP_T on embed (reuses row-major [V,D] buffer).
-                    gpu_gemm_bi_tied_lm_head_raw(
-                        ctx,
-                        self.gpu_logits.cached_ptr(),
-                        temporal_ptr,
-                        embed.cached_ptr(),
-                        b,
-                        d,
-                        self.vocab_size_padded,
-                    )?;
-                }
-            }
-            EmbedStorage::Half {
-                embed,
-                lm_head,
-                dtype,
-            } => {
-                // With end-to-end bf16 inference, temporal is already in `dtype`
-                // from the Mixed engine — feed directly into lm_head, no staging.
-                // Legacy fall-back: if temporal is still f32 (e.g., prefill path
-                // for mixed hasn't been fully migrated yet), downcast once.
-                let backbone_dtype = self.backbone.temporal_dtype();
-                let temporal_half_ptr = if backbone_dtype == *dtype {
-                    temporal_ptr
-                } else {
-                    // Legacy: f32 temporal → cast to half into half_staging.
-                    let half_bytes = b * d * dtype.size_bytes();
-                    ctx.ensure_half_staging(half_bytes)?;
-                    let staging_ptr = ctx.half_staging_ptr();
-                    use cudarc::driver::PushKernelArg;
-                    let n = (b * d) as i32;
-                    let kernel = match *dtype {
-                        WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
-                        WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-                        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
-                    };
-                    let mut builder = stream.launch_builder(kernel);
-                    builder.arg(&staging_ptr);
-                    builder.arg(&temporal_ptr);
-                    builder.arg(&n);
-                    use crate::mamba_ssm::gpu::launch::grid_1d;
-                    unsafe { builder.launch(grid_1d(b * d)) }
-                        .map_err(|e| format!("cast temporal: {e:?}"))?;
-                    staging_ptr
+        match *dtype {
+            WeightDtype::F32 | WeightDtype::Tf32 => match lm_head {
+                // logits[B, Vpad] = rows[B, D] @ lm_head[D, Vpad], straight
+                // from the rows on the device.
+                Some(lm) => gpu_gemm_bi_forward_ptr(
+                    ctx,
+                    &mut self.gpu_logits,
+                    temporal_ptr,
+                    lm.cached_ptr(),
+                    None,
+                    (b, d, vp),
+                )?,
+                // logits[B, V] = rows[B, D] @ embed^T[D, V], the embedding
+                // read transposed in place.
+                None => gpu_gemm_bi_tied_lm_head_raw(
+                    ctx,
+                    self.gpu_logits.cached_ptr(),
+                    temporal_ptr,
+                    embed.cached_ptr(),
+                    b,
+                    d,
+                    vp,
+                )?,
+            },
+            WeightDtype::Bf16 | WeightDtype::F16 => {
+                let dt = *dtype;
+                // The Mamba-1 and SISO engines leave half rows; Mamba-2 and
+                // MIMO leave f32 rows, cast once into the head's own rows.
+                let rows_ptr = match &self.head_rows {
+                    None => temporal_ptr,
+                    Some(rows) => {
+                        let rows_ptr = rows.cached_ptr();
+                        let cast = if dt == WeightDtype::Bf16 {
+                            &ctx.kernels.cast_f32_to_bf16
+                        } else {
+                            &ctx.kernels.cast_f32_to_f16
+                        };
+                        let n = (b * d) as i32;
+                        let mut bld = stream.launch_builder(cast);
+                        bld.arg(&rows_ptr);
+                        bld.arg(&temporal_ptr);
+                        bld.arg(&n);
+                        unsafe { bld.launch(grid_1d(b * d)) }
+                            .map_err(|e| format!("cast rows for the head: {e:?}"))?;
+                        rows_ptr
+                    }
                 };
-
-                if let Some(lm) = lm_head {
-                    // Untied: Y[B,Vpad] = temporal_half[B,D] @ lm_head[D,Vpad]
-                    // `vocab_size_padded` matches lm_head and gpu_logits row stride.
-                    gpu_gemm_ex_forward_raw(
+                match lm_head {
+                    Some(lm) => gpu_gemm_ex_forward_raw(
                         ctx,
                         &mut self.gpu_logits,
                         TypedPtr {
-                            ptr: temporal_half_ptr,
-                            dtype: *dtype,
+                            ptr: rows_ptr,
+                            dtype: dt,
                         },
                         TypedPtr {
                             ptr: lm.cached_ptr(),
-                            dtype: *dtype,
+                            dtype: dt,
                         },
                         None,
-                        (b, d, self.vocab_size_padded),
-                    )?;
-                } else {
-                    // Tied: logits[B,V] = temporal_half[B,D] @ embed^T[D,V]
-                    gpu_gemm_ex_tied_lm_head_raw(
+                        (b, d, vp),
+                    )?,
+                    None => gpu_gemm_ex_tied_lm_head_raw(
                         ctx,
                         self.gpu_logits.cached_ptr(),
-                        temporal_half_ptr,
+                        rows_ptr,
                         embed.cached_ptr(),
-                        *dtype,
+                        dt,
                         TiedLmDims {
                             batch: b,
                             d_model: d,
-                            vocab_padded: self.vocab_size_padded,
+                            vocab_padded: vp,
                         },
-                    )?;
+                    )?,
                 }
             }
         }
@@ -749,63 +575,186 @@ impl GpuMambaLM {
             .map_err(|e| format!("logits sync: {e:?}"))?;
         self.gpu_logits
             .download(&stream, &mut self.logits_padded_cpu)?;
-        // Both tied and untied paths produce row-major [B, vocab_padded].
-        // Slice off padding per slot.
-        for bi in 0..self.batch {
-            let src = &self.logits_padded_cpu
-                [bi * self.vocab_size_padded..bi * self.vocab_size_padded + self.vocab_size];
-            let dst = &mut self.logits_cpu[bi * self.vocab_size..(bi + 1) * self.vocab_size];
-            dst.copy_from_slice(src);
+        // The logits rows are [B, vocab_padded]; drop the padding columns.
+        for (dst, src) in self
+            .logits_cpu
+            .chunks_mut(self.vocab_size)
+            .zip(self.logits_padded_cpu.chunks(vp))
+        {
+            dst.copy_from_slice(&src[..self.vocab_size]);
         }
         Ok(())
     }
 }
 
-/// Upload an f32 slice into a byte buffer at given element offset, converting to `dtype`.
-fn upload_f32_as_dtype(
-    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
-    dst: &GpuByteBuffer,
-    elem_offset: usize,
-    src: &[f32],
-    src_elems: usize,
-    dtype: WeightDtype,
-) -> Result<(), String> {
-    use crate::mamba_ssm::gpu::buffers::cu_memcpy_htod_raw;
-    assert_eq!(src.len(), src_elems, "src size mismatch");
-    let byte_off = elem_offset * dtype.size_bytes();
-    let byte_count = src_elems * dtype.size_bytes();
-    let dst_ptr = dst.cached_ptr() + byte_off as u64;
+/// The Mamba-1 language model of 0.7. [`MambaGpuLM`] serves every family
+/// and takes its place; this type forwards to one.
+pub struct GpuMambaLM {
+    lm: MambaGpuLM,
+    /// Vocabulary size, the number of valid token ids.
+    pub vocab_size: usize,
+    /// Backbone width (`d_model`).
+    pub d_model: usize,
+    /// Sequences generated side by side.
+    pub batch: usize,
+}
 
-    match dtype {
-        WeightDtype::F32 | WeightDtype::Tf32 => {
-            let bytes: &[u8] = bytemuck::cast_slice(src);
-            assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
-        }
-        WeightDtype::Bf16 => {
-            let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
-            let bytes: &[u8] = bytemuck::cast_slice(&buf);
-            assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
-        }
-        WeightDtype::F16 => {
-            let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
-            let bytes: &[u8] = bytemuck::cast_slice(&buf);
-            assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
-        }
+impl GpuMambaLM {
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf(dir, 1, GpuOptions::default().device(gpu_ordinal))`"
+    )]
+    pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
+        Self::load(dir, 1, GpuOptions::default().device(gpu_ordinal))
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).mode(mode)`"
+    )]
+    pub fn from_hf_with_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        Self::load(dir, 1, GpuOptions::default().device(gpu_ordinal).mode(mode))
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
+    )]
+    pub fn from_hf_with_dtype(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        Self::load(
+            dir,
+            1,
+            GpuOptions::default().device(gpu_ordinal).dtype(dtype),
+        )
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
+    )]
+    pub fn from_hf_with_dtype_and_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        let opts = GpuOptions::default()
+            .device(gpu_ordinal)
+            .dtype(dtype)
+            .mode(mode);
+        Self::load(dir, 1, opts)
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf(dir, batch, GpuOptions::default().device(gpu_ordinal).dtype(dtype))`"
+    )]
+    pub fn from_hf_with_dtype_batch(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        batch: usize,
+    ) -> Result<Self, String> {
+        Self::load(
+            dir,
+            batch,
+            GpuOptions::default().device(gpu_ordinal).dtype(dtype),
+        )
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaGpuLM::from_hf(dir, batch, GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode))`"
+    )]
+    pub fn from_hf_with_dtype_batch_and_mode(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        batch: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        let opts = GpuOptions::default()
+            .device(gpu_ordinal)
+            .dtype(dtype)
+            .mode(mode);
+        Self::load(dir, batch, opts)
+    }
+
+    fn load(dir: &Path, batch: usize, opts: GpuOptions) -> Result<Self, String> {
+        let lm = MambaGpuLM::from_hf(dir, batch, opts)?;
+        Ok(Self {
+            vocab_size: lm.vocab_size,
+            d_model: lm.d_model,
+            batch: lm.batch,
+            lm,
+        })
+    }
+
+    /// See [`MambaGpuLM::ctx`].
+    pub fn ctx(&self) -> &GpuCtx {
+        self.lm.ctx()
+    }
+
+    /// See [`MambaGpuLM::last_logits`].
+    pub fn last_logits(&self, b: usize) -> &[f32] {
+        self.lm.last_logits(b)
+    }
+
+    /// See [`MambaGpuLM::dtype`].
+    pub fn dtype(&self) -> WeightDtype {
+        self.lm.dtype()
+    }
+
+    /// See [`MambaGpuLM::capture_graph`].
+    pub fn capture_graph(&mut self) -> Result<(), String> {
+        self.lm.capture_graph()
+    }
+
+    /// See [`MambaGpuLM::reset`].
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.lm.reset()
+    }
+
+    /// See [`MambaGpuLM::generate`].
+    pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
+        self.lm.generate(prompt, params)
+    }
+
+    /// See [`MambaGpuLM::generate_streaming`].
+    pub fn generate_streaming(
+        &mut self,
+        prompt: &[u32],
+        params: &SampleParams,
+        cb: impl FnMut(u32, &str),
+    ) -> Result<(), String> {
+        self.lm.generate_streaming(prompt, params, cb)
+    }
+
+    /// See [`MambaGpuLM::generate_batch`].
+    pub fn generate_batch(
+        &mut self,
+        prompts: &[&[u32]],
+        params: &[SampleParams],
+    ) -> Result<Vec<Vec<u32>>, String> {
+        self.lm.generate_batch(prompts, params)
     }
 }
 
-/// Pad an untied lm_head from `[d_model, vocab]` row-major to
-/// `[d_model, vocab_padded]` row-major (trailing zeros per ROW).
+/// Pad an untied head from `[d_model, vocab]` row-major to
+/// `[d_model, vocab_padded]` row-major, with zeros at the end of every row.
 ///
-/// The logits GEMM reads the head with stride `vocab_padded`; a flat
-/// `copy_from_slice` interleaves source rows into wrong destination
-/// offsets and silently produces wrong logits for every vocab that is not
-/// already 64-aligned (e.g. 50280 -> 50304 on mamba-130m-hf). The Mamba-1
-/// LM fixed this first; the Mamba-3 LM shipped the flat copy until 0.6, and
-/// both architectures now share this one implementation.
+/// The logits GEMM reads the head at the padded row stride. A flat copy
+/// would shift every row after the first into the wrong columns and give
+/// wrong logits for any vocabulary that is not already a multiple of the
+/// padding (50280 against 50304 on mamba-130m-hf).
 pub(crate) fn pad_lm_head_rows(
     lm: &[f32],
     d_model: usize,
@@ -813,10 +762,11 @@ pub(crate) fn pad_lm_head_rows(
     vocab_size_padded: usize,
 ) -> Vec<f32> {
     let mut padded = vec![0.0f32; vocab_size_padded * d_model];
-    for row in 0..d_model {
-        let src = &lm[row * vocab_size..(row + 1) * vocab_size];
-        let dst = &mut padded[row * vocab_size_padded..row * vocab_size_padded + vocab_size];
-        dst.copy_from_slice(src);
+    for (dst, src) in padded
+        .chunks_mut(vocab_size_padded)
+        .zip(lm.chunks(vocab_size))
+    {
+        dst[..vocab_size].copy_from_slice(src);
     }
     padded
 }
@@ -825,9 +775,9 @@ pub(crate) fn pad_lm_head_rows(
 mod pad_tests {
     use super::pad_lm_head_rows;
 
-    /// Pin: padding is PER-ROW, never a flat copy. With d_model=2,
-    /// vocab=3, padded=4 the flat copy would smear row 1 across the row
-    /// boundary; the row pad keeps each row's values at its own stride.
+    /// Padding is per row, never a flat copy. With d_model=2, vocab=3,
+    /// padded=4 a flat copy would smear row 1 across the row boundary; the
+    /// row pad keeps each row's values at its own stride.
     #[test]
     fn pad_lm_head_rows_is_row_strided() {
         let lm = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
@@ -835,20 +785,22 @@ mod pad_tests {
         assert_eq!(got, vec![1.0, 2.0, 3.0, 0.0, 10.0, 20.0, 30.0, 0.0]);
         let mut flat = vec![0.0f32; 8];
         flat[..6].copy_from_slice(&lm);
-        assert_ne!(got, flat, "flat copy must differ - that was the M3 bug");
+        assert_ne!(
+            got, flat,
+            "a flat copy differs, the bug the Mamba-3 LM once shipped"
+        );
     }
 }
 
 #[cfg(test)]
 mod tied_head_capture_tests {
     use super::*;
-    use crate::mamba_ssm::gpu::context::GemmMode;
     use crate::mamba_ssm::weights::MambaWeights;
     use crate::{config::ScanMode, mamba_ssm::config::MambaConfig};
 
-    fn owned_lm(dtype: WeightDtype, tied: bool) -> GpuMambaLM {
+    fn owned_lm(dtype: WeightDtype, tied: bool) -> MambaGpuLM {
         const D_MODEL: usize = 16;
-        const VOCAB_PADDED: usize = 512;
+        const VOCAB: usize = 512;
         let cfg = MambaConfig {
             d_model: D_MODEL,
             d_state: 4,
@@ -869,40 +821,9 @@ mod tied_head_capture_tests {
             GpuOptions::default().dtype(dtype),
         )
         .unwrap();
-        let stream = backbone.stream().clone();
-        let embed_cpu = vec![0.125; VOCAB_PADDED * D_MODEL];
-        let embed_storage = if dtype == WeightDtype::F32 {
-            EmbedStorage::F32 {
-                embed: GpuBuffer::from_cpu(&stream, &embed_cpu).unwrap(),
-                lm_head: (!tied).then(|| GpuBuffer::from_cpu(&stream, &embed_cpu).unwrap()),
-            }
-        } else {
-            let upload = || {
-                let buffer =
-                    GpuByteBuffer::zeros(&stream, embed_cpu.len() * dtype.size_bytes()).unwrap();
-                upload_f32_as_dtype(&stream, &buffer, 0, &embed_cpu, embed_cpu.len(), dtype)
-                    .unwrap();
-                buffer
-            };
-            EmbedStorage::Half {
-                embed: upload(),
-                lm_head: (!tied).then(upload),
-                dtype,
-            }
-        };
-        GpuMambaLM {
-            backbone,
-            embed_storage,
-            embed_cpu,
-            input_cpu: vec![0.0; D_MODEL],
-            gpu_logits: GpuBuffer::zeros(&stream, VOCAB_PADDED).unwrap(),
-            logits_padded_cpu: vec![0.0; VOCAB_PADDED],
-            logits_cpu: vec![0.0; VOCAB_PADDED],
-            vocab_size: VOCAB_PADDED,
-            vocab_size_padded: VOCAB_PADDED,
-            d_model: D_MODEL,
-            batch: 1,
-        }
+        let embed = vec![0.125; VOCAB * D_MODEL];
+        let lm_head = (!tied).then(|| embed.clone());
+        MambaGpuLM::new(backbone, embed, lm_head, VOCAB).unwrap()
     }
 
     #[test]

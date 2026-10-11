@@ -25,8 +25,8 @@ use crate::mlp::GatedMlpLayerWeights;
 use super::pickle::TensorRef;
 use super::torch_zip::TorchBin;
 
-/// An official Mamba-3 checkpoint, ready for [`crate::module::MambaLM::from_mamba3`]
-/// or the GPU language models.
+/// An official Mamba-3 checkpoint, ready for [`crate::module::MambaLM::new`]
+/// or the GPU language model.
 pub struct HfMamba3Model {
     pub cfg: Mamba3Config,
     /// Layer weights with an empty (identity) input projection.

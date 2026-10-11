@@ -2,6 +2,64 @@
 
 ## 0.8.0 (unreleased)
 
+### Added
+
+- Mamba-2 (Dao and Gu, 2024) on the CPU and the GPU. The decode step, the
+  chunked state space dual and the sequential recurrence serve prompts,
+  and both paths train. The GPU stores the weights in f32, tf32, bf16 or
+  f16 and replays the decode step as one CUDA graph. The official
+  checkpoints in the `mamba_ssm` format load through `hf::load_mamba2`,
+  and `state-spaces/mamba2-130m` matches a float64 transcription of the
+  reference step (`tools/oracles/m2_oracle.py`) on the CPU and the GPU.
+- Mamba-3 MIMO on the CPU and the GPU, with the same paths: decode, the
+  chunked and the sequential scan, training, the four storage precisions
+  and the decode graph. The official MIMO checkpoints load through
+  `hf::load_mamba3::load_hf_mamba3_mimo`, and the 187m model matches a
+  float64 transcription of the reference.
+- The official Mamba-3 SISO checkpoints load and run: the bf16
+  `pytorch_model.bin` archives with their original-format `config.json`,
+  the gated MLP after every mixer (`Mamba3Config::d_intermediate`), and
+  headdim 64 on the GPU, which a block tier serves beside the warp tier.
+  The 187m model matches a float64 transcription of the reference on the
+  CPU and the GPU.
+- Every family is held to float64: a Mamba-1 oracle runs
+  `state-spaces/mamba-130m-hf` (`tools/oracles/m1_oracle.py`), and the
+  SISO backward is checked against float64 central differences.
+- One GPU surface for every family. Each GPU backbone has `step`,
+  `step_gpu_only`, `prefill`, `reset`, `capture_graph`, `has_graph`,
+  `temporal_ptr`, `temporal_dtype`, `download_temporal`, `batch`,
+  `input_dim`, `d_model`, `dtype`, `ctx` and `stream`. `prefill(input,
+  seq_len)` runs a prompt of host rows in one pass and continues from the
+  current state. The `GpuBackbone` trait names this surface, and
+  `AnyGpuBackbone` holds a backbone of a family chosen at run time.
+- Each GPU trainer has `step(input, d_temporal)`, `forward`,
+  `backward_step(d_temporal, opts)` with the global-norm clip, the skip of
+  a spiking window and gradient accumulation over micro-batches,
+  `reset_state`, `set_lr`, `lr`, `snapshot_master` and the shape
+  accessors. The `GpuTrainer` trait names this surface, and
+  `BackwardOpts`, `BackwardMetrics` and `StepMetrics` are exported at the
+  crate root. The Mamba-2 and MIMO trainers also keep `backward` with the
+  input gradient and `apply_adamw`, for a caller that trains something
+  upstream.
+- `MambaGpuLM` generates text on the GPU for every family.
+  `MambaGpuLM::from_hf(dir, batch, opts)` reads the family from the
+  checkpoint's `config.json`, and `MambaGpuLM::new(backbone, embed,
+  lm_head, vocab_size)` wraps a backbone built in code. `MambaLM::from_hf`
+  loads every family on the CPU, and `MambaLM::new` wraps a CPU backbone
+  of any family. `mamba-generate` runs every family, with `--gpu` too.
+- `ModelFamily` gains `Mamba3Mimo`, read from `ssm_cfg.is_mimo`, and
+  `hf::read_family(dir)` reads the family a checkpoint directory holds.
+- Safetensors checkpoints for Mamba-2 and MIMO, `mamba2::serialize` and
+  `mamba3_mimo::serialize`, with the whole configuration and the input
+  width in the metadata. Every family's serializer has `save(path,
+  weights, cfg, input_dim)` and `load(path)`.
+- CPU decode with packed projections: `pack_for_decode` on every CPU
+  backbone stores each projection in panels of 64 columns, so a decode
+  step streams the weights in order. Without a BLAS it gives the same bits
+  as the row-major product.
+- `benches/family_compare_bench.rs` runs the four families side by side
+  at one size.
+
 ### Changed
 
 - The GPU kernels compile as three modules instead of one: `Inference`
@@ -19,7 +77,7 @@
   `MAMBA_FIXED_*` qualification variables follow. `ModuleKind` gains
   `Mamba1` and `Shared`.
 - The Inference retained bundle and the Ada copy-plan routes no longer
-  depend on the state capacity; they are admitted at every capacity
+  depend on the state capacity. They are admitted at every capacity
   instead of only 16 and 64.
 - The GPU types of the four families follow one naming scheme, the family
   first and then `Gpu` and the role. The old names stay as deprecated
@@ -58,14 +116,64 @@
   first argument. The constructors `new_with_mode`, `new_with_dtype`,
   `new_with_dtype_and_mode`, `new_full` and `new_full_with_mode` of the
   Mamba-1 and SISO backbones and trainers stay as deprecated wrappers.
-  `GpuOptions` and `GemmMode` are exported at the crate root.
+- `GpuMambaLM` and `GpuMamba3LM` are fronts for `MambaGpuLM`, and their
+  constructors are deprecated. `generate` returns an error for an empty
+  prompt or a batch other than one, where the old models read stale rows
+  or panicked, and `generate_batch` returns an error when the prompts or
+  parameter sets do not match the batch.
+- The CPU backbones of the four families are built and driven the same
+  way: `new(weights, cfg, input_dim)` wraps loaded weights,
+  `forward_step(input, output, state, scratch)` runs one token and
+  `forward_sequence(inputs, outputs, state, scratch, seq_len)` a window,
+  with the state and scratch that `alloc_state` and `alloc_scratch` give.
+  Every backbone reports `config`, `weights`, `input_dim` and `d_model`.
+  `MambaBackbone::from_weights(cfg, weights)`, `from_weights_no_proj`,
+  `Mamba3Backbone::from_weights` and `MambaLM::from_mamba3` stay as
+  deprecated wrappers. The SISO `forward_step` used to take the scratch and
+  the layer states (`&mut scratch, &mut state.layers`). It now takes the
+  state and the scratch like the others, and the SISO backbone gains
+  `forward_sequence`.
+- The SISO serializer takes the shared names `save` and `load`.
+  `save_mamba3` and `load_mamba3_auto` stay as deprecated wrappers.
 - Mamba-1 keeps its configuration, weights, state and safetensors
   serializer in its own module, as the other families do:
   `mamba_rs::mamba_ssm::{config, weights, state, serialize}`. The crate
   root still re-exports `MambaConfig`, `MambaWeights`, `MambaLayerWeights`,
-  `MambaState` and `MambaLayerState`; the root modules `weights`, `state`
-  and `serialize` are gone, and `mamba_rs::config` holds only `ScanMode`,
-  which the families share.
+  `MambaState` and `MambaLayerState`. The root modules `weights`, `state`
+  and `serialize` are gone, and `mamba_rs::config` holds what the families
+  share: `ScanMode` and `ModelFamily`, which is now `#[non_exhaustive]`.
+- The crate root re-exports the configuration, weights and state of every
+  family, the four CPU backbones, `MambaLM` and `SampleParams`, and with
+  `cuda` `GpuOptions`, `GemmMode`, `WeightDtype`, `TrainSessionCfg`, the
+  backbone and trainer of every family, the two traits, `AnyGpuBackbone`
+  and `MambaGpuLM`.
+- `Mamba3Config::validate` holds the model envelope the reference accepts.
+  It refused any headdim above 32 or not a power of two, which are limits
+  of the GPU kernels, so the official checkpoints' headdim 64 could not be
+  built on the CPU. The GPU limits are checked where the GPU builds.
+- The CPU sums of SISO and MIMO and the SIMD exponential give one result
+  on every instruction set. They used the instruction set's horizontal
+  add and its own exponential polynomial, so NEON, AVX2 and AVX-512
+  machines disagreed. On some machines their bits differ from 0.7.5.
+
+### Fixed
+
+- A NaN in Mamba-3's `dd_A` reached the state as the finite decay
+  `-a_floor`, because the clamp returned its non-NaN operand. The NaN now
+  goes through, as the reference's `torch.clamp` lets it.
+- The bf16 and f16 decode of Mamba-1 and SISO models with their own input
+  projection panicked on the first step. It runs, and its graph captures.
+- The benchmarks that pick instruments by name ran nothing under a bare
+  `cargo bench`.
+- The library builds without warnings on Rust 1.99, which deprecates
+  `AtomicU64::fetch_update`.
+- A prompt longer than any before failed after a CUDA graph capture in
+  bf16 and f16, because the capture froze the staging buffers and the
+  prompt needed them larger. A call that outgrows them now runs on
+  buffers of its own, which no graph records, and the graph keeps its
+  addresses. `GpuCtx::half_staging_for(bytes)` hands
+  out such a span, and `ensure_half_staging` still refuses to grow a
+  frozen buffer.
 
 ## 0.7.5 (2026-09-23)
 

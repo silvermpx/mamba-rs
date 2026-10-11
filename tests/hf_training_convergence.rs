@@ -10,7 +10,7 @@
 //!    points toward a deterministic pattern.
 //! 4. Snapshots weights every 5 steps and asserts `||θ_t − θ_0||` grows
 //!    monotonically (training makes consistent progress, not oscillating).
-//! 5. Rebuilds `GpuMambaLM` in the SAME dtype and generates 5 tokens to
+//! 5. Rebuilds `MambaGpuLM` in the SAME dtype and generates 5 tokens to
 //!    prove the trained backbone still passes inference.
 //!
 //! f16 uses `lr = 1e-5` and a small gradient scale: the dynamic loss
@@ -29,10 +29,10 @@
 use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
+use mamba_rs::MambaGpuLM;
 use mamba_rs::hf::load::load_hf;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -295,7 +295,7 @@ fn run_convergence(dtype: WeightDtype) {
     drop(trainer);
 
     // Inference sanity check in the same dtype.
-    let mut lm_post = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype)
+    let mut lm_post = MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype))
         .unwrap_or_else(|e| panic!("[{label}] reload LM: {e}"));
     let prompt: &[u32] = &[1, 2, 3, 4, 5];
     let params = SampleParams {

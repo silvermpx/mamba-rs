@@ -52,15 +52,41 @@ impl MambaBackbone {
         }
     }
 
-    /// Create a backbone from pre-loaded weights.
+    /// Wrap loaded weights for input rows `input_dim` wide, after checking
+    /// every tensor against `cfg`. Weights without an input projection (an
+    /// empty `input_proj_w`, as the checkpoint loader gives) read rows
+    /// `d_model` wide unchanged, so `input_dim` is then `d_model`.
     ///
-    /// Validates dimensions against config. Returns `Err` on mismatch.
-    /// Recomputes `a_neg = -exp(a_log)` for every layer — inference reads
-    /// `a_neg` exclusively and `from_weights` must accept weight bundles
-    /// whose `a_neg` field may be stale (e.g. fresh-constructed, post
-    /// serialize/deserialize, or loaded from a non-HF source).
-    pub fn from_weights(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
+    /// Recomputes `a_neg = -exp(a_log)` for every layer: inference reads
+    /// `a_neg` alone, and loaded weights may carry a stale one.
+    pub fn new(weights: MambaWeights, cfg: MambaConfig, input_dim: usize) -> Result<Self, String> {
+        if weights.input_proj_w.is_empty() {
+            if input_dim != cfg.d_model {
+                return Err(format!(
+                    "weights without an input projection read rows d_model ({}) wide, \
+                     not {input_dim}",
+                    cfg.d_model
+                ));
+            }
+            return Self::without_projection(cfg, weights);
+        }
+        Self::with_projection(cfg, weights, input_dim)
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaBackbone::new(weights, cfg, input_dim)`"
+    )]
+    pub fn from_weights(cfg: MambaConfig, weights: MambaWeights) -> Result<Self, String> {
         let input_dim = weights.input_proj_w.len() / cfg.d_model;
+        Self::with_projection(cfg, weights, input_dim)
+    }
+
+    fn with_projection(
+        cfg: MambaConfig,
+        mut weights: MambaWeights,
+        input_dim: usize,
+    ) -> Result<Self, String> {
         weights.validate(&cfg, input_dim)?;
         for lw in &mut weights.layers {
             lw.compute_a_neg();
@@ -74,16 +100,19 @@ impl MambaBackbone {
         })
     }
 
-    /// Create a backbone from HF weights that have no input_proj.
-    ///
-    /// Skips the standard `validate()` (which rejects empty `input_proj_w`).
-    /// Performs targeted layer-weight validation and calls `compute_a_neg()`
-    /// on every layer (critical — SSM reads `a_neg`, never `a_log` at inference time).
     #[cfg(feature = "hf")]
-    pub fn from_weights_no_proj(
-        cfg: MambaConfig,
-        mut weights: MambaWeights,
-    ) -> Result<Self, String> {
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `MambaBackbone::new(weights, cfg, cfg.d_model)`"
+    )]
+    pub fn from_weights_no_proj(cfg: MambaConfig, weights: MambaWeights) -> Result<Self, String> {
+        Self::without_projection(cfg, weights)
+    }
+
+    /// Weights without an input projection. The checks of `validate()`
+    /// except the projection's, which it requires, and the `a_neg`
+    /// refresh the SSM reads.
+    fn without_projection(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
         if weights.layers.len() != cfg.n_layers {
             return Err(format!(
                 "expected {} layers, got {}",
@@ -200,6 +229,11 @@ impl MambaBackbone {
     /// External input dimension.
     pub fn input_dim(&self) -> usize {
         self.input_dim
+    }
+
+    /// Width of an output row.
+    pub fn d_model(&self) -> usize {
+        self.cfg.d_model
     }
 
     /// Single-step recurrent forward through the full backbone.

@@ -165,7 +165,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         norm_f_weight,
     };
 
-    let backbone = MambaBackbone::from_weights_no_proj(mamba_cfg, weights)?;
+    let backbone = MambaBackbone::new(weights, mamba_cfg, mamba_cfg.d_model)?;
 
     Ok(HfModel {
         backbone,

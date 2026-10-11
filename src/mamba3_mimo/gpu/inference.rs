@@ -66,6 +66,16 @@ pub struct Mamba3MimoGpuState {
     pub angle: GpuBuffer,
 }
 
+impl Mamba3MimoGpuState {
+    /// Zero every layer's state, the start of a new sequence.
+    pub fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
+        self.ssm.zero(&ctx.stream)?;
+        self.k.zero(&ctx.stream)?;
+        self.v.zero(&ctx.stream)?;
+        self.angle.zero(&ctx.stream)
+    }
+}
+
 /// Buffers for windows of one length (a decode step is a window of one).
 pub struct Mamba3MimoGpuWindow {
     seq_len: usize,
@@ -91,6 +101,19 @@ pub struct Mamba3MimoGpuWindow {
     e0: GpuBuffer,
     contrib: GpuBuffer,
     enter: GpuBuffer,
+}
+
+impl Mamba3MimoGpuWindow {
+    /// The tokens a run of this window covers per sequence.
+    pub fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    /// Every position's final-norm row of the last run, f32
+    /// `[batch, seq_len, d_model]`, on the device.
+    pub fn final_rows(&self) -> &GpuBuffer {
+        &self.final_rows
+    }
 }
 
 /// The MIMO decode and prefill engine.
@@ -396,8 +419,30 @@ impl Mamba3MimoGpuEngine {
         win: &mut Mamba3MimoGpuWindow,
     ) -> Result<(), String> {
         let rows = self.batch * win.seq_len;
-        Self::check_host_len("input", input.len(), rows * self.input_dim)?;
         Self::check_host_len("output", rows_out.len(), rows * self.cfg.d_model)?;
+        self.run_gpu_only(input, state, win)?;
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("MIMO sync: {e:?}"))?;
+        win.final_rows.download(&self.ctx.stream, rows_out)?;
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("MIMO sync: {e:?}"))
+    }
+
+    /// [`Self::run`] without the download: every position's final-norm
+    /// row stays in [`Mamba3MimoGpuWindow::final_rows`] on the stream, for a
+    /// consumer on the GPU such as a language-model head.
+    pub fn run_gpu_only(
+        &self,
+        input: &[f32],
+        state: &mut Mamba3MimoGpuState,
+        win: &mut Mamba3MimoGpuWindow,
+    ) -> Result<(), String> {
+        let rows = self.batch * win.seq_len;
+        Self::check_host_len("input", input.len(), rows * self.input_dim)?;
         Self::check_host_len(
             "window buffers",
             win.input.len(),
@@ -420,15 +465,42 @@ impl Mamba3MimoGpuEngine {
                 self.eager_gemm_manifest.set(Some(manifest));
             }
         }
-        self.ctx
+        Ok(())
+    }
+
+    /// Copy each sequence's last row of `from`'s final rows into `to`'s
+    /// first row slots: the prompt's last position of a prefill window,
+    /// placed where a decode step's window leaves its output.
+    pub fn gather_last_rows(
+        &self,
+        from: &Mamba3MimoGpuWindow,
+        to: &mut Mamba3MimoGpuWindow,
+    ) -> Result<(), String> {
+        if from.seq_len == 0 || self.batch == 0 {
+            return Ok(());
+        }
+        Self::check_host_len(
+            "last-row window",
+            to.final_rows.len(),
+            self.batch * self.cfg.d_model,
+        )?;
+        let (b, t, dm) = (
+            self.batch as i32,
+            from.seq_len as i32,
+            self.cfg.d_model as i32,
+        );
+        let mut bld = self
+            .ctx
             .stream
-            .synchronize()
-            .map_err(|e| format!("MIMO sync: {e:?}"))?;
-        win.final_rows.download(&self.ctx.stream, rows_out)?;
-        self.ctx
-            .stream
-            .synchronize()
-            .map_err(|e| format!("MIMO sync: {e:?}"))
+            .launch_builder(&self.ctx.kernels.gather_last_timestep);
+        bld.arg(to.final_rows.inner_mut());
+        bld.arg(from.final_rows.inner());
+        bld.arg(&b);
+        bld.arg(&t);
+        bld.arg(&dm);
+        unsafe { bld.launch(grid_1d(self.batch * self.cfg.d_model)) }
+            .map_err(|e| format!("MIMO last rows: {e:?}"))?;
+        Ok(())
     }
 
     /// Whether a window runs any GEMM: the input projection or a layer.

@@ -288,8 +288,11 @@ fn m3_f16_training_graph_rejects_half_staging_growth_before_replay() {
     assert!(metrics.graph_replayed);
 }
 
+/// A GEMM larger than any the captured graph saw runs eagerly on overflow
+/// scratch; the graph-visible slots keep their addresses, which the replay
+/// below checks before it runs.
 #[test]
-fn m3_f16_training_graph_rejects_bi_upcast_growth_before_replay() {
+fn m3_f16_training_graph_keeps_its_scratch_when_a_larger_gemm_runs() {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(WeightDtype::F16);
     let (m, k, n) = (128, 257, 131);
     let gemm_input = DtypedBuf::zeros(&trainer.ctx().stream, m * k, WeightDtype::F16)
@@ -299,7 +302,7 @@ fn m3_f16_training_graph_rejects_bi_upcast_growth_before_replay() {
     let output = DtypedBuf::zeros(&trainer.ctx().stream, m * n, WeightDtype::F16)
         .expect("allocate GEMM output");
 
-    let error = gpu_gemm_typed_forward_raw(
+    gpu_gemm_typed_forward_raw(
         trainer.ctx(),
         TypedPtr {
             ptr: output.cached_ptr(),
@@ -314,13 +317,9 @@ fn m3_f16_training_graph_rejects_bi_upcast_growth_before_replay() {
             dtype: WeightDtype::F16,
         },
         None,
-        (128, 257, 131),
+        (m, k, n),
     )
-    .expect_err("a captured graph freezes BI upcast scratch");
-    assert!(
-        error.contains("batch-invariant upcast scratch cannot grow"),
-        "unexpected error: {error}"
-    );
+    .expect("a larger GEMM after the capture runs on overflow scratch");
     let metrics = trainer
         .step(&input, &d_temporal)
         .expect("the original graph remains replayable");

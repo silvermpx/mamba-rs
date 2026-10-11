@@ -1,12 +1,12 @@
-//! GpuMamba3LM smoke tests — synthetic weights (no HF M3 checkpoint exists).
+//! MambaGpuLM smoke tests — synthetic weights (no HF M3 checkpoint exists).
 
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::module::gpu_lm3::GpuMamba3LM;
 use mamba_rs::module::sample::SampleParams;
+use mamba_rs::{GpuOptions, Mamba3GpuBackbone, MambaGpuLM};
 
 fn small_m3_cfg() -> Mamba3Config {
     Mamba3Config {
@@ -23,7 +23,7 @@ fn small_m3_cfg() -> Mamba3Config {
     }
 }
 
-fn build_synthetic_lm(dtype: WeightDtype, vocab_size: usize) -> GpuMamba3LM {
+fn build_synthetic_lm(dtype: WeightDtype, vocab_size: usize) -> MambaGpuLM {
     let cfg = small_m3_cfg();
     let input_dim = cfg.d_model;
     let mut weights = Mamba3Weights::init(&cfg, input_dim, 0xDEADBEEF);
@@ -43,7 +43,15 @@ fn build_synthetic_lm(dtype: WeightDtype, vocab_size: usize) -> GpuMamba3LM {
         seed ^= seed << 17;
         *v = (((seed & 0xFFFFFF) as f32 / 16777216.0) - 0.5) * 0.1;
     }
-    GpuMamba3LM::from_weights_with_dtype(&weights, cfg, embed, None, vocab_size, 0, dtype).unwrap()
+    Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        1,
+        GpuOptions::default().dtype(dtype),
+    )
+    .and_then(|backbone| MambaGpuLM::new(backbone, embed, None, vocab_size))
+    .unwrap()
 }
 
 #[test]

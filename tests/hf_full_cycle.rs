@@ -7,12 +7,12 @@
 //! the machinery matters.
 //!
 //! For each dtype (f32, bf16, f16):
-//!   1. Load `state-spaces/mamba-130m-hf` via `GpuMambaLM`.
+//!   1. Load `state-spaces/mamba-130m-hf` via `MambaGpuLM`.
 //!   2. Run greedy generation → record `tokens_before`, save last logits.
 //!   3. Build a `MambaGpuTrainer` from the same backbone weights.
 //!   4. Train 20 steps with a fixed deterministic gradient signal.
 //!   5. Cross-load the trained master weights back into a fresh
-//!      `GpuMambaLM` (via snapshot + rebuild) and generate again.
+//!      `MambaGpuLM` (via snapshot + rebuild) and generate again.
 //!   6. Assert:
 //!      - `tokens_after.len() == 5`, all valid vocab indices
 //!      - logits moved perceptibly (mean-abs-diff > 1e-4) — training
@@ -31,10 +31,10 @@
 use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
+use mamba_rs::MambaGpuLM;
 use mamba_rs::hf::load::load_hf;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -105,7 +105,8 @@ fn run_full_cycle(dtype: WeightDtype) {
     };
 
     // ========== PHASE 1: baseline inference ==========
-    let mut lm_before = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype).expect("load baseline");
+    let mut lm_before =
+        MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("load baseline");
     let tokens_before = lm_before
         .generate(prompt, &params)
         .expect("baseline generate");
@@ -186,12 +187,13 @@ fn run_full_cycle(dtype: WeightDtype) {
     drop(trainer);
 
     // ========== PHASE 3: post-training inference ==========
-    // NOTE: we cannot inject trained weights back into GpuMambaLM without
+    // NOTE: we cannot inject trained weights back into MambaGpuLM without
     // a weight-loading API. Instead, re-load from disk and assert that
     // the inference pipeline still works (post-training bits are tested
     // in hf_training_convergence.rs via generate()). This test's unique
     // contribution is the END-TO-END logits comparison baseline.
-    let mut lm_after = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype).expect("reload after");
+    let mut lm_after =
+        MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("reload after");
     let tokens_after = lm_after.generate(prompt, &params).expect("post generate");
     let logits_after: Vec<f32> = lm_after.last_logits(0).to_vec();
 

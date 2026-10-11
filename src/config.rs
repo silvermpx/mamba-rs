@@ -1,5 +1,20 @@
-//! Configuration shared by the model families: the scan mode of the
-//! GPU recurrence.
+//! Configuration shared by the model families: the family itself and the
+//! scan mode of the GPU recurrence.
+
+/// The model families this crate runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ModelFamily {
+    /// Mamba (Gu and Dao, 2023), the selective scan.
+    Mamba1,
+    /// Mamba-2 (Dao and Gu, 2024), the state space duality.
+    Mamba2,
+    /// Mamba-3 SISO (Lahoti et al., 2026), one input and one output channel
+    /// per head.
+    Mamba3,
+    /// Mamba-3 MIMO, a rank of input and output channels per head.
+    Mamba3Mimo,
+}
 
 /// Scan mode for GPU SSM recurrence.
 ///

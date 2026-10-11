@@ -127,7 +127,7 @@ fn main() {
     // =====================================================================
     let (loaded_w, loaded_cfg, loaded_input_dim) =
         mamba_rs::mamba_ssm::serialize::load(Path::new(&save_path)).expect("load failed");
-    let bb = MambaBackbone::from_weights(loaded_cfg, loaded_w).expect("from_weights failed");
+    let bb = MambaBackbone::new(loaded_w, loaded_cfg, loaded_input_dim).expect("load failed");
     assert_eq!(bb.input_dim(), loaded_input_dim);
     println!(
         "Loaded: d_model={}, layers={}, params={}",

@@ -8,7 +8,7 @@
 //!    launches inside the captured body (e.g. race on a shared
 //!    atomicAdd target, non-deterministic reduction order).
 //!
-//! 2. **Long-sequence inference stability** — drive `GpuMambaLM` through
+//! 2. **Long-sequence inference stability** — drive `MambaGpuLM` through
 //!    256 tokens and verify no NaN / Inf and logit norms stay bounded.
 //!    Mamba's SSM recurrence can drift over long sequences if the decay
 //!    math is slightly off; this is the canary.
@@ -345,8 +345,8 @@ fn graph_determinism_f16() {
 #[cfg(feature = "hf")]
 mod hf_stability {
     use super::*;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
     use std::path::PathBuf;
 
     fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -391,7 +391,8 @@ mod hf_stability {
             }
         };
 
-        let mut lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype).expect("load LM");
+        let mut lm =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(dtype)).expect("load LM");
         let prompt: &[u32] = &[1, 2, 3, 4, 5];
         let params = SampleParams {
             temperature: 0.0,

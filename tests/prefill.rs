@@ -173,10 +173,10 @@ fn prefill_parallel_bit_equals_single() {
 #[test]
 fn prefill_then_decode_handoff() {
     let cfg = test_cfg();
-    let input_dim = cfg.d_model; // backbone from_weights derives input_dim
+    let input_dim = cfg.d_model;
     let seq_len = 8usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
-    let backbone = MambaBackbone::from_weights(cfg, w.clone()).expect("backbone");
+    let backbone = MambaBackbone::new(w.clone(), cfg, input_dim).expect("backbone");
     let inputs = det((seq_len + 1) * input_dim, 0xAC, 0.05);
 
     // Reference: the pure step loop over T+1 tokens.

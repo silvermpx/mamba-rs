@@ -12,7 +12,7 @@ use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::cpu::inference::{
     Mamba3PackedLinears, Mamba3StepScratch, mamba3_step, mamba3_step_packed,
 };
-use crate::mamba3_siso::state::{Mamba3LayerState, Mamba3State};
+use crate::mamba3_siso::state::Mamba3State;
 use crate::mamba3_siso::weights::Mamba3Weights;
 
 /// Mamba-3 SISO backbone for CPU inference. Holds the full set of
@@ -21,14 +21,16 @@ use crate::mamba3_siso::weights::Mamba3Weights;
 /// concurrently against shared weights.
 ///
 /// For GPU inference see `crate::mamba3_siso::gpu::Mamba3GpuBackbone`;
-/// for LM-style generation with sampling see
-/// `crate::module::gpu_lm3::GpuMamba3LM` (feature `cuda` + `hf`).
+/// for text generation see `crate::module::lm::MambaLM` (feature `hf`)
+/// and `crate::module::gpu_lm::MambaGpuLM` (features `cuda` and `hf`).
 pub struct Mamba3Backbone {
     weights: Mamba3Weights,
     cfg: Mamba3Config,
     /// The projections packed for decode by [`Self::pack_for_decode`]; the
     /// weights never change after construction, so the copy stays current.
     packed: Option<Mamba3PackedLinears>,
+    /// Width of an input row.
+    input_dim: usize,
 }
 
 impl Mamba3Backbone {
@@ -41,15 +43,16 @@ impl Mamba3Backbone {
             weights,
             cfg,
             packed: None,
+            input_dim,
         }
     }
 
-    /// Wrap pre-loaded weights — e.g. from
-    /// [`crate::mamba3_siso::serialize::load_mamba3`] or a trainer's
-    /// `snapshot_master`. Validates every tensor length against `cfg`
-    /// before accepting, so undersized checkpoints are rejected here
-    /// rather than panicking mid-inference.
-    pub fn from_weights(
+    /// Wrap loaded weights for input rows `input_dim` wide, from a
+    /// checkpoint ([`crate::mamba3_siso::serialize::load_mamba3`]) or a
+    /// trainer's `snapshot_master`. Every tensor length is checked against
+    /// `cfg` first, so an undersized checkpoint is refused here instead of
+    /// failing mid-inference.
+    pub fn new(
         weights: Mamba3Weights,
         cfg: Mamba3Config,
         input_dim: usize,
@@ -59,7 +62,20 @@ impl Mamba3Backbone {
             weights,
             cfg,
             packed: None,
+            input_dim,
         })
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `Mamba3Backbone::new(weights, cfg, input_dim)`"
+    )]
+    pub fn from_weights(
+        weights: Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+    ) -> Result<Self, String> {
+        Self::new(weights, cfg, input_dim)
     }
 
     /// Borrow the weight bundle (e.g. for serialization).
@@ -72,7 +88,12 @@ impl Mamba3Backbone {
         &self.cfg
     }
 
-    /// Backbone hidden width (`d_model` in the paper).
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Width of an output row.
     pub fn d_model(&self) -> usize {
         self.cfg.d_model
     }
@@ -94,26 +115,42 @@ impl Mamba3Backbone {
         self.packed.is_some()
     }
 
-    /// Single-step (T=1) forward. Reads `input[..d_model]`, writes
-    /// `temporal[..d_model]`, advances each layer's recurrent state in
-    /// `states` in place. `scratch` is reusable across calls.
+    /// One token: reads `input` (`input_dim` wide), writes `output`
+    /// (`d_model` wide) and advances every layer's state.
     pub fn forward_step(
         &self,
         input: &[f32],
-        temporal: &mut [f32],
+        output: &mut [f32],
+        state: &mut Mamba3State,
         scratch: &mut Mamba3StepScratch,
-        states: &mut [Mamba3LayerState],
     ) {
+        let states = &mut state.layers;
         match &self.packed {
             Some(p) => mamba3_step_packed(
-                temporal,
+                output,
                 input,
                 scratch,
                 (&self.weights, p),
                 states,
                 &self.cfg,
             ),
-            None => mamba3_step(temporal, input, scratch, &self.weights, states, &self.cfg),
+            None => mamba3_step(output, input, scratch, &self.weights, states, &self.cfg),
+        }
+    }
+
+    /// `seq_len` tokens in a row, every one through [`Self::forward_step`]:
+    /// `inputs` is `[seq_len, input_dim]`, `outputs` `[seq_len, d_model]`.
+    pub fn forward_sequence(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut Mamba3State,
+        scratch: &mut Mamba3StepScratch,
+        seq_len: usize,
+    ) {
+        let (din, dm) = (self.input_dim, self.cfg.d_model);
+        for (x, y) in inputs.chunks(din).zip(outputs.chunks_mut(dm)).take(seq_len) {
+            self.forward_step(x, y, state, scratch);
         }
     }
 
@@ -174,8 +211,8 @@ mod tests {
         let (mut o0, mut o1) = (vec![0f32; cfg.d_model], vec![0f32; cfg.d_model]);
         for t in 0..12u64 {
             let x = det(input_dim, 100 + t);
-            plain.forward_step(&x, &mut o0, &mut c0, &mut s0.layers);
-            packed.forward_step(&x, &mut o1, &mut c1, &mut s1.layers);
+            plain.forward_step(&x, &mut o0, &mut s0, &mut c0);
+            packed.forward_step(&x, &mut o1, &mut s1, &mut c1);
             if NO_BLAS {
                 assert_eq!(o0, o1, "step {t}");
             }

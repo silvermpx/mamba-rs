@@ -125,8 +125,8 @@ use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 use crate::mamba_ssm::weights::MambaWeights;
 
-/// Training-session hyperparameters shared by the M1 and M3 trainer
-/// constructors: tensor shape fixed at construction + AdamW hyperparams.
+/// The session every family's GPU trainer is built for: the window shape,
+/// fixed at construction, and the AdamW settings.
 #[derive(Clone, Copy, Debug)]
 pub struct TrainSessionCfg {
     /// Input feature dimension fed to the backbone.
@@ -144,9 +144,8 @@ pub struct TrainSessionCfg {
 
 impl TrainSessionCfg {
     /// Session settings with the default optimizer: AdamW at learning
-    /// rate 1e-3 and weight decay 1e-2, the values the `new_with_dtype`
-    /// constructors use. Pass the result to `new_full_with_mode` to pick
-    /// the GEMM mode explicitly without spelling out the optimizer.
+    /// rate 1e-3 and weight decay 1e-2. Struct update syntax changes them:
+    /// `TrainSessionCfg { lr: 3e-4, ..TrainSessionCfg::new(d, b, t) }`.
     pub fn new(input_dim: usize, batch: usize, seq_len: usize) -> Self {
         Self {
             input_dim,
@@ -295,6 +294,8 @@ enum TrainerInner {
 /// per operation, dtype dispatch happens internally on the private enum.
 pub struct MambaGpuTrainer {
     inner: TrainerInner,
+    /// Width of an input row, from the session.
+    input_dim: usize,
 }
 
 impl MambaGpuTrainer {
@@ -401,7 +402,10 @@ impl MambaGpuTrainer {
                 MambaTrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype, mode)?,
             )),
         };
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            input_dim: session.input_dim,
+        })
     }
 
     /// Weight storage dtype the trainer was constructed with.
@@ -427,6 +431,24 @@ impl MambaGpuTrainer {
             TrainerInner::F32(t) => t.seq_len,
             TrainerInner::Mixed(t) => t.seq_len,
         }
+    }
+
+    /// The model's configuration.
+    pub fn config(&self) -> &MambaConfig {
+        match &self.inner {
+            TrainerInner::F32(t) => &t.cfg,
+            TrainerInner::Mixed(t) => &t.cfg,
+        }
+    }
+
+    /// Width of an input row.
+    pub fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Width of the model, the rows `forward` writes.
+    pub fn d_model(&self) -> usize {
+        self.config().d_model
     }
 
     /// Access the trainer's GPU execution context.

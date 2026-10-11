@@ -29,8 +29,9 @@ fn view<'a>(data: &'a [f32], shape: &[usize]) -> TensorView<'a> {
     )
 }
 
-/// Save Mamba-3 SISO weights to safetensors.
-pub fn save_mamba3(
+/// Save the weights, the configuration and the input width to a
+/// safetensors file.
+pub fn save(
     path: &Path,
     weights: &Mamba3Weights,
     cfg: &Mamba3Config,
@@ -237,15 +238,24 @@ pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, us
     Ok((w, input_dim))
 }
 
-/// Load a SELF-DESCRIBING Mamba-3 checkpoint: the full `Mamba3Config` is
-/// reconstructed from file metadata — the caller supplies nothing and cannot
-/// mis-describe the model. Mirrors the Mamba-1 `serialize::load` contract.
+#[deprecated(since = "0.8.0", note = "use `serialize::save`")]
+pub fn save_mamba3(
+    path: &Path,
+    weights: &Mamba3Weights,
+    cfg: &Mamba3Config,
+    input_dim: usize,
+) -> Result<(), String> {
+    save(path, weights, cfg, input_dim)
+}
+
+/// Load a checkpoint [`save`] wrote: the weights, the configuration read
+/// from the file's metadata, and the input width. The caller supplies
+/// nothing, so it cannot describe the model wrongly.
 ///
-/// Back-compat: checkpoints written before 0.6 lack `is_outproj_norm`,
-/// `rms_norm_eps` and `scan_mode`; they load with the defaults that were
-/// hardcoded at the time they were written (false / 1e-5 / Auto), which is
-/// exactly the model they trained as.
-pub fn load_mamba3_auto(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
+/// Checkpoints written before 0.6 lack `is_outproj_norm`, `rms_norm_eps`
+/// and `scan_mode`; they load with the values those versions fixed
+/// (false, 1e-5 and Auto), the model they trained as.
+pub fn load(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
     let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
     let (_, header) = SafeTensors::read_metadata(&data).map_err(|e| format!("metadata: {e}"))?;
     let meta_map = header.metadata().as_ref().ok_or("no metadata")?;
@@ -310,6 +320,11 @@ pub fn load_mamba3_auto(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usi
     Ok((w, cfg, input_dim))
 }
 
+#[deprecated(since = "0.8.0", note = "use `serialize::load`")]
+pub fn load_mamba3_auto(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
+    load(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,7 +334,7 @@ mod tests {
         let cfg = Mamba3Config::default();
         let w = Mamba3Weights::init(&cfg, 128, 42);
         let tmp = std::env::temp_dir().join("mamba3_test.safetensors");
-        save_mamba3(&tmp, &w, &cfg, 128).unwrap();
+        save(&tmp, &w, &cfg, 128).unwrap();
         let (w2, input_dim) = load_mamba3(&tmp, &cfg).unwrap();
         assert_eq!(input_dim, 128);
         assert_eq!(w.layers[0].dt_bias, w2.layers[0].dt_bias);
@@ -342,9 +357,9 @@ mod tests {
         };
         let w = Mamba3Weights::init(&cfg, 64, 7);
         let tmp = std::env::temp_dir().join("mamba3_test_g4.safetensors");
-        save_mamba3(&tmp, &w, &cfg, 64).unwrap();
+        save(&tmp, &w, &cfg, 64).unwrap();
 
-        let (w2, cfg2, input_dim) = load_mamba3_auto(&tmp).unwrap();
+        let (w2, cfg2, input_dim) = load(&tmp).unwrap();
         assert_eq!(cfg2, cfg, "metadata round-trip must restore the config");
         assert_eq!(input_dim, 64);
         assert_eq!(w.layers[0].dt_bias, w2.layers[0].dt_bias);
@@ -378,9 +393,9 @@ mod tests {
         let w = Mamba3Weights::init(&cfg, 64, 11);
         assert_eq!(w.mlp.len(), cfg.n_layers);
         let tmp = std::env::temp_dir().join("mamba3_test_mlp.safetensors");
-        save_mamba3(&tmp, &w, &cfg, 64).unwrap();
+        save(&tmp, &w, &cfg, 64).unwrap();
 
-        let (w2, cfg2, _) = load_mamba3_auto(&tmp).unwrap();
+        let (w2, cfg2, _) = load(&tmp).unwrap();
         assert_eq!(cfg2, cfg);
         for (a, b) in w.mlp.iter().zip(&w2.mlp) {
             assert_eq!(a.norm_weight, b.norm_weight);

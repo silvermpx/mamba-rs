@@ -80,12 +80,14 @@ fn test_gpu_lm_bf16_matches_f32_130m() {
         }
     };
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
 
     // Load two LMs: f32 reference + bf16 native.
-    let mut lm_f32 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::F32).unwrap();
-    let mut lm_bf16 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16).unwrap();
+    let mut lm_f32 =
+        MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::F32)).unwrap();
+    let mut lm_bf16 =
+        MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16)).unwrap();
 
     let prompt: &[u32] = &[1, 2, 3, 4, 5];
     let params = SampleParams {
@@ -146,8 +148,8 @@ fn test_gpu_lm_bf16_matches_f32_130m() {
 #[ignore]
 fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
+    use mamba_rs::{GpuOptions, MambaGpuLM};
 
     let candidates = [
         "mamba-130m-hf",
@@ -170,10 +172,12 @@ fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
         tested += 1;
         eprintln!("\n=== {name} ===");
 
-        let mut lm_f32 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::F32)
-            .unwrap_or_else(|e| panic!("{name} f32 load: {e}"));
-        let mut lm_bf16 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16)
-            .unwrap_or_else(|e| panic!("{name} bf16 load: {e}"));
+        let mut lm_f32 =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::F32))
+                .unwrap_or_else(|e| panic!("{name} f32 load: {e}"));
+        let mut lm_bf16 =
+            MambaGpuLM::from_hf(&dir, 1, GpuOptions::default().dtype(WeightDtype::Bf16))
+                .unwrap_or_else(|e| panic!("{name} bf16 load: {e}"));
 
         let tokens_f32 = lm_f32.generate(&[1, 2, 3, 4, 5], &params).unwrap();
         let tokens_bf16 = lm_bf16.generate(&[1, 2, 3, 4, 5], &params).unwrap();

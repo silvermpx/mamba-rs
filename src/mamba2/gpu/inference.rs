@@ -634,6 +634,7 @@ pub struct Mamba2GpuState {
 }
 
 impl Mamba2GpuState {
+    /// Zero every layer's state, the start of a new sequence.
     pub fn reset(&mut self, ctx: &GpuCtx) -> Result<(), String> {
         self.conv.zero(&ctx.stream)?;
         self.ssm.zero(&ctx.stream)
@@ -653,6 +654,15 @@ pub struct Mamba2GpuScratch {
     out: DtypedBuf,
     /// The final-norm rows, f32.
     final_out: GpuBuffer,
+}
+
+impl Mamba2GpuScratch {
+    /// The final-norm rows of the last step, or of the last prompt position
+    /// [`Mamba2GpuEngine::prefill_gpu_only`] placed here, f32
+    /// `[batch, d_model]`, on the device.
+    pub fn final_rows(&self) -> &GpuBuffer {
+        &self.final_out
+    }
 }
 
 /// The Mamba-2 decode and prefill engine.
@@ -872,9 +882,30 @@ impl Mamba2GpuEngine {
         state: &mut Mamba2GpuState,
         scratch: &mut Mamba2GpuScratch,
     ) -> Result<(), String> {
+        Self::check_host_len("step output", output.len(), self.batch * self.cfg.d_model)?;
+        self.step_gpu_only(input, state, scratch)?;
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("Mamba-2 step sync: {e:?}"))?;
+        scratch.final_out.download(&self.ctx.stream, output)?;
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("Mamba-2 step sync: {e:?}"))
+    }
+
+    /// [`Self::step`] without the download: the final-norm rows stay in
+    /// [`Mamba2GpuScratch::final_rows`] on the stream, for a consumer on the
+    /// GPU such as a language-model head.
+    pub fn step_gpu_only(
+        &self,
+        input: &[f32],
+        state: &mut Mamba2GpuState,
+        scratch: &mut Mamba2GpuScratch,
+    ) -> Result<(), String> {
         let b = self.batch;
         Self::check_host_len("step input", input.len(), b * self.input_dim)?;
-        Self::check_host_len("step output", output.len(), b * self.cfg.d_model)?;
         Self::check_host_len("step scratch", scratch.input.len(), b * self.input_dim)?;
         self.check_state(state)?;
         self.eager_gemm_manifest.set(None);
@@ -891,15 +922,7 @@ impl Mamba2GpuEngine {
                 self.eager_gemm_manifest.set(Some(manifest));
             }
         }
-        self.ctx
-            .stream
-            .synchronize()
-            .map_err(|e| format!("Mamba-2 step sync: {e:?}"))?;
-        scratch.final_out.download(&self.ctx.stream, output)?;
-        self.ctx
-            .stream
-            .synchronize()
-            .map_err(|e| format!("Mamba-2 step sync: {e:?}"))
+        Ok(())
     }
 
     /// Whether the step runs any GEMM: the input projection or a layer.
@@ -1179,6 +1202,50 @@ impl Mamba2GpuEngine {
         })
     }
 
+    /// [`Self::prefill`] without the download: every position's row stays
+    /// in [`Mamba2GpuPrefill::final_rows`], and each sequence's last row
+    /// lands in `scratch`'s final rows, where a decode step leaves its
+    /// output, so a consumer on the GPU reads the prompt's last position as
+    /// it reads a step's.
+    pub fn prefill_gpu_only(
+        &self,
+        input: &[f32],
+        state: &mut Mamba2GpuState,
+        pf: &mut Mamba2GpuPrefill,
+        scratch: &mut Mamba2GpuScratch,
+    ) -> Result<(), String> {
+        let rows = self.batch * pf.seq_len;
+        Self::check_host_len("prefill input", input.len(), rows * self.input_dim)?;
+        Self::check_host_len(
+            "prefill buffers",
+            pf.input.len(),
+            (rows * self.input_dim).max(1),
+        )?;
+        self.check_state(state)?;
+        pf.input.upload(&self.ctx.stream, input)?;
+        self.prefill_kernels(state, pf)?;
+        if pf.seq_len == 0 || self.batch == 0 {
+            return Ok(());
+        }
+        let (b, t, dm) = (
+            self.batch as i32,
+            pf.seq_len as i32,
+            self.cfg.d_model as i32,
+        );
+        let mut bld = self
+            .ctx
+            .stream
+            .launch_builder(&self.ctx.kernels.gather_last_timestep);
+        bld.arg(scratch.final_out.inner_mut());
+        bld.arg(pf.final_rows.inner());
+        bld.arg(&b);
+        bld.arg(&t);
+        bld.arg(&dm);
+        unsafe { bld.launch(grid_1d(self.batch * self.cfg.d_model)) }
+            .map_err(|e| format!("Mamba-2 prefill last rows: {e:?}"))?;
+        Ok(())
+    }
+
     /// A prompt window through the backbone for every sequence: `input` is
     /// `[batch, seq_len, input_dim]`, `rows_out` (`[batch, seq_len,
     /// d_model]`) receives every position's final-norm output, and `state`
@@ -1291,4 +1358,17 @@ pub struct Mamba2GpuPrefill {
     gated: DtypedBuf,
     out: DtypedBuf,
     final_rows: GpuBuffer,
+}
+
+impl Mamba2GpuPrefill {
+    /// The prompt tokens these buffers take per sequence.
+    pub fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    /// Every position's final-norm row of the last prefill, f32
+    /// `[batch, seq_len, d_model]`, on the device.
+    pub fn final_rows(&self) -> &GpuBuffer {
+        &self.final_rows
+    }
 }

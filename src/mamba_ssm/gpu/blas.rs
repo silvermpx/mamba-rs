@@ -2425,8 +2425,7 @@ pub fn gpu_gemm_forward_dispatch(
             // into the ctx's reusable half-staging buffer.
             let (batch, n_in, _) = dims;
             let half_bytes = batch * n_in * w_dtype.size_bytes();
-            ctx.ensure_half_staging(half_bytes)?;
-            let half_ptr = ctx.half_staging_ptr();
+            let half_ptr = ctx.half_staging_for(half_bytes)?;
             let n = (batch * n_in) as i32;
             let src_ptr = x.cached_ptr();
             let kernel = match w_dtype {
@@ -3402,7 +3401,7 @@ mod physical_graph_tests {
 
     #[test]
     #[ignore = "needs a CUDA device"]
-    fn tied_half_f32_scratch_freeze_reuses_reserved_pointers_and_rejects_growth() {
+    fn tied_half_f32_scratch_freeze_keeps_reserved_pointers_and_grows_on_overflow() {
         use super::super::buffers::DtypedBuf;
         use super::super::context::GemmMode;
         use super::super::device::GpuDevice;
@@ -3456,7 +3455,10 @@ mod physical_graph_tests {
             WeightDtype::Bf16,
         )
         .unwrap();
-        let error = gpu_gemm_ex_tied_lm_head_raw(
+        // A larger head after the freeze runs eagerly on overflow scratch:
+        // the graph-visible slots keep their addresses and the logits are
+        // computed (zero rows give zero logits).
+        gpu_gemm_ex_tied_lm_head_raw(
             &ctx,
             larger_logits.cached_ptr(),
             larger_temporal.cached_ptr(),
@@ -3464,12 +3466,12 @@ mod physical_graph_tests {
             WeightDtype::Bf16,
             larger,
         )
-        .unwrap_err();
-        assert!(
-            error.contains("cannot grow after CUDA graph capture"),
-            "{error}"
+        .expect("larger tied head after freeze");
+        assert_eq!(ctx.bi_upcast_scratch_ptrs(), before);
+        assert_eq!(
+            larger_logits.to_cpu(&ctx.stream).unwrap(),
+            vec![0.0; dims.batch * dims.vocab_padded]
         );
-        assert_eq!(larger_logits.to_cpu(&ctx.stream).unwrap(), sentinel);
     }
 
     #[test]
@@ -3757,7 +3759,7 @@ pub(crate) fn presize_tied_lm_head_scratch(
 ///
 /// Returns an error before enqueue for unhealthy context state, invalid or
 /// overflowing dimensions, null/misaligned/unmanaged spans, output overlap,
-/// unsupported deterministic input types, or scratch growth after capture.
+/// unsupported deterministic input types, or scratch growth inside a capture.
 pub fn gpu_gemm_ex_tied_lm_head_raw(
     ctx: &GpuCtx,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
