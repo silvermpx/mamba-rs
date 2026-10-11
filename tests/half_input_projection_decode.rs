@@ -6,6 +6,7 @@
 //! them from a captured graph.
 
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
@@ -94,7 +95,14 @@ fn half_inproj_m1_decode() {
     let cfg = m1_config();
     let w = MambaWeights::init(&cfg, INPUT_DIM, 0x4D31);
     let run = |dtype| {
-        let mut m = MambaGpuBackbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
+        let mut m = MambaGpuBackbone::new(
+            &w,
+            cfg,
+            INPUT_DIM,
+            BATCH,
+            GpuOptions::default().dtype(dtype),
+        )
+        .unwrap();
         decode(cfg.d_model, |x, y| m.step(x, y))
     };
     let reference = run(WeightDtype::F32);
@@ -114,7 +122,14 @@ fn m3_siso_case(input_dim: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>, V
         w.input_proj_b.clear();
     }
     let run = |dtype| {
-        let mut m = Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, input_dim, BATCH, dtype).unwrap();
+        let mut m = Mamba3GpuBackbone::new(
+            &w,
+            cfg,
+            input_dim,
+            BATCH,
+            GpuOptions::default().dtype(dtype),
+        )
+        .unwrap();
         let mut all = Vec::with_capacity(STEPS * BATCH * cfg.d_model);
         let mut out = vec![0f32; BATCH * cfg.d_model];
         for s in 0..STEPS {
@@ -155,7 +170,16 @@ fn half_inproj_decode_graph_replays_the_eager_steps() {
     let cfg = m1_config();
     let w = MambaWeights::init(&cfg, INPUT_DIM, 0x4D31);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-        let new = || MambaGpuBackbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
+        let new = || {
+            MambaGpuBackbone::new(
+                &w,
+                cfg,
+                INPUT_DIM,
+                BATCH,
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap()
+        };
         let mut eager = new();
         let want = decode(cfg.d_model, |x, y| eager.step(x, y));
         let mut graphed = new();
@@ -167,8 +191,16 @@ fn half_inproj_decode_graph_replays_the_eager_steps() {
     let cfg = siso_config();
     let w = Mamba3Weights::init(&cfg, INPUT_DIM, 0x4D33);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-        let new =
-            || Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
+        let new = || {
+            Mamba3GpuBackbone::new(
+                &w,
+                cfg,
+                INPUT_DIM,
+                BATCH,
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap()
+        };
         let mut eager = new();
         let want = decode(cfg.d_model, |x, y| eager.step(x, y));
         let mut graphed = new();

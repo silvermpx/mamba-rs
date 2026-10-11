@@ -27,6 +27,7 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 fn det_scaled(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -78,8 +79,7 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
 
     // lr=1e-7 keeps synthetic-gradient f16 runs finite; scan correctness is
     // what this test proves, not optimizer convergence.
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -89,7 +89,7 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .expect("construct parallel-scan trainer");
 
@@ -240,8 +240,7 @@ fn a_log_actually_reaches_ssm_after_training() {
     let a_log_init: Vec<f32> = cpu.layers.iter().flat_map(|lw| lw.a_log.clone()).collect();
     let a_neg_init: Vec<f32> = a_log_init.iter().map(|&v| -v.exp()).collect();
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -252,7 +251,7 @@ fn a_log_actually_reaches_ssm_after_training() {
             lr: 1e-3,
             weight_decay: 0.0,
         },
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("build trainer");
 
@@ -347,8 +346,7 @@ fn m1_trainer_f16_production_lr_stable() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -359,7 +357,7 @@ fn m1_trainer_f16_production_lr_stable() {
             lr: 1e-4,
             weight_decay: 0.01,
         },
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("construct f16 prod-lr trainer");
 
@@ -437,7 +435,7 @@ fn m1_trainer_f16_production_lr_stable() {
 #[test]
 fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
     use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
     // d_model 5 with expand 2 gives d_inner 10: the vectorized kernels need
@@ -453,10 +451,14 @@ fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
         rms_norm_eps: 1e-5,
     };
     let cpu = MambaWeights::init(&cfg, cfg.d_model, 7);
-    let error =
-        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, cfg.d_model, 1, 300, WeightDtype::F32)
-            .err()
-            .expect("a d_inner of 10 must be rejected before any kernel runs");
+    let error = MambaGpuTrainer::new(
+        &cpu,
+        cfg,
+        TrainSessionCfg::new(cfg.d_model, 1, 300),
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .err()
+    .expect("a d_inner of 10 must be rejected before any kernel runs");
     assert!(
         error.contains("divisible by 4"),
         "unexpected rejection: {error}"

@@ -14,6 +14,7 @@
 
 use half::{bf16, f16};
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -464,8 +465,13 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
             lr: 1e-3,
             weight_decay: 0.0,
         };
-        let mut tr =
-            MambaGpuTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
+        let mut tr = MambaGpuTrainer::new(
+            &cpu,
+            cfg,
+            session,
+            GpuOptions::default().dtype(WeightDtype::Bf16),
+        )
+        .expect("trainer");
         tr.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         tr.ctx().route_controls().set_tensor_cores(true);
         let n = 4 * 256 * cfg.d_model;

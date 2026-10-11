@@ -15,6 +15,7 @@ mod digest;
 
 use digest::{Digest, fnv1a_f32};
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
@@ -39,7 +40,14 @@ fn run(cfg: MambaConfig, batch: usize, t: usize, dtype: WeightDtype) -> (u64, u6
     let mut w = MambaWeights::init(&cfg, cfg.d_model, 0x5CA7);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
-    let mut bb = MambaGpuBackbone::new_with_dtype(0, &w, cfg, cfg.d_model, batch, dtype).unwrap();
+    let mut bb = MambaGpuBackbone::new(
+        &w,
+        cfg,
+        cfg.d_model,
+        batch,
+        GpuOptions::default().dtype(dtype),
+    )
+    .unwrap();
     let prompt = det(batch * t * cfg.d_model, 41);
     let mut input = GpuBuffer::zeros(bb.stream(), prompt.len()).unwrap();
     input.upload(bb.stream(), &prompt).unwrap();

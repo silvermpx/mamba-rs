@@ -4,6 +4,7 @@
 //! Compute is always f32 (CUBLAS_COMPUTE_32F for GEMMs, f32 for custom kernels).
 //! Dtype is chosen at construction via `from_hf_with_dtype`.
 
+use crate::mamba_ssm::gpu::GpuOptions;
 use std::path::Path;
 
 use crate::mamba_ssm::gpu::blas::{
@@ -242,22 +243,22 @@ impl GpuMambaLM {
 
         let cfg = *cpu_backbone.config();
         let backbone = match mode {
-            Some(mode) => MambaGpuBackbone::new_with_dtype_and_mode(
-                gpu_ordinal,
+            Some(mode) => MambaGpuBackbone::new(
                 cpu_backbone.weights(),
                 cfg,
                 d_model,
                 batch,
-                dtype,
-                mode,
+                GpuOptions::default()
+                    .device(gpu_ordinal)
+                    .dtype(dtype)
+                    .mode(mode),
             )?,
-            None => MambaGpuBackbone::new_with_dtype(
-                gpu_ordinal,
+            None => MambaGpuBackbone::new(
                 cpu_backbone.weights(),
                 cfg,
                 d_model,
                 batch,
-                dtype,
+                GpuOptions::default().device(gpu_ordinal).dtype(dtype),
             )?,
         };
         let stream = backbone.stream();
@@ -860,8 +861,14 @@ mod tied_head_capture_tests {
         let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x9031);
         weights.input_proj_w.clear();
         weights.input_proj_b.clear();
-        let backbone =
-            MambaGpuBackbone::new_with_dtype(0, &weights, cfg, D_MODEL, 1, dtype).unwrap();
+        let backbone = MambaGpuBackbone::new(
+            &weights,
+            cfg,
+            D_MODEL,
+            1,
+            GpuOptions::default().dtype(dtype),
+        )
+        .unwrap();
         let stream = backbone.stream().clone();
         let embed_cpu = vec![0.125; VOCAB_PADDED * D_MODEL];
         let embed_storage = if dtype == WeightDtype::F32 {

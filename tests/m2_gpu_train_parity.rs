@@ -6,7 +6,10 @@
 //! AdamW steps that lower a loss in every lane.
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::mamba_ssm::gpu::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{
     Mamba2Config, Mamba2State, Mamba2Tape, Mamba2TrainScratch, Mamba2Weights,
@@ -181,7 +184,6 @@ fn cpu_reference(
 // about ten times that; a wrong index or term fails by orders of magnitude.
 #[test]
 fn m2_gpu_train_matches_the_cpu_trainer() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     for (label, cfg) in cases() {
         cfg.validate().unwrap();
@@ -192,7 +194,13 @@ fn m2_gpu_train_matches_the_cpu_trainer() {
         let (want_rows, want_grads, want_d_in) =
             cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
 
-        let mut tr = Mamba2GpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq)).unwrap();
+        let mut tr = Mamba2GpuTrainer::new(
+            &w,
+            cfg,
+            TrainSessionCfg::new(input_dim, batch, seq),
+            GpuOptions::default(),
+        )
+        .unwrap();
         let mut rows = vec![0f32; batch * seq * dm];
         tr.forward(&inputs, &mut rows).unwrap();
         let fwd = rel_l2(&rows, &want_rows);
@@ -231,10 +239,17 @@ fn m2_gpu_train_forward_tracks_the_prefill() {
         let w = drawn(&cfg, input_dim, 21);
         let dm = cfg.d_model;
         let inputs = det(batch * seq * input_dim, 700, 1.0);
-        let mut tr = Mamba2GpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq)).unwrap();
+        let mut tr = Mamba2GpuTrainer::new(
+            &w,
+            cfg,
+            TrainSessionCfg::new(input_dim, batch, seq),
+            GpuOptions::default(),
+        )
+        .unwrap();
         let mut got = vec![0f32; batch * seq * dm];
         tr.forward(&inputs, &mut got).unwrap();
-        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let engine =
+            Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch, WeightDtype::F32).unwrap();
         let mut st = engine.alloc_state().unwrap();
         let mut pf = engine.alloc_prefill(seq).unwrap();
         let mut want = vec![0f32; batch * seq * dm];
@@ -258,14 +273,19 @@ fn m2_gpu_train_forward_tracks_the_prefill() {
 /// a repeated backward are bit for bit the same, and the weights move.
 #[test]
 fn m2_gpu_train_adamw_lowers_a_loss() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[1].1;
     let w = drawn(&cfg, input_dim, 31);
     let dm = cfg.d_model;
     let inputs = det(batch * seq * input_dim, 900, 1.0);
     let target = det(batch * seq * dm, 901, 1.0);
-    let mut tr = Mamba2GpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq)).unwrap();
+    let mut tr = Mamba2GpuTrainer::new(
+        &w,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq),
+        GpuOptions::default(),
+    )
+    .unwrap();
     tr.adamw_mut().lr = 3e-3;
     let mut out = vec![0f32; batch * seq * dm];
     let mut losses = Vec::new();
@@ -298,7 +318,6 @@ fn m2_gpu_train_adamw_lowers_a_loss() {
 #[test]
 fn m2_gpu_train_typed_lanes_track_the_cpu() {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     for (dtype, fwd_tol, grad_tol) in [
         (WeightDtype::Tf32, 3e-3, 3e-2),
@@ -312,9 +331,13 @@ fn m2_gpu_train_typed_lanes_track_the_cpu() {
             let d_out = det(batch * seq * dm, 501, 1.0);
             let (want_rows, want_grads, want_d_in) =
                 cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-            let mut tr =
-                Mamba2GpuTrainer::new_with_dtype(&device, &w, (cfg, input_dim, batch, seq), dtype)
-                    .unwrap();
+            let mut tr = Mamba2GpuTrainer::new(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
             // A scale these gradients do not overflow in f16 (the dynamic
             // scale's first steps would back off from 2^16 and skip).
             tr.load_scaler_state(256.0, 0);
@@ -368,7 +391,6 @@ fn m2_gpu_train_typed_lanes_track_the_cpu() {
 #[test]
 fn m2_gpu_train_half_lanes_lower_a_loss() {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[1].1;
     let w = drawn(&cfg, input_dim, 31);
@@ -376,9 +398,13 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
     let inputs = det(batch * seq * input_dim, 900, 1.0);
     let target = det(batch * seq * dm, 901, 1.0);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-        let mut tr =
-            Mamba2GpuTrainer::new_with_dtype(&device, &w, (cfg, input_dim, batch, seq), dtype)
-                .unwrap();
+        let mut tr = Mamba2GpuTrainer::new(
+            &w,
+            cfg,
+            TrainSessionCfg::new(input_dim, batch, seq),
+            GpuOptions::default().dtype(dtype),
+        )
+        .unwrap();
         tr.adamw_mut().lr = 3e-3;
         let mut out = vec![0f32; batch * seq * dm];
         let (mut losses, mut applied) = (Vec::new(), 0);
@@ -434,7 +460,6 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
 fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
     use mamba_rs::config::ScanMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     for (dtype, fwd_tol, grad_tol) in [
         (WeightDtype::F32, 5e-6, 5e-5),
@@ -453,9 +478,13 @@ fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
             let d_out = det(batch * seq * dm, 501, 1.0);
             let (want_rows, want_grads, want_d_in) =
                 cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-            let mut tr =
-                Mamba2GpuTrainer::new_with_dtype(&device, &w, (cfg, input_dim, batch, seq), dtype)
-                    .unwrap();
+            let mut tr = Mamba2GpuTrainer::new(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
             tr.load_scaler_state(256.0, 0);
             let mut rows = vec![0f32; batch * seq * dm];
             tr.forward(&inputs, &mut rows).unwrap();
@@ -525,7 +554,6 @@ fn worst_gradient(got: &Mamba2Weights, want: &Mamba2Weights) -> (f64, String) {
 fn m2_gpu_train_continues_a_carried_state() {
     use mamba_rs::config::ScanMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch) = (40usize, 2usize);
     let base = cases()[0].1;
     let shapes = [
@@ -597,11 +625,11 @@ fn m2_gpu_train_continues_a_carried_state() {
                     (&cfg, &mut s),
                 );
             }
-            let mut tr = Mamba2GpuTrainer::new_with_dtype(
-                &device,
+            let mut tr = Mamba2GpuTrainer::new(
                 &w,
-                (cfg, input_dim, batch, seq),
-                WeightDtype::F32,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(WeightDtype::F32),
             )
             .unwrap();
             let mut rows = vec![0f32; batch * seq * dm];
@@ -636,7 +664,6 @@ fn m2_gpu_train_continues_a_carried_state() {
 fn m2_gpu_train_identity_input() {
     use mamba_rs::config::ScanMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let base = cases()[2].1;
     let (batch, seq) = (2usize, 100usize);
     let input_dim = base.d_model;
@@ -657,9 +684,13 @@ fn m2_gpu_train_identity_input() {
             let d_out = det(batch * seq * dm, 541, 1.0);
             let (want_rows, want_grads, want_d_in) =
                 cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-            let mut tr =
-                Mamba2GpuTrainer::new_with_dtype(&device, &w, (cfg, input_dim, batch, seq), dtype)
-                    .unwrap();
+            let mut tr = Mamba2GpuTrainer::new(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
             let mut rows = vec![0f32; batch * seq * dm];
             tr.forward(&inputs, &mut rows).unwrap();
             let mut d_in = vec![0f32; batch * seq * input_dim];
@@ -694,18 +725,17 @@ fn m2_gpu_train_identity_input() {
 #[test]
 fn m2_gpu_train_f16_overflow_skips_the_step() {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[0].1;
     let w = drawn(&cfg, input_dim, 33);
     let dm = cfg.d_model;
     let inputs = det(batch * seq * input_dim, 910, 1.0);
     let d_out = det(batch * seq * dm, 911, 1.0);
-    let mut tr = Mamba2GpuTrainer::new_with_dtype(
-        &device,
+    let mut tr = Mamba2GpuTrainer::new(
         &w,
-        (cfg, input_dim, batch, seq),
-        WeightDtype::F16,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq),
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .unwrap();
     assert!(

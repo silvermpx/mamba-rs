@@ -28,6 +28,7 @@ mod stamp;
 #[path = "../../tests/common/timed.rs"]
 mod timed;
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -123,8 +124,7 @@ fn run_lm_shape(
     }
 
     // Conservative lr so f16 doesn't NaN out before timing finishes.
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -134,7 +134,7 @@ fn run_lm_shape(
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )?;
     apply_bench_tier(trainer.ctx())?;
     // The default row runs the deterministic kernels; the IEEE row measures
@@ -375,8 +375,7 @@ fn bench_production_split_fwd_bwd() {
     for lw in cpu.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -386,7 +385,7 @@ fn bench_production_split_fwd_bwd() {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
     apply_bench_tier(trainer.ctx()).unwrap();
@@ -487,8 +486,7 @@ fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
         cpu.input_proj_b.clear();
     }
 
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -498,7 +496,7 @@ fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )?;
 
     for s in 0..WARMUP {

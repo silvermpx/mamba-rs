@@ -7,6 +7,7 @@
 //! Graph capture for all three. See the M1 trainer for the
 //! precision-support rationale.
 
+use crate::mamba_ssm::gpu::options::GpuOptions;
 use cudarc::driver::PushKernelArg;
 
 use crate::mamba_ssm::gpu::adamw::{
@@ -77,14 +78,35 @@ pub struct Mamba3GpuTrainer {
 }
 
 impl Mamba3GpuTrainer {
-    /// Construct an M3 trainer with default Adam settings in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
-    ///
-    /// `dtype` controls storage independently of the mode: f32, tf32 (f32 storage
-    /// with deterministic TF32 products), bf16, or f16. See [`Self::new_full`]
-    /// for explicit optimizer settings, and [`Self::new_full_with_mode`] with
-    /// [`TrainSessionCfg::new`] to pick the mode in code. [`Self::ctx`] shows the
-    /// route graph capture binds.
+    /// Build a trainer for the session `session` names (shape and AdamW
+    /// settings, see [`TrainSessionCfg::new`]) from `cpu_weights`, on the
+    /// device, in the storage precision and in the GEMM mode `opts` names
+    /// ([`GpuOptions::default`] is device 0, f32 and the mode
+    /// `MAMBA_RS_GEMM_MODE` names). In the deterministic mode the trainer
+    /// runs the Triad kernels; [`Self::ctx`] shows the route a captured graph
+    /// binds. Shape, state-capacity, CUDA, upload or allocation errors are
+    /// returned.
+    pub fn new(
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        session: TrainSessionCfg,
+        opts: GpuOptions,
+    ) -> Result<Self, String> {
+        Self::new_full_inner(
+            opts.device,
+            cpu_weights,
+            cfg,
+            session,
+            opts.dtype,
+            opts.mode,
+        )
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `TrainSessionCfg::new(input_dim, batch, seq_len)` and \
+                `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
+    )]
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -94,21 +116,15 @@ impl Mamba3GpuTrainer {
         seq_len: usize,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        Self::new_full(
-            gpu_ordinal,
-            cpu_weights,
-            cfg,
-            TrainSessionCfg::new(input_dim, batch, seq_len),
-            dtype,
-        )
+        let session = TrainSessionCfg::new(input_dim, batch, seq_len);
+        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
+        Self::new(cpu_weights, cfg, session, opts)
     }
 
-    /// Construct an M3 trainer with session settings in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
-    ///
-    /// Invalid configuration, `MAMBA_RS_GEMM_MODE`, M3 state-cap, CUDA, upload, or
-    /// allocation returns an error. Use [`Self::new_full_with_mode`] to pick the
-    /// mode in code.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
+    )]
     pub fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -116,17 +132,14 @@ impl Mamba3GpuTrainer {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        Self::new_full_inner(gpu_ordinal, cpu_weights, cfg, session, dtype, None)
+        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
+        Self::new(cpu_weights, cfg, session, opts)
     }
 
-    /// Construct an M3 trainer with an explicit GEMM execution mode.
-    ///
-    /// `dtype` selects weight/activation storage (`Tf32` stores f32 with
-    /// deterministic TF32 products) while `mode` independently selects the
-    /// deterministic kernels or cuBLAS; `MAMBA_RS_GEMM_MODE` is ignored. Existing
-    /// configuration, launch-capacity, explicit f32 input-projection, M3
-    /// state-cap, CUDA, upload, and allocation errors are preserved. Captured
-    /// graphs remain bound to the complete construction route.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
+    )]
     pub fn new_full_with_mode(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -135,7 +148,11 @@ impl Mamba3GpuTrainer {
         dtype: WeightDtype,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_full_inner(gpu_ordinal, cpu_weights, cfg, session, dtype, Some(mode))
+        let opts = GpuOptions::default()
+            .device(gpu_ordinal)
+            .dtype(dtype)
+            .mode(mode);
+        Self::new(cpu_weights, cfg, session, opts)
     }
 
     fn new_full_inner(

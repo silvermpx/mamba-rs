@@ -29,6 +29,7 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 mod cuda_example {
+    use mamba_rs::GpuOptions;
     use mamba_rs::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -50,20 +51,17 @@ mod cuda_example {
         let weights = MambaWeights::init(&cfg, input_dim, 42);
         // A trainer context runs the Triad family in the deterministic mode;
         // the split forward/backward path below always executes eagerly.
-        let mut trainer = MambaGpuTrainer::new_full_with_mode(
-            0,
-            &weights,
-            cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr: 3e-3,
-                weight_decay: 1e-2,
-            },
-            WeightDtype::Bf16,
-            GemmMode::Deterministic,
-        )?;
+        let session = TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 3e-3,
+            weight_decay: 1e-2,
+        };
+        let opts = GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::Deterministic);
+        let mut trainer = MambaGpuTrainer::new(&weights, cfg, session, opts)?;
 
         // Synthetic input and a fixed target for the mean-pooled feature.
         let input: Vec<f32> = (0..n_in)

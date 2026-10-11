@@ -8,7 +8,9 @@
 
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
@@ -48,14 +50,11 @@ fn scan_mode_bench_classifier_shape() {
         for lw in cpu.layers.iter_mut() {
             lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
         }
-        let mut trainer = MambaGpuTrainer::new_with_dtype(
-            0,
+        let mut trainer = MambaGpuTrainer::new(
             &cpu,
             cfg,
-            input_dim,
-            batch,
-            seq_len,
-            WeightDtype::Bf16,
+            TrainSessionCfg::new(input_dim, batch, seq_len),
+            GpuOptions::default().dtype(WeightDtype::Bf16),
         )
         .expect("trainer");
         trainer

@@ -133,3 +133,5 @@ pub use mamba3_siso::{
 /// `Mamba3GpuBackbone::new_with_dtype`, `GpuMambaLM::from_hf_with_dtype`).
 #[cfg(feature = "cuda")]
 pub use mamba_ssm::gpu::dtype::WeightDtype;
+#[cfg(feature = "cuda")]
+pub use mamba_ssm::gpu::{GemmMode, GpuOptions};

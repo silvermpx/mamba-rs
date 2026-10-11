@@ -16,6 +16,7 @@
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
@@ -138,12 +139,20 @@ fn run_split_vs_fused(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
 
-    let mut fused =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("fused trainer");
-    let mut split =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("split trainer");
+    let mut fused = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("fused trainer");
+    let mut split = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("split trainer");
 
     let mut temporal_out = vec![0.0f32; n_out];
     for step in 0..3u32 {
@@ -188,12 +197,11 @@ fn forward_temporal_matches_cpu_training_forward() {
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
     let mut gpu_out = vec![0.0f32; batch * seq_len * cfg.d_model];
@@ -272,12 +280,11 @@ fn forward_alone_leaves_optimizer_untouched() {
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (2usize, 8usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
 
@@ -298,12 +305,11 @@ fn split_interlock_and_accumulate_window() {
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
 
@@ -370,9 +376,13 @@ fn accumulation_two_micro_equals_one_big_batch() {
     let s2_dt = det(n_out1, 0xB2, 0.01);
 
     // Big batch: both samples in one call.
-    let mut big =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(2, seq_len, input_dim), WeightDtype::F32)
-            .expect("big trainer");
+    let mut big = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(2, seq_len, input_dim),
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("big trainer");
     big.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let big_in: Vec<f32> = s1_in.iter().chain(s2_in.iter()).copied().collect();
     let big_dt: Vec<f32> = s1_dt.iter().chain(s2_dt.iter()).copied().collect();
@@ -383,9 +393,13 @@ fn accumulation_two_micro_equals_one_big_batch() {
     let sa = big.snapshot_master().expect("big snapshot");
 
     // Micro: accumulate sample 1, reset state, apply on sample 2.
-    let mut micro =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(1, seq_len, input_dim), WeightDtype::F32)
-            .expect("micro trainer");
+    let mut micro = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(1, seq_len, input_dim),
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("micro trainer");
     micro.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
     let mut out = vec![0.0f32; n_out1];
     micro.forward(&s1_in, &mut out).expect("micro fwd 1");
@@ -445,9 +459,13 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA2, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB2, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -486,9 +504,13 @@ fn assert_reset_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA3, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB3, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -523,9 +545,13 @@ fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        MambaGpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = MambaGpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA4, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB4, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -573,12 +599,11 @@ fn f16_split_scaler_protocol() {
     let mut w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("f16 trainer");
 
@@ -654,24 +679,22 @@ fn set_lr_scales_first_step_delta() {
             .fold(0.0, f64::max)
     };
 
-    let mut a = MambaGpuTrainer::new_full(
-        0,
+    let mut a = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer a");
     assert!((a.lr() - 1e-3).abs() < 1e-9);
     a.step(&input, &d_temporal).expect("step a");
     let da = max_delta(&a.snapshot_master().expect("a"));
 
-    let mut b = MambaGpuTrainer::new_full(
-        0,
+    let mut b = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer b");
     b.set_lr(1e-2).expect("set_lr");
@@ -706,12 +729,11 @@ fn set_lr_under_graph_applies_on_next_replay() {
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
 
     let run = |lr_after_capture: Option<f32>| -> (Vec<f32>, Vec<f32>) {
-        let mut t = MambaGpuTrainer::new_full(
-            0,
+        let mut t = MambaGpuTrainer::new(
             &w,
             cfg,
             session(batch, seq_len, input_dim),
-            WeightDtype::F32,
+            GpuOptions::default().dtype(WeightDtype::F32),
         )
         .expect("trainer");
         t.step(&input, &d_temporal).expect("warmup");
@@ -752,12 +774,11 @@ fn set_lr_under_graph_applies_on_next_replay() {
     );
 
     // drop_graph still falls back to eager.
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
     t.step(&input, &d_temporal).expect("warmup");
@@ -787,24 +808,22 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
     let (lr, wd) = (1e-3f64, 1e-2f64);
 
-    let mut off = MambaGpuTrainer::new_full(
-        0,
+    let mut off = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("off trainer");
     off.set_reference_no_decay(false).expect("disable mask");
     off.step(&input, &d_temporal).expect("off step");
     let s_off = off.snapshot_master().expect("off snapshot");
 
-    let mut on = MambaGpuTrainer::new_full(
-        0,
+    let mut on = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("on trainer");
     on.set_reference_no_decay(true).expect("enable mask");
@@ -887,12 +906,11 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
     assert!(any_moved, "the mask never changed a single masked element");
 
     // Toggle under a captured graph must err.
-    let mut g = MambaGpuTrainer::new_full(
-        0,
+    let mut g = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("graph trainer");
     g.step(&input, &d_temporal).expect("warmup");
@@ -912,20 +930,18 @@ fn bf16_trainable_input_proj_split_matches_fused() {
     let n_out = batch * seq_len * cfg.d_model;
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
 
-    let mut fused = MambaGpuTrainer::new_full(
-        0,
+    let mut fused = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("fused trainer");
-    let mut split = MambaGpuTrainer::new_full(
-        0,
+    let mut split = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("split trainer");
     let mut out = vec![0.0f32; n_out];
@@ -969,12 +985,11 @@ fn bf16_input_proj_graph_capture_with_large_patch_dim() {
     let input_dim = 200usize; // exceeds max(d_model, 2*d_inner, xdbl_dim)
     let (batch, seq_len) = (1usize, 4usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("trainer");
     t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -1010,12 +1025,11 @@ fn bf16_input_proj_eager_bi_large_forward_only() {
     let input_dim = 200usize;
     let (batch, seq_len) = (1usize, 4usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("trainer");
     t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -1027,12 +1041,11 @@ fn bf16_input_proj_eager_bi_large_forward_only() {
 fn eager_bi_probe(cfg: MambaConfig, input_dim: usize) {
     let (batch, seq_len) = (1usize, 4usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("trainer");
     t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();

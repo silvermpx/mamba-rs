@@ -6,6 +6,7 @@
 
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::context::{F32TriadPolicy, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
@@ -78,7 +79,8 @@ fn bench_gemm_bi_vs_tf32() {
                     lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
                 }
                 let mut tr =
-                    MambaGpuTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
+                    MambaGpuTrainer::new(&cpu, cfg, session, GpuOptions::default().dtype(dtype))
+                        .expect("trainer");
                 tr.ctx().set_gemm_mode(mode).unwrap();
                 tr.ctx().route_controls().set_tensor_cores(tc);
                 if mode == GemmMode::Deterministic {

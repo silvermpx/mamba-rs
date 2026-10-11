@@ -140,11 +140,14 @@ impl Drop for Mamba3MimoGpuEngine {
 impl Mamba3MimoGpuEngine {
     /// An engine for `batch` sequences storing its projections in `dtype`
     /// (f32, tf32, bf16 or f16), in the GEMM mode `MAMBA_RS_GEMM_MODE`
-    /// names (deterministic when unset).
+    /// names (deterministic when unset). The arguments are those of the
+    /// Mamba-1 and SISO mixed engines.
     pub fn new(
         device: &GpuDevice,
         w: &Mamba3MimoWeights,
-        (cfg, input_dim, batch): (Mamba3MimoConfig, usize, usize),
+        cfg: Mamba3MimoConfig,
+        input_dim: usize,
+        batch: usize,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, None))
@@ -154,8 +157,11 @@ impl Mamba3MimoGpuEngine {
     pub fn new_with_mode(
         device: &GpuDevice,
         w: &Mamba3MimoWeights,
-        (cfg, input_dim, batch): (Mamba3MimoConfig, usize, usize),
-        (dtype, mode): (WeightDtype, GemmMode),
+        cfg: Mamba3MimoConfig,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
+        mode: GemmMode,
     ) -> Result<Self, String> {
         Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, Some(mode)))
     }
@@ -279,14 +285,6 @@ impl Mamba3MimoGpuEngine {
     /// The model's configuration.
     pub fn config(&self) -> &Mamba3MimoConfig {
         &self.cfg
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "renamed to `config`, the name every family uses"
-    )]
-    pub fn cfg(&self) -> &Mamba3MimoConfig {
-        self.config()
     }
 
     /// Sequences per call.

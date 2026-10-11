@@ -22,8 +22,9 @@
 
 #![cfg(feature = "cuda")]
 
-#[cfg(feature = "hf")]
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+#[cfg(feature = "hf")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 // ===========================================================================
@@ -300,8 +301,7 @@ fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     }
 
     let label = format!("M3-{dtype:?}-T{seq_len}");
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -311,7 +311,7 @@ fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
             lr: 1e-6,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap_or_else(|e| panic!("[{label}] construct: {e}"));
 

@@ -6,6 +6,7 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
@@ -73,12 +74,22 @@ fn test_m3_bf16_matches_f32_synthetic() {
     weights.input_proj_w.clear();
     weights.input_proj_b.clear();
 
-    let mut bb_f32 =
-        Mamba3GpuBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::F32)
-            .unwrap();
-    let mut bb_bf16 =
-        Mamba3GpuBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)
-            .unwrap();
+    let mut bb_f32 = Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .unwrap();
+    let mut bb_bf16 = Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
+    )
+    .unwrap();
 
     assert_eq!(bb_f32.dtype(), WeightDtype::F32);
     assert_eq!(bb_bf16.dtype(), WeightDtype::Bf16);
@@ -158,12 +169,22 @@ fn test_m3_bf16_matches_f32_realistic() {
     weights.input_proj_w.clear();
     weights.input_proj_b.clear();
 
-    let mut bb_f32 =
-        Mamba3GpuBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::F32)
-            .unwrap();
-    let mut bb_bf16 =
-        Mamba3GpuBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)
-            .unwrap();
+    let mut bb_f32 = Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .unwrap();
+    let mut bb_bf16 = Mamba3GpuBackbone::new(
+        &weights,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
+    )
+    .unwrap();
 
     let dm = cfg.d_model;
     let mut out_f32 = vec![0.0f32; batch * dm];
@@ -200,13 +221,12 @@ fn test_m3_f32_backbone_unchanged_after_mixed_refactor() {
     let batch = 2;
     let weights = Mamba3Weights::init(&cfg, input_dim, 0xABCDEF);
     let cfg_copy = cfg;
-    let mut bb = Mamba3GpuBackbone::new_with_dtype(
-        0,
+    let mut bb = Mamba3GpuBackbone::new(
         &weights,
         cfg_copy,
         input_dim,
         batch,
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .unwrap();
     assert_eq!(bb.dtype(), WeightDtype::F32);

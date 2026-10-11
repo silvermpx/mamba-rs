@@ -5,6 +5,7 @@
 mod hf_synthetic;
 
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -130,7 +131,7 @@ fn m1_default_constructor_uses_inference_family() {
     let cfg = small_m1_cfg();
     let weights = m1_weights(&cfg, true);
 
-    let backbone = MambaGpuBackbone::new(0, &weights, cfg, cfg.d_model, 1)
+    let backbone = MambaGpuBackbone::new(&weights, cfg, cfg.d_model, 1, GpuOptions::default())
         .expect("construct M1 F32 backbone from owned weights");
 
     assert_eq!(backbone.ctx().gemm_mode(), GemmMode::Deterministic);
@@ -201,13 +202,12 @@ fn absent_environment_uses_role_defaults() {
     let m1_cfg = small_m1_cfg();
     let m1_model_weights = m1_weights(&m1_cfg, true);
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
-        let model = MambaGpuBackbone::new_with_dtype(
-            0,
+        let model = MambaGpuBackbone::new(
             &m1_model_weights,
             m1_cfg,
             m1_cfg.d_model,
             1,
-            dtype,
+            GpuOptions::default().dtype(dtype),
         )
         .expect("M1 default model");
         assert_route(
@@ -218,22 +218,25 @@ fn absent_environment_uses_role_defaults() {
     }
     let m1_train_weights = m1_weights(&m1_cfg, false);
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
-        let trainer =
-            MambaGpuTrainer::new_full(0, &m1_train_weights, m1_cfg, session(m1_cfg.d_model), dtype)
-                .expect("M1 default trainer");
+        let trainer = MambaGpuTrainer::new(
+            &m1_train_weights,
+            m1_cfg,
+            session(m1_cfg.d_model),
+            GpuOptions::default().dtype(dtype),
+        )
+        .expect("M1 default trainer");
         assert_route(trainer.ctx(), GemmMode::Deterministic, BiGemmFamily::Triad);
     }
 
     let m3_cfg = small_m3_cfg();
     let m3_model_weights = m3_weights(&m3_cfg, true);
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
-        let model = Mamba3GpuBackbone::new_with_dtype(
-            0,
+        let model = Mamba3GpuBackbone::new(
             &m3_model_weights,
             m3_cfg,
             m3_cfg.d_model,
             1,
-            dtype,
+            GpuOptions::default().dtype(dtype),
         )
         .expect("M3 default model");
         assert_route(
@@ -244,9 +247,13 @@ fn absent_environment_uses_role_defaults() {
     }
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
         let weights = m3_weights(&m3_cfg, dtype != WeightDtype::F32);
-        let trainer =
-            Mamba3GpuTrainer::new_full(0, &weights, m3_cfg, session(m3_cfg.d_model), dtype)
-                .expect("M3 default trainer");
+        let trainer = Mamba3GpuTrainer::new(
+            &weights,
+            m3_cfg,
+            session(m3_cfg.d_model),
+            GpuOptions::default().dtype(dtype),
+        )
+        .expect("M3 default trainer");
         assert_route(trainer.ctx(), GemmMode::Deterministic, BiGemmFamily::Triad);
     }
 }
@@ -289,13 +296,12 @@ fn explicit_overloads_bypass_conflicting_environment() {
         BiGemmFamily::Inference,
     );
 
-    let m1_backbone = MambaGpuBackbone::new_with_mode(
-        0,
+    let m1_backbone = MambaGpuBackbone::new(
         &m1_model,
         m1_cfg,
         m1_cfg.d_model,
         1,
-        GemmMode::CublasFast,
+        GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("M1 explicit f32 backbone");
     assert_route(
@@ -303,14 +309,14 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasFast,
         BiGemmFamily::Inference,
     );
-    let m1_bf16 = MambaGpuBackbone::new_with_dtype_and_mode(
-        0,
+    let m1_bf16 = MambaGpuBackbone::new(
         &m1_model,
         m1_cfg,
         m1_cfg.d_model,
         1,
-        WeightDtype::Bf16,
-        GemmMode::CublasPedantic,
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("M1 explicit bf16 backbone");
     assert_route(
@@ -319,24 +325,24 @@ fn explicit_overloads_bypass_conflicting_environment() {
         BiGemmFamily::Inference,
     );
 
-    let m1_trainer = MambaGpuTrainer::new_full_with_mode(
-        0,
+    let m1_trainer = MambaGpuTrainer::new(
         &m1_train,
         m1_cfg,
         session(m1_cfg.d_model),
-        WeightDtype::F16,
-        GemmMode::CublasFast,
+        GpuOptions::default()
+            .dtype(WeightDtype::F16)
+            .mode(GemmMode::CublasFast),
     )
     .expect("M1 explicit f16 trainer");
     assert_route(m1_trainer.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     assert_eq!(m1_trainer.ctx().state_cap(), 16);
-    let m1_default_session = MambaGpuTrainer::new_full_with_mode(
-        0,
+    let m1_default_session = MambaGpuTrainer::new(
         &m1_train,
         m1_cfg,
         TrainSessionCfg::new(m1_cfg.d_model, 1, 4),
-        WeightDtype::Bf16,
-        GemmMode::CublasPedantic,
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("M1 explicit bf16 trainer with default optimizer settings");
     assert_route(
@@ -376,13 +382,12 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasFast,
         BiGemmFamily::Inference,
     );
-    let m3_backbone = Mamba3GpuBackbone::new_with_mode(
-        0,
+    let m3_backbone = Mamba3GpuBackbone::new(
         &m3_model,
         m3_cfg,
         m3_cfg.d_model,
         1,
-        GemmMode::CublasFast,
+        GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("M3 explicit f32 backbone");
     assert_route(
@@ -390,14 +395,14 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasFast,
         BiGemmFamily::Inference,
     );
-    let m3_bf16 = Mamba3GpuBackbone::new_with_dtype_and_mode(
-        0,
+    let m3_bf16 = Mamba3GpuBackbone::new(
         &m3_model,
         m3_cfg,
         m3_cfg.d_model,
         1,
-        WeightDtype::Bf16,
-        GemmMode::CublasPedantic,
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("M3 explicit bf16 backbone");
     assert_route(
@@ -405,13 +410,13 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasPedantic,
         BiGemmFamily::Inference,
     );
-    let m3_trainer = Mamba3GpuTrainer::new_full_with_mode(
-        0,
+    let m3_trainer = Mamba3GpuTrainer::new(
         &m3_weights(&m3_cfg, true),
         m3_cfg,
         session(m3_cfg.d_model),
-        WeightDtype::F16,
-        GemmMode::CublasPedantic,
+        GpuOptions::default()
+            .dtype(WeightDtype::F16)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("M3 explicit f16 trainer");
     assert_route(
@@ -419,13 +424,13 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasPedantic,
         BiGemmFamily::Triad,
     );
-    let m3_default_session = Mamba3GpuTrainer::new_full_with_mode(
-        0,
+    let m3_default_session = Mamba3GpuTrainer::new(
         &m3_weights(&m3_cfg, true),
         m3_cfg,
         TrainSessionCfg::new(m3_cfg.d_model, 1, 4),
-        WeightDtype::Bf16,
-        GemmMode::CublasFast,
+        GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::CublasFast),
     )
     .expect("M3 explicit bf16 trainer with default optimizer settings");
     assert_route(
@@ -437,8 +442,9 @@ fn explicit_overloads_bypass_conflicting_environment() {
     #[cfg(feature = "hf")]
     exercise_lm_overloads();
 
-    let from_env = MambaGpuBackbone::new(0, &m1_model, m1_cfg, m1_cfg.d_model, 1)
-        .expect("env-aware construction reads the mode the environment names");
+    let from_env =
+        MambaGpuBackbone::new(&m1_model, m1_cfg, m1_cfg.d_model, 1, GpuOptions::default())
+            .expect("env-aware construction reads the mode the environment names");
     assert_route(
         from_env.ctx(),
         GemmMode::CublasPedantic,
@@ -529,16 +535,21 @@ fn exercise_lm_overloads() {
 fn explicit_overload_bypasses_invalid_mode() {
     let cfg = small_m1_cfg();
     let weights = m1_weights(&cfg, true);
-    let explicit =
-        MambaGpuBackbone::new_with_mode(0, &weights, cfg, cfg.d_model, 1, GemmMode::CublasFast)
-            .expect("explicit mode ignores invalid mode env");
+    let explicit = MambaGpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        1,
+        GpuOptions::default().mode(GemmMode::CublasFast),
+    )
+    .expect("explicit mode ignores invalid mode env");
     assert_route(
         explicit.ctx(),
         GemmMode::CublasFast,
         BiGemmFamily::Inference,
     );
     let error = construction_error(
-        MambaGpuBackbone::new(0, &weights, cfg, cfg.d_model, 1),
+        MambaGpuBackbone::new(&weights, cfg, cfg.d_model, 1, GpuOptions::default()),
         "env lane rejects invalid mode",
     );
     assert!(error.contains("MAMBA_RS_GEMM_MODE"), "{error}");
@@ -549,17 +560,22 @@ fn explicit_overloads_preserve_validation_errors() {
     invalid_m1.d_state = 257;
     let weights = m1_weights(&small_m1_cfg(), true);
     let env_error = construction_error(
-        MambaGpuBackbone::new(0, &weights, invalid_m1, invalid_m1.d_model, 1),
-        "M1 invalid state capacity",
-    );
-    let explicit_error = construction_error(
-        MambaGpuBackbone::new_with_mode(
-            0,
+        MambaGpuBackbone::new(
             &weights,
             invalid_m1,
             invalid_m1.d_model,
             1,
-            GemmMode::CublasFast,
+            GpuOptions::default(),
+        ),
+        "M1 invalid state capacity",
+    );
+    let explicit_error = construction_error(
+        MambaGpuBackbone::new(
+            &weights,
+            invalid_m1,
+            invalid_m1.d_model,
+            1,
+            GpuOptions::default().mode(GemmMode::CublasFast),
         ),
         "M1 explicit invalid state capacity",
     );
@@ -569,17 +585,22 @@ fn explicit_overloads_preserve_validation_errors() {
     invalid_m3.d_state = 257;
     let invalid_m3_weights = m3_weights(&small_m3_cfg(), true);
     let env_error = construction_error(
-        Mamba3GpuBackbone::new(0, &invalid_m3_weights, invalid_m3, invalid_m3.d_model, 1),
-        "M3 invalid state capacity",
-    );
-    let explicit_error = construction_error(
-        Mamba3GpuBackbone::new_with_mode(
-            0,
+        Mamba3GpuBackbone::new(
             &invalid_m3_weights,
             invalid_m3,
             invalid_m3.d_model,
             1,
-            GemmMode::CublasPedantic,
+            GpuOptions::default(),
+        ),
+        "M3 invalid state capacity",
+    );
+    let explicit_error = construction_error(
+        Mamba3GpuBackbone::new(
+            &invalid_m3_weights,
+            invalid_m3,
+            invalid_m3.d_model,
+            1,
+            GpuOptions::default().mode(GemmMode::CublasPedantic),
         ),
         "M3 explicit invalid state capacity",
     );
@@ -589,17 +610,22 @@ fn explicit_overloads_preserve_validation_errors() {
     let identity = m3_weights(&cfg, true);
     let expected = "f32 M3 trainer requires an explicit input projection";
     let env_error = construction_error(
-        Mamba3GpuTrainer::new_full(0, &identity, cfg, session(cfg.d_model), WeightDtype::F32),
-        "M3 f32 env projection rejection",
-    );
-    let explicit_error = construction_error(
-        Mamba3GpuTrainer::new_full_with_mode(
-            0,
+        Mamba3GpuTrainer::new(
             &identity,
             cfg,
             session(cfg.d_model),
-            WeightDtype::F32,
-            GemmMode::CublasFast,
+            GpuOptions::default().dtype(WeightDtype::F32),
+        ),
+        "M3 f32 env projection rejection",
+    );
+    let explicit_error = construction_error(
+        Mamba3GpuTrainer::new(
+            &identity,
+            cfg,
+            session(cfg.d_model),
+            GpuOptions::default()
+                .dtype(WeightDtype::F32)
+                .mode(GemmMode::CublasFast),
         ),
         "M3 f32 explicit projection rejection",
     );

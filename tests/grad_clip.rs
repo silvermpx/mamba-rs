@@ -14,6 +14,7 @@
 
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
@@ -112,12 +113,11 @@ fn clip_grad_norm_matches_cpu_reference() {
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
 
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
     let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
@@ -209,24 +209,22 @@ fn clip_above_threshold_is_bit_identity() {
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
     let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
 
-    let mut a = MambaGpuTrainer::new_full(
-        0,
+    let mut a = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer a");
     a.forward(&input, &mut out).expect("fwd a");
     a.backward_step(&d_temporal, BackwardOpts::default())
         .expect("bwd a");
 
-    let mut b = MambaGpuTrainer::new_full(
-        0,
+    let mut b = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer b");
     b.forward(&input, &mut out).expect("fwd b");
@@ -268,12 +266,11 @@ fn clip_below_threshold_equals_prescaled_d_temporal() {
     let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
 
     // Probe the unclipped norm.
-    let mut probe = MambaGpuTrainer::new_full(
-        0,
+    let mut probe = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("probe");
     probe.forward(&input, &mut out).expect("probe fwd");
@@ -286,12 +283,11 @@ fn clip_below_threshold_equals_prescaled_d_temporal() {
     let c = (norm / 2.0) as f32;
     let coef = 0.5f32;
 
-    let mut clipped = MambaGpuTrainer::new_full(
-        0,
+    let mut clipped = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("clipped");
     clipped.forward(&input, &mut out).expect("clipped fwd");
@@ -311,12 +307,11 @@ fn clip_below_threshold_equals_prescaled_d_temporal() {
     let halved_grad: Vec<f32> = raw_grad.iter().map(|&g| g * coef).collect();
 
     let scaled_dt: Vec<f32> = d_temporal.iter().map(|&v| v * coef).collect();
-    let mut prescaled = MambaGpuTrainer::new_full(
-        0,
+    let mut prescaled = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("prescaled");
     prescaled.forward(&input, &mut out).expect("prescaled fwd");
@@ -368,12 +363,11 @@ fn clip_with_accumulate_errs() {
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = MambaGpuTrainer::new_full(
-        0,
+    let mut t = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
@@ -410,12 +404,11 @@ fn f16_clip_norm_is_post_unscale() {
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
     let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
 
-    let mut f16 = MambaGpuTrainer::new_full(
-        0,
+    let mut f16 = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("f16 trainer");
     f16.forward(&input, &mut out).expect("f16 fwd");
@@ -425,12 +418,11 @@ fn f16_clip_norm_is_post_unscale() {
     assert_eq!(mf.overflow_skipped, Some(false));
     let f16_norm = mf.grad_norm.expect("f16 norm") as f64;
 
-    let mut bf16 = MambaGpuTrainer::new_full(
-        0,
+    let mut bf16 = MambaGpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("bf16 trainer");
     bf16.forward(&input, &mut out).expect("bf16 fwd");
@@ -461,12 +453,11 @@ fn clip_norm_is_deterministic() {
 
     let mut norms = Vec::new();
     for _ in 0..2 {
-        let mut t = MambaGpuTrainer::new_full(
-            0,
+        let mut t = MambaGpuTrainer::new(
             &w,
             cfg,
             session(batch, seq_len, input_dim),
-            WeightDtype::F32,
+            GpuOptions::default().dtype(WeightDtype::F32),
         )
         .expect("trainer");
         t.forward(&input, &mut out).expect("fwd");

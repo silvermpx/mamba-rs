@@ -1,5 +1,7 @@
 #![cfg(all(feature = "hf", feature = "cuda"))]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::time::Instant;
 
 #[test]
@@ -20,7 +22,7 @@ fn profile_gpu_backbone_only() {
         ..Default::default()
     };
     let weights = MambaWeights::init(&cfg, 768, 42);
-    let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 768, 1).unwrap();
+    let mut bb = MambaGpuBackbone::new(&weights, cfg, 768, 1, GpuOptions::default()).unwrap();
 
     let input = vec![0.1f32; 768];
     let mut output = vec![0.0f32; 768];

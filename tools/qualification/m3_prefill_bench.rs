@@ -6,6 +6,8 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -173,7 +175,14 @@ fn m3_prefill_latency_at_serve_shape() {
     w.input_proj_w.clear();
     w.input_proj_b.clear();
 
-    let mut bb = Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::F32).unwrap();
+    let mut bb = Mamba3GpuBackbone::new(
+        &w,
+        cfg,
+        dm,
+        1,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .unwrap();
     eprintln!(
         "prefill route: mode={:?} family={:?} route={:?} tensor_cores={} f32_policy={:?}",
         bb.ctx().gemm_mode(),
@@ -269,9 +278,13 @@ fn m3_train_step_at_multichunk_shape() {
             w.input_proj_w.clear();
             w.input_proj_b.clear();
         }
-        let mut tr =
-            Mamba3GpuTrainer::new_with_dtype(0, &w, cfg, cfg.d_model, batch, seq_len, dtype)
-                .unwrap();
+        let mut tr = Mamba3GpuTrainer::new(
+            &w,
+            cfg,
+            TrainSessionCfg::new(cfg.d_model, batch, seq_len),
+            GpuOptions::default().dtype(dtype),
+        )
+        .unwrap();
         eprintln!(
             "train route: dtype={dtype:?} scan={:?} parallel={} mode={:?} family={:?} route={:?} tensor_cores_allowed={} f32_policy={:?} B={batch} T={seq_len} layers={} state_cap={} iters={iters}",
             cfg.scan_mode,

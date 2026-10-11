@@ -7,6 +7,7 @@
 //! a synthetic-weight model + embedding + optional lm_head; useful for
 //! benchmarking and integration testing until HF M3 weights land.
 
+use crate::mamba_ssm::gpu::GpuOptions;
 use std::sync::Arc;
 
 use crate::hf::embed::embed_lookup;
@@ -268,22 +269,22 @@ impl GpuMamba3LM {
         }
 
         let backbone = match mode {
-            Some(mode) => Mamba3GpuBackbone::new_with_dtype_and_mode(
-                gpu_ordinal,
+            Some(mode) => Mamba3GpuBackbone::new(
                 &weights,
                 cfg,
                 d_model,
                 batch,
-                dtype,
-                mode,
+                GpuOptions::default()
+                    .device(gpu_ordinal)
+                    .dtype(dtype)
+                    .mode(mode),
             )?,
-            None => Mamba3GpuBackbone::new_with_dtype(
-                gpu_ordinal,
+            None => Mamba3GpuBackbone::new(
                 &weights,
                 cfg,
                 d_model,
                 batch,
-                dtype,
+                GpuOptions::default().device(gpu_ordinal).dtype(dtype),
             )?,
         };
         let stream = backbone.stream();

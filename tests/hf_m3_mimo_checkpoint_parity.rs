@@ -136,7 +136,7 @@ fn mimo_187m_gpu_arm(dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype) {
     let vocab_padded = model.embed.len() / d;
     let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba3MimoGpuEngine::new(&device, &model.weights, (cfg, d, 1), dtype).unwrap();
+    let engine = Mamba3MimoGpuEngine::new(&device, &model.weights, cfg, d, 1, dtype).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let t_len = golden.ids.len();
     let mut win = engine.alloc_window(t_len).unwrap();

@@ -28,6 +28,7 @@ fn main() {
 mod cuda_example {
     use std::time::Instant;
 
+    use mamba_rs::GpuOptions;
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
@@ -87,22 +88,20 @@ mod cuda_example {
         // training with an actual loss would pick lr based on the problem.
         let lr = 1e-6_f32;
         let wd = 1e-3_f32;
-        // Explicit storage dtype and GEMM mode; `new_full` would read
-        // MAMBA_RS_GEMM_MODE instead and default to Deterministic.
-        let mut trainer = MambaGpuTrainer::new_full_with_mode(
-            0,
-            &cpu,
-            cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr,
-                weight_decay: wd,
-            },
-            WeightDtype::Bf16,
-            GemmMode::Deterministic,
-        )?;
+        // Explicit storage dtype and GEMM mode. Without `.mode(..)` the
+        // trainer reads MAMBA_RS_GEMM_MODE and runs the deterministic
+        // kernels when it is unset.
+        let session = TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay: wd,
+        };
+        let opts = GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::Deterministic);
+        let mut trainer = MambaGpuTrainer::new(&cpu, cfg, session, opts)?;
         println!(
             "storage {:?}, mode {:?}",
             trainer.dtype(),

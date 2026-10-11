@@ -9,8 +9,10 @@
 
 use mamba_rs::dist::EmulatedWorld;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -99,7 +101,13 @@ fn run_emulated_ddp_tier(
     let ew = EmulatedWorld::new(world).unwrap();
     let mut ranks: Vec<Mamba3GpuTrainer> = (0..world)
         .map(|_| {
-            Mamba3GpuTrainer::new_with_dtype(0, &cpu, c, c.d_model, 1, seq_len, dtype).unwrap()
+            Mamba3GpuTrainer::new(
+                &cpu,
+                c,
+                TrainSessionCfg::new(c.d_model, 1, seq_len),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap()
         })
         .collect();
     if bi_tier {

@@ -7,6 +7,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+use mamba_rs::mamba_ssm::gpu::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 use mamba_rs::mamba2::{
@@ -129,7 +130,8 @@ fn m2_gpu_decode_matches_cpu() {
         cfg.validate().unwrap();
         let w = drawn(&cfg, input_dim, 13);
         let dm = cfg.d_model;
-        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1).unwrap();
+        let engine =
+            Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1, WeightDtype::F32).unwrap();
         let mut gst = engine.alloc_state().unwrap();
         let mut gsc = engine.alloc_scratch().unwrap();
         let mut cst = Mamba2State::zeros(&cfg);
@@ -156,8 +158,9 @@ fn m2_gpu_batch_rows_match_single_bits() {
     let w = drawn(&cfg, input_dim, 17);
     let dm = cfg.d_model;
     let batch = 5usize;
-    let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
-    let single = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1).unwrap();
+    let engine =
+        Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch, WeightDtype::F32).unwrap();
+    let single = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1, WeightDtype::F32).unwrap();
     let mut bst = engine.alloc_state().unwrap();
     let mut bsc = engine.alloc_scratch().unwrap();
     let mut sst = single.alloc_state().unwrap();
@@ -191,7 +194,8 @@ fn m2_gpu_prefill_matches_cpu() {
         let w = drawn(&cfg, input_dim, 19);
         let dm = cfg.d_model;
         let inputs = det(batch * seq * input_dim, 600, 1.0);
-        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let engine =
+            Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch, WeightDtype::F32).unwrap();
         let mut gst = engine.alloc_state().unwrap();
         let mut pf = engine.alloc_prefill(seq).unwrap();
         let mut rows = vec![0f32; batch * seq * dm];
@@ -254,7 +258,8 @@ fn m2_gpu_prefill_seams_are_bit_exact() {
         };
         let w = drawn(&cfg, input_dim, 29);
         let dm = cfg.d_model;
-        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1).unwrap();
+        let engine =
+            Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1, WeightDtype::F32).unwrap();
         let stream = &engine.ctx().stream;
         let inputs = det(129 * input_dim, 800, 1.0);
         let download = |b: &mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer| {
@@ -356,8 +361,7 @@ fn m2_gpu_typed_lanes_track_cpu() {
                 &mut ps,
                 (&cfg, seq, PrefillMode::Single),
             );
-            let engine =
-                Mamba2GpuEngine::new_with_dtype(&device, &w, (cfg, input_dim, 1), dtype).unwrap();
+            let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1, dtype).unwrap();
             let mut gst = engine.alloc_state().unwrap();
             let mut pf = engine.alloc_prefill(seq).unwrap();
             let mut rows = vec![0f32; seq * dm];
@@ -399,7 +403,8 @@ fn m2_gpu_sequential_prefill_is_decode_steps() {
         let w = drawn(&cfg, input_dim, 29);
         let dm = cfg.d_model;
         let inputs = det(batch * seq * input_dim, 610, 1.0);
-        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let engine =
+            Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch, WeightDtype::F32).unwrap();
         let mut st = engine.alloc_state().unwrap();
         let mut pf = engine.alloc_prefill(seq).unwrap();
         let mut rows = vec![0f32; batch * seq * dm];
@@ -442,7 +447,9 @@ fn m2_gpu_sequential_prefill_is_decode_steps() {
             scan_mode: ScanMode::Parallel,
             ..base
         };
-        let chunked = Mamba2GpuEngine::new(&device, &w, chunked_cfg, input_dim, batch).unwrap();
+        let chunked =
+            Mamba2GpuEngine::new(&device, &w, chunked_cfg, input_dim, batch, WeightDtype::F32)
+                .unwrap();
         let mut cst = chunked.alloc_state().unwrap();
         let mut cpf = chunked.alloc_prefill(seq).unwrap();
         let mut crow = vec![0f32; batch * seq * dm];
@@ -474,9 +481,7 @@ fn m2_gpu_graph_replay_is_the_eager_step() {
         WeightDtype::Bf16,
         WeightDtype::F16,
     ] {
-        let new = || {
-            Mamba2GpuEngine::new_with_dtype(&device, &w, (cfg, input_dim, batch), dtype).unwrap()
-        };
+        let new = || Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch, dtype).unwrap();
         let (eager, mut graphed) = (new(), new());
         let (mut est, mut esc) = (eager.alloc_state().unwrap(), eager.alloc_scratch().unwrap());
         let (mut gst, mut gsc) = (

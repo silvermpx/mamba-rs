@@ -13,6 +13,7 @@
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
@@ -77,8 +78,7 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
     let n = batch * seq_len * input_dim;
     let input = det_input(n, 0xA11C_1001);
     let d_temporal = det_input(n, 0xD7E0_1001);
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -88,7 +88,7 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .expect("construct M1 trainer");
 

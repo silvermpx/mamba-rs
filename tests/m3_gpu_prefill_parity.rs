@@ -5,6 +5,7 @@
 //! first-position error orders of magnitude above float noise).
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -455,8 +456,14 @@ fn gpu_prefill_mixed_backbone_handoff() {
     let decode_inputs = det_input(t_decode * dm, 0xB0B);
 
     // Reference: typed step loop over prompt + decode tokens.
-    let mut bb_steps =
-        Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
+    let mut bb_steps = Mamba3GpuBackbone::new(
+        &w,
+        cfg,
+        dm,
+        1,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
+    )
+    .unwrap();
     let mut out_ref = vec![0.0f32; dm];
     let mut ref_outs = Vec::new();
     for t in 0..t_prompt {
@@ -472,8 +479,14 @@ fn gpu_prefill_mixed_backbone_handoff() {
     }
 
     // Prefill lane: one-pass prompt, then the same decode tokens.
-    let mut bb_pre =
-        Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
+    let mut bb_pre = Mamba3GpuBackbone::new(
+        &w,
+        cfg,
+        dm,
+        1,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
+    )
+    .unwrap();
     let stream = bb_pre.stream().clone();
     let mut gpu_prompt = GpuBuffer::zeros(&stream, t_prompt * dm).unwrap();
     stream.synchronize().unwrap();

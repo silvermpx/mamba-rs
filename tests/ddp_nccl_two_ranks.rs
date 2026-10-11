@@ -22,8 +22,12 @@
 #![cfg(all(feature = "cuda", feature = "nccl"))]
 
 use mamba_rs::dist::{Bootstrap, Devices, DistConfig, EmulatedWorld, Rendezvous, bootstrap};
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -114,14 +118,13 @@ fn base_weights() -> Mamba3Weights {
 
 fn build_trainer(device: usize) -> Mamba3GpuTrainer {
     let c = cfg();
-    Mamba3GpuTrainer::new_with_dtype(
-        device,
+    Mamba3GpuTrainer::new(
         &base_weights(),
         c,
-        c.d_model,
-        1,
-        64,
-        WeightDtype::Bf16,
+        TrainSessionCfg::new(c.d_model, 1, 64),
+        GpuOptions::default()
+            .device(device)
+            .dtype(WeightDtype::Bf16),
     )
     .unwrap()
 }

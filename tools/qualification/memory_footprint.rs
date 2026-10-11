@@ -10,6 +10,7 @@
 
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
@@ -48,7 +49,12 @@ fn classifier_shape_memory_footprint() {
             lr: 5e-4,
             weight_decay: 0.05,
         };
-        match MambaGpuTrainer::new_full(0, &w, cfg, session, WeightDtype::Bf16) {
+        match MambaGpuTrainer::new(
+            &w,
+            cfg,
+            session,
+            GpuOptions::default().dtype(WeightDtype::Bf16),
+        ) {
             Ok(mut t) => {
                 eprintln!("    constructed: {} MiB", vram_used_mb());
                 let input = vec![0.01f32; batch * seq_len * input_dim];

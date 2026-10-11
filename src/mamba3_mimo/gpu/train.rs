@@ -24,6 +24,8 @@
 //! Windows carry the states from one call to the next, and the gradients
 //! stop at the states a window starts from.
 
+use crate::mamba_ssm::gpu::options::GpuOptions;
+use crate::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan};
@@ -398,17 +400,44 @@ pub struct Mamba3MimoGpuTrainer {
     fresh_grads: bool,
 }
 
+/// Tokens between the sequential scan's checkpoints that [`Mamba3MimoGpuTrainer::new`]
+/// takes.
+pub const DEFAULT_CHECKPOINT_STRIDE: usize = 16;
+
 impl Mamba3MimoGpuTrainer {
-    /// A trainer in `dtype` (f32, tf32, bf16 or f16) for `batch` sequences
-    /// of `seq_len` tokens starting from `w`, checkpointing the scan every
-    /// `stride` tokens, with AdamW at its defaults (see
-    /// [`Self::adamw_mut`]).
+    /// Build a trainer for the session `session` names (shape and AdamW
+    /// settings, see [`TrainSessionCfg::new`]) from `w`, on the device, in
+    /// the storage precision (f32, tf32, bf16 or f16) and in the GEMM mode
+    /// `opts` names, checkpointing the sequential scan every
+    /// [`DEFAULT_CHECKPOINT_STRIDE`] tokens.
     pub fn new(
-        device: &GpuDevice,
         w: &Mamba3MimoWeights,
-        (cfg, input_dim, batch, seq_len): (Mamba3MimoConfig, usize, usize, usize),
-        (dtype, stride): (WeightDtype, usize),
+        cfg: Mamba3MimoConfig,
+        session: TrainSessionCfg,
+        opts: GpuOptions,
     ) -> Result<Self, String> {
+        Self::new_with_stride(w, cfg, session, opts, DEFAULT_CHECKPOINT_STRIDE)
+    }
+
+    /// [`Self::new`] checkpointing the sequential scan every `stride`
+    /// tokens: a shorter stride replays less and keeps more checkpoints.
+    pub fn new_with_stride(
+        w: &Mamba3MimoWeights,
+        cfg: Mamba3MimoConfig,
+        session: TrainSessionCfg,
+        opts: GpuOptions,
+        stride: usize,
+    ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
+        let dtype = opts.dtype;
+        let device = GpuDevice::new(opts.device)?;
+        let device = &device;
         w.validate(&cfg, input_dim)?;
         if cfg.is_outproj_norm {
             return Err("the gated output norm does not train on the GPU yet".into());
@@ -449,7 +478,11 @@ impl Mamba3MimoGpuTrainer {
                  got {hd} and {na}"
             ));
         }
-        let ctx = GpuCtx::new_from_env_with_state_cap_and_role(device, 64, GemmRole::triad(dtype))?;
+        let role = GemmRole::triad(dtype);
+        let ctx = match opts.mode {
+            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
+            None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
+        };
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -623,7 +656,9 @@ impl Mamba3MimoGpuTrainer {
             fresh_grads: false,
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
-            adamw: GpuAdamW::new(s, layout.total)?,
+            adamw: GpuAdamW::new(s, layout.total)?
+                .with_lr(lr)
+                .with_weight_decay(weight_decay),
             state_ssm: per_layer(hd * ds)?,
             state_k: per_layer(rank * ds)?,
             state_v: per_layer(hd)?,
@@ -663,14 +698,6 @@ impl Mamba3MimoGpuTrainer {
     /// The model's configuration.
     pub fn config(&self) -> &Mamba3MimoConfig {
         &self.cfg
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "renamed to `config`, the name every family uses"
-    )]
-    pub fn cfg(&self) -> &Mamba3MimoConfig {
-        self.config()
     }
 
     /// Sequences per window.

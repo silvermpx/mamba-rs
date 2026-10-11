@@ -25,6 +25,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
@@ -94,8 +95,7 @@ fn run_repeatability(dtype: WeightDtype) {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut a = MambaGpuTrainer::new_full(
-        0,
+    let mut a = MambaGpuTrainer::new(
         &cpu,
         cfg_m,
         TrainSessionCfg {
@@ -105,11 +105,10 @@ fn run_repeatability(dtype: WeightDtype) {
             lr: 1e-4,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
-    let mut b = MambaGpuTrainer::new_full(
-        0,
+    let mut b = MambaGpuTrainer::new(
         &cpu,
         cfg_m,
         TrainSessionCfg {
@@ -119,7 +118,7 @@ fn run_repeatability(dtype: WeightDtype) {
             lr: 1e-4,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
 
@@ -202,8 +201,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
     };
 
     // Trainer A: eager for 3 steps
-    let mut a = MambaGpuTrainer::new_full(
-        0,
+    let mut a = MambaGpuTrainer::new(
         &cpu,
         cfg_m,
         TrainSessionCfg {
@@ -213,7 +211,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
             lr: 1e-4,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
     for s in 0..3 {
@@ -229,8 +227,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Trainer B: warmup eager 1 step, then capture + replay 2 times on
     // the SAME inputs that eager A used for steps 2,3.
-    let mut b = MambaGpuTrainer::new_full(
-        0,
+    let mut b = MambaGpuTrainer::new(
         &cpu,
         cfg_m,
         TrainSessionCfg {
@@ -240,7 +237,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
             lr: 1e-4,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
     let inp0 = det(n, 0xC0);
@@ -280,8 +277,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Now drive a SECOND B trainer and replay 10 times — all replays
     // must land at the same terminal weights.
-    let mut c = MambaGpuTrainer::new_full(
-        0,
+    let mut c = MambaGpuTrainer::new(
         &cpu,
         cfg_m,
         TrainSessionCfg {
@@ -291,7 +287,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
             lr: 1e-4,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap();
     c.step(&inp0, &dt0).unwrap();

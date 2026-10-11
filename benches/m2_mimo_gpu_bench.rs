@@ -12,6 +12,8 @@
 //! host upload of the input and the download of the rows; both scans pay
 //! the same transfers.
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use std::time::Instant;
 
 use mamba_rs::config::ScanMode;
@@ -93,8 +95,7 @@ fn mamba2(device: &GpuDevice, part: &str) {
                     scan_mode: mode,
                     ..base
                 };
-                let eng = Mamba2GpuEngine::new_with_dtype(device, &w, (cfg, input_dim, b), dtype)
-                    .unwrap();
+                let eng = Mamba2GpuEngine::new(device, &w, cfg, input_dim, b, dtype).unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut pf = eng.alloc_prefill(t).unwrap();
                 let input = det(b * t * input_dim, 11);
@@ -111,8 +112,7 @@ fn mamba2(device: &GpuDevice, part: &str) {
     println!("decode steps (us/step):");
     for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
-            let mut eng =
-                Mamba2GpuEngine::new_with_dtype(device, &w, (base, input_dim, b), dtype).unwrap();
+            let mut eng = Mamba2GpuEngine::new(device, &w, base, input_dim, b, dtype).unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut sc = eng.alloc_scratch().unwrap();
             let input = det(b * input_dim, 12);
@@ -136,9 +136,13 @@ fn mamba2(device: &GpuDevice, part: &str) {
                 scan_mode: mode,
                 ..base
             };
-            let mut tr =
-                Mamba2GpuTrainer::new_with_dtype(device, &w, (cfg, input_dim, b, t), dtype)
-                    .unwrap();
+            let mut tr = Mamba2GpuTrainer::new(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, b, t),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
             let input = det(b * t * input_dim, 13);
             let d_out = det(b * t * cfg.d_model, 14);
             let mut rows = vec![0f32; b * t * cfg.d_model];
@@ -176,7 +180,7 @@ fn mimo(device: &GpuDevice, part: &str) {
                     scan_mode: mode,
                     ..base
                 };
-                let eng = Mamba3MimoGpuEngine::new(device, &w, (cfg, input_dim, b), dtype).unwrap();
+                let eng = Mamba3MimoGpuEngine::new(device, &w, cfg, input_dim, b, dtype).unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut win = eng.alloc_window(t).unwrap();
                 let input = det(b * t * input_dim, 11);
@@ -193,8 +197,7 @@ fn mimo(device: &GpuDevice, part: &str) {
     println!("decode steps (us/step):");
     for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
-            let mut eng =
-                Mamba3MimoGpuEngine::new(device, &w, (base, input_dim, b), dtype).unwrap();
+            let mut eng = Mamba3MimoGpuEngine::new(device, &w, base, input_dim, b, dtype).unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut win = eng.alloc_window(1).unwrap();
             let input = det(b * input_dim, 12);
@@ -218,8 +221,14 @@ fn mimo(device: &GpuDevice, part: &str) {
                 scan_mode: mode,
                 ..base
             };
-            let mut tr =
-                Mamba3MimoGpuTrainer::new(device, &w, (cfg, input_dim, b, t), (dtype, 16)).unwrap();
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, b, t),
+                GpuOptions::default().dtype(dtype),
+                16,
+            )
+            .unwrap();
             let input = det(b * t * input_dim, 13);
             let d_out = det(b * t * cfg.d_model, 14);
             let mut rows = vec![0f32; b * t * cfg.d_model];

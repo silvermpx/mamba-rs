@@ -10,6 +10,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::{BackwardOpts, Mamba3GpuTrainer, TrainSessionCfg};
@@ -123,12 +124,20 @@ fn run_split_vs_fused(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
 
-    let mut fused =
-        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("fused trainer");
-    let mut split =
-        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("split trainer");
+    let mut fused = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("fused trainer");
+    let mut split = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("split trainer");
 
     let mut temporal_out = vec![0.0f32; n_out];
     for step in 0..3u32 {
@@ -170,12 +179,11 @@ fn m3_split_interlock_and_accumulate_window() {
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
     let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = Mamba3GpuTrainer::new_full(
-        0,
+    let mut t = Mamba3GpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("trainer");
 
@@ -232,9 +240,13 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA2, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB2, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -273,9 +285,13 @@ fn assert_reset_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA3, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB3, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -310,9 +326,13 @@ fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
-    let mut trainer =
-        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-            .expect("trainer");
+    let mut trainer = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA4, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB4, 0.01);
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
@@ -360,12 +380,11 @@ fn m3_f16_split_scaler_protocol() {
     let mut w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
-    let mut t = Mamba3GpuTrainer::new_full(
-        0,
+    let mut t = Mamba3GpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("f16 trainer");
 

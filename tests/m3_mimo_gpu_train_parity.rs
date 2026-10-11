@@ -8,8 +8,9 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
 use mamba_rs::mamba3_mimo::{
     Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoTape, Mamba3MimoTrainScratch, Mamba3MimoWeights,
@@ -211,7 +212,6 @@ fn worst_gradient(got: &Mamba3MimoWeights, want: &Mamba3MimoWeights) -> (f64, St
 // orders of magnitude. The half lanes round the stored rows.
 #[test]
 fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
-    let device = GpuDevice::new(0).unwrap();
     // Two chunks on the chunked path, the second partial.
     let (input_dim, batch, seq) = (40usize, 2usize, 100usize);
     for mode in [ScanMode::Auto, ScanMode::Sequential] {
@@ -233,11 +233,12 @@ fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
                 let d_out = det(batch * seq * dm, 501, 1.0);
                 let (want_rows, want_grads, want_d_in) =
                     cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-                let mut tr = Mamba3MimoGpuTrainer::new(
-                    &device,
+                let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
                     &w,
-                    (cfg, input_dim, batch, seq),
-                    (dtype, 8),
+                    cfg,
+                    TrainSessionCfg::new(input_dim, batch, seq),
+                    GpuOptions::default().dtype(dtype),
+                    8,
                 )
                 .unwrap();
                 tr.load_scaler_state(256.0, 0);
@@ -280,7 +281,6 @@ fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
 /// stride, and a repeated backward gives the same bits on both paths.
 #[test]
 fn m3_mimo_gpu_train_is_stride_free_and_repeatable() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 29usize);
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
         for (label, base) in cases() {
@@ -293,11 +293,12 @@ fn m3_mimo_gpu_train_is_stride_free_and_repeatable() {
             let inputs = det(batch * seq * input_dim, 700, 1.0);
             let d_out = det(batch * seq * dm, 701, 1.0);
             let run = |stride: usize| -> (Vec<f32>, Mamba3MimoWeights) {
-                let mut tr = Mamba3MimoGpuTrainer::new(
-                    &device,
+                let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
                     &w,
-                    (cfg, input_dim, batch, seq),
-                    (dtype, stride),
+                    cfg,
+                    TrainSessionCfg::new(input_dim, batch, seq),
+                    GpuOptions::default().dtype(dtype),
+                    stride,
                 )
                 .unwrap();
                 let mut rows = vec![0f32; batch * seq * dm];
@@ -327,7 +328,6 @@ fn m3_mimo_gpu_train_is_stride_free_and_repeatable() {
 /// AdamW on L = 0.5 |out - target|^2 lowers the loss in every lane.
 #[test]
 fn m3_mimo_gpu_train_adamw_lowers_a_loss() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 24usize);
     let cfg = cases()[1].1;
     let w = drawn(&cfg, input_dim, 31);
@@ -340,9 +340,14 @@ fn m3_mimo_gpu_train_adamw_lowers_a_loss() {
         WeightDtype::Bf16,
         WeightDtype::F16,
     ] {
-        let mut tr =
-            Mamba3MimoGpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq), (dtype, 8))
-                .unwrap();
+        let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+            &w,
+            cfg,
+            TrainSessionCfg::new(input_dim, batch, seq),
+            GpuOptions::default().dtype(dtype),
+            8,
+        )
+        .unwrap();
         tr.adamw_mut().lr = 3e-3;
         let mut out = vec![0f32; batch * seq * dm];
         let (mut losses, mut applied) = (Vec::new(), 0usize);
@@ -395,7 +400,6 @@ fn m3_mimo_gpu_train_adamw_lowers_a_loss() {
 /// trainer, and a repeated backward gives the same bits.
 #[test]
 fn m3_mimo_gpu_train_fits_a_wide_rank() {
-    let device = GpuDevice::new(0).unwrap();
     let base = Mamba3MimoConfig {
         d_model: 64,
         d_state: 16,
@@ -420,9 +424,14 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
             let d_out = det(batch * seq * dm, 521, 1.0);
             let (want_rows, want_grads, want_d_in) =
                 cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-            let mut tr =
-                Mamba3MimoGpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq), (dtype, 8))
-                    .unwrap();
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+                8,
+            )
+            .unwrap();
             let mut rows = vec![0f32; batch * seq * dm];
             tr.forward(&inputs, &mut rows).unwrap();
             let mut d_in = vec![0f32; batch * seq * input_dim];
@@ -464,7 +473,6 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
 /// GPU matches the CPU trainer carrying the same state.
 #[test]
 fn m3_mimo_gpu_train_continues_a_carried_state() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     let all = cases();
     for mode in [ScanMode::Auto, ScanMode::Sequential] {
@@ -530,11 +538,12 @@ fn m3_mimo_gpu_train_continues_a_carried_state() {
                 .unwrap();
             }
 
-            let mut tr = Mamba3MimoGpuTrainer::new(
-                &device,
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
                 &w,
-                (cfg, input_dim, batch, seq),
-                (WeightDtype::F32, 8),
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(WeightDtype::F32),
+                8,
             )
             .unwrap();
             let mut rows = vec![0f32; batch * seq * dm];
@@ -573,7 +582,6 @@ fn m3_mimo_gpu_train_continues_a_carried_state() {
 /// builds) on both paths, in f32 and bf16, against the CPU trainer.
 #[test]
 fn m3_mimo_gpu_train_identity_input() {
-    let device = GpuDevice::new(0).unwrap();
     let base = cases()[1].1;
     let (batch, seq) = (2usize, 100usize);
     let input_dim = base.d_model;
@@ -594,9 +602,14 @@ fn m3_mimo_gpu_train_identity_input() {
             let d_out = det(batch * seq * dm, 541, 1.0);
             let (want_rows, want_grads, want_d_in) =
                 cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
-            let mut tr =
-                Mamba3MimoGpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq), (dtype, 8))
-                    .unwrap();
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+                8,
+            )
+            .unwrap();
             let mut rows = vec![0f32; batch * seq * dm];
             tr.forward(&inputs, &mut rows).unwrap();
             let mut d_in = vec![0f32; batch * seq * input_dim];
@@ -630,18 +643,18 @@ fn m3_mimo_gpu_train_identity_input() {
 /// and slices of the wrong length are refused, not run.
 #[test]
 fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
-    let device = GpuDevice::new(0).unwrap();
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[0].1;
     let w = drawn(&cfg, input_dim, 33);
     let dm = cfg.d_model;
     let inputs = det(batch * seq * input_dim, 910, 1.0);
     let d_out = det(batch * seq * dm, 911, 1.0);
-    let mut tr = Mamba3MimoGpuTrainer::new(
-        &device,
+    let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
         &w,
-        (cfg, input_dim, batch, seq),
-        (WeightDtype::F16, 8),
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq),
+        GpuOptions::default().dtype(WeightDtype::F16),
+        8,
     )
     .unwrap();
     assert!(

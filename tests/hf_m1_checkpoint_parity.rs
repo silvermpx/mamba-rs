@@ -21,6 +21,8 @@
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load::{HfModel, load_hf};
 use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 
 #[path = "common/m3_golden.rs"]
 mod m3_golden;
@@ -196,8 +198,14 @@ fn gpu_decode_rows(
 
     let d = model.d_model;
     let cfg = *model.backbone.config();
-    let mut gpu =
-        MambaGpuBackbone::new_with_dtype(0, model.backbone.weights(), cfg, d, 1, dtype).unwrap();
+    let mut gpu = MambaGpuBackbone::new(
+        model.backbone.weights(),
+        cfg,
+        d,
+        1,
+        GpuOptions::default().dtype(dtype),
+    )
+    .unwrap();
     let mut head = Head::new(model);
     let mut hidden = vec![0f32; d];
     let rows = golden
@@ -249,7 +257,8 @@ fn mamba_130m_gpu_matches_the_f64_oracle() {
 
     let t_len = golden.ids.len();
     let cfg = *model.backbone.config();
-    let mut fresh = MambaGpuBackbone::new(0, model.backbone.weights(), cfg, d, 1).unwrap();
+    let mut fresh =
+        MambaGpuBackbone::new(model.backbone.weights(), cfg, d, 1, GpuOptions::default()).unwrap();
     let prompt: Vec<f32> = golden
         .ids
         .iter()

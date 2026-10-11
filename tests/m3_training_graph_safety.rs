@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
@@ -76,8 +77,7 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3GpuTrainer, Vec<f32>, Ve
     let cpu = Mamba3Weights::init(&cfg, input_dim, 0x6A50_0000 ^ dtype as u64);
     let input = deterministic(n, 0xA11C_E001);
     let d_temporal = deterministic(n, 0xD7E0_0001);
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -87,7 +87,7 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3GpuTrainer, Vec<f32>, Ve
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .expect("construct Mamba3 trainer");
 
@@ -219,8 +219,7 @@ fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
     let cpu = Mamba3Weights::init(&cfg, input_dim, 0x6A50_0001);
     let input = deterministic(n, 0xA11C_E001);
     let d_temporal = deterministic(n, 0xD7E0_0001);
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -230,7 +229,7 @@ fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("construct cold f16 trainer");
 

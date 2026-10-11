@@ -48,6 +48,7 @@ pub mod kernel_identity;
 pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;
+pub mod options;
 pub mod prefill;
 pub mod trainer;
 pub mod training_graph;
@@ -60,4 +61,5 @@ pub use inference::{
     MambaGpuBackbone, MambaGpuEngine, MambaGpuEngineMixed, MambaGpuScratch, MambaGpuScratchMixed,
     MambaGpuState,
 };
+pub use options::GpuOptions;
 pub use trainer::MambaGpuTrainer;

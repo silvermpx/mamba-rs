@@ -27,6 +27,8 @@
 
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
 use mamba_rs::hf::load::load_hf;
@@ -143,8 +145,7 @@ fn run_full_cycle(dtype: WeightDtype) {
         _ => (3e-5f32, 0.01f32),
     };
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &hf_weights,
         cfg,
         TrainSessionCfg {
@@ -154,7 +155,7 @@ fn run_full_cycle(dtype: WeightDtype) {
             lr,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .expect("build trainer");
 

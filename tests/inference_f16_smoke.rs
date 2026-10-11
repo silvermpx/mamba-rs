@@ -8,6 +8,7 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 #[test]
@@ -35,8 +36,14 @@ fn m1_inference_f16_wrapper_smoke() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut bb = MambaGpuBackbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
-        .expect("construct f16 backbone");
+    let mut bb = MambaGpuBackbone::new(
+        &cpu,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::F16),
+    )
+    .expect("construct f16 backbone");
     assert_eq!(bb.dtype(), WeightDtype::F16);
 
     let input = vec![0.05f32; batch * input_dim];
@@ -71,9 +78,14 @@ fn m3_inference_f16_wrapper_smoke() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut bb =
-        Mamba3GpuBackbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
-            .expect("construct M3 f16 backbone");
+    let mut bb = Mamba3GpuBackbone::new(
+        &cpu,
+        cfg,
+        input_dim,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::F16),
+    )
+    .expect("construct M3 f16 backbone");
     assert_eq!(bb.dtype(), WeightDtype::F16);
 
     let input = vec![0.05f32; batch * input_dim];

@@ -7,7 +7,9 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -63,7 +65,13 @@ fn weight_bits(w: &Mamba3Weights) -> Vec<u32> {
 
 fn build(cpu: &Mamba3Weights, dtype: WeightDtype) -> Mamba3GpuTrainer {
     let c = cfg();
-    Mamba3GpuTrainer::new_with_dtype(0, cpu, c, c.d_model, 1, 64, dtype).unwrap()
+    Mamba3GpuTrainer::new(
+        cpu,
+        c,
+        TrainSessionCfg::new(c.d_model, 1, 64),
+        GpuOptions::default().dtype(dtype),
+    )
+    .unwrap()
 }
 
 /// The f32 forward has no identity-proj branch (it always runs the GEMM),
@@ -270,7 +278,13 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
         out
     }
     fn m1_build(cpu: &MambaWeights, c: &MambaConfig) -> MambaGpuTrainer {
-        MambaGpuTrainer::new_with_dtype(0, cpu, *c, c.d_model, 1, 4, WeightDtype::F32).unwrap()
+        MambaGpuTrainer::new(
+            cpu,
+            *c,
+            TrainSessionCfg::new(c.d_model, 1, 4),
+            GpuOptions::default().dtype(WeightDtype::F32),
+        )
+        .unwrap()
     }
 
     let c = m1_cfg();

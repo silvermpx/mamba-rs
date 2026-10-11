@@ -697,42 +697,32 @@ impl Drop for Mamba2GpuEngine {
 }
 
 impl Mamba2GpuEngine {
-    /// An f32 engine for `batch` sequences, in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (deterministic when unset).
+    /// An engine for `batch` sequences storing its projections in `dtype`
+    /// (f32, tf32, bf16 or f16), in the GEMM mode `MAMBA_RS_GEMM_MODE`
+    /// names (deterministic when unset). The arguments are those of the
+    /// Mamba-1 and SISO mixed engines.
     pub fn new(
         device: &GpuDevice,
         w: &Mamba2Weights,
         cfg: Mamba2Config,
         input_dim: usize,
         batch: usize,
+        dtype: WeightDtype,
     ) -> Result<Self, String> {
-        Self::new_inner(device, w, (cfg, input_dim, batch), (WeightDtype::F32, None))
+        Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, None))
     }
 
     /// [`Self::new`] with an explicit GEMM mode.
     pub fn new_with_mode(
         device: &GpuDevice,
         w: &Mamba2Weights,
-        (cfg, input_dim, batch): (Mamba2Config, usize, usize),
+        cfg: Mamba2Config,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_inner(
-            device,
-            w,
-            (cfg, input_dim, batch),
-            (WeightDtype::F32, Some(mode)),
-        )
-    }
-
-    /// An engine storing its projections in `dtype`: f32, tf32 (f32 storage
-    /// with the TF32 GEMM contract), bf16 or f16.
-    pub fn new_with_dtype(
-        device: &GpuDevice,
-        w: &Mamba2Weights,
-        (cfg, input_dim, batch): (Mamba2Config, usize, usize),
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, None))
+        Self::new_inner(device, w, (cfg, input_dim, batch), (dtype, Some(mode)))
     }
 
     fn new_inner(
@@ -812,14 +802,6 @@ impl Mamba2GpuEngine {
     /// The model's configuration.
     pub fn config(&self) -> &Mamba2Config {
         &self.cfg
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "renamed to `config`, the name every family uses"
-    )]
-    pub fn cfg(&self) -> &Mamba2Config {
-        self.config()
     }
 
     /// Sequences per call.
@@ -1310,8 +1292,3 @@ pub struct Mamba2GpuPrefill {
     out: DtypedBuf,
     final_rows: GpuBuffer,
 }
-
-// The names these types carried before 0.8, when each family named its GPU
-// types its own way.
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba2GpuEngine`")]
-pub type Mamba2GpuInferenceEngine = Mamba2GpuEngine;

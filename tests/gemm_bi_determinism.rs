@@ -26,6 +26,7 @@
 
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
@@ -102,8 +103,8 @@ fn run_training(
         lr: 1e-3,
         weight_decay: 0.0,
     };
-    let mut trainer =
-        MambaGpuTrainer::new_full(0, &cpu, cfg, session, dtype).expect("construct trainer");
+    let mut trainer = MambaGpuTrainer::new(&cpu, cfg, session, GpuOptions::default().dtype(dtype))
+        .expect("construct trainer");
     trainer
         .ctx()
         .set_gemm_mode(if invariant {

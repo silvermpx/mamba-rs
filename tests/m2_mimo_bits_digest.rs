@@ -18,8 +18,10 @@ mod digest;
 
 use digest::{Digest, fnv1a_f32};
 use mamba_rs::config::ScanMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};
@@ -83,9 +85,7 @@ fn print_m2_bits_digest() {
                     scan_mode: mode,
                     ..base
                 };
-                let eng =
-                    Mamba2GpuEngine::new_with_dtype(&device, &w, (cfg, INPUT_DIM, BATCH), dtype)
-                        .unwrap();
+                let eng = Mamba2GpuEngine::new(&device, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut sc = eng.alloc_scratch().unwrap();
                 let mut pf = eng.alloc_prefill(SEQ).unwrap();
@@ -113,11 +113,11 @@ fn print_m2_bits_digest() {
                 )
                 .unwrap();
                 d.absorb_f32(&rows);
-                let mut tr = Mamba2GpuTrainer::new_with_dtype(
-                    &device,
+                let mut tr = Mamba2GpuTrainer::new(
                     &w,
-                    (cfg, INPUT_DIM, BATCH, SEQ),
-                    dtype,
+                    cfg,
+                    TrainSessionCfg::new(INPUT_DIM, BATCH, SEQ),
+                    GpuOptions::default().dtype(dtype),
                 )
                 .unwrap();
                 let mut dx = vec![0f32; BATCH * SEQ * INPUT_DIM];
@@ -162,7 +162,7 @@ fn print_mimo_bits_digest() {
                     ..base
                 };
                 let eng =
-                    Mamba3MimoGpuEngine::new(&device, &w, (cfg, INPUT_DIM, BATCH), dtype).unwrap();
+                    Mamba3MimoGpuEngine::new(&device, &w, cfg, INPUT_DIM, BATCH, dtype).unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut win = eng.alloc_window(SEQ).unwrap();
                 let mut one = eng.alloc_window(1).unwrap();
@@ -190,11 +190,12 @@ fn print_mimo_bits_digest() {
                 )
                 .unwrap();
                 d.absorb_f32(&rows);
-                let mut tr = Mamba3MimoGpuTrainer::new(
-                    &device,
+                let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
                     &w,
-                    (cfg, INPUT_DIM, BATCH, SEQ),
-                    (dtype, 16),
+                    cfg,
+                    TrainSessionCfg::new(INPUT_DIM, BATCH, SEQ),
+                    GpuOptions::default().dtype(dtype),
+                    16,
                 )
                 .unwrap();
                 let mut dx = vec![0f32; BATCH * SEQ * INPUT_DIM];

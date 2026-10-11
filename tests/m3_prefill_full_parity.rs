@@ -7,6 +7,7 @@
 //! the pooled CUDA-graph replay must equal the eager pooled path.
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -94,8 +95,7 @@ fn m3_prefill_full_matches_trainer_forward() {
 
     // Trainer-forward reference temporal (the surface the classify lane
     // scores through today).
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &w,
         cfg,
         TrainSessionCfg {
@@ -105,7 +105,7 @@ fn m3_prefill_full_matches_trainer_forward() {
             lr: 1e-5,
             weight_decay: 0.0,
         },
-        WeightDtype::F32,
+        GpuOptions::default().dtype(WeightDtype::F32),
     )
     .expect("m3 f32 trainer");
     let mut reference = vec![0.0f32; seq_len * dm];

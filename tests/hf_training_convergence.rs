@@ -25,6 +25,8 @@
 
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
 use mamba_rs::hf::load::load_hf;
@@ -176,8 +178,7 @@ fn run_convergence(dtype: WeightDtype) {
     let n = batch * seq_len * input_dim;
     let tune = cfg_for(dtype);
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &hf_weights,
         cfg,
         TrainSessionCfg {
@@ -187,7 +188,7 @@ fn run_convergence(dtype: WeightDtype) {
             lr: tune.lr,
             weight_decay: 0.0,
         },
-        dtype,
+        GpuOptions::default().dtype(dtype),
     )
     .unwrap_or_else(|e| panic!("build {label} trainer: {e}"));
 

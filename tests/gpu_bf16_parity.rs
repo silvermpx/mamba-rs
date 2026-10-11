@@ -7,6 +7,8 @@
 
 #![cfg(all(feature = "hf", feature = "cuda"))]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -217,8 +219,14 @@ fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
     let batch = 2;
     let bb = MambaBackbone::init(cfg, input_dim, 0xC0FFEE);
 
-    let mut gpu_bb =
-        MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
+    let mut gpu_bb = MambaGpuBackbone::new(
+        bb.weights(),
+        *bb.config(),
+        input_dim,
+        batch,
+        GpuOptions::default(),
+    )
+    .unwrap();
 
     // Verify temporal_dtype reports F32 for F32 engine.
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;

@@ -22,6 +22,7 @@
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -140,8 +141,7 @@ fn typed_prefill_matches_mixed_trainer_forward() {
 
         // MIXED trainer-forward reference temporal: the exact numeric
         // chain a production classifier checkpoint trains through.
-        let mut trainer = Mamba3GpuTrainer::new_full(
-            0,
+        let mut trainer = Mamba3GpuTrainer::new(
             &w,
             cfg,
             TrainSessionCfg {
@@ -151,7 +151,7 @@ fn typed_prefill_matches_mixed_trainer_forward() {
                 lr: 1e-5,
                 weight_decay: 0.0,
             },
-            dtype,
+            GpuOptions::default().dtype(dtype),
         )
         .expect("m3 mixed trainer");
         let mut reference = vec![0.0f32; seq_len * dm];

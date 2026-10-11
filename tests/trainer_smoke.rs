@@ -8,6 +8,7 @@
 
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
@@ -26,7 +27,7 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 fn m1_trainer_bf16_smoke() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -49,9 +50,13 @@ fn m1_trainer_bf16_smoke() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut trainer =
-        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
-            .expect("construct");
+    let mut trainer = MambaGpuTrainer::new(
+        &cpu,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq_len),
+        GpuOptions::default().dtype(WeightDtype::Bf16),
+    )
+    .expect("construct");
 
     let before = trainer.snapshot_master().unwrap();
 
@@ -115,8 +120,7 @@ fn m1_trainer_multi_layer_bf16() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -126,7 +130,7 @@ fn m1_trainer_multi_layer_bf16() {
             lr: 1e-5,
             weight_decay: 0.0,
         },
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("construct multi-layer bf16");
 
@@ -182,8 +186,7 @@ fn m3_trainer_multi_layer_bf16() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -193,7 +196,7 @@ fn m3_trainer_multi_layer_bf16() {
             lr: 1e-5,
             weight_decay: 0.0,
         },
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("construct multi-layer M3 bf16");
 
@@ -250,8 +253,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
     // Tiny lr — synthetic random d_temporal at default lr blows up f16
     // weights within a few steps; this test cares about the API path,
     // not convergence.
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -261,7 +263,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("construct f16");
     assert_eq!(trainer.dtype(), WeightDtype::F16);
@@ -318,8 +320,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer = Mamba3GpuTrainer::new_full(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
         TrainSessionCfg {
@@ -329,7 +330,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
             lr: 1e-7,
             weight_decay: 0.0,
         },
-        WeightDtype::F16,
+        GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("construct M3 f16");
     assert_eq!(trainer.dtype(), WeightDtype::F16);
@@ -357,7 +358,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
 fn m1_trainer_f32_smoke() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -379,9 +380,13 @@ fn m1_trainer_f32_smoke() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut trainer =
-        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
-            .expect("construct f32");
+    let mut trainer = MambaGpuTrainer::new(
+        &cpu,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq_len),
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("construct f32");
     assert_eq!(trainer.dtype(), WeightDtype::F32);
 
     for s in 0..2 {
@@ -401,7 +406,7 @@ fn m1_trainer_f32_smoke() {
 #[test]
 fn m3_trainer_bf16_smoke() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -425,14 +430,11 @@ fn m3_trainer_bf16_smoke() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer = Mamba3GpuTrainer::new_with_dtype(
-        0,
+    let mut trainer = Mamba3GpuTrainer::new(
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
-        WeightDtype::Bf16,
+        TrainSessionCfg::new(input_dim, batch, seq_len),
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("construct");
 
@@ -466,7 +468,7 @@ fn m3_trainer_bf16_smoke() {
 #[test]
 fn m3_trainer_f32_smoke() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -499,9 +501,13 @@ fn m3_trainer_f32_smoke() {
         .collect();
     cpu.input_proj_b = vec![0.0; cfg.d_model];
 
-    let mut trainer =
-        Mamba3GpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
-            .expect("construct f32");
+    let mut trainer = Mamba3GpuTrainer::new(
+        &cpu,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq_len),
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("construct f32");
     assert_eq!(trainer.dtype(), WeightDtype::F32);
 
     for s in 0..2 {

@@ -22,6 +22,7 @@ use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
 };
 use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::gpu::options::GpuOptions;
 use crate::mamba_ssm::weights::MambaWeights;
 use cudarc::driver::PushKernelArg;
 use std::cell::Cell;
@@ -2364,12 +2365,12 @@ impl MambaGpuEngineMixed {
 /// Simple API for inference: `step()`, `reset()`, `capture_graph()`.
 ///
 /// ```rust,no_run
-/// use mamba_rs::MambaConfig;
 /// use mamba_rs::gpu::inference::MambaGpuBackbone;
+/// use mamba_rs::{GpuOptions, MambaConfig};
 ///
 /// let cfg = MambaConfig::default();
 /// let weights = mamba_rs::MambaWeights::init(&cfg, 128, 42);
-/// let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 128, 1).unwrap();
+/// let mut bb = MambaGpuBackbone::new(&weights, cfg, 128, 1, GpuOptions::default()).unwrap();
 /// bb.capture_graph().unwrap(); // optional ~2-5x speedup
 ///
 /// let input = vec![0.1f32; 128];
@@ -2420,20 +2421,18 @@ impl BackboneScratch {
 /// HF `residual_in_fp32=True`). The F32 path keeps f32 scratch throughout.
 ///
 /// ```rust,no_run
-/// use mamba_rs::MambaConfig;
 /// use mamba_rs::gpu::inference::MambaGpuBackbone;
-/// use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+/// use mamba_rs::{GpuOptions, MambaConfig, WeightDtype};
 ///
 /// let cfg = MambaConfig::default();
 /// let weights = mamba_rs::MambaWeights::init(&cfg, 128, 42);
 ///
 /// // f32 (default)
-/// let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 128, 1).unwrap();
+/// let mut bb = MambaGpuBackbone::new(&weights, cfg, 128, 1, GpuOptions::default()).unwrap();
 ///
 /// // bf16 (half VRAM)
-/// let mut bb_bf16 = MambaGpuBackbone::new_with_dtype(
-///     0, &weights, cfg, 128, 1, WeightDtype::Bf16
-/// ).unwrap();
+/// let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
+/// let mut bb_bf16 = MambaGpuBackbone::new(&weights, cfg, 128, 1, opts).unwrap();
 ///
 /// bb.capture_graph().unwrap();
 /// let mut output = vec![0.0f32; 128];
@@ -2446,34 +2445,34 @@ pub struct MambaGpuBackbone {
 }
 
 impl MambaGpuBackbone {
-    /// Create an f32 GPU backbone in the GEMM mode `MAMBA_RS_GEMM_MODE` names
-    /// (`deterministic` when unset).
-    ///
-    /// Storage remains f32; inspect the resolved route with [`Self::ctx`].
-    /// Construction and later graph capture can return validation, CUDA, upload,
-    /// allocation, or route errors.
+    /// Build the GPU backbone of `cpu_weights` for `batch` sequences, on the
+    /// device, in the storage precision and in the GEMM mode `opts` names
+    /// ([`GpuOptions::default`] is device 0, f32 and the mode
+    /// `MAMBA_RS_GEMM_MODE` names). [`Self::ctx`] shows the GEMM route a
+    /// captured graph binds. Configuration, CUDA, upload or allocation
+    /// errors are returned.
     pub fn new(
-        gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
         cfg: MambaConfig,
         input_dim: usize,
         batch: usize,
+        opts: GpuOptions,
     ) -> Result<Self, String> {
-        Self::new_with_dtype(
-            gpu_ordinal,
+        Self::new_with_dtype_inner(
+            opts.device,
             cpu_weights,
             cfg,
             input_dim,
             batch,
-            WeightDtype::F32,
+            opts.dtype,
+            opts.mode,
         )
     }
 
-    /// Create an f32 GPU backbone with an explicit GEMM execution mode.
-    ///
-    /// The mode is independent of f32 weight storage; `MAMBA_RS_GEMM_MODE` is
-    /// ignored. Model validation, CUDA setup, upload, and allocation failures are
-    /// returned. Captured graphs still require an unchanged complete GEMM route.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).mode(mode)`"
+    )]
     pub fn new_with_mode(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -2482,25 +2481,14 @@ impl MambaGpuBackbone {
         batch: usize,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_with_dtype_and_mode(
-            gpu_ordinal,
-            cpu_weights,
-            cfg,
-            input_dim,
-            batch,
-            WeightDtype::F32,
-            mode,
-        )
+        let opts = GpuOptions::default().device(gpu_ordinal).mode(mode);
+        Self::new(cpu_weights, cfg, input_dim, batch, opts)
     }
 
-    /// Create a GPU backbone with an explicit storage precision in the GEMM mode
-    /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
-    ///
-    /// `dtype` selects f32, tf32, bf16, or f16 storage independently of the mode;
-    /// `Tf32` stores f32 and lets the deterministic GEMMs take the TF32 kernels
-    /// where one is measured. Use [`Self::new_with_dtype_and_mode`] to pick the
-    /// mode in code and [`Self::ctx`] to inspect the route that graph capture
-    /// binds. Configuration, dtype, CUDA, upload, or allocation can also fail.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
+    )]
     pub fn new_with_dtype(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -2509,16 +2497,14 @@ impl MambaGpuBackbone {
         batch: usize,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        Self::new_with_dtype_inner(gpu_ordinal, cpu_weights, cfg, input_dim, batch, dtype, None)
+        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
+        Self::new(cpu_weights, cfg, input_dim, batch, opts)
     }
 
-    /// Create a GPU backbone with an explicit storage precision and GEMM mode.
-    ///
-    /// `dtype` controls weight/activation storage (`Tf32` stores f32 with
-    /// deterministic TF32 products); `mode` controls GEMM execution and does not
-    /// change that storage choice. `MAMBA_RS_GEMM_MODE` is ignored. Invalid
-    /// configuration, dtype-specific setup, CUDA, upload, or allocation failures
-    /// are returned; graph replay requires the construction route.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
+    )]
     pub fn new_with_dtype_and_mode(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -2528,15 +2514,11 @@ impl MambaGpuBackbone {
         dtype: WeightDtype,
         mode: GemmMode,
     ) -> Result<Self, String> {
-        Self::new_with_dtype_inner(
-            gpu_ordinal,
-            cpu_weights,
-            cfg,
-            input_dim,
-            batch,
-            dtype,
-            Some(mode),
-        )
+        let opts = GpuOptions::default()
+            .device(gpu_ordinal)
+            .dtype(dtype)
+            .mode(mode);
+        Self::new(cpu_weights, cfg, input_dim, batch, opts)
     }
 
     fn new_with_dtype_inner(

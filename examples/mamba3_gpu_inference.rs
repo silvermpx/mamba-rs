@@ -11,6 +11,7 @@
 fn main() {
     #[cfg(feature = "cuda")]
     {
+        use mamba_rs::GpuOptions;
         use mamba_rs::mamba_ssm::gpu::GemmMode;
         use mamba_rs::mamba3_siso::config::Mamba3Config;
         use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
@@ -31,15 +32,10 @@ fn main() {
 
         // Create the GPU backbone (uploads weights, compiles the kernels)
         // with f32 storage and the deterministic GEMM mode.
-        let mut gpu = Mamba3GpuBackbone::new_with_mode(
-            0, // GPU device 0
-            &weights,
-            cfg,
-            input_dim,
-            1, // batch = 1
-            GemmMode::Deterministic,
-        )
-        .expect("GPU init failed");
+        let opts = GpuOptions::default().mode(GemmMode::Deterministic);
+        let batch = 1;
+        let mut gpu =
+            Mamba3GpuBackbone::new(&weights, cfg, input_dim, batch, opts).expect("GPU init failed");
         println!("mode {:?}", gpu.ctx().gemm_mode());
 
         // Optional: capture the step as one CUDA Graph.

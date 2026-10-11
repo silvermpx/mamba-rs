@@ -20,6 +20,7 @@ fn main() {
 mod cuda_example {
     use std::time::Instant;
 
+    use mamba_rs::GpuOptions;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
@@ -81,20 +82,17 @@ mod cuda_example {
         // Modest lr for synthetic-gradient stability (see gpu_training_bf16.rs).
         let lr = 1e-5_f32;
         let wd = 1e-2_f32;
-        let mut trainer = Mamba3GpuTrainer::new_full_with_mode(
-            0,
-            &cpu,
-            cfg,
-            TrainSessionCfg {
-                input_dim,
-                batch,
-                seq_len,
-                lr,
-                weight_decay: wd,
-            },
-            WeightDtype::Bf16,
-            GemmMode::Deterministic,
-        )?;
+        let session = TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay: wd,
+        };
+        let opts = GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::Deterministic);
+        let mut trainer = Mamba3GpuTrainer::new(&cpu, cfg, session, opts)?;
         println!(
             "storage {:?}, mode {:?}",
             trainer.dtype(),

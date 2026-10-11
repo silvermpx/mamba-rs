@@ -6,6 +6,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
@@ -68,9 +69,14 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     let cfg = m1_cfg();
     let weights = MambaWeights::init(&cfg, cfg.d_model, 0x7f32_0001);
 
-    let model =
-        MambaGpuBackbone::new_with_dtype(0, &weights, cfg, cfg.d_model, 2, WeightDtype::Tf32)
-            .expect("Tf32 backbone");
+    let model = MambaGpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        2,
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 backbone");
     assert_eq!(model.dtype(), WeightDtype::Tf32);
     assert_eq!(model.ctx().gemm_mode(), GemmMode::Deterministic);
     let controls = model.ctx().route_controls();
@@ -80,18 +86,27 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
         F32TriadPolicy::AllowDeterministicTf32
     );
 
-    let exact =
-        MambaGpuBackbone::new_with_dtype(0, &weights, cfg, cfg.d_model, 2, WeightDtype::F32)
-            .expect("F32 backbone");
+    let exact = MambaGpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        2,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("F32 backbone");
     assert_eq!(exact.dtype(), WeightDtype::F32);
     assert_eq!(
         exact.ctx().route_controls().f32_policy(),
         F32TriadPolicy::ExactScalarFma
     );
 
-    let trainer =
-        MambaGpuTrainer::new_full(0, &weights, cfg, session(cfg.d_model), WeightDtype::Tf32)
-            .expect("Tf32 trainer");
+    let trainer = MambaGpuTrainer::new(
+        &weights,
+        cfg,
+        session(cfg.d_model),
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 trainer");
     assert_eq!(trainer.dtype(), WeightDtype::Tf32);
     let controls = trainer.ctx().route_controls();
     assert_eq!(controls.family(), BiGemmFamily::Triad);
@@ -100,13 +115,13 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
         F32TriadPolicy::AllowDeterministicTf32
     );
 
-    let vendor = MambaGpuTrainer::new_full_with_mode(
-        0,
+    let vendor = MambaGpuTrainer::new(
         &weights,
         cfg,
         session(cfg.d_model),
-        WeightDtype::Tf32,
-        GemmMode::CublasPedantic,
+        GpuOptions::default()
+            .dtype(WeightDtype::Tf32)
+            .mode(GemmMode::CublasPedantic),
     )
     .expect("Tf32 trainer in a cuBLAS mode");
     assert_eq!(vendor.dtype(), WeightDtype::Tf32);
@@ -114,17 +129,26 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
 
     let cfg3 = m3_cfg();
     let weights3 = Mamba3Weights::init(&cfg3, cfg3.d_model, 0x7f32_0003);
-    let model3 =
-        Mamba3GpuBackbone::new_with_dtype(0, &weights3, cfg3, cfg3.d_model, 2, WeightDtype::Tf32)
-            .expect("Tf32 M3 backbone");
+    let model3 = Mamba3GpuBackbone::new(
+        &weights3,
+        cfg3,
+        cfg3.d_model,
+        2,
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 M3 backbone");
     assert_eq!(model3.dtype(), WeightDtype::Tf32);
     assert_eq!(
         model3.ctx().route_controls().f32_policy(),
         F32TriadPolicy::AllowDeterministicTf32
     );
-    let trainer3 =
-        Mamba3GpuTrainer::new_full(0, &weights3, cfg3, session(cfg3.d_model), WeightDtype::Tf32)
-            .expect("Tf32 M3 trainer");
+    let trainer3 = Mamba3GpuTrainer::new(
+        &weights3,
+        cfg3,
+        session(cfg3.d_model),
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 M3 trainer");
     assert_eq!(trainer3.dtype(), WeightDtype::Tf32);
     assert_eq!(
         trainer3.ctx().route_controls().f32_policy(),
@@ -142,12 +166,22 @@ fn tf32_storage_produces_the_bits_of_the_tf32_permitted_f32_route() {
     let batch = 2;
     let input = ramp(batch * cfg.d_model, 1);
 
-    let mut by_dtype =
-        MambaGpuBackbone::new_with_dtype(0, &weights, cfg, cfg.d_model, batch, WeightDtype::Tf32)
-            .expect("Tf32 backbone");
-    let mut by_policy =
-        MambaGpuBackbone::new_with_dtype(0, &weights, cfg, cfg.d_model, batch, WeightDtype::F32)
-            .expect("F32 backbone");
+    let mut by_dtype = MambaGpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 backbone");
+    let mut by_policy = MambaGpuBackbone::new(
+        &weights,
+        cfg,
+        cfg.d_model,
+        batch,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("F32 backbone");
     by_policy
         .ctx()
         .route_controls()
@@ -164,10 +198,20 @@ fn tf32_storage_produces_the_bits_of_the_tf32_permitted_f32_route() {
     assert!(out_dtype.iter().all(|value| value.is_finite()));
 
     let sess = session(cfg.d_model);
-    let mut train_dtype =
-        MambaGpuTrainer::new_full(0, &weights, cfg, sess, WeightDtype::Tf32).expect("Tf32 trainer");
-    let mut train_policy =
-        MambaGpuTrainer::new_full(0, &weights, cfg, sess, WeightDtype::F32).expect("F32 trainer");
+    let mut train_dtype = MambaGpuTrainer::new(
+        &weights,
+        cfg,
+        sess,
+        GpuOptions::default().dtype(WeightDtype::Tf32),
+    )
+    .expect("Tf32 trainer");
+    let mut train_policy = MambaGpuTrainer::new(
+        &weights,
+        cfg,
+        sess,
+        GpuOptions::default().dtype(WeightDtype::F32),
+    )
+    .expect("F32 trainer");
     train_policy
         .ctx()
         .route_controls()

@@ -127,7 +127,7 @@ fn engine(
     (cfg, input_dim, batch): (Mamba3MimoConfig, usize, usize),
     dtype: WeightDtype,
 ) -> Mamba3MimoGpuEngine {
-    Mamba3MimoGpuEngine::new(device, w, (cfg, input_dim, batch), dtype).unwrap()
+    Mamba3MimoGpuEngine::new(device, w, cfg, input_dim, batch, dtype).unwrap()
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn m3_mimo_gpu_refuses_the_output_norm() {
         ..cases()[0].1
     };
     let w = drawn(&cfg, 40, 3);
-    let err = Mamba3MimoGpuEngine::new(&device, &w, (cfg, 40, 1), WeightDtype::F32)
+    let err = Mamba3MimoGpuEngine::new(&device, &w, cfg, 40, 1, WeightDtype::F32)
         .err()
         .unwrap();
     assert!(err.contains("output norm"), "{err}");

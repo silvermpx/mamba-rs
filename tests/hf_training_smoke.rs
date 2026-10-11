@@ -24,6 +24,8 @@
 
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::path::PathBuf;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -101,8 +103,7 @@ fn hf_training_130m_bf16_smoke() {
     let n = batch * seq_len * input_dim;
 
     // lr=1e-6 with bf16 gives small but finite updates on real-weight grads.
-    let mut trainer = MambaGpuTrainer::new_full(
-        0,
+    let mut trainer = MambaGpuTrainer::new(
         hf.backbone.weights(),
         cfg,
         TrainSessionCfg {
@@ -112,7 +113,7 @@ fn hf_training_130m_bf16_smoke() {
             lr: 1e-6,
             weight_decay: 0.0,
         },
-        WeightDtype::Bf16,
+        GpuOptions::default().dtype(WeightDtype::Bf16),
     )
     .expect("construct 130m bf16 trainer");
 

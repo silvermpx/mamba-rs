@@ -11,6 +11,8 @@
 //! GPU (stream-synchronized); decode and training time the public call,
 //! host transfers included.
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::MambaWeights;
@@ -173,7 +175,8 @@ fn decode() {
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
         for &b in &DECODE_BATCH {
             let mut bb =
-                MambaGpuBackbone::new_with_dtype(0, &w, cfg, cfg.d_model, b, dtype).unwrap();
+                MambaGpuBackbone::new(&w, cfg, cfg.d_model, b, GpuOptions::default().dtype(dtype))
+                    .unwrap();
             let input = det(b * cfg.d_model, 12);
             let mut out = vec![0f32; b * cfg.d_model];
             let eager = median_us(20, 200, || bb.step(&input, &mut out).unwrap());
@@ -195,8 +198,13 @@ fn train() {
         ] {
             let cfg = mixer(mode);
             let w = MambaWeights::init(&cfg, cfg.d_model, 7);
-            let mut tr =
-                MambaGpuTrainer::new_with_dtype(0, &w, cfg, cfg.d_model, b, t, dtype).unwrap();
+            let mut tr = MambaGpuTrainer::new(
+                &w,
+                cfg,
+                TrainSessionCfg::new(cfg.d_model, b, t),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
             let input = det(b * t * cfg.d_model, 13);
             let d_out = det(b * t * cfg.d_model, 14);
             let us = median_us(2, 7, || {

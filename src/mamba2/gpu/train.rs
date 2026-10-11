@@ -23,6 +23,8 @@
 //! Windows carry the conv and SSM states from one call to the next, and
 //! the gradients stop at the states a window starts from.
 
+use crate::mamba_ssm::gpu::options::GpuOptions;
+use crate::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::check_device_envelope;
@@ -360,23 +362,26 @@ const PAIRS: usize = CHUNK * (CHUNK + 1) / 2;
 const SEQ_STRIDE: usize = 16;
 
 impl Mamba2GpuTrainer {
-    /// An f32 trainer for `batch` sequences of `seq_len` tokens starting
-    /// from `w`, with AdamW at its defaults (see [`Self::adamw_mut`]).
+    /// Build a trainer for the session `session` names (shape and AdamW
+    /// settings, see [`TrainSessionCfg::new`]) from `w`, on the device, in
+    /// the storage precision and in the GEMM mode `opts` names: f32, tf32,
+    /// bf16 or f16 (see the module docs).
     pub fn new(
-        device: &GpuDevice,
         w: &Mamba2Weights,
-        dims: (Mamba2Config, usize, usize, usize),
+        cfg: Mamba2Config,
+        session: TrainSessionCfg,
+        opts: GpuOptions,
     ) -> Result<Self, String> {
-        Self::new_with_dtype(device, w, dims, WeightDtype::F32)
-    }
-
-    /// A trainer in `dtype`: f32, tf32, bf16 or f16 (see the module docs).
-    pub fn new_with_dtype(
-        device: &GpuDevice,
-        w: &Mamba2Weights,
-        (cfg, input_dim, batch, seq_len): (Mamba2Config, usize, usize, usize),
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
+        let dtype = opts.dtype;
+        let device = GpuDevice::new(opts.device)?;
+        let device = &device;
         w.validate(&cfg, input_dim)?;
         if !w.mlp.is_empty() {
             return Err(
@@ -396,7 +401,11 @@ impl Mamba2GpuTrainer {
         }
         let seq_mode = !cfg.train_use_parallel_scan();
         let stride = SEQ_STRIDE.min(seq_len);
-        let ctx = GpuCtx::new_from_env_with_state_cap_and_role(device, 64, GemmRole::triad(dtype))?;
+        let role = GemmRole::triad(dtype);
+        let ctx = match opts.mode {
+            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
+            None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
+        };
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -538,7 +547,9 @@ impl Mamba2GpuTrainer {
             fresh_grads: false,
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
-            adamw: GpuAdamW::new(s, layout.total)?,
+            adamw: GpuAdamW::new(s, layout.total)?
+                .with_lr(lr)
+                .with_weight_decay(weight_decay),
             a_neg: z(c.n_layers * nh)?,
             conv_zero_b: z(cd)?,
             state: Mamba2GpuState {
@@ -582,14 +593,6 @@ impl Mamba2GpuTrainer {
     /// The model's configuration.
     pub fn config(&self) -> &Mamba2Config {
         &self.cfg
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "renamed to `config`, the name every family uses"
-    )]
-    pub fn cfg(&self) -> &Mamba2Config {
-        self.config()
     }
 
     /// Sequences per window.

@@ -20,6 +20,7 @@
 
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load_mamba2::load_hf_mamba2;
+use mamba_rs::mamba_ssm::gpu::WeightDtype;
 use mamba_rs::mamba2::{
     Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, forward_mamba2_backbone_prefill,
     mamba2_step,
@@ -165,7 +166,8 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
     let vocab_padded = model.embed.len() / d;
     let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba2GpuEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
+    let engine =
+        Mamba2GpuEngine::new(&device, &model.weights, cfg, d, 1, WeightDtype::F32).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let t_len = golden.ids.len();
@@ -255,8 +257,7 @@ fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
     let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
     let device = GpuDevice::new(0).unwrap();
     let engine =
-        Mamba2GpuEngine::new_with_dtype(&device, &model.weights, (cfg, d, 1), WeightDtype::Bf16)
-            .unwrap();
+        Mamba2GpuEngine::new(&device, &model.weights, cfg, d, 1, WeightDtype::Bf16).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let t_len = golden.ids.len();

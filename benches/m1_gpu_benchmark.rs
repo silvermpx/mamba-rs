@@ -1,5 +1,6 @@
 #![cfg(feature = "cuda")]
 
+use mamba_rs::mamba_ssm::gpu::GpuOptions;
 use std::time::Instant;
 
 use mamba_rs::MambaBackbone;
@@ -45,7 +46,8 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, no graph) ---");
     for &b in &batch_sizes {
-        let mut bb = MambaGpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb =
+            MambaGpuBackbone::new(&cpu_weights, cfg, input_dim, b, GpuOptions::default()).unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];
 
@@ -70,7 +72,8 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, CUDA Graph) ---");
     for &b in &batch_sizes {
-        let mut bb = MambaGpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb =
+            MambaGpuBackbone::new(&cpu_weights, cfg, input_dim, b, GpuOptions::default()).unwrap();
         bb.capture_graph().unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];

@@ -41,11 +41,24 @@
   | `Mamba3GpuInferenceScratch` | `Mamba3GpuScratch` |
   | `Mamba3GpuInferenceMixedScratch` | `Mamba3GpuScratchMixed` |
   | `Mamba3Trainer` | `Mamba3GpuTrainer` |
-  | `Mamba2GpuInferenceEngine` | `Mamba2GpuEngine` |
 
-  The Mamba-2 and MIMO engines and trainers answer `config()` like the
-  others. Their `cfg()` stays as a deprecated alias. Every family's `gpu`
-  module now exports its backbone, engines, state, scratch and trainer.
+  Every family's `gpu` module exports its backbone, engines, state,
+  scratch and trainer.
+- The GPU backbones and trainers take one `GpuOptions` value for the
+  device, the storage precision and the GEMM mode, in a single `new`:
+
+  ```rust
+  let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
+  let model = MambaGpuBackbone::new(&weights, cfg, input_dim, batch, opts)?;
+  let trainer = MambaGpuTrainer::new(&weights, cfg, session, opts)?;
+  ```
+
+  `GpuOptions::default()` is device 0, f32 and the mode
+  `MAMBA_RS_GEMM_MODE` names. `new` no longer takes the GPU ordinal as its
+  first argument. The constructors `new_with_mode`, `new_with_dtype`,
+  `new_with_dtype_and_mode`, `new_full` and `new_full_with_mode` of the
+  Mamba-1 and SISO backbones and trainers stay as deprecated wrappers.
+  `GpuOptions` and `GemmMode` are exported at the crate root.
 - Mamba-1 keeps its configuration, weights, state and safetensors
   serializer in its own module, as the other families do:
   `mamba_rs::mamba_ssm::{config, weights, state, serialize}`. The crate

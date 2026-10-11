@@ -20,7 +20,7 @@ fn main() {
         use mamba_rs::WeightDtype;
         use mamba_rs::gpu::inference::MambaGpuBackbone;
         use mamba_rs::mamba_ssm::gpu::GemmMode;
-        use mamba_rs::{MambaBackbone, MambaConfig};
+        use mamba_rs::{GpuOptions, MambaBackbone, MambaConfig};
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -34,19 +34,17 @@ fn main() {
             cpu_backbone.param_count(),
         );
 
-        // Storage dtype and GEMM mode are chosen explicitly here; the
-        // no-mode constructors read MAMBA_RS_GEMM_MODE instead and default
-        // to Deterministic when it is absent.
-        let mut gpu_bb = MambaGpuBackbone::new_with_dtype_and_mode(
-            0, // GPU ordinal
-            cpu_backbone.weights(),
-            *cpu_backbone.config(),
-            input_dim,
-            1, // batch
-            WeightDtype::Bf16,
-            GemmMode::Deterministic,
-        )
-        .expect("GPU init failed");
+        // Storage dtype and GEMM mode are chosen explicitly here. Without
+        // `.mode(..)` the backbone reads MAMBA_RS_GEMM_MODE and runs the
+        // deterministic kernels when it is unset.
+        let opts = GpuOptions::default()
+            .dtype(WeightDtype::Bf16)
+            .mode(GemmMode::Deterministic);
+        let weights = cpu_backbone.weights();
+        let cfg = *cpu_backbone.config();
+        let batch = 1;
+        let mut gpu_bb =
+            MambaGpuBackbone::new(weights, cfg, input_dim, batch, opts).expect("GPU init failed");
         println!(
             "storage {:?}, mode {:?}",
             gpu_bb.dtype(),
@@ -78,16 +76,8 @@ fn main() {
         // fallible: it is refused while a graph is being captured, and a
         // graph captured before the change refuses to replay after it, so
         // change the mode before capturing.
-        let mut vendor_bb = MambaGpuBackbone::new_with_dtype_and_mode(
-            0,
-            cpu_backbone.weights(),
-            *cpu_backbone.config(),
-            input_dim,
-            1,
-            WeightDtype::Bf16,
-            GemmMode::Deterministic,
-        )
-        .expect("GPU init failed");
+        let mut vendor_bb =
+            MambaGpuBackbone::new(weights, cfg, input_dim, batch, opts).expect("GPU init failed");
         vendor_bb
             .ctx()
             .set_gemm_mode(GemmMode::CublasFast)
