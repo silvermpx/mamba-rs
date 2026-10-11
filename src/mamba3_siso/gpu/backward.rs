@@ -284,8 +284,9 @@ pub fn gpu_backward_mamba3_layer(
             // padded by one float so a warp reading consecutive rows spreads
             // over the banks; two per-step lanes, the da/qk lanes, and TWO
             // head-state tiles (true states + d_state staging for the
-            // warp-parallel dADT). The kernel lays its tiles out the same way.
-            let legacy_floats = 2 * cs_u * (ds + 1) + 2 * cs_u * (hd + 1) + 4 * cs_u + 2 * hd * ds;
+            // warp-parallel dADT). The kernel lays its tiles out the same way,
+            // and the route bounds the same tile, so a shape it admits runs.
+            let legacy_floats = crate::mamba3_siso::route::chunked_backward_smem_bytes(hd, ds) / 4;
             let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
             // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
             // One head per block: pair matrices when the tile

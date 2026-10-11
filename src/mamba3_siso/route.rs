@@ -86,16 +86,21 @@ pub fn head_tier(headdim: usize) -> Result<HeadTier, String> {
     }
 }
 
-/// The shared memory the chunked backward needs for a head, in bytes.
-///
-/// The kernel stages two chunk-by-d_state operand tiles (chunk size 64)
-/// plus smaller pieces in dynamic shared memory, and the loader opts in to
-/// the device's extended budget. 99 KB is the opt-in floor across every
+/// The chunk the chunked scan and its backward walk. The GPU state's
+/// `CHUNK_SIZE` is this constant, so the bound below and the kernels agree.
+pub const CHUNKED_CHUNK_SIZE: usize = 64;
+
+/// The shared memory the chunked backward needs for a head, in bytes: the
+/// kernel's tile without its optional pair matrices. Two chunk-by-d_state
+/// operand tiles and two chunk-by-headdim tiles, each row padded by one
+/// float against bank conflicts, four per-step lanes and two head-state
+/// tiles. The backward sizes its launch from this, and the loader opts in
+/// to the device's extended budget. 99 KB is the opt-in floor across every
 /// supported part since Ampere; some parts offer more, and the floor keeps
 /// one portable bound.
 pub fn chunked_backward_smem_bytes(headdim: usize, d_state: usize) -> usize {
-    let cs = 64usize;
-    (2 * cs * d_state + 2 * cs * headdim + 4 * cs + 2 * headdim * d_state) * 4
+    let cs = CHUNKED_CHUNK_SIZE;
+    (2 * cs * (d_state + 1) + 2 * cs * (headdim + 1) + 4 * cs + 2 * headdim * d_state) * 4
 }
 
 /// The chunked backward's shared-memory ceiling.
@@ -220,6 +225,24 @@ mod tests {
             ..cfg
         };
         check_config(&sequential, RoutePurpose::Training).unwrap();
+    }
+
+    /// The bound is the kernel's tile with its padded rows. Headdim 16
+    /// trains chunked up to d_state 142 and is refused at 143, whose padded
+    /// tile is past 99 KB; the unpadded bound admitted it and the backward
+    /// refused it at the first step.
+    #[test]
+    fn chunked_backward_bound_counts_the_padded_rows() {
+        let at = |d_state| Mamba3Config {
+            d_state,
+            headdim: 16,
+            ..Mamba3Config::default()
+        };
+        assert_eq!(chunked_backward_smem_bytes(16, 142), 101_120);
+        assert_eq!(chunked_backward_smem_bytes(16, 143), 101_760);
+        check_config(&at(142), RoutePurpose::Training).unwrap();
+        let err = check_config(&at(143), RoutePurpose::Training).unwrap_err();
+        assert!(err.contains("shared memory"), "{err}");
     }
 
     /// The fused gated norm cannot serve more than 1024 channels; without

@@ -600,6 +600,24 @@ fn m3_cpu_gpu_train_parity_chunked_large_d_state() {
     check_scenario("chunked_ds128", &scn);
 }
 
+/// The largest state headdim 16 trains chunked with: the backward's tile
+/// sits just under the 99 KB opt-in. The route used to admit d_state 143,
+/// whose padded tile the backward then refused at the first step.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_tile_at_its_limit() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 142,
+            headdim: 16,
+            ..base_cfg(true)
+        },
+        batch: 1,
+        seq_len: 128,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_ds142_hd16", &scn);
+}
+
 #[test]
 fn m3_cpu_gpu_train_parity_sequential_large_d_state() {
     let scn = Scenario {

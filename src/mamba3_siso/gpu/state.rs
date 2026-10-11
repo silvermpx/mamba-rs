@@ -137,10 +137,11 @@ impl GpuMamba3Dims {
     }
 }
 
-/// Chunk size for the Mamba-3 SISO chunked SSD parallel scan. Single source
-/// of truth — every site that allocates `[B * n_chunks * nh * chunk_size]`
-/// scratch must reference this constant rather than re-spelling `64`.
-pub const CHUNK_SIZE: usize = 64;
+/// Chunk size for the Mamba-3 SISO chunked SSD parallel scan, the route's
+/// `CHUNKED_CHUNK_SIZE` so its shared-memory bound and the kernels agree.
+/// Every site that allocates `[B * n_chunks * nh * chunk_size]` scratch
+/// must reference this constant rather than re-spelling `64`.
+pub const CHUNK_SIZE: usize = crate::mamba3_siso::route::CHUNKED_CHUNK_SIZE;
 
 #[cfg(test)]
 mod index_budget_tests {
