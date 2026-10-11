@@ -546,16 +546,31 @@ fn prefill_body<W: MambaWeightsView>(
         // dead until F5 reuses it as the block output). The old
         // copy-then-overwrite spent a full [B*T*dm] D2D per layer
         // (25 x 7.1 MB per page at the serve shape) moving the same bytes.
-        // Values are untouched — same kernel, same inputs, other buffer.
+        // From the second layer on, the previous layer's residual add rides
+        // in the same launch: out_flat absorbs the block output still in
+        // `residual` as `out_flat + residual`, the sum the standalone add
+        // stored, and the norm reads it from registers - the bits of the
+        // add-then-norm pair.
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
             let eps: f32 = dims.rms_norm_eps;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-            builder.arg(scratch.residual.inner_mut());
-            builder.arg(scratch.rms_discard.inner_mut());
-            builder.arg(scratch.out_flat.inner());
+            let res_ptr = scratch.residual.cached_ptr();
+            let out_ptr = scratch.out_flat.cached_ptr();
+            let rms_ptr = scratch.rms_discard.cached_ptr();
             let nw = lw.norm_weight();
+            let mut builder = if layer_idx == 0 {
+                ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd)
+            } else {
+                ctx.stream
+                    .launch_builder(&ctx.kernels.rmsnorm_fwd_resadd_typed.f32)
+            };
+            builder.arg(&res_ptr);
+            builder.arg(&rms_ptr);
+            builder.arg(&out_ptr);
+            if layer_idx > 0 {
+                builder.arg(&res_ptr);
+            }
             builder.arg(&nw);
             builder.arg(&bt_i);
             builder.arg(&dm_i);
@@ -781,24 +796,12 @@ fn prefill_body<W: MambaWeightsView>(
             (bt, di, dm),
         )?;
 
-        // F6: residual add — the running activations (out_flat) absorb the
-        // block output. The roles are swapped versus the old
-        // copy-then-overwrite layout, but IEEE f32 addition of the same two
-        // values is commutative: a + b and b + a round identically, so the
-        // sum is bit-equal to the old route.
-        {
-            let n = (bt * dm) as i32;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-            builder.arg(scratch.out_flat.inner_mut());
-            builder.arg(scratch.residual.inner());
-            builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("residual prefill L{layer_idx}: {e:?}"))?;
-        }
+        // F6, the residual add of this block's output, rides in the next
+        // layer's norm or in norm_f below.
     }
 
     // Final RmsNorm (norm_f) over all B*T timesteps
-    {
+    if weights.n_layers() == 0 {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let eps: f32 = dims.rms_norm_eps;
@@ -814,6 +817,35 @@ fn prefill_body<W: MambaWeightsView>(
         builder.arg(scratch.rms_discard.inner_mut());
         builder.arg(scratch.residual.inner());
         let nfw = weights.norm_f_weight();
+        builder.arg(&nfw);
+        builder.arg(&bt_i);
+        builder.arg(&dm_i);
+        builder.arg(&eps);
+        unsafe { builder.launch(grid_norm(bt, dm)) }
+            .map_err(|e| format!("norm_f prefill: {e:?}"))?;
+    } else {
+        // The last block's residual add rides in norm_f: out_flat takes
+        // the sum and the norm lands in the all-T temporal when the caller
+        // wants it, else over the sum in out_flat (each thread writes the
+        // norm of an element after it stored that element's sum).
+        let bt_i = bt as i32;
+        let dm_i = dm as i32;
+        let eps: f32 = dims.rms_norm_eps;
+        let res_ptr = scratch.residual.cached_ptr();
+        let out_ptr = scratch.out_flat.cached_ptr();
+        let rms_ptr = scratch.rms_discard.cached_ptr();
+        let y_ptr = match final_out {
+            Some(full) => full.cached_ptr(),
+            None => out_ptr,
+        };
+        let nfw = weights.norm_f_weight();
+        let mut builder = ctx
+            .stream
+            .launch_builder(&ctx.kernels.rmsnorm_fwd_resadd_typed.f32);
+        builder.arg(&y_ptr);
+        builder.arg(&rms_ptr);
+        builder.arg(&out_ptr);
+        builder.arg(&res_ptr);
         builder.arg(&nfw);
         builder.arg(&bt_i);
         builder.arg(&dm_i);
@@ -952,17 +984,30 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
         let a_neg_ptr = a_neg_all.cached_ptr() + (layer_idx * di * ds) as u64 * f32_sz;
 
         // F1: rmsnorm f32in → half_out (out_flat ← residual * norm_w).
+        // From the second layer on, the previous layer's residual add rides
+        // in the same launch: the f32 residual absorbs the typed block output
+        // still in out_flat as `residual + to_f(out_flat)`, the sum the
+        // standalone add stored, and the norm reads it from registers - the
+        // bits of the add-then-norm pair.
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
             let eps: f32 = dims.rms_norm_eps;
-            let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+            let mut bld = if layer_idx == 0 {
+                ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt))
+            } else {
+                ctx.stream
+                    .launch_builder(k.rmsnorm_fwd_resadd_typed.get(dt))
+            };
             let out_ptr = scratch.out_flat.cached_ptr();
             let rms_ptr = scratch.rms_discard.cached_ptr();
             let res_ptr = scratch.residual.cached_ptr();
             bld.arg(&out_ptr);
             bld.arg(&rms_ptr);
             bld.arg(&res_ptr);
+            if layer_idx > 0 {
+                bld.arg(&out_ptr);
+            }
             let nw = lw.norm_weight();
             bld.arg(&nw);
             bld.arg(&bt_i);
@@ -1235,33 +1280,32 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             (bt, di, dm),
         )?;
 
-        // F6: residual_add_f32_typed — residual_f32 += out_flat_bf16 (stays f32).
-        {
-            let n = (bt * dm) as i32;
-            let mut bld = ctx.stream.launch_builder(k.residual_add_f32_typed.get(dt));
-            let r_ptr = scratch.residual.cached_ptr();
-            let t_ptr = scratch.out_flat.cached_ptr();
-            bld.arg(&r_ptr);
-            bld.arg(&r_ptr);
-            bld.arg(&t_ptr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("residual_add_f32 prefill L{layer_idx}: {e:?}"))?;
-        }
+        // F6, the f32 residual add of this block's output, rides in the
+        // next layer's norm or in norm_f below.
     }
 
-    // Final norm_f: residual_f32 → out_flat_bf16 (all T timesteps).
+    // Final norm_f: residual_f32 → out_flat_bf16 (all T timesteps), with
+    // the last block's residual add riding in it as in the layer norms.
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let eps: f32 = dims.rms_norm_eps;
-        let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+        let fused = weights.n_layers() > 0;
+        let mut bld = if fused {
+            ctx.stream
+                .launch_builder(k.rmsnorm_fwd_resadd_typed.get(dt))
+        } else {
+            ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt))
+        };
         let out_ptr = scratch.out_flat.cached_ptr();
         let rms_ptr = scratch.rms_discard.cached_ptr();
         let res_ptr = scratch.residual.cached_ptr();
         bld.arg(&out_ptr);
         bld.arg(&rms_ptr);
         bld.arg(&res_ptr);
+        if fused {
+            bld.arg(&out_ptr);
+        }
         let nfw = weights.norm_f_weight();
         bld.arg(&nfw);
         bld.arg(&bt_i);
