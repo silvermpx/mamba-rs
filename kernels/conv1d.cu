@@ -352,6 +352,83 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
 // reduction folds as before. The recomputed pre-activation is the
 // forward's own chain on the forward's own window values, rounded to the
 // activation type as the forward's store rounded it.
+//
+// The walk loads the x and d_u values of CONV1D_BWD_BATCH steps before it
+// runs them, so a step's loads no longer wait for the step before it, and
+// the usual four-tap walk keeps its window, carries, taps and tap
+// accumulators in registers (an array indexed by a runtime bound anywhere
+// lives in local memory everywhere). Every step's arithmetic is the one
+// the step-by-step walk did, in the same order.
+#define CONV1D_BWD_BATCH 8
+
+// The descending walk from ts_top to t0 with DC taps over the arrays WIN,
+// CARRY, DW and W (W preloaded with the taps).
+#define CONV1D_BWD_WALK(DC, TY, FROM_F, WIN, CARRY, DW, W)                   \
+    for (int tb = ts_top; tb >= t0; tb -= CONV1D_BWD_BATCH) {                \
+        float xs[CONV1D_BWD_BATCH];                                          \
+        float dus[CONV1D_BWD_BATCH];                                         \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                         \
+            int ts = tb - j;                                                 \
+            int tx = ts - ((DC) - 1);                                        \
+            bool live = (ts >= t0) && (ts < T_);                             \
+            xs[j] = (live && ts < ts0)                                       \
+                ? ((tx >= 0)                                                 \
+                    ? to_f(x_branch[(b * T_ + tx) * x_stride + d])          \
+                    : conv_init[init_base + tx + d_conv])                    \
+                : 0.0f;                                                      \
+            dus[j] = live ? to_f(d_u[(b * T_ + ts) * d_inner + d]) : 0.0f;   \
+        }                                                                    \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                         \
+            int ts = tb - j;                                                 \
+            if (ts < t0) break;                                              \
+            float dco = 0.0f;                                                \
+            float du = 0.0f;                                                 \
+            float silu_grad = 0.0f;                                          \
+            if (ts < T_) {                                                   \
+                if (ts < ts0) {                                              \
+                    for (int k = (DC) - 1; k >= 1; k--) WIN[k] = WIN[k - 1]; \
+                    WIN[0] = xs[j];                                          \
+                }                                                            \
+                float val = bias_d;                                          \
+                for (int k = 0; k < (DC); k++) {                             \
+                    val += WIN[k] * W[k];                                    \
+                }                                                            \
+                float x = to_f(FROM_F(val));                                 \
+                float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f)); \
+                silu_grad = sig * (1.0f + x * (1.0f - sig));                 \
+                du = dus[j];                                                 \
+                dco = du * silu_grad;                                        \
+            }                                                                \
+            if (ts < t_end) {                                                \
+                for (int k = 0; k < (DC); k++) DW[k] += dco * WIN[k];        \
+                /* explicit two-rounding shape, as the bias gradient       \
+                   always had */                                           \
+                local_d_bias =                                               \
+                    __fadd_rn(local_d_bias, __fmul_rn(du, silu_grad));       \
+                /* Two roundings, as the step-by-step walk did with its \
+                   runtime-guarded add: a compile-time tap count would let \
+                   the compiler fuse them into one. */                     \
+                float dxb = __fmul_rn(dco, W[(DC) - 1]);                     \
+                if ((DC) > 1) {                                              \
+                    dxb = __fadd_rn(dxb, CARRY[0]);                          \
+                    for (int k = 0; k < (DC) - 2; k++) {                     \
+                        CARRY[k] = CARRY[k + 1] + dco * W[(DC) - 2 - k];     \
+                    }                                                        \
+                    CARRY[(DC) - 2] = dco * W[0];                            \
+                }                                                            \
+                d_x_branch[(b * T_ + ts) * out_stride + out_offset + d] =    \
+                    FROM_F(dxb);                                             \
+            } else if ((DC) > 1) {                                           \
+                for (int k = 0; k < (DC) - 2; k++) {                         \
+                    CARRY[k] = CARRY[k + 1] + dco * W[(DC) - 2 - k];         \
+                }                                                            \
+                CARRY[(DC) - 2] = dco * W[0];                                \
+            }                                                                \
+        }                                                                    \
+    }
+
 #define DEFINE_CONV1D_BWD_TILED(SUFFIX, TY, FROM_F)                           \
 extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     TY* __restrict__ d_x_branch,                                              \
@@ -382,71 +459,50 @@ extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     int row = b * n_tiles + tile;                                             \
     int init_base = (b * d_inner + d) * d_conv;                               \
     int carry_len = d_conv - 1;                                               \
-    float carry[8];                                                           \
-    float dw[8];                                                              \
-    float win[8];                                                             \
-    for (int k = 0; k < carry_len; k++) carry[k] = 0.0f;                      \
-    for (int k = 0; k < d_conv; k++) dw[k] = 0.0f;                            \
     float local_d_bias = 0.0f;                                                \
+    float bias_d = bias[d];                                                   \
     /* The window at step ts holds x[ts - d_conv + 1 + k]; a negative         \
        index reads the carry-in state past its first slot. */                 \
     int ts_top = t_end + carry_len - 1;                                       \
     int ts0 = min(ts_top, T_ - 1);                                            \
-    for (int k = 0; k < d_conv; k++) {                                        \
-        int tx = ts0 - carry_len + k;                                         \
-        win[k] = (tx >= 0)                                                    \
-            ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                    \
-            : conv_init[init_base + tx + d_conv];                             \
-    }                                                                         \
-    /* Descending walk: the steps past the tile seed the d_x carries as       \
-       the serial walk would hold them (dco = 0 past T), then the tile. */    \
-    for (int ts = ts_top; ts >= t0; ts--) {                                   \
-        float dco = 0.0f;                                                     \
-        float du = 0.0f;                                                      \
-        float silu_grad = 0.0f;                                               \
-        if (ts < T_) {                                                        \
-            if (ts < ts0) {                                                   \
-                for (int k = d_conv - 1; k >= 1; k--) win[k] = win[k - 1];    \
-                int tx = ts - carry_len;                                      \
-                win[0] = (tx >= 0)                                            \
-                    ? to_f(x_branch[(b * T_ + tx) * x_stride + d])            \
-                    : conv_init[init_base + tx + d_conv];                     \
-            }                                                                 \
-            float val = bias[d];                                              \
-            for (int k = 0; k < d_conv; k++) {                                \
-                val += win[k] * weight[d * d_conv + k];                       \
-            }                                                                 \
-            float x = to_f(FROM_F(val));                                      \
-            float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));      \
-            silu_grad = sig * (1.0f + x * (1.0f - sig));                      \
-            du = to_f(d_u[(b * T_ + ts) * d_inner + d]);                      \
-            dco = du * silu_grad;                                             \
+    if (d_conv == 4) {                                                        \
+        float win4[4];                                                        \
+        float carry4[3] = {0.0f, 0.0f, 0.0f};                                 \
+        float dw4[4] = {0.0f, 0.0f, 0.0f, 0.0f};                              \
+        float w4[4];                                                          \
+        _Pragma("unroll")                                                     \
+        for (int k = 0; k < 4; k++) {                                         \
+            w4[k] = weight[d * d_conv + k];                                   \
+            int tx = ts0 - 3 + k;                                             \
+            win4[k] = (tx >= 0)                                               \
+                ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                \
+                : conv_init[init_base + tx + d_conv];                         \
         }                                                                     \
-        if (ts < t_end) {                                                     \
-            for (int k = 0; k < d_conv; k++) dw[k] += dco * win[k];           \
-            /* explicit two-rounding shape, as the bias gradient always had */ \
-            local_d_bias = __fadd_rn(local_d_bias, __fmul_rn(du, silu_grad)); \
-            float dxb = dco * weight[d * d_conv + d_conv - 1];                \
-            if (d_conv > 1) {                                                 \
-                dxb += carry[0];                                              \
-                for (int k = 0; k < carry_len - 1; k++) {                     \
-                    carry[k] = carry[k + 1]                                   \
-                             + dco * weight[d * d_conv + d_conv - 2 - k];     \
-                }                                                             \
-                carry[carry_len - 1] = dco * weight[d * d_conv];              \
-            }                                                                 \
-            d_x_branch[(b * T_ + ts) * out_stride + out_offset + d] =         \
-                FROM_F(dxb);                                                  \
-        } else if (d_conv > 1) {                                              \
-            for (int k = 0; k < carry_len - 1; k++) {                         \
-                carry[k] = carry[k + 1]                                       \
-                         + dco * weight[d * d_conv + d_conv - 2 - k];         \
-            }                                                                 \
-            carry[carry_len - 1] = dco * weight[d * d_conv];                  \
+        CONV1D_BWD_WALK(4, TY, FROM_F, win4, carry4, dw4, w4)                 \
+        _Pragma("unroll")                                                     \
+        for (int k = 0; k < 4; k++) {                                         \
+            d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] =    \
+                dw4[k];                                                       \
         }                                                                     \
-    }                                                                         \
-    for (int k = 0; k < d_conv; k++) {                                        \
-        d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] = dw[k]; \
+    } else {                                                                  \
+        float carry[8];                                                       \
+        float dw[8];                                                          \
+        float win[8];                                                         \
+        float w[8];                                                           \
+        for (int k = 0; k < carry_len; k++) carry[k] = 0.0f;                  \
+        for (int k = 0; k < d_conv; k++) {                                    \
+            dw[k] = 0.0f;                                                     \
+            w[k] = weight[d * d_conv + k];                                    \
+            int tx = ts0 - carry_len + k;                                     \
+            win[k] = (tx >= 0)                                                \
+                ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                \
+                : conv_init[init_base + tx + d_conv];                         \
+        }                                                                     \
+        CONV1D_BWD_WALK(d_conv, TY, FROM_F, win, carry, dw, w)                \
+        for (int k = 0; k < d_conv; k++) {                                    \
+            d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] =    \
+                dw[k];                                                        \
+        }                                                                     \
     }                                                                         \
     d_bias_partials[row * d_inner + d] = local_d_bias;                        \
 }                                                                             \
