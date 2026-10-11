@@ -1159,7 +1159,6 @@ fn verify_inference_holder(
             compute_capability: ctx.gemm_route().device.compute_capability,
             multiprocessors: ctx.gemm_route().device.multiprocessor_count,
             compiler_target: compiler.target.as_str(),
-            state_capacity: ctx.state_cap(),
             nvrtc: compiler.nvrtc_version,
             nvrtc_library_known: compiler.nvrtc_library_known,
             policy: ctx.route_controls().f32_policy(),

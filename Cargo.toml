@@ -845,6 +845,12 @@ harness = false
 required-features = ["cuda"]
 
 [[bench]]
+name = "m1_mixer_gpu_bench"
+path = "benches/m1_mixer_gpu_bench.rs"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
 name = "m2_mimo_gpu_bench"
 path = "benches/m2_mimo_gpu_bench.rs"
 harness = false

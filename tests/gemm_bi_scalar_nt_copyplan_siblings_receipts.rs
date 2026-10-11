@@ -1,46 +1,15 @@
-//! The six scalar-NT copy-plan cohorts the dispatcher admits must carry
-//! the identities the final six-cohort census measured on the board:
-//! compile key, artifact, source, header manifest and NVRTC library domain,
-//! per toolkit and state capacity. The receipts are the identity records those
-//! runs wrote, kept as a fixture so the check needs neither a GPU nor raw logs.
+//! The three scalar-NT copy-plan cohorts the dispatcher admits must carry
+//! the identities the module loader computes on Ada for each retained
+//! toolkit: compile key, artifact, source, header manifest and NVRTC library
+//! domain of both the scalar module and the Inference module. The fixture is
+//! the `identity_mint` output for those two modules on sm_89 under CUDA
+//! 12.8, 13.0 and 13.2, so the check needs neither a GPU nor raw logs.
 
 use serde_json::Value;
 
 const DISPATCH: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs");
-const RECEIPTS: &str =
-    include_str!("fixtures/ada_f32_nt_copyplan_siblings_identity_receipts.jsonl");
-const COHORTS: [(&str, &str, &str); 6] = [
-    (
-        "cuda12.8-cap16",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda12.8-cap16.9j7vm0/identities.wwgemm",
-        "9811c8f1d0ebef143bb9e8f3261ff7dba162ecc90efbce428938254fff936d7f",
-    ),
-    (
-        "cuda12.8-cap64",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda12.8-cap64.2hGlK4/identities.wwgemm",
-        "bcbbdcde0ddd8bbdb6d8550c047e3c632f1c089cd5bea6d53f69bee3c481cab7",
-    ),
-    (
-        "cuda13.0-cap16",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda13.0-cap16.TNAtg8/identities.wwgemm",
-        "53d08d7262e2cc6601542a43beb3aacfa0a4aa6b7f91a0f86fb1b7fd6a091228",
-    ),
-    (
-        "cuda13.0-cap64",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda13.0-cap64.D7rL8r/identities.wwgemm",
-        "8faa897edb5df9f52ad1e0f768a8c9de7f2e9c7d33c1ebf90cb429103c8e6754",
-    ),
-    (
-        "cuda13.2-cap16",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda13.2-cap16.JZx9G2/identities.wwgemm",
-        "e7fab57006cb2a070c4cac38bb75e021ebf570d6148e09185114f622d4944318",
-    ),
-    (
-        "cuda13.2-cap64",
-        "scratchpad/mamba-audit/combined-gemm-initial-cuda13.2-cap64.c3UFSh/identities.wwgemm",
-        "8afe6f6cfb3983b8b39c132e8e1b52f54a534fc9f0ec4e7ead7e30ec3a636801",
-    ),
-];
+const MINTED: &str = include_str!("fixtures/ada_f32_nt_copyplan_mint_identities.jsonl");
+const TOOLKITS: [(i32, i32); 3] = [(12, 8), (13, 0), (13, 2)];
 const FIELDS: [&str; 5] = [
     "compile_key",
     "artifact_digest",
@@ -59,14 +28,6 @@ struct Identity {
 struct Composed {
     scalar: Identity,
     inference: Identity,
-}
-
-#[derive(Clone, Debug)]
-struct Measured {
-    cohort: String,
-    receipt_path: String,
-    receipt_frame_sha256: String,
-    composed: Composed,
 }
 
 fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
@@ -91,59 +52,66 @@ fn version(text: &str) -> (i32, i32) {
     (major.trim().parse().unwrap(), minor.trim().parse().unwrap())
 }
 
-fn json_bytes(record: &Value, field: &str) -> [u8; 32] {
-    record[field]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap()
+fn hex_bytes(record: &Value, field: &str) -> [u8; 32] {
+    let hex = record[field].as_str().unwrap();
+    assert_eq!(hex.len(), 64, "{field}");
+    std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
 }
 
-fn measured_identity(record: &Value) -> Identity {
-    let version = record["nvrtc_version"].as_array().unwrap();
+/// The minted identity of one module, in the field order the dispatcher pins.
+fn minted_identity(record: &Value) -> Identity {
+    // The loader keys an artifact by its invocation digest.
+    assert_eq!(record["compile_key"], record["invocation"]);
+    let version = record["nvrtc"].as_array().unwrap();
     Identity {
         version: (
             i32::try_from(version[0].as_i64().unwrap()).unwrap(),
             i32::try_from(version[1].as_i64().unwrap()).unwrap(),
         ),
         fields: [
-            json_bytes(record, "compile_key"),
-            json_bytes(record, "artifact_digest"),
-            json_bytes(record, "source_digest"),
-            json_bytes(record, "header_manifest_digest"),
-            json_bytes(record, "nvrtc_library_domain"),
+            hex_bytes(record, "compile_key"),
+            hex_bytes(record, "artifact"),
+            hex_bytes(record, "source"),
+            hex_bytes(record, "header"),
+            hex_bytes(record, "library"),
         ],
     }
 }
 
-fn measured(receipt: &str) -> Measured {
-    let record = serde_json::from_str::<Value>(receipt).unwrap();
-    assert_eq!(record["schema"], "MambaBiNtCopyPlanSiblingsFinalIdentityV2");
-    Measured {
-        cohort: record["cohort"].as_str().unwrap().to_owned(),
-        receipt_path: record["receipt_path"].as_str().unwrap().to_owned(),
-        receipt_frame_sha256: record["receipt_frame_sha256"].as_str().unwrap().to_owned(),
-        composed: Composed {
-            scalar: measured_identity(&record["scalar"]),
-            inference: measured_identity(&record["fixed"]),
-        },
-    }
+fn minted() -> Vec<Composed> {
+    let records = MINTED
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2 * TOOLKITS.len());
+    let find = |module: &str, toolkit: (i32, i32)| {
+        let found = records
+            .iter()
+            .filter(|record| {
+                record["module"] == module
+                    && record["target"] == "sm_89"
+                    && record["nvrtc"] == serde_json::json!([toolkit.0, toolkit.1])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{module} {toolkit:?}");
+        minted_identity(found[0])
+    };
+    TOOLKITS
+        .into_iter()
+        .map(|toolkit| {
+            let inference = find("Inference", toolkit);
+            Composed {
+                scalar: find("TriadScalar", toolkit),
+                inference,
+            }
+        })
+        .collect()
 }
 
 fn frozen() -> Vec<Composed> {
-    let inference_source_cap16 = bytes(
+    let inference_source = bytes(
         DISPATCH
-            .split_once("const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] =")
-            .unwrap()
-            .1,
-        "",
-    );
-    let inference_source_cap64 = bytes(
-        DISPATCH
-            .split_once("const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] =")
+            .split_once("const INFERENCE_COPYPLAN_SOURCE_DIGEST: [u8; 32] =")
             .unwrap()
             .1,
         "",
@@ -163,20 +131,13 @@ fn frozen() -> Vec<Composed> {
     .split("\n    InferenceCopyPlanQualificationIdentity {")
     .skip(1)
     .map(|block| {
-        let source_digest = match (
-            block.contains("source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,"),
-            block.contains("source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,"),
-        ) {
-            (true, false) => inference_source_cap16,
-            (false, true) => inference_source_cap64,
-            _ => panic!("Inference cohort must bind exactly one capacity source digest"),
-        };
+        assert!(block.contains("source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST,"));
         Identity {
             version: version(block),
             fields: [
                 bytes(block, "compile_key:"),
                 bytes(block, "artifact_digest:"),
-                source_digest,
+                inference_source,
                 bytes(block, "header_manifest_digest:"),
                 bytes(block, "nvrtc_library_domain:"),
             ],
@@ -207,93 +168,80 @@ fn frozen() -> Vec<Composed> {
     let composed = between(
         DISPATCH,
         "const NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:",
-        "// The six measured complete-module pairs",
+        "// The three measured complete-module pairs",
     )
     .split("NtInferenceCopyPlanComposedQualificationIdentity {")
     .skip(1)
     .collect::<Vec<_>>();
     let aliases = [
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8", 0, 0),
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8", 0, 1),
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0", 1, 2),
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0", 1, 3),
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2", 2, 4),
-        ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2", 2, 5),
+        "TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8",
+        "TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0",
+        "TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2",
     ];
-    assert_eq!((inference.len(), scalar.len(), composed.len()), (6, 3, 6));
+    assert_eq!((inference.len(), scalar.len(), composed.len()), (3, 3, 3));
     composed
         .into_iter()
         .zip(aliases)
-        .map(|(block, (scalar_name, scalar_index, inference_index))| {
+        .enumerate()
+        .map(|(index, (block, scalar_name))| {
             assert!(block.contains(&format!("scalar: {scalar_name},")));
             assert!(block.contains(&format!(
-                "inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[{inference_index}]"
+                "inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[{index}]"
             )));
             Composed {
-                scalar: scalar[scalar_index].clone(),
-                inference: inference[inference_index].clone(),
+                scalar: scalar[index].clone(),
+                inference: inference[index].clone(),
             }
         })
         .collect()
 }
 
-fn mismatch(live: &Identity, frozen: &Identity) -> Option<&'static str> {
-    if live.version != frozen.version {
+fn mismatch(minted: &Identity, frozen: &Identity) -> Option<&'static str> {
+    if minted.version != frozen.version {
         return Some("nvrtc_version");
     }
     FIELDS
         .into_iter()
-        .zip(live.fields.iter().zip(frozen.fields.iter()))
-        .find_map(|(name, (live, frozen))| (live != frozen).then_some(name))
+        .zip(minted.fields.iter().zip(frozen.fields.iter()))
+        .find_map(|(name, (minted, frozen))| (minted != frozen).then_some(name))
 }
 
 #[test]
-fn admitted_composed_cohorts_match_independent_live_identity_receipts() {
-    let receipts = RECEIPTS.lines().map(measured).collect::<Vec<_>>();
-    assert_eq!(receipts.len(), COHORTS.len());
+fn admitted_composed_cohorts_match_the_minted_module_identities() {
+    let minted = minted();
     let mut dispatch = frozen();
-    for (((cohort, path, frame_sha256), receipt), frozen) in
-        COHORTS.into_iter().zip(&receipts).zip(dispatch.iter())
-    {
-        assert_eq!(receipt.cohort, cohort);
-        assert_eq!(receipt.receipt_path, path);
-        assert_eq!(receipt.receipt_frame_sha256, frame_sha256);
+    for ((toolkit, minted), frozen) in TOOLKITS.into_iter().zip(&minted).zip(dispatch.iter()) {
         assert_eq!(
-            mismatch(&receipt.composed.scalar, &frozen.scalar),
+            mismatch(&minted.scalar, &frozen.scalar),
             None,
-            "{cohort} scalar"
+            "CUDA {toolkit:?} scalar"
         );
         assert_eq!(
-            mismatch(&receipt.composed.inference, &frozen.inference),
+            mismatch(&minted.inference, &frozen.inference),
             None,
-            "{cohort} Inference"
+            "CUDA {toolkit:?} Inference"
         );
     }
 
-    for index in [0, 2, 4] {
-        assert_eq!(dispatch[index].scalar, dispatch[index + 1].scalar);
-        assert_ne!(dispatch[index].inference, dispatch[index + 1].inference);
-        assert_ne!(
-            dispatch[index].inference.fields[2],
-            dispatch[index + 1].inference.fields[2],
-            "{} Inference source must remain capacity-specific",
-            COHORTS[index].0
-        );
+    // The Inference module takes no state capacity: one source serves every
+    // toolkit, while the compiled artifact is the toolkit's own.
+    for pair in dispatch.windows(2) {
+        assert_eq!(pair[0].inference.fields[2], pair[1].inference.fields[2]);
+        assert_ne!(pair[0].inference.fields[0], pair[1].inference.fields[0]);
     }
 
-    // Mutation proof for the original CUDA12.8/13.0 admission bug: a
+    // Mutation proof for the original CUDA12.8/13.0 admission bug: an
     // Inference-module header cannot stand in for the scalar-module header.
-    for cohort in 0..COHORTS.len() {
+    for (index, toolkit) in TOOLKITS.into_iter().enumerate() {
         assert_ne!(
-            dispatch[cohort].scalar.fields[3],
-            dispatch[cohort].inference.fields[3]
+            dispatch[index].scalar.fields[3],
+            dispatch[index].inference.fields[3]
         );
-        dispatch[cohort].scalar.fields[3] = dispatch[cohort].inference.fields[3];
+        dispatch[index].scalar.fields[3] = dispatch[index].inference.fields[3];
         assert_eq!(
-            mismatch(&receipts[cohort].composed.scalar, &dispatch[cohort].scalar),
+            mismatch(&minted[index].scalar, &dispatch[index].scalar),
             Some("header_manifest_digest"),
-            "{}",
-            COHORTS[cohort].0
+            "CUDA {toolkit:?}"
         );
     }
 }

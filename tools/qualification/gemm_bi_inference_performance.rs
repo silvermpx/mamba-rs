@@ -11958,7 +11958,6 @@ struct InferenceAutoPhysicalRequest<'a> {
     compute_capability: (u32, u32),
     multiprocessors: u32,
     compiler_target: &'a str,
-    state_capacity: usize,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: F32TriadPolicy,
@@ -12043,7 +12042,6 @@ fn inference_auto_bundle_physical_descriptor(
         compute_capability,
         multiprocessors,
         compiler_target,
-        state_capacity,
         nvrtc,
         nvrtc_library_known,
         policy,
@@ -12057,7 +12055,6 @@ fn inference_auto_bundle_physical_descriptor(
     if compute_capability != (8, 9)
         || multiprocessors != 142
         || compiler_target != "sm_89"
-        || !matches!(state_capacity, 16 | 64)
         || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         || !nvrtc_library_known
         || !pointers_admitted
@@ -14438,7 +14435,6 @@ fn inference_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
 #[cfg(test)]
 fn inference_bundle_auto_tooling_request(
     nvrtc: (i32, i32),
-    state_capacity: usize,
     row: &'static str,
     input_dtype: WeightDtype,
     shape: InferenceShape,
@@ -14470,7 +14466,6 @@ fn inference_bundle_auto_tooling_request(
         compute_capability: (8, 9),
         multiprocessors: 142,
         compiler_target: "sm_89",
-        state_capacity,
         nvrtc,
         nvrtc_library_known: true,
         policy: F32TriadPolicy::ExactScalarFma,
@@ -14518,16 +14513,8 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
         n: 384,
     };
     let abi = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
-    let cohorts = [
-        ((12, 8), 16),
-        ((12, 8), 64),
-        ((13, 0), 16),
-        ((13, 0), 64),
-        ((13, 2), 16),
-        ((13, 2), 64),
-    ];
-    assert_eq!(cohorts.len(), 6);
-    for (nvrtc, state_capacity) in cohorts {
+    // The Inference module takes no state capacity: one cohort per toolkit.
+    for nvrtc in [(12, 8), (13, 0), (13, 2)] {
         for (row, dtype, policy_dtype, symbol) in [
             (
                 "bf16_f32",
@@ -14544,14 +14531,8 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
         ] {
             for (shape, grid) in [(hot_b, 666), (hot_c, 111)] {
                 for bias_ptr in [None, Some(0x4004)] {
-                    let request = inference_bundle_auto_tooling_request(
-                        nvrtc,
-                        state_capacity,
-                        row,
-                        dtype,
-                        shape,
-                        bias_ptr,
-                    );
+                    let request =
+                        inference_bundle_auto_tooling_request(nvrtc, row, dtype, shape, bias_ptr);
                     let route = inference_bundle_auto_tooling_recorded_route(
                         symbol,
                         policy_dtype,
@@ -14579,7 +14560,7 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
                             static_shared_bytes: 0,
                             driver_abi: abi,
                         },
-                        "literal mixed AUTO descriptor for {nvrtc:?}/cap{state_capacity} {row} {shape:?} bias={bias_ptr:?}"
+                        "literal mixed AUTO descriptor for {nvrtc:?} {row} {shape:?} bias={bias_ptr:?}"
                     );
                     let bundle = if shape == hot_b {
                         [1.0f32.to_bits(), 0, 4621, 2304, 768, 768, 2304, 2304]
@@ -14612,14 +14593,8 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
         }
 
         for row in ["f32_exact", "f32_exact_fast"] {
-            let request = inference_bundle_auto_tooling_request(
-                nvrtc,
-                state_capacity,
-                row,
-                WeightDtype::F32,
-                hot_c,
-                None,
-            );
+            let request =
+                inference_bundle_auto_tooling_request(nvrtc, row, WeightDtype::F32, hot_c, None);
             let symbol = "nn_sm89_f32_m128n64_tail_copyplan";
             let route = inference_bundle_auto_tooling_recorded_route(
                 symbol,
@@ -14647,7 +14622,7 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
                     static_shared_bytes: 49_152,
                     driver_abi: abi,
                 },
-                "literal exact AUTO descriptor for {nvrtc:?}/cap{state_capacity} {row}"
+                "literal exact AUTO descriptor for {nvrtc:?} {row}"
             );
         }
     }
@@ -14676,14 +14651,8 @@ fn inference_bundle_auto_tooling_rejects_request_route_and_graph_mutations_close
         k: 1928,
         n: 384,
     };
-    let request = inference_bundle_auto_tooling_request(
-        (13, 2),
-        64,
-        "f32_exact",
-        WeightDtype::F32,
-        shape,
-        None,
-    );
+    let request =
+        inference_bundle_auto_tooling_request((13, 2), "f32_exact", WeightDtype::F32, shape, None);
     let symbol = "nn_sm89_f32_m128n64_tail_copyplan";
     let route = inference_bundle_auto_tooling_recorded_route(
         symbol,
@@ -14753,9 +14722,6 @@ fn inference_bundle_auto_tooling_rejects_request_route_and_graph_mutations_close
     request_mutations.push(changed);
     let mut changed = request;
     changed.compiler_target = "compute_89";
-    request_mutations.push(changed);
-    let mut changed = request;
-    changed.state_capacity = 32;
     request_mutations.push(changed);
     let mut changed = request;
     changed.nvrtc = (13, 1);
@@ -15544,7 +15510,6 @@ fn inference_ada_production_auto_paired_precision_cublas() {
                         compute_capability: device.compute_capability,
                         multiprocessors: device.multiprocessor_count(),
                         compiler_target: compiler.target.as_str(),
-                        state_capacity: ctx.state_cap(),
                         nvrtc: compiler.nvrtc_version,
                         nvrtc_library_known: compiler.nvrtc_library_known,
                         policy: row_spec.policy,
@@ -16069,7 +16034,6 @@ fn inference_ada_forced_rungs_paired_precision_cublas() {
                         compute_capability: device.compute_capability,
                         multiprocessors: device.multiprocessor_count(),
                         compiler_target: compiler.target.as_str(),
-                        state_capacity: ctx.state_cap(),
                         nvrtc: compiler.nvrtc_version,
                         nvrtc_library_known: compiler.nvrtc_library_known,
                         policy,

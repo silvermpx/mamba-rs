@@ -6849,55 +6849,29 @@ impl InferenceCopyPlanQualificationIdentity {
     }
 }
 
-const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
-    228, 106, 241, 227, 21, 211, 35, 219, 106, 191, 90, 209, 117, 105, 54, 113, 80, 182, 50, 5,
-    169, 247, 81, 115, 170, 248, 8, 29, 180, 94, 14, 144,
+const INFERENCE_COPYPLAN_SOURCE_DIGEST: [u8; 32] = [
+    59, 122, 134, 236, 194, 32, 175, 1, 63, 86, 29, 5, 233, 68, 204, 187, 136, 30, 68, 199, 130,
+    86, 55, 193, 149, 196, 223, 55, 45, 89, 166, 252,
 ];
 
-const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
-    115, 17, 29, 85, 12, 211, 55, 120, 203, 161, 47, 39, 235, 56, 204, 139, 48, 228, 23, 180, 11,
-    100, 105, 243, 243, 109, 220, 56, 21, 224, 220, 171,
-];
-
-/// Exact Inference identities from the six initial complete-module compilations,
-/// ordered by CUDA toolkit and then state capacity (16, 64). Inference carries the
-/// fold and Inference overlays, so its source, key and artifact remain
-/// capacity-specific even when the toolkit is unchanged.
+/// Exact Inference identities minted on Ada, one per retained toolkit. The
+/// Inference module takes no state capacity, so one identity serves every
+/// capacity on a toolkit.
 const INFERENCE_COPYPLAN_EVIDENCE_COHORTS: &[InferenceCopyPlanQualificationIdentity] = &[
     InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            40, 38, 84, 166, 63, 118, 16, 227, 231, 122, 248, 220, 26, 188, 177, 61, 237, 52, 57,
-            90, 237, 253, 178, 38, 114, 107, 155, 157, 217, 66, 243, 246,
+            12, 17, 144, 213, 3, 52, 126, 193, 128, 214, 181, 11, 112, 91, 103, 1, 27, 188, 129,
+            95, 220, 101, 126, 171, 138, 57, 34, 21, 191, 179, 232, 47,
         ],
         artifact_digest: [
-            48, 83, 107, 208, 145, 221, 237, 54, 223, 79, 190, 228, 100, 240, 151, 149, 253, 214,
-            106, 122, 60, 135, 46, 108, 179, 206, 192, 180, 64, 5, 242, 211,
+            240, 139, 195, 112, 188, 209, 32, 240, 25, 76, 19, 240, 235, 44, 165, 50, 23, 22, 10,
+            1, 136, 2, 204, 13, 152, 32, 93, 146, 111, 244, 17, 113,
         ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            41, 90, 28, 248, 109, 177, 114, 166, 101, 88, 33, 169, 246, 40, 246, 75, 177, 57, 3,
-            231, 218, 127, 19, 175, 21, 243, 133, 66, 41, 157, 25, 172,
-        ],
-        nvrtc_library_domain: [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    },
-    InferenceCopyPlanQualificationIdentity {
-        nvrtc_version: (12, 8),
-        compile_key: [
-            232, 157, 8, 230, 245, 198, 87, 201, 15, 189, 133, 47, 195, 181, 46, 144, 211, 254,
-            183, 9, 91, 230, 9, 58, 41, 152, 145, 93, 63, 57, 196, 219,
-        ],
-        artifact_digest: [
-            199, 51, 148, 167, 38, 145, 169, 213, 65, 27, 87, 115, 57, 69, 247, 254, 13, 109, 196,
-            198, 236, 53, 133, 214, 87, 161, 11, 100, 241, 142, 119, 132,
-        ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
-        header_manifest_digest: [
-            95, 72, 218, 83, 232, 0, 212, 34, 241, 28, 99, 193, 37, 110, 226, 125, 210, 6, 31, 25,
-            126, 59, 205, 91, 114, 143, 133, 18, 228, 74, 197, 153,
+            92, 118, 31, 241, 96, 57, 48, 196, 146, 88, 75, 119, 178, 215, 121, 17, 104, 244, 209,
+            45, 221, 166, 151, 163, 203, 143, 60, 202, 192, 90, 62, 190,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6907,37 +6881,17 @@ const INFERENCE_COPYPLAN_EVIDENCE_COHORTS: &[InferenceCopyPlanQualificationIdent
     InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            150, 113, 145, 232, 99, 212, 108, 81, 23, 216, 108, 167, 29, 147, 58, 37, 156, 181, 43,
-            102, 253, 226, 168, 137, 169, 39, 136, 158, 13, 2, 87, 153,
+            204, 237, 201, 109, 135, 166, 200, 57, 110, 24, 124, 36, 197, 35, 93, 168, 23, 107,
+            174, 81, 134, 162, 78, 133, 46, 199, 193, 70, 116, 21, 124, 175,
         ],
         artifact_digest: [
-            29, 145, 211, 101, 64, 243, 47, 108, 137, 22, 198, 148, 235, 117, 224, 190, 140, 112,
-            250, 179, 89, 41, 112, 176, 171, 69, 120, 30, 171, 37, 19, 160,
+            95, 241, 16, 132, 243, 96, 90, 136, 187, 131, 85, 109, 226, 138, 72, 252, 188, 102, 75,
+            39, 35, 3, 79, 229, 242, 105, 3, 127, 63, 181, 53, 11,
         ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            65, 180, 50, 8, 184, 220, 49, 112, 66, 46, 53, 126, 16, 203, 46, 224, 202, 8, 75, 10,
-            147, 239, 224, 31, 241, 212, 227, 195, 159, 211, 60, 194,
-        ],
-        nvrtc_library_domain: [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    },
-    InferenceCopyPlanQualificationIdentity {
-        nvrtc_version: (13, 0),
-        compile_key: [
-            62, 106, 196, 94, 150, 126, 236, 129, 124, 167, 163, 234, 112, 121, 152, 206, 148, 171,
-            60, 231, 206, 79, 211, 92, 158, 153, 103, 10, 209, 12, 50, 217,
-        ],
-        artifact_digest: [
-            158, 250, 100, 169, 63, 150, 216, 122, 162, 206, 190, 241, 203, 158, 124, 66, 11, 185,
-            233, 12, 5, 198, 216, 146, 192, 166, 218, 120, 200, 171, 152, 196,
-        ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
-        header_manifest_digest: [
-            183, 131, 32, 166, 164, 22, 77, 115, 215, 224, 240, 101, 40, 121, 115, 97, 216, 132,
-            213, 100, 168, 50, 100, 145, 188, 188, 120, 143, 170, 210, 18, 158,
+            242, 91, 36, 121, 218, 36, 90, 206, 50, 163, 82, 83, 174, 137, 239, 84, 109, 231, 245,
+            70, 241, 112, 117, 64, 240, 139, 172, 110, 250, 65, 222, 98,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6947,37 +6901,17 @@ const INFERENCE_COPYPLAN_EVIDENCE_COHORTS: &[InferenceCopyPlanQualificationIdent
     InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            64, 234, 181, 34, 254, 181, 41, 162, 25, 207, 72, 187, 38, 9, 49, 174, 162, 202, 121,
-            227, 239, 11, 140, 167, 222, 173, 137, 58, 225, 223, 63, 24,
+            108, 118, 1, 22, 58, 210, 9, 206, 176, 208, 76, 105, 108, 197, 114, 218, 77, 36, 37,
+            38, 246, 155, 201, 25, 87, 110, 88, 63, 46, 220, 83, 100,
         ],
         artifact_digest: [
-            131, 208, 156, 113, 96, 92, 98, 221, 166, 89, 8, 187, 182, 255, 28, 237, 233, 149, 91,
-            19, 107, 164, 240, 185, 24, 217, 4, 77, 77, 30, 69, 228,
+            245, 103, 64, 67, 67, 66, 27, 138, 15, 114, 129, 83, 123, 68, 91, 220, 133, 69, 22,
+            228, 110, 35, 25, 9, 30, 56, 38, 172, 93, 185, 219, 3,
         ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST,
         header_manifest_digest: [
-            156, 37, 38, 105, 194, 169, 155, 210, 128, 109, 239, 74, 65, 38, 170, 164, 62, 150, 7,
-            243, 164, 210, 107, 112, 158, 60, 159, 9, 61, 122, 244, 54,
-        ],
-        nvrtc_library_domain: [
-            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
-            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-        ],
-    },
-    InferenceCopyPlanQualificationIdentity {
-        nvrtc_version: (13, 2),
-        compile_key: [
-            244, 82, 102, 107, 95, 169, 215, 120, 179, 137, 166, 13, 212, 20, 14, 130, 251, 162,
-            183, 173, 155, 17, 83, 117, 236, 143, 120, 213, 30, 86, 201, 218,
-        ],
-        artifact_digest: [
-            57, 155, 175, 93, 19, 222, 42, 191, 85, 198, 183, 206, 85, 176, 97, 9, 104, 146, 163,
-            110, 155, 78, 19, 186, 32, 82, 251, 4, 105, 154, 91, 115,
-        ],
-        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
-        header_manifest_digest: [
-            245, 204, 65, 250, 5, 45, 192, 124, 0, 78, 252, 37, 44, 87, 101, 38, 109, 151, 163, 65,
-            14, 251, 78, 249, 166, 229, 159, 54, 190, 91, 84, 79,
+            26, 213, 41, 179, 21, 21, 5, 1, 5, 111, 152, 20, 128, 204, 76, 5, 243, 58, 15, 169,
+            138, 53, 138, 232, 230, 63, 199, 84, 103, 82, 108, 13,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -7112,40 +7046,27 @@ const NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
         inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[0],
     },
     NtInferenceCopyPlanComposedQualificationIdentity {
-        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8,
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
         inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[1],
     },
     NtInferenceCopyPlanComposedQualificationIdentity {
-        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
+        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
         inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[2],
-    },
-    NtInferenceCopyPlanComposedQualificationIdentity {
-        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
-        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[3],
-    },
-    NtInferenceCopyPlanComposedQualificationIdentity {
-        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
-        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[4],
-    },
-    NtInferenceCopyPlanComposedQualificationIdentity {
-        scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
-        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[5],
     },
 ];
 
-// The six measured complete-module pairs cover cap16/cap64 on each retained
-// toolkit. Admission is an alias of that sealed set so no unmeasured pair can
-// be appended here.
+// The three measured complete-module pairs, one per retained toolkit.
+// Admission is an alias of that sealed set so no unmeasured pair can be
+// appended here.
 const NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
     &[NtInferenceCopyPlanComposedQualificationIdentity] =
     NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
 
-// These three toolkit projections keep TN independent of the Inference holder and
-// of the paired cap-specific Inference identity.
+// These three toolkit projections keep TN independent of the Inference holder.
 const TN_M16N16_SPLITM16_SM89_BINDINGS: [ScalarTransposeQualificationIdentity; 3] = [
     NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[0].scalar,
+    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[1].scalar,
     NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[2].scalar,
-    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[4].scalar,
 ];
 
 fn qualified_nt_inference_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
@@ -8432,27 +8353,16 @@ mod scalar_wave_policy_tests {
         std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
     }
 
-    fn measured_composed_identities() -> [NtInferenceCopyPlanComposedQualificationIdentity; 6] {
+    fn measured_composed_identities() -> [NtInferenceCopyPlanComposedQualificationIdentity; 3] {
         const SCALAR_SOURCE: &str =
             "9416834ab136a18f0b3a3bbf8eb0ffb3c03ff5cc4ffe6170d41243cc0b47978b";
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                inference_key: "282654a63f7610e3e77af8dc1abcb13ded34395aedfdb226726b9b9dd942f3f6",
-                inference_artifact: "30536bd091dded36df4fbee464f09795fdd66a7a3c872e6cb3cec0b44005f2d3",
-                inference_header: "295a1cf86db172a6655821a9f628f64bb13903e7da7f13af15f38542299d19ac",
-                scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
-                scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
-                scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
-                library: "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
-            },
-            MeasuredComposedRow {
-                nvrtc: (12, 8),
-                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                inference_key: "e89d08e6f5c657c90fbd852fc3b52e90d3feb7095be6093a2998915d3f39c4db",
-                inference_artifact: "c73394a72691a9d5411b57733945f7fe0d6dc4c6ec3585d657a10b64f18e7784",
-                inference_header: "5f48da53e800d422f11c63c1256ee27dd2061f197e3bcd5b728f8512e44ac599",
+                inference_source: "3b7a86ecc220af013f561d05e944ccbb881e44c7825637c195c4df372d59a6fc",
+                inference_key: "0c1190d503347ec180d6b50b705b67011bbc815fdc657eab8a392215bfb3e82f",
+                inference_artifact: "f08bc370bcd120f0194c13f0eb2ca53217160a018802cc0d98205d926ff41171",
+                inference_header: "5c761ff1603930c492584b77b2d7791168f4d12ddda697a3cb8f3ccac05a3ebe",
                 scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
                 scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
                 scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
@@ -8460,21 +8370,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                inference_key: "967191e863d46c5117d86ca71d933a259cb52b66fde2a889a927889e0d025799",
-                inference_artifact: "1d91d36540f32f6c8916c694eb75e0be8c70fab3592970b0ab45781eab2513a0",
-                inference_header: "41b43208b8dc3170422e357e10cb2ee0ca084b0a93efe01ff1d4e3c39fd33cc2",
-                scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
-                scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
-                scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
-                library: "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
-            },
-            MeasuredComposedRow {
-                nvrtc: (13, 0),
-                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                inference_key: "3e6ac45e967eec817ca7a3ea707998ce94ab3ce7ce4fd35c9e99670ad10c32d9",
-                inference_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
-                inference_header: "b78320a6a4164d73d7e0f06528797361d884d564a8326491bcbc788faad2129e",
+                inference_source: "3b7a86ecc220af013f561d05e944ccbb881e44c7825637c195c4df372d59a6fc",
+                inference_key: "ccedc96d87a6c8396e187c24c5235da8176bae5186a24e852ec7c14674157caf",
+                inference_artifact: "5ff11084f3605a88bb83556de28a48fcbc664b2723034fe5f269037f3fb5350b",
+                inference_header: "f25b2479da245ace32a35253ae89ef546de7f546f1707540f08bac6efa41de62",
                 scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
                 scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
                 scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
@@ -8482,21 +8381,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                inference_key: "40eab522feb529a219cf48bb260931aea2ca79e3ef0b8ca7dead893ae1df3f18",
-                inference_artifact: "83d09c71605c62dda65908bbb6ff1cede9955b136ba4f0b918d9044d4d1e45e4",
-                inference_header: "9c252669c2a99bd2806def4a4126aaa43e9607f3a4d26b709e3c9f093d7af436",
-                scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
-                scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
-                scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
-                library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
-            },
-            MeasuredComposedRow {
-                nvrtc: (13, 2),
-                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                inference_key: "f452666b5fa9d778b389a60dd4140e82fba2b7ad9b115375ec8f78d51e56c9da",
-                inference_artifact: "399baf5d13de2abf55c6b7ce55b061096892a36e9b4e13ba2052fb04699a5b73",
-                inference_header: "f5cc41fa052dc07c004efc252c5765266d97a3410efb4ef9a6e59f36be5b544f",
+                inference_source: "3b7a86ecc220af013f561d05e944ccbb881e44c7825637c195c4df372d59a6fc",
+                inference_key: "6c7601163ad209ceb0d04c696cc572da4d242526f69bc919576e583f2edc5364",
+                inference_artifact: "f567404343421b8a0f7281537b445bdc854516e46e2319091e3826ac5db9db03",
+                inference_header: "1ad529b315150501056f981480cc4c05f33a0fa98a358ae8e63fc75467526c0d",
                 scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
                 scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
                 scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
@@ -9788,23 +9676,23 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_inference_copyplan_sibling_selector_admits_only_all_six_measured_cohorts() {
+    fn nt_inference_copyplan_sibling_selector_admits_only_all_three_measured_cohorts() {
         assert_eq!(
             NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
             NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
-            "admission must contain exactly the six measured composed candidates"
+            "admission must contain exactly the three measured composed candidates"
         );
     }
 
     #[test]
-    fn triad_retained_identity_inference_scalar_pairs_match_the_six_measured_cohorts() {
+    fn triad_retained_identity_inference_scalar_pairs_match_the_three_measured_cohorts() {
         let expected = measured_composed_identities();
         assert_eq!(
             NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len(),
-            6,
-            "the six capacity-specific measured pairs must all be staged"
+            3,
+            "the three measured pairs must all be staged"
         );
-        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), 6);
+        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), 3);
 
         for (index, identity) in expected.iter().copied().enumerate() {
             let facts = facts_for_measured_pair(identity);
@@ -9845,7 +9733,7 @@ mod scalar_wave_policy_tests {
                 changed
             ));
 
-            let other_toolkit = expected[(index + 2) % expected.len()].scalar;
+            let other_toolkit = expected[(index + 1) % expected.len()].scalar;
             let mut crossed = facts;
             crossed.scalar_artifact.compile_key = other_toolkit.compile_key;
             crossed.scalar_artifact.artifact_digest = other_toolkit.artifact_digest;
@@ -9874,7 +9762,7 @@ mod scalar_wave_policy_tests {
         );
         assert_eq!(
             TN_M16N16_SPLITM16_SM89_BINDINGS,
-            [expected[0].scalar, expected[2].scalar, expected[4].scalar]
+            [expected[0].scalar, expected[1].scalar, expected[2].scalar]
         );
     }
 
@@ -9957,7 +9845,7 @@ mod scalar_wave_policy_tests {
             beta: 1.0,
             ..nn_qualified_operands()
         };
-        for cohort in [0, 2, 4] {
+        for cohort in 0..3 {
             let mut facts = nt_inference_copyplan_sibling_facts(cohort);
             facts.inference_copyplan_loaded = false;
             facts.inference_artifact.compile_key = [0; 32];
@@ -13083,14 +12971,13 @@ mod sm120_tests {
 #[cfg(test)]
 mod tf32_tests {
     use super::{
-        INFERENCE_COPYPLAN_EVIDENCE_COHORTS, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
-        INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64, SM89_EXACT_F32_D128_EVIDENCE_COHORTS,
-        SM89_EXACT_F32_EVIDENCE_COHORTS, SM89_FINALIST_TF32_EVIDENCE_COHORTS,
-        SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
-        SM89_JOINT_TF32_IDENTITY_CUDA_13_0, SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
-        SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS, SM89_TF32_QUALIFICATION_IDENTITY,
-        SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-        SM120_TF32_EVIDENCE_COHORTS,
+        INFERENCE_COPYPLAN_EVIDENCE_COHORTS, INFERENCE_COPYPLAN_SOURCE_DIGEST,
+        SM89_EXACT_F32_D128_EVIDENCE_COHORTS, SM89_EXACT_F32_EVIDENCE_COHORTS,
+        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_EVIDENCE_COHORTS,
+        SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
+        SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS,
+        SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
+        SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED, SM120_TF32_EVIDENCE_COHORTS,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
@@ -15467,34 +15354,29 @@ mod tf32_tests {
             super::super::modules::module_source_digest(kind, "sm_89")
                 .unwrap_or_else(|error| panic!("compose {kind:?} for sm_89: {error}"))
         };
-        let inference = [
-            ((12, 8), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((12, 8), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
-            ((13, 0), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((13, 0), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
-            ((13, 2), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((13, 2), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
-        ];
-        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), inference.len());
-        for (cohort, (nvrtc, state_cap, expected_source)) in
-            INFERENCE_COPYPLAN_EVIDENCE_COHORTS.iter().zip(inference)
-        {
+        let toolkits = [(12, 8), (13, 0), (13, 2)];
+        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), toolkits.len());
+        for (cohort, nvrtc) in INFERENCE_COPYPLAN_EVIDENCE_COHORTS.iter().zip(toolkits) {
             assert_eq!(cohort.nvrtc_version, nvrtc);
-            assert_eq!(cohort.source_digest, expected_source);
-            let digest = super::super::modules::module_source_digest_for_compile(
-                ModuleKind::Inference,
-                Some((8, 9)),
-                "sm_89",
-                state_cap,
-                nvrtc,
-            )
-            .unwrap_or_else(|error| {
-                panic!("compose Inference for CUDA {nvrtc:?} cap{state_cap}: {error}")
-            });
-            assert_eq!(
-                cohort.source_digest, digest,
-                "an Inference copy-plan cohort pins a pre-overlay or stale source"
-            );
+            assert_eq!(cohort.source_digest, INFERENCE_COPYPLAN_SOURCE_DIGEST);
+            // The module takes no state capacity: every capacity composes
+            // the one source the cohort pins.
+            for state_cap in [16, 32, 64, 256] {
+                let digest = super::super::modules::module_source_digest_for_compile(
+                    ModuleKind::Inference,
+                    Some((8, 9)),
+                    "sm_89",
+                    state_cap,
+                    nvrtc,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("compose Inference for CUDA {nvrtc:?} cap{state_cap}: {error}")
+                });
+                assert_eq!(
+                    cohort.source_digest, digest,
+                    "an Inference copy-plan cohort pins a pre-overlay or stale source"
+                );
+            }
         }
         let tf32 = [
             (
