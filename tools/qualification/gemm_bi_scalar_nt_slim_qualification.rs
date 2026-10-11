@@ -23,13 +23,8 @@ fn production_symbol_is_unique_registered_and_the_experiment_is_removed() {
     );
     assert!(!SCALAR_SOURCE.contains("GEMM_BI_SCALAR_NT_SLIM_BRAW_EXPERIMENT"));
     assert!(!SCALAR_SOURCE.contains("nt_slim_braw_exp"));
-    assert!(
-        include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs")
-            .contains(PRODUCTION_SYMBOL)
-    );
-    assert!(
-        include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs").contains(PRODUCTION_SYMBOL)
-    );
+    assert!(include_str!("../../src/gpu/gemm_bi_triad/modules.rs").contains(PRODUCTION_SYMBOL));
+    assert!(include_str!("../../src/gpu/gemm_bi_triad/launch.rs").contains(PRODUCTION_SYMBOL));
 }
 
 #[test]
@@ -189,7 +184,7 @@ fn production_compiles_for_the_portable_compute80_floor() {
             "-DNDEBUG".to_owned(),
             "-DGEMM_BI_GROUP_M=8".to_owned(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(compose_cuda_source(), options)
@@ -206,9 +201,9 @@ mod cuda_qualification {
     use cudarc::driver::{
         CudaFunction, CudaGraph, CudaModule, CudaStream, LaunchConfig, PushKernelArg,
     };
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
 
     use super::{PRODUCTION_SYMBOL, compose_cuda_source};
 
@@ -392,7 +387,7 @@ mod cuda_qualification {
                 "-DNDEBUG".to_owned(),
                 format!("-DGEMM_BI_GROUP_M={group_m}"),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         cudarc::nvrtc::compile_ptx_with_opts(compose_cuda_source(), options)

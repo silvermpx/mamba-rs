@@ -117,7 +117,7 @@ impl DistContext {
     #[cfg(feature = "cuda")]
     pub fn all_reduce_grad_sum(
         &self,
-        arena: &crate::mamba_ssm::gpu::buffers::GpuBuffer,
+        arena: &crate::gpu::buffers::GpuBuffer,
         stream: &cudarc::driver::CudaStream,
     ) -> Result<(), DistError> {
         match &self.inner {
@@ -328,10 +328,10 @@ impl DistContext {
                 if xs.is_empty() {
                     return Ok(());
                 }
-                let gpu = crate::mamba_ssm::gpu::device::GpuDevice::new(*device)
+                let gpu = crate::gpu::device::GpuDevice::new(*device)
                     .map_err(|e| DistError::Transport(format!("host reduce device: {e}")))?;
                 let stream = gpu.context().default_stream();
-                let mut buf = crate::mamba_ssm::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
+                let mut buf = crate::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
                     .map_err(|e| DistError::Transport(format!("host reduce stage: {e}")))?;
                 let sync = |tag: &str| {
                     stream
@@ -386,7 +386,7 @@ impl DistContext {
                 barrier_timeout,
                 ..
             } => {
-                let gpu = crate::mamba_ssm::gpu::device::GpuDevice::new(*device)
+                let gpu = crate::gpu::device::GpuDevice::new(*device)
                     .map_err(|e| DistError::Transport(format!("flag reduce device: {e}")))?;
                 let stream = gpu.context().default_stream();
                 let staged = stream

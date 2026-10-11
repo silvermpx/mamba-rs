@@ -7,10 +7,10 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::MambaBackbone;
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -86,7 +86,7 @@ fn m1_gpu_step_matches_cpu_at_d_state_256() {
 
 #[test]
 fn state_capacity_range() {
-    use mamba_rs::mamba_ssm::gpu::kernels::state_capacity;
+    use mamba_rs::gpu::kernels::state_capacity;
     // 16-granular: the cap sizes per-thread register
     // arrays; a 64-floor at small d_state was 4x local-memory waste.
     assert_eq!(state_capacity(8).unwrap(), 16);

@@ -1,7 +1,7 @@
 //! M1 against M3 CPU prefill at the classifier page shape, with the
 //! parameter counts printed beside the times. The M3 prefill contracts
 //! are tested in tests/prefill_m3.rs.
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{
@@ -34,9 +34,9 @@ fn m1_vs_m3_prefill_head_to_head() {
     // M1 at the classify center shape.
     {
         use mamba_rs::inference::{PrefillScratch, forward_mamba_backbone_prefill_mode};
-        use mamba_rs::mamba_ssm::MambaConfig;
-        use mamba_rs::mamba_ssm::MambaState;
-        use mamba_rs::mamba_ssm::MambaWeights;
+        use mamba_rs::mamba1::MambaConfig;
+        use mamba_rs::mamba1::MambaState;
+        use mamba_rs::mamba1::MambaWeights;
         use mamba_rs::ops::dims::MambaDims;
         let cfg = MambaConfig {
             d_model: 384,

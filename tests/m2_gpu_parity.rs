@@ -6,9 +6,9 @@
 //! chunk boundaries give the whole window).
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
-use mamba_rs::mamba_ssm::gpu::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 use mamba_rs::mamba2::{
     Mamba2Config, Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, Mamba2Weights,
@@ -262,7 +262,7 @@ fn m2_gpu_prefill_seams_are_bit_exact() {
             Mamba2GpuEngine::new(&device, &w, cfg, input_dim, 1, WeightDtype::F32).unwrap();
         let stream = &engine.ctx().stream;
         let inputs = det(129 * input_dim, 800, 1.0);
-        let download = |b: &mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer| {
+        let download = |b: &mamba_rs::gpu::buffers::GpuBuffer| {
             let mut v = vec![0f32; b.len()];
             b.download(stream, &mut v).unwrap();
             stream.synchronize().unwrap();
@@ -337,7 +337,7 @@ fn m2_gpu_prefill_seams_are_bit_exact() {
 /// mantissa bits, f16 stores activations with 10 and bf16 with 7.
 #[test]
 fn m2_gpu_typed_lanes_track_cpu() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
     let seq = 70usize;
@@ -467,7 +467,7 @@ fn m2_gpu_sequential_prefill_is_decode_steps() {
 /// state it was not captured with until the graph is cleared.
 #[test]
 fn m2_gpu_graph_replay_is_the_eager_step() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
     let (batch, seq) = (3usize, 70usize);

@@ -360,7 +360,7 @@ fn assert_same(label: &str, got: &[f32], want: &[f32]) {
 /// steps after the window continue the same chain.
 #[test]
 fn m3_mimo_prefill_matches_the_decode_chain() {
-    use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
     use mamba_rs::mamba3_mimo::{
         Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill_mode,
     };

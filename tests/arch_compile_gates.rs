@@ -438,7 +438,7 @@ fn scalar_nn_m32n64_splitk32_has_one_exact_source_owner_abi_and_resource_contrac
     }
     assert_eq!(owners, ["scalar_nn_splitk_m32n64.cu"]);
 
-    let modules_path = manifest.join("src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let modules_path = manifest.join("src/gpu/gemm_bi_triad/modules.rs");
     let modules = std::fs::read_to_string(&modules_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", modules_path.display()));
     let scalar_fragments = modules
@@ -512,7 +512,7 @@ fn scalar_nt_m2n16_has_one_production_source_and_scalar_owner() {
     }
     assert_eq!(owners, ["scalar_nt_m2n16.cu"]);
 
-    let modules_path = manifest.join("src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let modules_path = manifest.join("src/gpu/gemm_bi_triad/modules.rs");
     let modules = std::fs::read_to_string(&modules_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", modules_path.display()));
     let scalar_fragments = modules
@@ -596,7 +596,7 @@ fn scalar_tn_m16n16_has_one_exact_source_owner_abi_and_resource_contract() {
     }
     assert_eq!(owners, ["scalar_tn_m16n16.cu"]);
 
-    let modules_path = manifest.join("src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let modules_path = manifest.join("src/gpu/gemm_bi_triad/modules.rs");
     let modules = std::fs::read_to_string(&modules_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", modules_path.display()));
     let scalar_fragments = modules
@@ -2468,7 +2468,7 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     let opts = cudarc::nvrtc::CompileOptions {
         arch: Some(arch),
         options,
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     match cudarc::nvrtc::compile_ptx_with_opts(source, opts) {
@@ -2558,7 +2558,7 @@ fn inference_sm120_tf32_pair_store_production_source_contract() {
 
     // Qualified D0/D1 AUTO selection and graph identity are covered by the
     // existing selector and pair-store graph tests; the force tile stays public.
-    let inventory = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let inventory = include_str!("../src/gpu/gemm_bi_triad/modules.rs");
     assert_eq!(
         inventory.matches(CANDIDATE).count(),
         1,
@@ -2591,7 +2591,7 @@ fn inference_sm120_tf32_producer_warp_candidate_source_contract() {
         );
     }
 
-    let inference = include_str!("../src/mamba_ssm/gpu/gemm_bi_inference.rs");
+    let inference = include_str!("../src/gpu/gemm_bi_inference.rs");
     assert!(
         inference.contains("Tf32Sm120M64S2ProducerWarp"),
         "forced M64 candidate tile"
@@ -2601,7 +2601,7 @@ fn inference_sm120_tf32_producer_warp_candidate_source_contract() {
         "M64 candidate launch geometry"
     );
 
-    let holders = include_str!("../src/mamba_ssm/gpu/kernels.rs");
+    let holders = include_str!("../src/gpu/kernels.rs");
     assert!(holders.contains("pub m64n64_s2_producer_warp: CudaFunction"));
     assert!(holders.contains("\"nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp\""));
     assert!(holders.contains("(&kernels.m64n64_s2_producer_warp, 32_896)"));
@@ -2850,7 +2850,7 @@ fn inference_f32_n128_s2_source_and_ptx_contract() {
             "exact-f32 N128 S2 source contains forbidden instruction token {token}"
         );
     }
-    let compiler = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let compiler = include_str!("../src/gpu/gemm_bi_triad/modules.rs");
     assert!(compiler.contains("\"--fmad=true\".to_string()"));
     assert!(!compiler.contains("--use_fast_math"));
 
@@ -4061,7 +4061,7 @@ fn compiles_for_sm80() {
     let opts = cudarc::nvrtc::CompileOptions {
         arch: Some("sm_80"),
         options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(sm80_blob(), opts)
@@ -4093,12 +4093,12 @@ fn scalar_nt_m2n16_compiles_for_compute80_with_exact_abi_and_bounded_resources()
             "-DNDEBUG".to_string(),
             "-DGEMM_BI_GROUP_M=8".to_string(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts)
         .expect("TriadScalar M2N16 must compile for compute_80");
-    let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+    let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
         image.as_bytes().expect("SM80 scalar PTX image"),
     )
     .expect("SM80 scalar PTX must be canonical UTF-8");
@@ -4191,14 +4191,14 @@ fn scalar_nn_m32n64_splitk32_compiles_for_compute80_and_sm120_with_exact_contrac
                 "-DNDEBUG".to_string(),
                 format!("-DGEMM_BI_GROUP_M={group_m}"),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         let image =
             cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts).unwrap_or_else(|error| {
                 panic!("TriadScalar NN M32N64 Split-K must compile for {target}: {error:?}")
             });
-        mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+        mamba_rs::gpu::kernel_identity::canonical_ptx_image(
             image.as_bytes().expect("scalar M32N64 Split-K PTX image"),
         )
         .expect("scalar M32N64 Split-K PTX must be canonical UTF-8")
@@ -4280,14 +4280,14 @@ fn scalar_tn_m16n16_compiles_for_compute80_and_sm120_with_exact_numeric_contract
                 "-DNDEBUG".to_string(),
                 format!("-DGEMM_BI_GROUP_M={group_m}"),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         let image =
             cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts).unwrap_or_else(|error| {
                 panic!("TriadScalar TN M16N16 must compile for {target}: {error:?}")
             });
-        mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+        mamba_rs::gpu::kernel_identity::canonical_ptx_image(
             image.as_bytes().expect("scalar TN M16N16 PTX image"),
         )
         .expect("scalar TN M16N16 PTX must be canonical UTF-8")
@@ -4393,12 +4393,12 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
             "-DNDEBUG".to_string(),
             "-DGEMM_BI_GROUP_M=16".to_string(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts)
         .expect("TriadScalar must compile for compute_89");
-    let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+    let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
         image.as_bytes().expect("SM89 scalar PTX image"),
     )
     .expect("SM89 scalar PTX must be canonical UTF-8");
@@ -4519,12 +4519,12 @@ fn scalar_sm89_tn_narrow_splitm_candidates_have_exact_protocols_and_bounds() {
             "-DNDEBUG".to_string(),
             "-DGEMM_BI_GROUP_M=16".to_string(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts)
         .expect("TriadScalar TN narrow split-M candidates must compile for compute_89");
-    let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+    let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
         image.as_bytes().expect("SM89 scalar PTX image"),
     )
     .expect("SM89 scalar PTX must be canonical UTF-8");
@@ -4580,12 +4580,12 @@ fn scalar_sm89_splitm_reducer_uses_a_portable_launch_bound() {
     let opts = cudarc::nvrtc::CompileOptions {
         arch: Some("compute_89"),
         options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(scalar_blob(), opts)
         .expect("TriadScalar split-M reducer must compile for compute_89");
-    let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+    let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
         image.as_bytes().expect("SM89 scalar PTX image"),
     )
     .expect("SM89 scalar PTX must be canonical UTF-8");
@@ -4609,7 +4609,7 @@ fn compiles_for_sm90a() {
     let opts = cudarc::nvrtc::CompileOptions {
         arch: Some("sm_90a"),
         options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(sm90a_blob(), opts)
@@ -4859,12 +4859,12 @@ fn compiles_exact_sm100_family_triad_modules() {
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(requested),
             options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
             .unwrap_or_else(|error| panic!("TriadSm100 must compile for {requested}: {error}"));
-        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+        let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
             image.as_bytes().expect("SM100 PTX image"),
         )
         .expect("SM100 PTX must be canonical UTF-8");
@@ -4977,12 +4977,12 @@ fn ordinary_sm100_targets_fail_offline_tcgen_assembly() {
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(requested),
             options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
             .unwrap_or_else(|error| panic!("NVRTC ordinary-target probe failed: {error}"));
-        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+        let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
             image.as_bytes().expect("ordinary SM100 PTX image"),
         )
         .expect("ordinary SM100 PTX must be canonical UTF-8");
@@ -5029,12 +5029,12 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
                 "--extra-device-vectorization".to_string(),
                 "-DNDEBUG".to_string(),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         let image = cudarc::nvrtc::compile_ptx_with_opts(sm120_blob(), opts)
             .unwrap_or_else(|error| panic!("TriadSm120 must compile for {requested}: {error}"));
-        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+        let ptx = mamba_rs::gpu::kernel_identity::canonical_ptx_image(
             image.as_bytes().expect("SM120 PTX image"),
         )
         .expect("SM120 PTX must be canonical UTF-8");

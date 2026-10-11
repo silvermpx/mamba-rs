@@ -8,15 +8,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{
     TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, SM120_AUTO_CELLS_CC120,
     SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_CELLS_CC120,
     SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk, Sm120ForcedRoute,
@@ -28,8 +28,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     qualify_physical_launch, resolve_sm120_forced, validate_sm120_graph_replay,
     validate_sm120_map_request,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{
     FramedSha256, ModuleKind, PhysicalGemmBackend, ResolvedGemmOp, ResolvedNumericContract,
     Sha256Digest,
 };
@@ -1148,7 +1148,7 @@ fn launch_auto_typed_ptr(ctx: &GpuCtx, case: &CensusCase, output: u64) -> Result
 }
 
 fn assert_auto_route(
-    actual: &mamba_rs::mamba_ssm::gpu::kernel_identity::RecordedGemmTrace,
+    actual: &mamba_rs::gpu::kernel_identity::RecordedGemmTrace,
     expected: Sm120ForcedRoute,
 ) {
     let [route] = actual.routes() else {

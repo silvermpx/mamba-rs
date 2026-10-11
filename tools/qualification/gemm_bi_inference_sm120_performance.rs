@@ -8,18 +8,18 @@ use std::thread;
 use std::time::Duration;
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
     inference_forward_f32_legacy_baseline, inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{TUNING_TABLE_REVISION, digest_hex};
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{TUNING_TABLE_REVISION, digest_hex};
 
 #[path = "support/inference_sm120_exact_n64_admission.rs"]
 mod exact_n64_admission;
@@ -182,7 +182,7 @@ fn sm120_exact_vendor_launch(
         launch.arg(&bias_ptr);
         launch.arg(&rows);
         launch.arg(&cols);
-        unsafe { launch.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(shape.m * shape.n)) }
+        unsafe { launch.launch(mamba_rs::gpu::launch::grid_1d(shape.m * shape.n)) }
             .expect("SM120 exact vendor bias broadcast");
         1.0f32
     } else {

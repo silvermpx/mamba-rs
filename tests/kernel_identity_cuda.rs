@@ -1,23 +1,23 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, QualifiedPhysicalLaunchEvidence,
     TcTile, presize_physical_qualification_suite, qualify_physical_launch,
 };
 #[cfg(target_os = "linux")]
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::gemm_bi_triad::{
     SM80_TF32_ROUTE_SPECS, SM80_TF32_WIDE_ROUTE_SPECS, SM120_KERNEL_SPECS,
     SM120_STREAMK_KERNEL_SPECS, SM120_TF32_ROUTE_SPECS,
 };
 #[cfg(target_os = "linux")]
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactSetIdentity, CacheEnvelope, FramedSha256, digest_hex,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::kernel_identity::{
     ArtifactKind, ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp,
 };
 

@@ -6,20 +6,20 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
-use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, PinnedHostBuf};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
-use mamba_rs::mamba_ssm::gpu::prefill::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::buffers::{GpuBuffer, PinnedHostBuf};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
+use mamba_rs::mamba1::gpu::forward::GpuMambaDims;
+use mamba_rs::mamba1::gpu::inference::MambaGpuState;
+use mamba_rs::mamba1::gpu::prefill::{
     PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::mamba1::gpu::weights::GpuMambaWeights;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -289,12 +289,12 @@ fn pooled_graph_refuses_route_drift() {
             &|| {
                 r.ctx
                     .route_controls()
-                    .set_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Inference)
+                    .set_family(mamba_rs::gpu::context::BiGemmFamily::Inference)
             },
             &|| {
                 r.ctx
                     .route_controls()
-                    .set_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Triad)
+                    .set_family(mamba_rs::gpu::context::BiGemmFamily::Triad)
             },
         ),
     ];

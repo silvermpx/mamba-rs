@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM100_KERNEL_SPECS, Sm100ForcedRoute,
     Sm100MapRequest, Sm100Op, Sm100PhysicalRoute, Sm100Schedule, Sm100Shape, Sm100Stages,
     Sm100TargetCandidate, Sm100TargetKind, Sm100TensorMap, Sm100Tile, resolve_sm100_forced,
@@ -11,7 +11,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 
 const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100/tcgen05.cu");
-const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
+const LAUNCH_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/launch.rs");
 
 fn public_function_source(source: &str, name: &str) -> String {
     let marker = format!("pub fn {name}(");

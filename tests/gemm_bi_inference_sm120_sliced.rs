@@ -6,17 +6,17 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaGraph, DeviceRepr, LaunchConfig, PushKernelArg, sys};
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::GpuByteBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
     inference_forward_f32_legacy_baseline, inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 
 const SYMBOL: &str = "nn_sm120_f32_n64_sliced";
 const LEGACY_SYMBOL: &str = "f32_f32_s2";

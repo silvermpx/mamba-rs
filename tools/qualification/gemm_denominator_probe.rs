@@ -22,15 +22,13 @@ mod evidence;
 
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::sys::CUevent_flags;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
-};
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile};
 
 const RATE_SRC: &str = r#"
 // Null-memory tensor-pipe rate kernels: eight independent accumulator

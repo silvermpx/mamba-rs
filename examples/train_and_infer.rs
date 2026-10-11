@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
 use mamba_rs::train::flat::MambaBackboneFlat;
@@ -118,7 +118,7 @@ fn main() {
     // =====================================================================
     let save_path = std::env::temp_dir().join("mamba_rs_trained.safetensors");
     let trained_inf_weights = inference_weights_from_train(&tw, &inf_weights);
-    mamba_rs::mamba_ssm::serialize::save(&save_path, &trained_inf_weights, &cfg, input_dim)
+    mamba_rs::mamba1::serialize::save(&save_path, &trained_inf_weights, &cfg, input_dim)
         .expect("save failed");
     println!("\nSaved to: {}", save_path.display());
 
@@ -126,7 +126,7 @@ fn main() {
     // Step 4: Load and run inference
     // =====================================================================
     let (loaded_w, loaded_cfg, loaded_input_dim) =
-        mamba_rs::mamba_ssm::serialize::load(Path::new(&save_path)).expect("load failed");
+        mamba_rs::mamba1::serialize::load(Path::new(&save_path)).expect("load failed");
     let bb = MambaBackbone::new(loaded_w, loaded_cfg, loaded_input_dim).expect("load failed");
     assert_eq!(bb.input_dim(), loaded_input_dim);
     println!(
@@ -213,7 +213,7 @@ fn inference_weights_from_train(tw: &TrainMambaWeights, template: &MambaWeights)
             .layers
             .iter()
             .zip(template.layers.iter())
-            .map(|(tlw, _)| mamba_rs::mamba_ssm::MambaLayerWeights {
+            .map(|(tlw, _)| mamba_rs::mamba1::MambaLayerWeights {
                 norm_weight: tlw.norm_weight.clone(),
                 in_proj_w: tlw.in_proj_w.clone(),
                 conv1d_weight: tlw.conv1d_weight.clone(),

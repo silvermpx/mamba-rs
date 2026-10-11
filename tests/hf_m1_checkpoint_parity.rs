@@ -18,11 +18,11 @@
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
 
+#[cfg(feature = "cuda")]
+use mamba_rs::gpu::GpuOptions;
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load::{HfModel, load_hf};
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
-#[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 
 #[path = "common/m3_golden.rs"]
 mod m3_golden;
@@ -189,12 +189,12 @@ fn mamba_130m_cpu_matches_the_f64_oracle() {
 fn gpu_decode_rows(
     model: &HfModel,
     golden: &Golden,
-    dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype,
+    dtype: mamba_rs::gpu::dtype::WeightDtype,
 ) -> (
-    mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone,
+    mamba_rs::mamba1::gpu::inference::MambaGpuBackbone,
     Vec<Vec<f32>>,
 ) {
-    use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
+    use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
     let d = model.d_model;
     let cfg = *model.backbone.config();
@@ -228,9 +228,9 @@ fn gpu_decode_rows(
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba_130m_gpu_matches_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::dtype::WeightDtype;
+    use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
     let (model, golden) = checkpoint();
     let d = model.d_model;
@@ -285,7 +285,7 @@ fn mamba_130m_gpu_matches_the_f64_oracle() {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
 
     let (model, golden) = checkpoint();
     let d = model.d_model;

@@ -7,12 +7,12 @@
 //! the pooled CUDA-graph replay must equal the eager pooled path.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::gpu::prefill::{

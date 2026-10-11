@@ -9,19 +9,19 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::forward::{GpuMambaDims, GpuRecurrentState};
-use mamba_rs::mamba_ssm::gpu::forward_mixed::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
+use mamba_rs::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
+use mamba_rs::mamba1::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaGrads;
-use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
+use mamba_rs::mamba1::gpu::weights::GpuMambaGrads;
+use mamba_rs::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 fn tiny_cfg() -> MambaConfig {
     MambaConfig {

@@ -8,9 +8,9 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
 use mamba_rs::mamba3_mimo::{
     Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoTape, Mamba3MimoTrainScratch, Mamba3MimoWeights,

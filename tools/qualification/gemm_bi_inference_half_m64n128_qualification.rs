@@ -9,18 +9,18 @@ use std::thread;
 use std::time::Duration;
 
 use cudarc::driver::{CudaGraph, sys};
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceSm120HalfTile, InferenceTile, inference_forward,
     inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, CompilerIdentity, DeviceIdentity, ModuleKind,
     TUNING_TABLE_REVISION, digest_hex,
 };
@@ -29,7 +29,7 @@ use sha2::{Digest as _, Sha256};
 const OUTPUT_ENV: &str = "MAMBA_RS_INFERENCE_HALF_M64N128_JSONL";
 const SCHEMA: &str = "MambaBiInferenceHalfM64N128Qualification";
 const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_inference_half_m64n128_qualification.rs");
-const RUST_DISPATCH_SOURCE: &str = include_str!("../../src/mamba_ssm/gpu/gemm_bi_inference.rs");
+const RUST_DISPATCH_SOURCE: &str = include_str!("../../src/gpu/gemm_bi_inference.rs");
 const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm120/tma.cu");
 const CANDIDATE_TILE: InferenceSm120HalfTile = InferenceSm120HalfTile::M64N128Bk64S2;
 const EAGER_REPEATS: usize = 10;
@@ -360,7 +360,7 @@ impl RunMetadata {
             QUALIFICATION_SOURCE,
         )?;
         let rust_dispatch_source_sha256 = verify_compiled_source(
-            &manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"),
+            &manifest.join("src/gpu/gemm_bi_inference.rs"),
             RUST_DISPATCH_SOURCE,
         )?;
         let cuda_source_sha256 = verify_compiled_source(
@@ -1936,8 +1936,7 @@ mod tests {
     use super::*;
 
     fn metadata_with_run_identity(run_identity: &str) -> RunMetadata {
-        let target =
-            mamba_rs::mamba_ssm::gpu::kernel_identity::CudaTarget::new("compute_120").unwrap();
+        let target = mamba_rs::gpu::kernel_identity::CudaTarget::new("compute_120").unwrap();
         let compiler = CompilerIdentity {
             source_digest: [1; 32],
             invocation_digest: [2; 32],
@@ -1962,7 +1961,7 @@ mod tests {
             compute_capability: (12, 0),
             multiprocessor_count: 170,
             target,
-            driver: mamba_rs::mamba_ssm::gpu::kernel_identity::DriverIdentity {
+            driver: mamba_rs::gpu::kernel_identity::DriverIdentity {
                 api_version: 13_200,
                 build_sources: 1,
                 build_digest: [7; 32],
@@ -2189,7 +2188,7 @@ mod tests {
                 QUALIFICATION_SOURCE,
             ),
             (
-                manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"),
+                manifest.join("src/gpu/gemm_bi_inference.rs"),
                 RUST_DISPATCH_SOURCE,
             ),
             (

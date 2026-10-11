@@ -19,10 +19,10 @@ use super::state::{
     GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
-use crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::blas::gpu_gemm_bi_forward_raw;
+use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::gpu::context::GpuCtx;
+use crate::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Logical dimensions for chunk-parallel angle accumulation.
@@ -306,8 +306,8 @@ pub(super) fn adt_multiply_launch<'k>(
     n: usize,
     ptrs: &[cudarc::driver::sys::CUdeviceptr],
 ) -> (&'k cudarc::driver::CudaFunction, usize) {
-    let w = crate::mamba_ssm::gpu::launch::vec8_width(4);
-    if crate::mamba_ssm::gpu::launch::vec8_ok(n, 4, ptrs) {
+    let w = crate::gpu::launch::vec8_width(4);
+    if crate::gpu::launch::vec8_ok(n, 4, ptrs) {
         (&m3k.elementwise_mul_v, n / w)
     } else {
         (&m3k.elementwise_mul, n)

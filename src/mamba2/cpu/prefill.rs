@@ -16,7 +16,7 @@ use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
 use super::core::{
     DSkip, HeadScan, conv_hist_push, conv_silu_token, dt_da, gate_token, head_scan, rms_row,
 };
-use crate::mamba_ssm::cpu::prefill::{PrefillMode, zip_rows};
+use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::norms::rms_norm_weighted;

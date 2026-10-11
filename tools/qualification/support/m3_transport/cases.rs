@@ -2,7 +2,7 @@
 
 use super::{Case, check_case, encode, values};
 use cudarc::driver::{CudaModule, CudaStream, LaunchConfig};
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
 use std::sync::Arc;
 

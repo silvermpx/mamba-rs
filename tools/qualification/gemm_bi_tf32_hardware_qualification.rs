@@ -13,12 +13,12 @@ use std::process::Command;
 
 #[path = "../../tests/support/gemm_bi_tf32_contract_toolkit.rs"]
 mod toolkit;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::gpu::GemmMode;
 use toolkit::*;
 
 fn require_exact_cc(expected: (u32, u32)) {
-    let device = mamba_rs::mamba_ssm::gpu::device::GpuDevice::new(0)
-        .expect("open the exact qualification GPU");
+    let device =
+        mamba_rs::gpu::device::GpuDevice::new(0).expect("open the exact qualification GPU");
     assert_eq!(
         device.compute_capability, expected,
         "wrong qualification CC"
@@ -283,13 +283,13 @@ fn nt_fixed_split2_sample_bits(
 #[test]
 #[ignore = "requires exact CC 12.0/170SM with CUDA 13.0 measured-symbol exclusion"]
 fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> Result<(), String> {
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         presize_physical_qualification_suite, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::kernel_identity::{
         ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
     };
 

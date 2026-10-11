@@ -23,11 +23,11 @@
 
 use mamba_rs::dist::{Bootstrap, Devices, DistConfig, EmulatedWorld, Rendezvous, bootstrap};
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::BackwardOpts;
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;

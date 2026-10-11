@@ -157,9 +157,9 @@ fn test_serialize_roundtrip() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
 
-    mamba_rs::mamba_ssm::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
+    mamba_rs::mamba1::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
     let (loaded_w, loaded_cfg, loaded_input_dim) =
-        mamba_rs::mamba_ssm::serialize::load(&path).unwrap();
+        mamba_rs::mamba1::serialize::load(&path).unwrap();
 
     assert_eq!(loaded_cfg.d_model, cfg.d_model);
     assert_eq!(loaded_cfg.d_state, cfg.d_state);
@@ -203,9 +203,9 @@ fn test_serialize_inference_parity() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
 
-    mamba_rs::mamba_ssm::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
+    mamba_rs::mamba1::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
     let (loaded_w, loaded_cfg, loaded_input_dim) =
-        mamba_rs::mamba_ssm::serialize::load(&path).unwrap();
+        mamba_rs::mamba1::serialize::load(&path).unwrap();
     let bb2 = MambaBackbone::new(loaded_w, loaded_cfg, loaded_input_dim).unwrap();
     assert_eq!(bb2.input_dim(), loaded_input_dim);
 
@@ -736,12 +736,12 @@ fn test_debug_gradient_trace() {
 
 #[cfg(feature = "cuda")]
 mod gpu_tests {
-    use mamba_rs::mamba_ssm::gpu::GpuOptions;
+    use mamba_rs::gpu::GpuOptions;
     use mamba_rs::{MambaBackbone, MambaConfig, MambaState, MambaStepScratch};
 
     #[test]
     fn test_gpu_inference_matches_cpu() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -796,7 +796,7 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_inference_cuda_graph() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -846,7 +846,7 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_inference_state_reset() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -892,11 +892,11 @@ mod gpu_tests {
         use mamba_rs::gpu::buffers::GpuBuffer;
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
-        use mamba_rs::gpu::forward::GpuRecurrentState;
-        use mamba_rs::gpu::forward::{
+        use mamba_rs::mamba1::gpu::forward::GpuRecurrentState;
+        use mamba_rs::mamba1::gpu::forward::{
             GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, gpu_forward_mamba_backbone,
         };
-        use mamba_rs::gpu::weights::GpuMambaTrainWeights;
+        use mamba_rs::mamba1::gpu::weights::GpuMambaTrainWeights;
         use mamba_rs::ops::dims::MambaDims;
 
         let cfg = MambaConfig::default();
@@ -994,15 +994,15 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_cpu_training_backward_parity() {
-        use mamba_rs::gpu::backward::gpu_backward_mamba_backbone;
         use mamba_rs::gpu::buffers::GpuBuffer;
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
-        use mamba_rs::gpu::forward::GpuRecurrentState;
-        use mamba_rs::gpu::forward::{
+        use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone;
+        use mamba_rs::mamba1::gpu::forward::GpuRecurrentState;
+        use mamba_rs::mamba1::gpu::forward::{
             GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, gpu_forward_mamba_backbone,
         };
-        use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+        use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1220,17 +1220,17 @@ mod gpu_tests {
     #[test]
     fn test_backward_diagnostic() {
         use cudarc::driver::PushKernelArg;
-        use mamba_rs::gpu::backward::gpu_backward_mamba_layer;
         use mamba_rs::gpu::blas::gpu_gemm_bi_backward_grad_raw;
         use mamba_rs::gpu::buffers::GpuBuffer;
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
-        use mamba_rs::gpu::forward::GpuRecurrentState;
-        use mamba_rs::gpu::forward::{
+        use mamba_rs::gpu::launch::grid_norm;
+        use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_layer;
+        use mamba_rs::mamba1::gpu::forward::GpuRecurrentState;
+        use mamba_rs::mamba1::gpu::forward::{
             GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, gpu_forward_mamba_backbone,
         };
-        use mamba_rs::gpu::launch::grid_norm;
-        use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+        use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
         use mamba_rs::ops::dims::MambaRecurrentState;
         use mamba_rs::train::backward::backward_mamba_layer_batched;
         use mamba_rs::train::backward_ops::backward_rms_norm;
@@ -1812,12 +1812,12 @@ fn test_long_sequence_stability() {
 
 #[cfg(feature = "cuda")]
 mod gpu_extra_tests {
-    use mamba_rs::mamba_ssm::gpu::GpuOptions;
+    use mamba_rs::gpu::GpuOptions;
     use mamba_rs::{MambaBackbone, MambaConfig};
 
     #[test]
     fn test_gpu_inference_batch_parity() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1877,7 +1877,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_inference_long_sequence_stability() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1906,7 +1906,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_cuda_graph_matches_cpu() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1956,15 +1956,15 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_training_all_gradients_nonzero() {
-        use mamba_rs::gpu::backward::gpu_backward_mamba_backbone;
         use mamba_rs::gpu::buffers::GpuBuffer;
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
-        use mamba_rs::gpu::forward::GpuRecurrentState;
-        use mamba_rs::gpu::forward::{
+        use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone;
+        use mamba_rs::mamba1::gpu::forward::GpuRecurrentState;
+        use mamba_rs::mamba1::gpu::forward::{
             GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, gpu_forward_mamba_backbone,
         };
-        use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+        use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -2069,7 +2069,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_custom_config() {
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig {
             d_model: 64,

@@ -8,7 +8,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::{
     AnyGpuBackbone, GpuBackbone, GpuOptions, Mamba2Config, Mamba2GpuBackbone, Mamba2Weights,
     Mamba3Config, Mamba3GpuBackbone, Mamba3MimoConfig, Mamba3MimoGpuBackbone, Mamba3MimoWeights,

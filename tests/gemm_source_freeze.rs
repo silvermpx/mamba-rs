@@ -376,17 +376,22 @@ fn gemm_module_sources_are_frozen() {
     );
 }
 
-/// The include_str! paths of one fragment table in modules.rs.
+/// The include_str! paths of one fragment table in modules.rs, relative to
+/// the crate root whatever directory modules.rs sits in.
 fn table_files(modules: &str, table: &str) -> Vec<String> {
     let start = modules
         .find(&format!("const {table}: &[SourceFragment] = &["))
         .unwrap_or_else(|| panic!("{table} is defined in modules.rs"));
     let body = &modules[start..];
     let body = &body[..body.find("\n];").expect("the table ends")];
-    body.match_indices("include_str!(\"../../../../")
+    body.match_indices("include_str!(\"")
         .map(|(at, prefix)| {
             let rest = &body[at + prefix.len()..];
-            rest[..rest.find('"').expect("the path ends")].to_string()
+            let mut path = &rest[..rest.find('"').expect("the path ends")];
+            while let Some(up) = path.strip_prefix("../") {
+                path = up;
+            }
+            path.to_string()
         })
         .collect()
 }
@@ -394,9 +399,14 @@ fn table_files(modules: &str, table: &str) -> Vec<String> {
 #[test]
 fn inference_module_composes_no_model_kernel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let modules = std::fs::read_to_string(root.join("src/mamba_ssm/gpu/gemm_bi_triad/modules.rs"))
+    let modules = std::fs::read_to_string(root.join("src/gpu/gemm_bi_triad/modules.rs"))
         .expect("read modules.rs");
-    for path in table_files(&modules, "INFERENCE_SOURCE_FRAGMENTS") {
+    let inference = table_files(&modules, "INFERENCE_SOURCE_FRAGMENTS");
+    assert!(
+        !inference.is_empty(),
+        "INFERENCE_SOURCE_FRAGMENTS composes its kernels"
+    );
+    for path in inference {
         assert!(
             path.starts_with("kernels/gemm_bi_inference/") || path == "kernels/_typed_prelude.cuh",
             "the Inference module composes {path}, which is not a GEMM source"

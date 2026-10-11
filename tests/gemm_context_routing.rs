@@ -1,13 +1,13 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::{
+use mamba_rs::gpu::blas::{
     TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_forward_raw, gpu_gemm_bi_tied_lm_head_raw,
     gpu_gemm_typed_forward_raw,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
 
 const BATCH: usize = 3;
 const D_MODEL: usize = 37;
@@ -390,15 +390,15 @@ fn all_f32_typed_nn_zero_reduction_applies_bias_once_inside_output_guards() {
         &ctx,
         TypedPtr {
             ptr: output.raw_ptr_at(&ctx.stream, PREFIX),
-            dtype: mamba_rs::mamba_ssm::gpu::WeightDtype::F32,
+            dtype: mamba_rs::gpu::WeightDtype::F32,
         },
         TypedPtr {
             ptr: 0,
-            dtype: mamba_rs::mamba_ssm::gpu::WeightDtype::F32,
+            dtype: mamba_rs::gpu::WeightDtype::F32,
         },
         TypedPtr {
             ptr: 0,
-            dtype: mamba_rs::mamba_ssm::gpu::WeightDtype::F32,
+            dtype: mamba_rs::gpu::WeightDtype::F32,
         },
         Some(bias.cached_ptr()),
         (BATCH, 0, VOCAB_PADDED),

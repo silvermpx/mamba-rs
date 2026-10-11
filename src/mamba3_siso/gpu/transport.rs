@@ -1,8 +1,8 @@
 //! Qualified Mamba-3 backward transport routes.
 
 use super::kernels::Mamba3Kernels;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::kernels::{HalfKernel, TypedKernel};
 use cudarc::driver::{CudaFunction, LaunchConfig};
 
 #[derive(Clone, Copy)]
@@ -244,7 +244,7 @@ impl Mamba3Kernels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mamba_ssm::gpu::dtype::WeightDtype;
+    use crate::gpu::dtype::WeightDtype;
 
     #[test]
     fn compiler_and_device_admission_is_exact() {

@@ -1,16 +1,14 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::context::{
-    BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy,
-};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::inference::{MambaGpuEngine, MambaGpuEngineMixed};
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::{MambaGpuEngine, MambaGpuEngineMixed};
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::{Mamba3GpuEngine, Mamba3GpuEngineMixed};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 const OUTPUT_POISON_BITS: u32 = 0x7fc0_d00d;
 

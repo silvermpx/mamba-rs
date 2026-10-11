@@ -6,12 +6,12 @@
 #![cfg(feature = "cuda")]
 
 use half::{bf16, f16};
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad;
 #[path = "../tests/common/digest.rs"]
 mod digest;
 #[path = "../tests/common/evidence.rs"]
@@ -191,7 +191,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
             });
         }
         // Scalar-tier reference on the same shape (what TC64 must beat).
-        use mamba_rs::mamba_ssm::gpu::blas::{
+        use mamba_rs::gpu::blas::{
             gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
         };
         time_path("fwd scalar bi", &|| {
@@ -206,7 +206,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
     }
 }
 fn bench_tc_vs_scalar_paths() {
-    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_forward_typed;
+    use mamba_rs::gpu::blas::gemm_bi_forward_typed;
     use std::time::Instant;
     let t = Ctx::new();
     let dt = WeightDtype::Bf16;
@@ -270,9 +270,7 @@ fn bench_tc_vs_scalar_paths() {
         eprintln!("  TC speedup vs scalar bi: {:.2}x", scalar / tc);
 
         // Backward twins on the same shape.
-        use mamba_rs::mamba_ssm::gpu::blas::{
-            gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed,
-        };
+        use mamba_rs::gpu::blas::{gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed};
         let qdy = quantize(&det(m * n, 55, 0.5), dt);
         let dyt = t.typed_buf(&qdy, dt);
         let dytp = TypedPtr {
@@ -323,7 +321,7 @@ fn bench_tc_vs_scalar_paths() {
 /// Run before and after each optimization step; goldens must not move on steps
 /// that promise bit-identity (swizzle, dynsmem, BK=64 on K%64 ∉ (0,32] shapes).
 fn step0_tc_attrs_and_goldens() {
-    use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
+    use mamba_rs::gpu::blas::TypedPtr;
     use std::time::Instant;
     let t = Ctx::new();
     let k = &t.ctx.kernels;

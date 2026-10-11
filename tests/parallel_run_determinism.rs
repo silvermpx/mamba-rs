@@ -20,14 +20,15 @@ mod evidence;
 #[path = "common/evidence_digest.rs"]
 mod evidence_digest;
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
-use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer};
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::BackwardOpts;
+use mamba_rs::gpu::train::TrainSessionCfg;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::forward::PARALLEL_SCAN_THRESHOLD;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

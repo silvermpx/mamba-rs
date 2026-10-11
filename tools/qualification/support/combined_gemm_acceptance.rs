@@ -3,12 +3,12 @@
 use super::gpu_quiet;
 use super::*;
 use cudarc::driver::{CudaFunction, LaunchConfig, sys};
-use mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::context::HalfTriadPolicy;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationF32Epilogue, QualifiedPhysicalLaunchEvidence, SM89_HALF_AUTO_CELLS,
     SM89_HALF_KERNEL_SPECS, Sm89HalfRoute,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ArtifactIdentity, CompilerIdentity};
+use mamba_rs::gpu::kernel_identity::{ArtifactIdentity, CompilerIdentity};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 const HARNESS_SOURCE: &str = include_str!("../gemm_bi_inference_performance.rs");
@@ -1204,7 +1204,7 @@ fn qualification_request(
 
 fn offset_negative_request(
     dtype: WeightDtype,
-    offset: mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset,
+    offset: mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset,
 ) -> PhysicalQualificationRequest {
     PhysicalQualificationRequest::one_element_offset(
         ResolvedGemmOp::Tn,
@@ -1245,9 +1245,9 @@ fn combined_scratch_requests() -> Result<Vec<PhysicalQualificationRequest>, Stri
     }
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for offset in [
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
         ] {
             requests.push(offset_negative_request(dtype, offset));
         }
@@ -1606,9 +1606,9 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
     }
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for offset in [
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
-            mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
+            mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
         ] {
             let request = offset_negative_request(dtype, offset);
             let launch = qualify_physical_launch(ctx, request)?;
@@ -1907,9 +1907,9 @@ mod combined_gemm_host {
         }
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             for offset in [
-                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
-                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
-                mamba_rs::mamba_ssm::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
+                mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::A,
+                mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::B,
+                mamba_rs::gpu::gemm_bi_triad::PhysicalQualificationOffset::Output,
             ] {
                 assert!(requests.contains(&offset_negative_request(dtype, offset)));
             }

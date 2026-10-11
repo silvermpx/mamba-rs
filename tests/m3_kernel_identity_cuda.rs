@@ -1,7 +1,7 @@
 #![cfg(all(feature = "cuda", target_os = "linux"))]
 
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ArtifactKind, ModuleKind};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::kernel_identity::{ArtifactKind, ModuleKind};
 use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
 
 struct CacheEnvGuard(Option<std::ffi::OsString>);

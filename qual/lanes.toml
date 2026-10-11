@@ -195,6 +195,7 @@
 "msrv_single_source" = "host"
 "optimizer_resume_bitwise" = "gate"
 "parallel_run_determinism" = "contract"
+"paths_from_0_7" = "host"
 "prefill" = "host"
 "prefill_classifier_bench" = "bench"
 "prefill_m1_vs_m3_bench" = "bench"

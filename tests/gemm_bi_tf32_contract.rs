@@ -15,20 +15,19 @@ const SM80_TN_SPLITK_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80/
 const SM90A_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm90a/wgmma.cu");
 const SM100_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100/tcgen05.cu");
 const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
-const CONTEXT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/context.rs");
-const DEVICE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/device.rs");
-const IDENTITY_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/kernel_identity.rs");
-const CONTRACT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs");
-const DISPATCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs");
-const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
-const QUALIFICATION_SOURCE: &str =
-    include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/qualification.rs");
-const BLAS_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/blas.rs");
-const GRAPH_CAPTURE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/graph_capture.rs");
-const TRAINING_GRAPH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/training_graph.rs");
-const TRAINER_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/trainer.rs");
-const INFERENCE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/inference.rs");
-const PREFILL_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/prefill.rs");
+const CONTEXT_SOURCE: &str = include_str!("../src/gpu/context.rs");
+const DEVICE_SOURCE: &str = include_str!("../src/gpu/device.rs");
+const IDENTITY_SOURCE: &str = include_str!("../src/gpu/kernel_identity.rs");
+const CONTRACT_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/contract.rs");
+const DISPATCH_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/dispatch.rs");
+const LAUNCH_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/launch.rs");
+const QUALIFICATION_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/qualification.rs");
+const BLAS_SOURCE: &str = include_str!("../src/gpu/blas.rs");
+const GRAPH_CAPTURE_SOURCE: &str = include_str!("../src/gpu/graph_capture.rs");
+const TRAINING_GRAPH_SOURCE: &str = include_str!("../src/mamba1/gpu/training_graph.rs");
+const TRAINER_SOURCE: &str = include_str!("../src/mamba1/gpu/trainer.rs");
+const INFERENCE_SOURCE: &str = include_str!("../src/mamba1/gpu/inference.rs");
+const PREFILL_SOURCE: &str = include_str!("../src/mamba1/gpu/prefill.rs");
 const MAMBA3_TRAINING_GRAPH_SOURCE: &str = include_str!("../src/mamba3_siso/gpu/training_graph.rs");
 const MAMBA3_TRAINER_SOURCE: &str = include_str!("../src/mamba3_siso/gpu/trainer.rs");
 const MAMBA3_INFERENCE_SOURCE: &str = include_str!("../src/mamba3_siso/gpu/inference.rs");
@@ -494,12 +493,12 @@ fn compile_tf32_ptx(source: String, target: &'static str) -> String {
             "--generate-line-info".to_owned(),
             "-DNDEBUG".to_owned(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(source, options)
         .unwrap_or_else(|error| panic!("TF32 module must compile for {target}: {error}"));
-    mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+    mamba_rs::gpu::kernel_identity::canonical_ptx_image(
         image.as_bytes().expect("compiled TF32 PTX image"),
     )
     .expect("compiled TF32 PTX must be canonical UTF-8")
@@ -3871,7 +3870,7 @@ fn physical_graph_capture_has_one_opaque_package_and_guarded_graph_boundary() {
     );
     let scalar_binding = source_mask(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) fn bind<'a>",
+        "pub(in crate::gpu) fn bind<'a>",
     ));
     assert_code_contains_all(
         &scalar_binding,
@@ -3898,7 +3897,7 @@ fn physical_graph_package_covers_all_prepared_triad_route_shapes() {
     );
     let request = source_mask(braced_scope_after(
         BLAS_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) struct F32PhysicalGraphPackageRequest",
+        "pub(in crate::gpu) struct F32PhysicalGraphPackageRequest",
     ));
     assert_code_contains_all(
         &request,
@@ -3932,7 +3931,7 @@ fn physical_graph_package_covers_all_prepared_triad_route_shapes() {
     );
     let direct = source_mask(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence",
+        "pub(in crate::gpu) fn prepare_prepared_f32_direct_graph_sequence",
     ));
     assert_code_contains_all(
         &direct,
@@ -5399,22 +5398,21 @@ fn validate_physical_sensitive_call_site_ownership(
 ) -> Result<(), String> {
     let mut found_identity_owner = false;
     for (path, stored_source) in sources {
-        let source = if path.ends_with("mamba_ssm/gpu/kernel_identity.rs") {
+        let source = if path.ends_with("gpu/kernel_identity.rs") {
             found_identity_owner = true;
             identity_source
         } else {
             stored_source.as_str()
         };
-        let calls =
-            physical_sensitive_calls(source, path.ends_with("mamba_ssm/gpu/kernel_identity.rs"));
+        let calls = physical_sensitive_calls(source, path.ends_with("gpu/kernel_identity.rs"));
         let mut covered = Vec::new();
-        if path.ends_with("mamba_ssm/gpu/kernel_identity.rs") {
+        if path.ends_with("gpu/kernel_identity.rs") {
             let identity_tests = active_test_module_scope(source, "physical_launch_tests")?;
             let inference_support = active_test_module_scope(source, "inference_test_support")?;
             let observer = direct_test_function_scope(inference_support, "observer", "")?;
             for (scope, visibility) in [
-                (inference_support, "pub(incrate::mamba_ssm::gpu)"),
-                (observer, "pub(incrate::mamba_ssm::gpu)"),
+                (inference_support, "pub(incrate::gpu)"),
+                (observer, "pub(incrate::gpu)"),
                 (
                     active_production_method_scope(source, "PhysicalLaunchObservation", "resolve")?,
                     "",
@@ -5538,7 +5536,7 @@ fn validate_physical_sensitive_call_site_ownership(
             ] {
                 validate_sensitive_scope(source, scope, expected, &calls, &mut covered)?;
             }
-        } else if path.ends_with("mamba_ssm/gpu/blas.rs") {
+        } else if path.ends_with("gpu/blas.rs") {
             let graph_tests = active_test_module_scope(source, "physical_graph_tests")?;
             let inventory_tests = active_test_module_scope(source, "matvec_inventory_cuda_tests")?;
             for (scope, expected) in [
@@ -5625,7 +5623,7 @@ fn validate_physical_sensitive_call_site_ownership(
             ] {
                 validate_sensitive_scope(source, scope, expected, &calls, &mut covered)?;
             }
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_triad/launch.rs") {
+        } else if path.ends_with("gpu/gemm_bi_triad/launch.rs") {
             for (scope, expected) in [
                 (
                     audited_function_scope(
@@ -5838,7 +5836,7 @@ fn validate_physical_sensitive_call_site_ownership(
             ] {
                 validate_sensitive_scope(source, scope, expected, &calls, &mut covered)?;
             }
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/identity.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference/identity.rs") {
             validate_sensitive_scope(
                 source,
                 audited_function_scope(source, "observation", "")?,
@@ -5880,7 +5878,7 @@ fn validate_physical_sensitive_call_site_ownership(
                     &mut covered,
                 )?;
             }
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/runtime_bundle.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference/runtime_bundle.rs") {
             // The retained-route runtime bundle is a launch owner in its own
             // right: one submission from its single launch function, the same
             // shape as every launcher in gemm_bi_inference.rs.
@@ -5891,7 +5889,7 @@ fn validate_physical_sensitive_call_site_ownership(
                 &calls,
                 &mut covered,
             )?;
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference.rs") {
             for name in [
                 "launch_sm89_exact_n64",
                 "launch_sm120_exact_n64",
@@ -5932,7 +5930,7 @@ fn validate_physical_sensitive_call_site_ownership(
                 &calls,
                 &mut covered,
             )?;
-        } else if path.ends_with("mamba_ssm/gpu/graph_capture.rs") {
+        } else if path.ends_with("gpu/graph_capture.rs") {
             validate_sensitive_scope(
                 source,
                 audited_function_scope(source, "capture_into_graph_with_physical_plan", "")?,
@@ -5956,7 +5954,7 @@ fn validate_physical_sensitive_call_site_ownership(
                 *counts.entry(*kind).or_insert(0_usize) += 1;
                 counts
             });
-        let expected_uncovered = if path.ends_with("mamba_ssm/gpu/blas.rs") {
+        let expected_uncovered = if path.ends_with("gpu/blas.rs") {
             [
                 (PhysicalSensitiveCall::PreparedObserverFactory, 1),
                 (PhysicalSensitiveCall::ObserverFinalizationAuthority, 1),
@@ -5966,7 +5964,7 @@ fn validate_physical_sensitive_call_site_ownership(
             ]
             .into_iter()
             .collect::<BTreeMap<_, _>>()
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_triad/launch.rs") {
+        } else if path.ends_with("gpu/gemm_bi_triad/launch.rs") {
             [
                 (PhysicalSensitiveCall::ObserverConstructionAuthority, 1),
                 (PhysicalSensitiveCall::Submission, 1),
@@ -5975,17 +5973,17 @@ fn validate_physical_sensitive_call_site_ownership(
             ]
             .into_iter()
             .collect::<BTreeMap<_, _>>()
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/identity.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference/identity.rs") {
             [(PhysicalSensitiveCall::ObservationResolution, 1)]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>()
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference/runtime_bundle.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference/runtime_bundle.rs") {
             // The import of the submission function sits outside any audited
             // scope, as it does in gemm_bi_inference.rs.
             [(PhysicalSensitiveCall::Submission, 1)]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>()
-        } else if path.ends_with("mamba_ssm/gpu/gemm_bi_inference.rs") {
+        } else if path.ends_with("gpu/gemm_bi_inference.rs") {
             [
                 (PhysicalSensitiveCall::Submission, 1),
                 (PhysicalSensitiveCall::PreparedObserverFactory, 1),
@@ -5993,7 +5991,7 @@ fn validate_physical_sensitive_call_site_ownership(
             ]
             .into_iter()
             .collect::<BTreeMap<_, _>>()
-        } else if path.ends_with("mamba_ssm/gpu/graph_capture.rs") {
+        } else if path.ends_with("gpu/graph_capture.rs") {
             [(
                 PhysicalSensitiveCall::ObserverCaptureFinalizationAuthority,
                 1,
@@ -6309,7 +6307,7 @@ fn validate_physical_trace_ownership_boundary(
             "pubstruct",
             "pub(crate)struct",
             "pub(super)struct",
-            "pub(incrate::mamba_ssm::gpu)struct",
+            "pub(incrate::gpu)struct",
         ]
         .iter()
         .any(|visibility| {
@@ -7073,7 +7071,7 @@ fn prepared_physical_enqueue_oracle_rejects_body_and_topology_mutations() {
 fn f32_preparation_and_cache_store_no_physical_observer_digest() {
     let prepared = compact_code(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) struct PreparedF32TriadLaunch",
+        "pub(in crate::gpu) struct PreparedF32TriadLaunch",
     ));
     assert!(!prepared.contains("physical_resources_digest"));
     for function in [
@@ -7124,8 +7122,8 @@ fn half_physical_trace_authority_is_crate_private() {
     assert_code_contains_all(
         BLAS_SOURCE,
         &[
-            "pub(in crate::mamba_ssm::gpu) struct HalfPhysicalTraceRequest",
-            "pub(in crate::mamba_ssm::gpu) unsafe fn record_half_physical_trace",
+            "pub(in crate::gpu) struct HalfPhysicalTraceRequest",
+            "pub(in crate::gpu) unsafe fn record_half_physical_trace",
         ],
         "half physical trace authority",
     );
@@ -7327,7 +7325,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
         ),
         (
             "aliased sibling physical submission",
-            "use crate::mamba_ssm::gpu::kernel_identity::enqueue_with_physical_observation as submit; fn forged() { let _ = submit(observer, builder, config, observation); }",
+            "use crate::gpu::kernel_identity::enqueue_with_physical_observation as submit; fn forged() { let _ = submit(observer, builder, config, observation); }",
         ),
         (
             "function-pointer sibling observer factory",
@@ -7343,7 +7341,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
         ),
         (
             "import-aliased sibling conversion semantic constructor",
-            "use crate::mamba_ssm::gpu::kernel_identity::PhysicalLaunchObservation as Alias; fn forged() { let mint = Alias::conversion; let _ = mint(kind, op, dtype, shape, strides, count, arguments); }",
+            "use crate::gpu::kernel_identity::PhysicalLaunchObservation as Alias; fn forged() { let mint = Alias::conversion; let _ = mint(kind, op, dtype, shape, strides, count, arguments); }",
         ),
         (
             "UFCS through conversion-argument type alias",
@@ -7359,15 +7357,15 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
         ),
         (
             "aliased sibling capture finalization authority",
-            "use crate::mamba_ssm::gpu::kernel_identity::finish_recording_physical_capture as finalize; fn forged() { let _ = finalize(observer, ctx, manifest); }",
+            "use crate::gpu::kernel_identity::finish_recording_physical_capture as finalize; fn forged() { let _ = finalize(observer, ctx, manifest); }",
         ),
         (
             "alias-derived prepared submission function pointer",
-            "use crate::mamba_ssm::gpu::kernel_identity::enqueue_prepared_physical_launch as submit; fn forged() { let enqueue = submit; let _ = enqueue(observer, builder, config, node); }",
+            "use crate::gpu::kernel_identity::enqueue_prepared_physical_launch as submit; fn forged() { let enqueue = submit; let _ = enqueue(observer, builder, config, node); }",
         ),
         (
             "macro-expanded observation resolution alias",
-            "use crate::mamba_ssm::gpu::kernel_identity::resolve_physical_launch_observation as resolve; macro_rules! mint { () => { resolve(observer, observation, config) } } fn forged() { let _ = mint!(); }",
+            "use crate::gpu::kernel_identity::resolve_physical_launch_observation as resolve; macro_rules! mint { () => { resolve(observer, observation, config) } } fn forged() { let _ = mint!(); }",
         ),
     ];
     let accepted = crate_visible_bypasses
@@ -7425,7 +7423,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
         let mut bypass = sources
             .iter()
             .map(|(path, source)| {
-                if path.ends_with("mamba_ssm/gpu/kernel_identity.rs") {
+                if path.ends_with("gpu/kernel_identity.rs") {
                     (path.clone(), owner_reexport.clone())
                 } else {
                     (path.clone(), source.clone())
@@ -7448,7 +7446,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
     let mut macro_bypass = sources
         .iter()
         .map(|(path, source)| {
-            if path.ends_with("mamba_ssm/gpu/kernel_identity.rs") {
+            if path.ends_with("gpu/kernel_identity.rs") {
                 (path.clone(), owner_macro_reexport.clone())
             } else {
                 (path.clone(), source.clone())
@@ -7487,7 +7485,7 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
     let duplicate_sources = sources
         .iter()
         .map(|(path, source)| {
-            if path.ends_with("mamba_ssm/gpu/gemm_bi_triad/launch.rs") {
+            if path.ends_with("gpu/gemm_bi_triad/launch.rs") {
                 (path.clone(), duplicate_semantics.clone())
             } else {
                 (path.clone(), source.clone())
@@ -7500,14 +7498,14 @@ fn physical_trace_provenance_has_no_crate_visible_mint_or_src_bypass() {
     );
 
     let conditional_constructor = LAUNCH_SOURCE.replacen(
-        "pub(in crate::mamba_ssm::gpu) fn prepare_physical_observer(",
-        "#[cfg(any())]\npub(in crate::mamba_ssm::gpu) fn prepare_physical_observer(",
+        "pub(in crate::gpu) fn prepare_physical_observer(",
+        "#[cfg(any())]\npub(in crate::gpu) fn prepare_physical_observer(",
         1,
     );
     let conditional_sources = sources
         .iter()
         .map(|(path, source)| {
-            if path.ends_with("mamba_ssm/gpu/gemm_bi_triad/launch.rs") {
+            if path.ends_with("gpu/gemm_bi_triad/launch.rs") {
                 (path.clone(), conditional_constructor.clone())
             } else {
                 (path.clone(), source.clone())
@@ -7528,7 +7526,7 @@ fn physical_904_census_keeps_test_authorities_gated_private_and_exact() {
     validate_physical_trace_ownership_boundary(IDENTITY_SOURCE, &sources).unwrap();
     for signature in [
         "fn helper() -> RecordedPhysicalTrace { unreachable!() }",
-        "fn helper() -> crate::mamba_ssm::gpu::kernel_identity::RecordedPhysicalTrace { unreachable!() }",
+        "fn helper() -> crate::gpu::kernel_identity::RecordedPhysicalTrace { unreachable!() }",
     ] {
         assert!(!has_recorded_physical_trace_literal(signature));
         let mut with_return_type = sources.clone();
@@ -7556,17 +7554,17 @@ fn physical_904_census_keeps_test_authorities_gated_private_and_exact() {
     for (label, from, to) in [
         (
             "missing test gate",
-            "#[cfg(test)]\npub(in crate::mamba_ssm::gpu) mod inference_test_support",
-            "pub(in crate::mamba_ssm::gpu) mod inference_test_support",
+            "#[cfg(test)]\npub(in crate::gpu) mod inference_test_support",
+            "pub(in crate::gpu) mod inference_test_support",
         ),
         (
             "public test module",
-            "pub(in crate::mamba_ssm::gpu) mod inference_test_support",
+            "pub(in crate::gpu) mod inference_test_support",
             "pub mod inference_test_support",
         ),
         (
             "public observer factory",
-            "pub(in crate::mamba_ssm::gpu) fn observer(",
+            "pub(in crate::gpu) fn observer(",
             "pub fn observer(",
         ),
         (
@@ -7606,11 +7604,8 @@ fn physical_904_census_keeps_test_authorities_gated_private_and_exact() {
         );
     }
     for (path_suffix, module) in [
-        ("mamba_ssm/gpu/blas.rs", "matvec_inventory_cuda_tests"),
-        (
-            "mamba_ssm/gpu/gemm_bi_inference.rs",
-            "observed_inventory_cuda_tests",
-        ),
+        ("gpu/blas.rs", "matvec_inventory_cuda_tests"),
+        ("gpu/gemm_bi_inference.rs", "observed_inventory_cuda_tests"),
     ] {
         let mut changed = sources.clone();
         let (_, source) = changed
@@ -8152,18 +8147,18 @@ fn f32_triad_capture_path_is_prepared_and_records_scalar_fallback_nodes() {
     assert_contains_all(
         LAUNCH_SOURCE,
         &[
-            "pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(",
+            "pub(in crate::gpu) fn prepare_f32_triad(",
             "request: F32TriadRequest",
             "operands: F32TriadOperands",
             "Result<PreparedF32TriadLaunch, String>",
-            "pub(in crate::mamba_ssm::gpu) unsafe fn launch_prepared_f32_triad(",
+            "pub(in crate::gpu) unsafe fn launch_prepared_f32_triad(",
             "record_resolved_gemm_route",
         ],
         "prepared f32 triad launch path",
     );
     let preparation = source_mask(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad",
+        "pub(in crate::gpu) fn prepare_f32_triad",
     ));
     assert_contains_all(
         &preparation,
@@ -8209,7 +8204,7 @@ fn f32_triad_capture_path_is_prepared_and_records_scalar_fallback_nodes() {
     );
     let launch = source_mask(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) unsafe fn launch_prepared_f32_triad",
+        "pub(in crate::gpu) unsafe fn launch_prepared_f32_triad",
     ));
     for forbidden in [
         "capture_status",
@@ -9585,7 +9580,7 @@ fn zero_reduction_preparation_uses_a_revisioned_mapless_sentinel() {
 
     let preparation = source_mask(braced_scope_after(
         LAUNCH_SOURCE,
-        "pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad",
+        "pub(in crate::gpu) fn prepare_f32_triad",
     ));
     let zero_marker = preparation
         .find("reduction() == 0")
@@ -10425,7 +10420,7 @@ fn tf32_target_and_toolchain_admission_is_fail_closed() {
     );
 
     assert_eq!(
-        mamba_rs::mamba_ssm::gpu::device::GpuDevice::resolve_nvrtc_target((11, 0)),
+        mamba_rs::gpu::device::GpuDevice::resolve_nvrtc_target((11, 0)),
         Ok("sm_110a"),
         "SM110 runs its arch-specific target so the Inference tcgen05 rung is in its PTX"
     );

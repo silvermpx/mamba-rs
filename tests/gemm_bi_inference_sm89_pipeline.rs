@@ -2,17 +2,17 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaGraph, sys};
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, Sm89CellRoute, inference_forward,
     inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::TUNING_TABLE_REVISION;
 
 const CANDIDATE: InferenceTile = InferenceTile::Tc128Sm89Pipeline;
 const SWIZZLE_CANDIDATE: InferenceTile = InferenceTile::Tc128Sm89Swizzle;
@@ -1594,8 +1594,8 @@ fn inference_sm89_half_pipeline_sanitizer_smoke() {
 /// whose launch faults or whose epilogue drifts is caught here.
 #[test]
 fn inference_sm89_cells_launch_on_their_measured_shapes() {
-    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+    use mamba_rs::gpu::blas::gpu_gemm_bi_forward_raw;
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy};
 
     struct CellCase {
         symbol: &'static str,

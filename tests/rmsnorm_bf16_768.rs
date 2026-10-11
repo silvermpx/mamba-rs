@@ -10,8 +10,8 @@
 #[test]
 fn rmsnorm_bf16_dim768_direct() {
     use cudarc::driver::{DevicePtr, LaunchConfig, PushKernelArg};
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
@@ -32,7 +32,7 @@ fn rmsnorm_bf16_dim768_direct() {
     let kernel = ctx
         .kernels
         .rmsnorm_fwd_f32in_typed
-        .get(mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16);
+        .get(mamba_rs::gpu::dtype::WeightDtype::Bf16);
 
     let block: u32 = (dim as u32).min(1024).next_power_of_two();
     let cfg = LaunchConfig {

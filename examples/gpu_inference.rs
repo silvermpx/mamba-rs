@@ -12,14 +12,14 @@
 //! row's output does not depend on the batch it is in. The example then
 //! switches a second backbone to `GemmMode::CublasFast` to show the
 //! fallible mode change; the two cuBLAS modes are explicit alternatives,
-//! see `mamba_rs::mamba_ssm::gpu::GemmMode`.
+//! see `mamba_rs::gpu::GemmMode`.
 
 fn main() {
     #[cfg(feature = "cuda")]
     {
         use mamba_rs::WeightDtype;
-        use mamba_rs::gpu::inference::MambaGpuBackbone;
-        use mamba_rs::mamba_ssm::gpu::GemmMode;
+        use mamba_rs::gpu::GemmMode;
+        use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
         use mamba_rs::{GpuOptions, MambaBackbone, MambaConfig};
 
         let cfg = MambaConfig::default();

@@ -18,13 +18,13 @@
 //!     -- --ignored --nocapture --test-threads=1
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gemm_bi_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::gemm_bi_forward_tc;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gemm_bi_forward_raw};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::gemm_bi_forward_tc;
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
@@ -164,9 +164,7 @@ fn census_wmma_vs_mma_sync() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn census_thin16_vs_tile64() {
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
-    };
+    use mamba_rs::gpu::gemm_bi_triad::{TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile};
 
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
@@ -253,7 +251,7 @@ fn census_thin16_vs_tile64() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn census_backward_tile64_tail_contract() {
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::gemm_bi_triad::{
         TcTile, gemm_bi_backward_dw_tc_with_tile, gemm_bi_backward_dx_tc_with_tile,
     };
 
@@ -365,10 +363,8 @@ fn census_backward_tile64_tail_contract() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn census_matvec_vs_thin16() {
-    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
-    };
+    use mamba_rs::gpu::blas::gpu_gemm_typed_forward_raw;
+    use mamba_rs::gpu::gemm_bi_triad::{TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile};
 
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");

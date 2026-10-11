@@ -225,17 +225,17 @@ mod gpu {
     use super::*;
     use cudarc::driver::{CudaGraph, sys};
     use gpu_quiet::QuietGpu;
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::GemmMode;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         QualifiedPhysicalLaunch, Tf32PhysicalRoute, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile,
         qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::kernel_identity::{
         ModuleKind, ResolvedGemmOp, ResolvedNumericContract, digest_hex,
     };
     use sha2::{Digest, Sha256};
@@ -1084,7 +1084,7 @@ mod gpu {
                         "\"numeric_tolerance\":\"0.0025*(1+abs(PEDANTIC))\",\"timed_corpus\":\"finite_TF32_representable\",\"preflight\":{},\"postflight\":{},",
                         "\"own_us\":{},\"vendor_us\":{},\"own_over_vendor\":{},\"subwindows_execution_order_us\":[{}],\"ratio_p50\":{:.9},\"ratio_p95\":{:.9}}}"),
                         SCHEMA,quoted(cell.name),m,k,n,quoted(mode),quoted(path),quoted(order),windows,own_iterations,vendor_iterations,version,manifest,vendor_graph,identity,
-                        quoted(&sha(include_bytes!("gemm_bi_sm120_tf32_vendor.rs"))),quoted(&sha(include_bytes!("../../src/mamba_ssm/gpu/gemm_bi_triad/qualification.rs"))),quoted(&quiet.uuid),
+                        quoted(&sha(include_bytes!("gemm_bi_sm120_tf32_vendor.rs"))),quoted(&sha(include_bytes!("../../src/gpu/gemm_bi_triad/qualification.rs"))),quoted(&quiet.uuid),
                         quoted(&bits_digest(&as_bits(&corpus.a))),quoted(&bits_digest(&as_bits(&corpus.b))),quoted(&bits_digest(own_golden)),quoted(&bits_digest(&vendor_golden)),quoted(&bits_digest(&reference)),quoted(&pre),quoted(&post),
                         raw(&own_samples),raw(&vendor_samples),raw(&ratios),subwindows.join(","),percentile(&ratios,0.5),percentile(&ratios,0.95)))?;
                     println!(

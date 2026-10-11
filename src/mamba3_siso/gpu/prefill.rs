@@ -25,17 +25,17 @@ use super::state::{
     CUptr, GpuMamba3Dims, GpuMamba3StateBufs, GpuMamba3TargetScratch, Mamba3PrefillTypedScratch,
 };
 use super::weights::Mamba3WeightsView;
-use crate::mamba_ssm::gpu::blas::TypedPtr;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::mamba_ssm::gpu::graph_capture::{
+use crate::gpu::blas::TypedPtr;
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -55,8 +55,8 @@ pub struct Mamba3PrefillChunkScratch {
     /// Chunk contributions, then (in-place) entering states per chunk.
     chunk_states: GpuBuffer, // [B*n_chunks*nh*hd*ds]
     /// fp64 staging for the chunk-parallel angle accumulation.
-    angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
-    angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
+    angle_chunk_sums: crate::gpu::buffers::GpuByteBuffer,
+    angle_chunk_carries: crate::gpu::buffers::GpuByteBuffer,
 }
 
 impl Mamba3PrefillChunkScratch {
@@ -76,11 +76,11 @@ impl Mamba3PrefillChunkScratch {
             qk_dot: GpuBuffer::zeros(stream, bt * nh)?,
             da_cumsum: GpuBuffer::zeros(stream, dims.batch * nc * nh * cs)?,
             chunk_states: GpuBuffer::zeros(stream, dims.batch * nc * nh * hd * ds)?,
-            angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+            angle_chunk_sums: crate::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 dims.batch * nc * dims.nheads * dims.n_angles.max(1) * std::mem::size_of::<f64>(),
             )?,
-            angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+            angle_chunk_carries: crate::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 dims.batch * nc * dims.nheads * dims.n_angles.max(1) * std::mem::size_of::<f64>(),
             )?,
@@ -113,8 +113,8 @@ pub struct Mamba3Prefill {
 /// One window's gated-MLP buffers in the executor's compute dtype: the up
 /// projection `[rows * 2 * hidden]` and the activation `[rows * hidden]`.
 struct MlpWindow {
-    up: crate::mamba_ssm::gpu::buffers::DtypedBuf,
-    act: crate::mamba_ssm::gpu::buffers::DtypedBuf,
+    up: crate::gpu::buffers::DtypedBuf,
+    act: crate::gpu::buffers::DtypedBuf,
     hidden: usize,
 }
 
@@ -211,7 +211,7 @@ impl Mamba3Prefill {
         if hidden == 0 || self.mlp.as_ref().is_some_and(|m| m.hidden == hidden) {
             return Ok(());
         }
-        use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+        use crate::gpu::buffers::DtypedBuf;
         let rows = self.sized_for.batch * self.sized_for.seq_len;
         let dtype = match self.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
@@ -370,7 +370,7 @@ impl Mamba3Prefill {
                 unsafe { b.launch(grid_1d(bt * mid)) }
                     .map_err(|e| format!("prefill input cast: {e:?}"))?;
             }
-            crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+            crate::gpu::blas::gpu_gemm_typed_forward_raw(
                 ctx,
                 TypedPtr {
                     ptr: ts.out_flat.cached_ptr(),
@@ -406,7 +406,7 @@ impl Mamba3Prefill {
                     .map_err(|e| format!("prefill input upcast: {e:?}"))?;
             }
         } else {
-            crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
+            crate::gpu::blas::gpu_gemm_bi_forward_raw(
                 ctx,
                 &mut tgt.temporal_work,
                 mamba_input,
@@ -466,7 +466,7 @@ impl Mamba3Prefill {
                 }
             }
             if let Some(ts) = typed.as_deref_mut() {
-                crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                crate::gpu::blas::gpu_gemm_typed_forward_raw(
                     ctx,
                     TypedPtr {
                         ptr: ts.proj_flat.cached_ptr(),
@@ -484,7 +484,7 @@ impl Mamba3Prefill {
                     (bt, dm, ip),
                 )?;
             } else {
-                crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
+                crate::gpu::blas::gpu_gemm_bi_forward_raw(
                     ctx,
                     &mut tgt.proj_flat,
                     &tgt.out_flat,
@@ -1075,7 +1075,7 @@ impl Mamba3Prefill {
                     .map_err(|e| format!("prefill silu L{l}: {e:?}"))?;
             }
             if let Some(ts) = typed.as_deref_mut() {
-                crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                crate::gpu::blas::gpu_gemm_typed_forward_raw(
                     ctx,
                     TypedPtr {
                         ptr: ts.out_flat.cached_ptr(),
@@ -1109,7 +1109,7 @@ impl Mamba3Prefill {
                 unsafe { b.launch(grid_1d(bt * dm)) }
                     .map_err(|e| format!("prefill residual typed L{l}: {e:?}"))?;
             } else {
-                crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
+                crate::gpu::blas::gpu_gemm_bi_forward_raw(
                     ctx,
                     &mut tgt.out_flat,
                     &tgt.gated,
@@ -1158,7 +1158,7 @@ impl Mamba3Prefill {
                     b.arg(&eps);
                     unsafe { b.launch(grid_norm(bt, dm)) }
                         .map_err(|e| format!("prefill mlp norm2 typed L{l}: {e:?}"))?;
-                    crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                    crate::gpu::blas::gpu_gemm_typed_forward_raw(
                         ctx,
                         TypedPtr { ptr: up, dtype },
                         TypedPtr { ptr: pn, dtype },
@@ -1177,7 +1177,7 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid_1d(bt * m.hidden)) }
                         .map_err(|e| format!("prefill mlp gate typed L{l}: {e:?}"))?;
                     let out = ts.out_flat.cached_ptr();
-                    crate::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw(
+                    crate::gpu::blas::gpu_gemm_typed_forward_raw(
                         ctx,
                         TypedPtr { ptr: out, dtype },
                         TypedPtr { ptr: act, dtype },
@@ -1211,7 +1211,7 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid_norm(bt, dm)) }
                         .map_err(|e| format!("prefill mlp norm2 L{l}: {e:?}"))?;
                     unsafe {
-                        crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs(
+                        crate::gpu::blas::gpu_gemm_f32_forward_ptrs(
                             ctx,
                             up,
                             pn,
@@ -1228,7 +1228,7 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid_1d(bt * m.hidden)) }
                         .map_err(|e| format!("prefill mlp gate L{l}: {e:?}"))?;
                     unsafe {
-                        crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs(
+                        crate::gpu::blas::gpu_gemm_f32_forward_ptrs(
                             ctx,
                             pn,
                             act,
@@ -1341,9 +1341,9 @@ impl Mamba3Prefill {
 pub struct Mamba3PrefillGraph {
     module_identity: String,
     graph: cudarc::driver::CudaGraph,
-    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
-    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
-    flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    ctx_resources: Rc<crate::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::gpu::kernels::CudaModuleAnchors,
+    flags_at_capture: crate::gpu::context::GemmRoute,
     has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
@@ -1540,9 +1540,9 @@ impl Drop for Mamba3PrefillGraph {
 pub struct Mamba3PrefillPooledGraph {
     module_identity: String,
     graph: cudarc::driver::CudaGraph,
-    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
-    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
-    flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    ctx_resources: Rc<crate::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::gpu::kernels::CudaModuleAnchors,
+    flags_at_capture: crate::gpu::context::GemmRoute,
     has_gemm_work: bool,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,

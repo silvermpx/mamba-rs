@@ -3,15 +3,15 @@
 //! Live compile/ABI/resource qualification for the sealed Ada exact-F32 module.
 //! This deliberately does not launch or select any kernel; Batch B1 leaves AUTO unchanged.
 
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::SM89_EXACT_F32_KERNEL_SPECS;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, digest_hex};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::gemm_bi_triad::SM89_EXACT_F32_KERNEL_SPECS;
+use mamba_rs::gpu::kernel_identity::{ModuleKind, digest_hex};
 
 #[test]
 #[ignore = "requires an exclusive SM89 GPU and explicit CUDA 12.8/13.0/13.2 selection"]
 fn sm89_exact_f32_module_abi_and_resources_qualify() -> Result<(), String> {
     let device = GpuDevice::new(0)?;
-    let ctx = mamba_rs::mamba_ssm::gpu::context::GpuCtx::new(&device)?;
+    let ctx = mamba_rs::gpu::context::GpuCtx::new(&device)?;
     let route = ctx.gemm_route();
     let compiler = ctx
         .kernels

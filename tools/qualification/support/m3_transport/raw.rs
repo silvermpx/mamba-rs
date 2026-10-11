@@ -6,10 +6,10 @@ mod baseline;
 mod cases;
 
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::buffers::GpuByteBuffer;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
 use std::sync::Arc;
 

@@ -22,13 +22,13 @@
 //!   d_c_raw, d_proj, d_post_norm, d_temporal_typed); otherwise f32 in
 //!   the existing `GpuMamba3Scratch`.
 
-use crate::mamba_ssm::gpu::blas::{
+use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
 };
@@ -996,11 +996,11 @@ fn gpu_backward_mamba3_layer_mixed(
 fn cast_f32_to_typed(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,
-    dst: &mut crate::mamba_ssm::gpu::buffers::DtypedBuf,
+    dst: &mut crate::gpu::buffers::DtypedBuf,
     src: &GpuBuffer,
     n: usize,
 ) -> Result<(), String> {
-    use crate::mamba_ssm::gpu::dtype::WeightDtype as WD;
+    use crate::gpu::dtype::WeightDtype as WD;
     let n_i = n as i32;
     let kernel = match dst.dtype() {
         WD::F32 | WD::Tf32 => {
@@ -1037,10 +1037,10 @@ fn cast_typed_to_f32(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,
     dst: &mut GpuBuffer,
-    src: &crate::mamba_ssm::gpu::buffers::DtypedBuf,
+    src: &crate::gpu::buffers::DtypedBuf,
     n: usize,
 ) -> Result<(), String> {
-    use crate::mamba_ssm::gpu::dtype::WeightDtype as WD;
+    use crate::gpu::dtype::WeightDtype as WD;
     let n_i = n as i32;
     let kernel = match src.dtype() {
         WD::F32 | WD::Tf32 => {

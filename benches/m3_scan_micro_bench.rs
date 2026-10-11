@@ -6,9 +6,9 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg, chunk_scan_cfg};
 use std::time::Instant;
 
@@ -329,8 +329,8 @@ fn scan_trio_time_and_hash() {
     // either macro body, which the dtype parity tests only measure
     // within tolerance.
     {
-        use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::buffers::DtypedBuf;
+        use mamba_rs::gpu::dtype::WeightDtype;
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             let typed = |data: Vec<f32>| {
                 let buf = DtypedBuf::zeros(st, data.len(), dtype).unwrap();
@@ -634,8 +634,8 @@ fn scan_trio_time_and_hash() {
 /// rework: every tensor a consumer actually reads must keep its exact
 /// bits through those changes.
 fn coeff_chain_time_and_hash() {
-    use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::buffers::DtypedBuf;
+    use mamba_rs::gpu::dtype::WeightDtype;
 
     let batch = 1usize;
     let t = 4621usize;
@@ -694,12 +694,9 @@ fn coeff_chain_time_and_hash() {
     let qq = DtypedBuf::zeros(st, bt * nh * ds, dt_ty).unwrap();
     let angle_state = GpuBuffer::zeros(st, batch * nh * na).unwrap();
     let nc = t.div_ceil(64);
-    let sums =
-        mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(st, batch * nc * nh * na * 8)
-            .unwrap();
+    let sums = mamba_rs::gpu::buffers::GpuByteBuffer::zeros(st, batch * nc * nh * na * 8).unwrap();
     let carries =
-        mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(st, batch * nc * nh * na * 8)
-            .unwrap();
+        mamba_rs::gpu::buffers::GpuByteBuffer::zeros(st, batch * nc * nh * na * 8).unwrap();
     let alpha = GpuBuffer::zeros(st, bt * nh).unwrap();
     let beta = GpuBuffer::zeros(st, bt * nh).unwrap();
     let gamma = GpuBuffer::zeros(st, bt * nh).unwrap();
@@ -737,7 +734,7 @@ fn coeff_chain_time_and_hash() {
         b.arg(&ds_i);
         b.arg(&nh_i);
         b.arg(&na_i);
-        unsafe { b.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * ip)) }.unwrap();
+        unsafe { b.launch(mamba_rs::gpu::launch::grid_1d(bt * ip)) }.unwrap();
     };
     let bcnorm = || {
         let n_i = bt as i32;
@@ -826,7 +823,7 @@ fn coeff_chain_time_and_hash() {
         b.arg(&no_angle);
         b.arg(&no_angle);
         b.arg(&no_angle);
-        unsafe { b.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * nh * ds)) }.unwrap();
+        unsafe { b.launch(mamba_rs::gpu::launch::grid_1d(bt * nh * ds)) }.unwrap();
     };
     let abg = || {
         let n_total = (bt * nh) as i32;
@@ -838,7 +835,7 @@ fn coeff_chain_time_and_hash() {
         b.arg(a_val.inner());
         b.arg(trap.inner());
         b.arg(&n_total);
-        unsafe { b.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * nh)) }.unwrap();
+        unsafe { b.launch(mamba_rs::gpu::launch::grid_1d(bt * nh)) }.unwrap();
     };
 
     split();

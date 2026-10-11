@@ -2,18 +2,16 @@
 
 use super::gpu_quiet::QuietGpu;
 use cudarc::driver::{CudaGraph, DevicePtr};
-use mamba_rs::mamba_ssm::gpu::{
-    GemmMode,
-    blas::{
-        TypedPtr, gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dw_grad_typed,
-        gpu_gemm_bi_backward_dx_raw, gpu_gemm_ex_backward_dx_typed, gpu_gemm_typed_forward_raw,
-    },
-    buffers::{DtypedBuf, GpuBuffer, GradSlice},
-    context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy},
-    device::GpuDevice,
-    dtype::WeightDtype,
-    graph_capture::capture_into_graph,
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{
+    TypedPtr, gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dw_grad_typed,
+    gpu_gemm_bi_backward_dx_raw, gpu_gemm_ex_backward_dx_typed, gpu_gemm_typed_forward_raw,
 };
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

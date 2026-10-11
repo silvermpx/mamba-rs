@@ -19,10 +19,10 @@
 mod arch;
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
 // Config: realistic-ish head dims, 2 chunks with partial last chunk coverage.

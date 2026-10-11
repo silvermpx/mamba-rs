@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaStream, PushKernelArg};
 
-use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::launch::{grid_1d, grid_norm};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
@@ -879,8 +879,8 @@ pub struct GpuMamba3MixedScratch {
     pub gamma: GpuBuffer,
     /// fp64 staging for the chunk-parallel angle accumulation
     /// (`[B * n_chunks * nh * n_angles]` doubles each).
-    pub angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
-    pub angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
+    pub angle_chunk_sums: crate::gpu::buffers::GpuByteBuffer,
+    pub angle_chunk_carries: crate::gpu::buffers::GpuByteBuffer,
 
     // Backward-only typed staging buffers (activation grads on the
     // wire match activation storage dtype per AMP precision invariant).
@@ -947,7 +947,7 @@ impl GpuMamba3MixedScratch {
             d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             adt_temp: GpuBuffer::zeros(stream, bt * nh)?,
-            angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+            angle_chunk_sums: crate::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 batch
                     * n_chunks_max
@@ -955,7 +955,7 @@ impl GpuMamba3MixedScratch {
                     * cfg.num_rope_angles().max(1)
                     * std::mem::size_of::<f64>(),
             )?,
-            angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+            angle_chunk_carries: crate::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 batch
                     * n_chunks_max

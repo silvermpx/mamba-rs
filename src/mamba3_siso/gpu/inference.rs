@@ -14,17 +14,17 @@
 
 use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::weights::GpuMamba3WeightsInf;
-use crate::mamba_ssm::gpu::blas::gpu_gemm_f32_forward_ptrs;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
-use crate::mamba_ssm::gpu::device::GpuDevice;
-use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::mamba_ssm::gpu::graph_capture::{
+use crate::gpu::blas::gpu_gemm_f32_forward_ptrs;
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::device::GpuDevice;
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::mamba_ssm::gpu::options::GpuOptions;
+use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::options::GpuOptions;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
 use std::{cell::Cell, sync::Arc};
@@ -186,8 +186,8 @@ impl Mamba3GpuScratch {
 // stream stay f32 — see mamba3_siso/cpu/inference.rs for the parity contract.
 // ---------------------------------------------------------------------------
 
-use crate::mamba_ssm::gpu::buffers::DtypedBuf;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::gpu::buffers::DtypedBuf;
+use crate::gpu::dtype::WeightDtype;
 
 pub struct Mamba3GpuScratchMixed {
     pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
@@ -320,7 +320,7 @@ pub struct Mamba3GpuEngine {
     /// HF M3 models have no input_proj — skip GEMM, copy input → temporal.
     pub identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
-    captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_gemm_route: Option<crate::gpu::context::GemmRoute>,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
@@ -414,7 +414,7 @@ impl Mamba3GpuEngine {
         let kernels = Mamba3Kernels::compile_with_state_cap(
             device.context(),
             arch,
-            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+            crate::gpu::kernels::state_capacity(cfg.d_state)?,
         )?;
         let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
         let identity_proj = cpu_weights.input_proj_w.is_empty();
@@ -663,7 +663,7 @@ impl Mamba3GpuEngine {
             }
         }
         {
-            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+            let grid = crate::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.temporal.inner());
@@ -727,7 +727,7 @@ impl Mamba3GpuEngine {
         // pre-norm value. IEEE addition of the same two f32 values is
         // commutative, so the swapped operand roles round identically.
         {
-            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+            let grid = crate::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
             let nw_ptr = lw.norm_weight.ptr();
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
@@ -756,7 +756,7 @@ impl Mamba3GpuEngine {
         // F3: m3_split (8-way + fused softplus/sigmoid)
         {
             let n = b * ip;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d(n);
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_split);
             builder.arg(scratch.z.inner());
             builder.arg(scratch.x.inner());
@@ -814,7 +814,7 @@ impl Mamba3GpuEngine {
         // for the state writeback consumers; n_angles == 0 passes through.
         {
             let n = b * nh * ds;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d(n);
             let a_ptr: cudarc::driver::sys::CUdeviceptr = if na > 0 {
                 state.angle_state.inner_at(a_off)
             } else {
@@ -881,7 +881,7 @@ impl Mamba3GpuEngine {
 
         // F7: Output gating
         if self.cfg.is_outproj_norm {
-            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, di);
+            let grid = crate::gpu::launch::grid_norm(b, di);
             let mut builder = self
                 .ctx
                 .stream
@@ -900,7 +900,7 @@ impl Mamba3GpuEngine {
         } else {
             let n = b * di;
             let n_i = n as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d(n);
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.silu_gate_fwd);
             builder.arg(scratch.gated.inner());
             builder.arg(scratch.y.inner());
@@ -927,7 +927,7 @@ impl Mamba3GpuEngine {
         {
             let n = b * dm;
             let n_i = n as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d(n);
             let mut builder = self
                 .ctx
                 .stream
@@ -957,7 +957,7 @@ impl Mamba3GpuEngine {
         let b_i = b as i32;
         let dm_i = dm as i32;
         {
-            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+            let grid = crate::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
             let nw_ptr = m.norm_weight.ptr();
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
@@ -983,7 +983,7 @@ impl Mamba3GpuEngine {
         {
             let rows_i = b_i;
             let h_i = h as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(b * h);
+            let grid = crate::gpu::launch::grid_1d(b * h);
             let mut builder = self
                 .ctx
                 .stream
@@ -1007,7 +1007,7 @@ impl Mamba3GpuEngine {
         {
             let n = b * dm;
             let n_i = n as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d(n);
             let mut builder = self
                 .ctx
                 .stream
@@ -1116,14 +1116,14 @@ impl Mamba3GpuEngine {
 // residual stream stay f32 for numerical stability.
 // ═══════════════════════════════════════════════════════════════════
 
-use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 
 pub struct Mamba3GpuEngineMixed {
     engine: Mamba3GpuEngine, // owns ctx + kernels + blas + (unused f32 weights)
     mixed_weights: GpuMamba3MixedWeights,
     graph: Option<cudarc::driver::CudaGraph>,
-    captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_gemm_route: Option<crate::gpu::context::GemmRoute>,
     captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
@@ -1351,7 +1351,7 @@ impl Mamba3GpuEngineMixed {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
-        use crate::mamba_ssm::gpu::launch::grid_1d;
+        use crate::gpu::launch::grid_1d;
         use cudarc::driver::PushKernelArg;
 
         let engine = &self.engine;
@@ -1453,7 +1453,7 @@ impl Mamba3GpuEngineMixed {
             // F1: rmsnorm f32in → half post_norm.
             {
                 let eps: f32 = engine.cfg.rms_norm_eps;
-                let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+                let grid = crate::gpu::launch::grid_norm(b, dm);
                 let mut bld = engine
                     .ctx
                     .stream
@@ -1656,7 +1656,7 @@ impl Mamba3GpuEngineMixed {
 
             // F7: output gating (typed).
             if cfg.is_outproj_norm {
-                let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, di);
+                let grid = crate::gpu::launch::grid_norm(b, di);
                 let mut bld = engine
                     .ctx
                     .stream
@@ -1742,7 +1742,7 @@ impl Mamba3GpuEngineMixed {
                 let h = m.hidden;
                 {
                     let eps: f32 = engine.cfg.rms_norm_eps;
-                    let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+                    let grid = crate::gpu::launch::grid_norm(b, dm);
                     let mut bld = engine
                         .ctx
                         .stream
@@ -1827,7 +1827,7 @@ impl Mamba3GpuEngineMixed {
 
         // Final norm_f: residual_f32 → temporal (half).
         {
-            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+            let grid = crate::gpu::launch::grid_norm(b, dm);
             let eps: f32 = engine.cfg.rms_norm_eps;
             let mut bld = engine
                 .ctx
@@ -2417,7 +2417,7 @@ impl Mamba3GpuBackbone {
                 bld.arg(&dst);
                 bld.arg(&src);
                 bld.arg(&n_i);
-                unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_1d(n)) }
+                unsafe { bld.launch(crate::gpu::launch::grid_1d(n)) }
                     .map_err(|e| format!("M3 mixed prefill hidden downcast: {e:?}"))?;
                 Ok(())
             }
@@ -2481,11 +2481,9 @@ pub type Mamba3GpuInferenceMixedScratch = Mamba3GpuScratchMixed;
 #[cfg(test)]
 mod model_gemm_manifest_tests {
     use super::*;
-    use crate::mamba_ssm::gpu::blas::vendor_gemm_test::Guard;
-    use crate::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode};
-    use crate::mamba_ssm::gpu::graph_capture::model_gemm_guard_tests::{
-        assert_inventory, configure,
-    };
+    use crate::gpu::blas::vendor_gemm_test::Guard;
+    use crate::gpu::context::{BiGemmFamily, GemmMode};
+    use crate::gpu::graph_capture::model_gemm_guard_tests::{assert_inventory, configure};
 
     fn config(layers: usize) -> Mamba3Config {
         Mamba3Config {
@@ -2568,7 +2566,7 @@ mod model_gemm_manifest_tests {
             .unwrap();
         // Warm the actual production body and its caches, but never grant the
         // public eager-step permit that capture is required to consume.
-        crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung(&engine.ctx).unwrap();
+        crate::gpu::gemm_bi_inference::prepare_inference_arch_rung(&engine.ctx).unwrap();
         engine.step_kernels(&mut state, &mut scratch).unwrap();
         engine.ctx.stream.synchronize().unwrap();
         let result = unsafe { engine.capture_graph(&mut state, &mut scratch) };
@@ -2754,7 +2752,7 @@ mod model_gemm_manifest_tests {
         let installed = engine.captured_gemm_plan.as_ref().unwrap().launches;
         let mut missing = trace.routes().to_vec();
         missing.remove(1);
-        let wrong = crate::mamba_ssm::gpu::kernel_identity::RecordedGemmTrace::from_routes(
+        let wrong = crate::gpu::kernel_identity::RecordedGemmTrace::from_routes(
             engine.ctx.gemm_route(),
             missing,
         )

@@ -11,15 +11,15 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, Tf32PhysicalRoute, Tf32PortableRoute,
     Tf32PortableStages, Tf32PortableTile, qualify_physical_launch,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
 
 #[derive(Clone, Copy, Debug)]
 enum NnSchedule {

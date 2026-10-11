@@ -276,14 +276,14 @@ fn toolkit_literal_map_keeps_lower_winners_and_serves_the_wide_d768_tn_tiles() {
 #[cfg(feature = "cuda")]
 mod live {
     use super::*;
-    use mamba_rs::mamba_ssm::gpu::context::{F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::context::{F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         QualifiedPhysicalLaunch, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
         Tf32PortableTile, presize_physical_qualification_suite, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::kernel_identity::{
         ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp, ResolvedNumericContract,
         ResolvedOutputOwnership,
     };

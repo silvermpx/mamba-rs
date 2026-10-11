@@ -1,7 +1,7 @@
 //! Mamba-2 on the CPU: against a float64 transcription of the reference
 //! step, prefill against the decode chain, and the decode's invariants.
 
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba2::{
     Mamba2Config, Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, Mamba2Weights,
     forward_mamba2_backbone_prefill_mode, mamba2_step,

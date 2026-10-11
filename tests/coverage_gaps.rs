@@ -27,8 +27,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 fn det_scaled(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -47,9 +47,10 @@ fn det_scaled(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 // ===========================================================================
 
 fn run_parallel_scan_trainer(dtype: WeightDtype) {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
     // ScanMode::Parallel FORCES the prefix-scan kernels regardless of T
     // (the Auto threshold routes parallel only at T > 256, not T == 256 —
@@ -211,9 +212,10 @@ fn m1_trainer_parallel_scan_f16() {
 ///      correct, not just "some arbitrary update").
 #[test]
 fn a_log_actually_reaches_ssm_after_training() {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
     let cfg = MambaConfig {
         d_model: 64,
@@ -321,9 +323,10 @@ fn a_log_actually_reaches_ssm_after_training() {
 
 #[test]
 fn m1_trainer_f16_production_lr_stable() {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
     let cfg = MambaConfig {
         d_model: 64,
@@ -434,9 +437,10 @@ fn m1_trainer_f16_production_lr_stable() {
 
 #[test]
 fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
     // d_model 5 with expand 2 gives d_inner 10: the vectorized kernels need
     // a multiple of four, and the parallel backward pairs its kernels and

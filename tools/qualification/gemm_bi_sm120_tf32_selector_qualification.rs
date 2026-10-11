@@ -9,19 +9,17 @@ use std::io::{BufWriter, Write as _};
 use std::path::PathBuf;
 
 use gpu_quiet::QuietGpu;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
     QualifiedPhysicalLaunch, TF32_SPLITK_EXTENSION_SPECS, Tf32PhysicalRoute, Tf32PortableRoute,
     Tf32PortableStages, Tf32PortableTile, Tf32QualifiedModule, portable_extensions_composed_for_cc,
     presize_physical_qualification_suite, qualify_physical_launch, tf32_extension_route_specs,
     tf32_route_specs, tf32_route_specs_all,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    GemmRouteIdentity, ModuleKind, ResolvedGemmOp, digest_hex,
-};
+use mamba_rs::gpu::kernel_identity::{GemmRouteIdentity, ModuleKind, ResolvedGemmOp, digest_hex};
 use sha2::{Digest as _, Sha256};
 
 const ENABLE_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_QUALIFICATION";
@@ -40,7 +38,7 @@ const MIN_P05_SPEEDUP: f64 = 1.0;
 const CORPUS_SALT: u64 = 0x1205_32a1;
 const SCHEMA: &str = "MambaBiSm120Tf32SelectorQualificationV2";
 const FIXED_SPLITK_SCRATCH_ELEMENTS: usize = 1 << 23;
-const DISPATCH_SOURCE: &str = include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs");
+const DISPATCH_SOURCE: &str = include_str!("../../src/gpu/gemm_bi_triad/dispatch.rs");
 const TEST_SOURCE: &str = include_str!("gemm_bi_sm120_tf32_selector_qualification.rs");
 
 #[derive(Clone, Copy, Debug, PartialEq)]

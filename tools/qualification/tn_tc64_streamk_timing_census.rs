@@ -6,10 +6,10 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad;
 
 struct Ctx {
     ctx: GpuCtx,
@@ -45,7 +45,7 @@ fn tn_tc64_streamk_versus_tiled_timing_census() {
     use gemm_bi_triad::{
         PhysicalQualificationRequest, PhysicalQualificationRoute, TcTile, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+    use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
 
     if !portable_module_composes_streamk() {
         return;
@@ -79,7 +79,7 @@ fn tn_tc64_streamk_versus_tiled_timing_census() {
     const ITERATIONS: usize = 20;
 
     let t = Ctx::new();
-    let multiprocessors = mamba_rs::mamba_ssm::gpu::device::GpuDevice::new(0)
+    let multiprocessors = mamba_rs::gpu::device::GpuDevice::new(0)
         .expect("query device 0")
         .multiprocessor_count();
     // Every cell captures a graph, and the context's scratch cannot grow

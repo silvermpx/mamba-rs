@@ -1,5 +1,5 @@
 //! Full-sequence Mamba-3 CPU inference forward ("prefill") — the M3 twin
-//! of [`crate::mamba_ssm::cpu::prefill`].
+//! of [`crate::mamba1::cpu::prefill`].
 //!
 //! Runs the SAME math as the training layer forward
 //! (`forward_mamba3_layer_batched`) WITHOUT saving the activation tape, on
@@ -21,7 +21,7 @@
 
 use rayon::prelude::*;
 
-use crate::mamba_ssm::cpu::prefill::{
+use crate::mamba1::cpu::prefill::{
     PrefillMode, for_rows, transpose_cm_to_rm, transpose_rows_to_cm, zip_rows,
 };
 use crate::mamba3_siso::cpu::dims::Mamba3Dims;
@@ -611,7 +611,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
 
 /// Prefill a batch of independent sequences in parallel (one rayon task per
 /// sample, each running [`PrefillMode::Single`] internally — the M3 twin of
-/// [`crate::mamba_ssm::cpu::prefill::prefill_batch`]).
+/// [`crate::mamba1::cpu::prefill::prefill_batch`]).
 pub fn prefill3_batch(
     outputs: &mut [f32],
     inputs: &[f32],

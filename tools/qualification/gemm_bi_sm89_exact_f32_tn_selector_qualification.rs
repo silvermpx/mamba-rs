@@ -1,4 +1,4 @@
-use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::gpu::GemmMode;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QualificationPhase {
     ModuleAbiResources,
@@ -86,15 +86,15 @@ mod live {
     use crate::raw_probe::{
         RawCell, raw_seed_words, run_k0_auto_probe, run_raw_probe, run_raw_probe_repeated,
     };
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL,
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         QualifiedPhysicalLaunch, SM89_EXACT_F32_KERNEL_SPECS, Sm89ExactF32TnRoute,
         qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::kernel_identity::{
         ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp, ResolvedNumericContract,
         ResolvedOutputOwnership,
     };

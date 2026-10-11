@@ -1,13 +1,13 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, HalfTriadPolicy};
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, HalfTriadPolicy};
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM120_SCHEDULE_REVISION, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk,
     Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120RouteIdentity, Sm120Schedule,
     Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CUBLAS_POLICY_REVISION, CacheEnvelope,
     CompileKeyMaterial, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity,
     FramedSha256, GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION,

@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 
-use crate::mamba_ssm::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
-use crate::mamba_ssm::gpu::kernel_identity as ki;
-use crate::mamba_ssm::gpu::kernels::TypedKernel;
-use crate::mamba_ssm::gpu::launch::opt_in_dynamic_smem;
+use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
+use crate::gpu::kernel_identity as ki;
+use crate::gpu::kernels::TypedKernel;
+use crate::gpu::launch::opt_in_dynamic_smem;
 
 /// The compiled MIMO kernels.
 pub struct Mamba3MimoKernels {

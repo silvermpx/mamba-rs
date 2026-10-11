@@ -18,11 +18,11 @@ mod hash_outputs;
 mod stamp;
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::launch::{
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{
     SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
     scan_tape_len,
 };
@@ -150,9 +150,7 @@ fn m1_scan_bwd_output_hashes() {
         let d_c_fold =
             DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
         let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-        let nc_fold = t
-            .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
-            .max(1);
+        let nc_fold = t.div_ceil(mamba_rs::gpu::launch::SCAN_CHUNK).max(1);
         // Fold writes one partial row per chunk; hashed after a host fold in
         // the same walk order (bit-equal to the retired accumulator).
         let mut d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
@@ -293,7 +291,7 @@ fn m1_scan_bwd_output_hashes() {
             bld.arg(&ti);
             bld.arg(&reduce_di);
             bld.arg(&dsi);
-            unsafe { bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(bt * ds)) }.unwrap();
+            unsafe { bld.launch(mamba_rs::gpu::launch::grid_1d(bt * ds)) }.unwrap();
         }
         ctx.stream.synchronize().unwrap();
         hash_outputs::hash_outputs(

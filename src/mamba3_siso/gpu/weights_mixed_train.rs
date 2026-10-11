@@ -1,6 +1,6 @@
 //! Mixed-precision training weights for Mamba-3 (SISO).
 //!
-//! Architecture mirrors M1's [`crate::mamba_ssm::gpu::weights_mixed_train`]:
+//! Architecture mirrors M1's [`crate::mamba1::gpu::weights_mixed_train`]:
 //! - **Master weights** = f32, owned by [`GpuMamba3Weights`] (per-tensor
 //!   `GpuBuffer`). Optimizer writes here.
 //! - **Compute copies** = bf16/f16 (or f32 passthrough), owned by
@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use cudarc::driver::CudaStream;
 
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::weights::{GpuMamba3MixedWeights, GpuMamba3Weights};
 use crate::mamba3_siso::weights::Mamba3Weights;

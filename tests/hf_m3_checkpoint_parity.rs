@@ -226,7 +226,7 @@ fn top_margin(golden: &m3_golden::Golden, t: usize) -> f64 {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn siso_187m_gpu_decode_matches_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
@@ -311,8 +311,8 @@ fn siso_187m_gpu_decode_matches_the_f64_oracle() {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
@@ -415,9 +415,9 @@ const BF16_MARGIN: f64 = 0.25;
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn siso_187m_gpu_bf16_tracks_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngineMixed;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");

@@ -5,11 +5,11 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 const M: usize = 4621;
 const K: usize = 1928;

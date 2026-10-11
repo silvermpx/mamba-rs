@@ -13,12 +13,13 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::{BackwardOpts, TrainSessionCfg};
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::flat::MambaBackboneFlat;
 use mamba_rs::train::forward::forward_mamba_backbone_batched;

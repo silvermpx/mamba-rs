@@ -1,9 +1,9 @@
 //! Freeze the changed fragment while sharing the unchanged module context.
 
 use cudarc::driver::CudaModule;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{FramedSha256, canonical_ptx_image, digest_hex};
-use mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::kernel_identity::{FramedSha256, canonical_ptx_image, digest_hex};
+use mamba_rs::gpu::kernels::cuda_include_paths;
 use std::sync::Arc;
 
 pub(super) fn compile(device: &GpuDevice, cap: usize) -> Arc<CudaModule> {

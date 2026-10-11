@@ -30,14 +30,14 @@
 #[path = "common/evidence.rs"]
 mod evidence;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{
     TypedPtr, gemm_bi_forward_raw, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 /// The reduced M ladder: every entry sits on (or adjacent to) a known
 /// dispatch edge — matvec row-block 4, FRAG_M 16, ultra-thin 32, tile 64,

@@ -38,10 +38,10 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
@@ -441,7 +441,7 @@ fn run_gpu(
     let m3k = Mamba3Kernels::compile_with_state_cap(
         dev.context(),
         arch::arch0(),
-        mamba_rs::mamba_ssm::gpu::kernels::state_capacity(scn.cfg.d_state).unwrap(),
+        mamba_rs::gpu::kernels::state_capacity(scn.cfg.d_state).unwrap(),
     )
     .expect("Mamba3Kernels");
 

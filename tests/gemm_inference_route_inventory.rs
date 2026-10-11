@@ -1,12 +1,12 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::inference_forward;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::inference_forward;
+use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
 
 fn assert_public_inference_nn_is_inventoried(input_dtype: WeightDtype, output_dtype: WeightDtype) {
     let device = GpuDevice::new(0).expect("CUDA device");
@@ -85,7 +85,7 @@ fn deterministic_inference_public_bf16_to_f32_forward_records_nn_route() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn deterministic_triad_public_half_matvec_records_both_tensor_core_states() {
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
+    use mamba_rs::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&device).unwrap();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();

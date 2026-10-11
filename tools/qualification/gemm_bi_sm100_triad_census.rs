@@ -5,11 +5,11 @@
 //! identity, output padding, and bitwise repeatability on CC 10.0 or 10.3.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM100_KERNEL_SPECS, SM100_TENSOR_MAP_REVISION,
     SM100_TUNING_REVISION, Sm100ForcedRoute, Sm100LaunchOperands, Sm100MapRequest,
     Sm100NumericContract, Sm100Op, Sm100PhysicalRoute, Sm100PreparedLaunch,
@@ -17,8 +17,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     launch_sm100_tcgen_prepared, prepare_sm100_tcgen_forced, prepare_sm100_tensor_maps,
     resolve_sm100_forced, validate_sm100_graph_replay, validate_sm100_map_request,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{FramedSha256, ModuleKind, Sha256Digest};
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{FramedSha256, ModuleKind, Sha256Digest};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

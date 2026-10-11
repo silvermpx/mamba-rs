@@ -14,12 +14,12 @@
 mod digest;
 
 use digest::{Digest, fnv1a_f32};
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 const DECODE_STEPS: usize = 3;
 

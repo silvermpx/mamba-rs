@@ -10,10 +10,10 @@ use super::state::{GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, 
 use super::weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights,
 };
-use crate::mamba_ssm::gpu::blas::gpu_gemm_bi_backward_grad_raw;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
@@ -317,7 +317,7 @@ pub fn gpu_backward_mamba3_layer(
                 };
                 let mut sb = ctx.stream.launch_builder(
                     m3k.m3_dqkv_state_terms_typed
-                        .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                        .get(crate::gpu::dtype::WeightDtype::F32),
                 );
                 sb.arg(scratch.dstate_terms.inner_mut());
                 sb.arg(acts.q.inner());

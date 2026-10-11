@@ -8,11 +8,12 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
 fn vram_used_mb() -> String {
     std::process::Command::new("nvidia-smi")

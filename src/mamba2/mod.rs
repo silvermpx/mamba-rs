@@ -1,4 +1,4 @@
-//! Mamba-2 (state space duality).
+//! Mamba-2, the structured state space duality (SSD).
 //!
 //! Each head has a scalar decay per token and a `d_state x headdim` state
 //! fed through a causal conv over x, B and C; the output is gated by a

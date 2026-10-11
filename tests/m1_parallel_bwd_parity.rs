@@ -8,12 +8,12 @@
 mod arch;
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
-use mamba_rs::mamba_ssm::gpu::launch::{grid_1d, grid_parallel_scan_bwd};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::kernels::MambaKernels;
+use mamba_rs::gpu::launch::{grid_1d, grid_parallel_scan_bwd};
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -459,7 +459,7 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
 }
 
 fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype, slim: bool) {
-    use mamba_rs::mamba_ssm::gpu::launch::{
+    use mamba_rs::gpu::launch::{
         SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_tape_len,
     };
     assert_eq!(
@@ -553,9 +553,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
     // The fold writes one partial ROW per chunk (walk order); the arm
     // folds them on the host in the same order before comparing.
-    let nc_fold = t
-        .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
-        .max(1);
+    let nc_fold = t.div_ceil(mamba_rs::gpu::launch::SCAN_CHUNK).max(1);
     let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
     ctx.stream.synchronize().unwrap();
     {
@@ -708,7 +706,7 @@ fn parity_fold_slim_bf16() {
 #[test]
 #[ignore = "diagnostic printer"]
 fn diag_fold_slim_vs_full_positions() {
-    use mamba_rs::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP;
+    use mamba_rs::gpu::launch::SCAN_BWD_DGROUP;
     let (b, t, di, ds) = (1usize, 512usize, 4usize, 8usize);
     let dtype = WeightDtype::F32;
     let g = SCAN_BWD_DGROUP;
@@ -729,7 +727,7 @@ fn diag_fold_slim_vs_full_positions() {
         let h_saved = GpuBuffer::zeros(&ctx.stream, b * (t + 1) * di * ds).unwrap();
         let tape = GpuBuffer::zeros(
             &ctx.stream,
-            mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+            mamba_rs::gpu::launch::scan_tape_len(b, t, di, ds),
         )
         .unwrap();
         ctx.stream.synchronize().unwrap();
@@ -774,12 +772,7 @@ fn diag_fold_slim_vs_full_positions() {
             bld.arg(&ds_i);
             bld.arg(&tp);
             bld.arg(&sl);
-            unsafe {
-                bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan(
-                    b, di, ds,
-                ))
-            }
-            .unwrap();
+            unsafe { bld.launch(mamba_rs::gpu::launch::grid_parallel_scan(b, di, ds)) }.unwrap();
         }
         let dy = upload_typed(&ctx, &inp.dy, dtype);
         let d_delta = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
@@ -788,9 +781,7 @@ fn diag_fold_slim_vs_full_positions() {
         let d_b_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
         let d_c_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
         let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-        let nc_fold = t
-            .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
-            .max(1);
+        let nc_fold = t.div_ceil(mamba_rs::gpu::launch::SCAN_CHUNK).max(1);
         let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
         ctx.stream.synchronize().unwrap();
         let mut bld = ctx.stream.launch_builder(if fold {
@@ -839,12 +830,7 @@ fn diag_fold_slim_vs_full_positions() {
         bld.arg(&tpa);
         bld.arg(&sl);
         let cfg = if fold {
-            mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_bwd_fold(
-                b,
-                di,
-                ds,
-                dtype.size_bytes(),
-            )
+            mamba_rs::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
         } else {
             grid_parallel_scan_bwd(b, di)
         };

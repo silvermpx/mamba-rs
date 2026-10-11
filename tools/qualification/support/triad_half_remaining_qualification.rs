@@ -208,8 +208,8 @@ fn weight_dtype(dtype: HalfDtype) -> WeightDtype {
 }
 
 #[cfg(feature = "cuda")]
-fn policy_dtype(dtype: WeightDtype) -> mamba_rs::mamba_ssm::gpu::kernel_identity::PolicyDtype {
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::PolicyDtype;
+fn policy_dtype(dtype: WeightDtype) -> mamba_rs::gpu::kernel_identity::PolicyDtype {
+    use mamba_rs::gpu::kernel_identity::PolicyDtype;
     match dtype {
         WeightDtype::F16 => PolicyDtype::F16,
         WeightDtype::Bf16 => PolicyDtype::Bf16,
@@ -232,7 +232,7 @@ fn digest_hex(digest: &[u8; 32]) -> String {
 fn qualify_and_print_auto_evidence(
     t: &Ctx,
     cell: &str,
-    op: mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp,
+    op: mamba_rs::gpu::kernel_identity::ResolvedGemmOp,
     dtype: WeightDtype,
     dims: (usize, usize, usize),
 ) -> Result<gemm_bi_triad::QualifiedPhysicalLaunchNode, String> {
@@ -242,7 +242,7 @@ fn qualify_and_print_auto_evidence(
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores: true,
-            half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
+            half_policy: mamba_rs::gpu::context::HalfTriadPolicy::TiledParity,
         },
     );
     let qualified = gemm_bi_triad::qualify_physical_launch(&t.ctx, request)?;
@@ -563,7 +563,7 @@ fn qualify_tn_case(
     let actual_evidence = qualify_and_print_auto_evidence(
         t,
         case.cell,
-        mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
+        mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn,
         dtype,
         case.dims,
     )?;
@@ -1027,7 +1027,7 @@ fn qualify_nn_case(t: &Ctx) -> Result<Option<String>, String> {
     let actual_evidence = qualify_and_print_auto_evidence(
         t,
         case.cell,
-        mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
+        mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nn,
         dtype,
         case.dims,
     )?;
@@ -1164,24 +1164,24 @@ fn run_remaining_half_actual_auto_batch() -> Result<(), String> {
         .iter()
         .map(|case| {
             gemm_bi_triad::PhysicalQualificationRequest::contiguous(
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn,
                 case.dims,
                 gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
                     dtype: weight_dtype(case.dtype),
                     tensor_cores: true,
-                    half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
+                    half_policy: mamba_rs::gpu::context::HalfTriadPolicy::TiledParity,
                 },
             )
         })
         .collect::<Vec<_>>();
     let nn = nn_case();
     actual_auto_requests.push(gemm_bi_triad::PhysicalQualificationRequest::contiguous(
-        mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
+        mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nn,
         nn.dims,
         gemm_bi_triad::PhysicalQualificationRoute::HalfPolicy {
             dtype: weight_dtype(nn.dtype),
             tensor_cores: true,
-            half_policy: mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParity,
+            half_policy: mamba_rs::gpu::context::HalfTriadPolicy::TiledParity,
         },
     ));
     gemm_bi_triad::presize_physical_qualification_suite(&t.ctx, &actual_auto_requests)?;

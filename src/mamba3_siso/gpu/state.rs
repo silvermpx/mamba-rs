@@ -6,8 +6,8 @@
 //! contain the launch-orchestration code.
 
 use super::kernels::Mamba3Kernels;
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::GpuCtx;
+use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::gpu::context::GpuCtx;
 use std::sync::Arc;
 
 pub(crate) type CUptr = cudarc::driver::sys::CUdeviceptr;
@@ -620,30 +620,30 @@ impl GpuMamba3TargetScratch {
 /// struct on purpose: `GpuMamba3TargetScratch` is shared with the no-save
 /// f32 forward and must not grow dtype branches.
 pub struct Mamba3PrefillTypedScratch {
-    pub dtype: crate::mamba_ssm::gpu::dtype::WeightDtype,
+    pub dtype: crate::gpu::dtype::WeightDtype,
     /// Typed staging of `mamba_input` for the non-identity input_proj
     /// (cast_f32_to_* before the typed GEMM).
-    pub input_cast: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*input_dim]
-    pub post_norm: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*d_model]
-    pub proj_flat: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*in_proj_dim]
-    pub x: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
-    pub b_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
-    pub c_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
-    pub k: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
-    pub q: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
-    pub k_scaled: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
-    pub y: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
-    pub gated: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*d_inner]
-    pub out_flat: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*d_model]
+    pub input_cast: crate::gpu::buffers::DtypedBuf, // [B*T*input_dim]
+    pub post_norm: crate::gpu::buffers::DtypedBuf, // [B*T*d_model]
+    pub proj_flat: crate::gpu::buffers::DtypedBuf, // [B*T*in_proj_dim]
+    pub x: crate::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
+    pub b_normed: crate::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
+    pub c_normed: crate::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
+    pub k: crate::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
+    pub q: crate::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
+    pub k_scaled: crate::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
+    pub y: crate::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
+    pub gated: crate::gpu::buffers::DtypedBuf,     // [B*T*d_inner]
+    pub out_flat: crate::gpu::buffers::DtypedBuf,  // [B*T*d_model]
 }
 
 impl Mamba3PrefillTypedScratch {
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
         dims: &GpuMamba3Dims,
-        dtype: crate::mamba_ssm::gpu::dtype::WeightDtype,
+        dtype: crate::gpu::dtype::WeightDtype,
     ) -> Result<Self, String> {
-        use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+        use crate::gpu::buffers::DtypedBuf;
         let bt = dims.bt();
         let dm = dims.d_model;
         let di = dims.d_inner;

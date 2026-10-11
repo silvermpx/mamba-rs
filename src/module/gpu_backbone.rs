@@ -13,9 +13,9 @@ use cudarc::driver::CudaStream;
 use cudarc::driver::sys::CUdeviceptr;
 
 use crate::config::ModelFamily;
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::inference::MambaGpuBackbone;
+use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
+use crate::mamba1::gpu::inference::MambaGpuBackbone;
 use crate::mamba2::gpu::Mamba2GpuBackbone;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuBackbone;
 use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;

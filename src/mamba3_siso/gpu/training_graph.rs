@@ -1,6 +1,6 @@
 //! CUDA-Graph-captured training step for Mamba-3 mixed-precision (bf16).
 //!
-//! Mirrors the M1 [`crate::mamba_ssm::gpu::training_graph`] design. Captures
+//! Mirrors the M1 [`crate::mamba1::gpu::training_graph`] design. Captures
 //! `grads.zero + forward_mixed + backward_mixed + adamw_capturable +
 //! sync_master_to_compute` as one CUDA Graph; replay launches the full
 //! training step with a single `cuGraphLaunch`.
@@ -13,15 +13,15 @@
 use cudarc::driver::CudaGraph;
 use std::rc::Rc;
 
-use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::{GemmRoute, GpuCtx};
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::graph_capture::{
+use crate::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::context::{GemmRoute, GpuCtx};
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
@@ -80,8 +80,8 @@ pub struct Mamba3MixedReplay<'a> {
 /// ```
 pub struct GpuMamba3TrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
-    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
+    ctx_resources: Rc<crate::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,
     pub dtype: WeightDtype,
@@ -122,7 +122,7 @@ pub struct GpuMamba3TrainingStepGraph {
 }
 
 impl GpuMamba3TrainingStepGraph {
-    /// See M1 [`crate::mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph::capture`]
+    /// See M1 [`crate::mamba1::gpu::training_graph::GpuMambaTrainingStepGraph::capture`]
     /// for the warmup / caller-ordering contract — identical here.
     /// # Safety
     ///
@@ -464,8 +464,8 @@ pub struct Mamba3F32Replay<'a> {
 /// ```
 pub struct GpuMamba3F32TrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
-    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
+    ctx_resources: Rc<crate::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,
 
@@ -553,7 +553,7 @@ impl GpuMamba3F32TrainingStepGraph {
                 step_multi(
                     ctx,
                     m3k.adamw_step_multi
-                        .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                        .get(crate::gpu::dtype::WeightDtype::F32),
                     multi_plan,
                     adam,
                     bias.ptr(),

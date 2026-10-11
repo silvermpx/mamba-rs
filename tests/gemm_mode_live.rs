@@ -1,8 +1,8 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::context::{GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 
 #[test]
 #[ignore = "needs a CUDA device"]

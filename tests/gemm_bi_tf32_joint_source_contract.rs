@@ -1,6 +1,6 @@
-#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_finalist_source.rs"]
+#[path = "../src/gpu/gemm_bi_triad/sm89_finalist_source.rs"]
 mod finalist;
-#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_tf32_joint_source.rs"]
+#[path = "../src/gpu/gemm_bi_triad/sm89_tf32_joint_source.rs"]
 mod joint;
 
 use tn_m64n64::parent as tn_n96;

@@ -3,8 +3,8 @@
 //! `common/evidence_digest.rs` beside this module; it reaches them through
 //! `super`.
 
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
 
 use super::digest::fnv1a_f32;
 

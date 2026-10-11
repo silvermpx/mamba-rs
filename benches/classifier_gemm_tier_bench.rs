@@ -13,12 +13,12 @@
 
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::gpu_gemm_bi_forward_raw;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::BiGemmFamily;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
 
 const ITERS: usize = 30;
 

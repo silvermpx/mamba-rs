@@ -135,13 +135,25 @@
   `forward_sequence`.
 - The SISO serializer takes the shared names `save` and `load`.
   `save_mamba3` and `load_mamba3_auto` stay as deprecated wrappers.
-- Mamba-1 keeps its configuration, weights, state and safetensors
-  serializer in its own module, as the other families do:
-  `mamba_rs::mamba_ssm::{config, weights, state, serialize}`. The crate
+- Mamba-1 lives in `mamba_rs::mamba1`, named after its family like
+  `mamba2`, `mamba3_siso` and `mamba3_mimo`, and keeps its configuration,
+  weights, state and safetensors serializer there as the other families
+  do: `mamba_rs::mamba1::{config, weights, state, serialize}`. The crate
   root still re-exports `MambaConfig`, `MambaWeights`, `MambaLayerWeights`,
-  `MambaState` and `MambaLayerState`. The root modules `weights`, `state`
-  and `serialize` are gone, and `mamba_rs::config` holds what the families
-  share: `ScanMode` and `ModelFamily`, which is now `#[non_exhaustive]`.
+  `MambaState` and `MambaLayerState`, and `mamba_rs::config` holds what the
+  families share: `ScanMode` and `ModelFamily`, which is now
+  `#[non_exhaustive]`.
+- The GPU engine the four families share moved out of the Mamba-1 folder
+  into `mamba_rs::gpu`: the context, the device, buffers, the kernels and
+  their identity, the GEMM dispatch with both deterministic families,
+  AdamW, gradient clipping, the loss scaler, graph capture, and
+  `TrainSessionCfg`, `BackwardOpts`, `StepMetrics` and `BackwardMetrics` in
+  `gpu::train`. The Mamba-1 GPU path is `mamba_rs::mamba1::gpu`.
+- Code written for 0.7 keeps building in this release. `mamba_rs::mamba_ssm`,
+  the Mamba-1 modules under `mamba_rs::gpu` (`mamba_rs::gpu::inference` and
+  the rest), the root modules `weights`, `state` and `serialize`, and
+  `mamba_rs::config::MambaConfig` resolve as hidden re-exports, and
+  `tests/paths_from_0_7.rs` holds every path the 0.7 README used.
 - The crate root re-exports the configuration, weights and state of every
   family, the four CPU backbones, `MambaLM` and `SampleParams`, and with
   `cuda` `GpuOptions`, `GemmMode`, `WeightDtype`, `TrainSessionCfg`, the

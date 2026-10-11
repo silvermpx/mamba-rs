@@ -20,7 +20,7 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 #[ignore]
 fn test_gpu_batch_generation() {
     let dir = find_model_dir("mamba-130m-hf").expect("model not in cache");
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{GpuOptions, MambaGpuLM};
 

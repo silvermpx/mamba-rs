@@ -63,11 +63,11 @@
 //!
 //! ## Modules
 //!
-//! - [`mamba_ssm`]: Mamba, CPU and GPU, and the GPU infrastructure the
-//!   families share (context, buffers, GEMMs, AdamW)
-//! - [`mamba2`], [`mamba3_siso`], [`mamba3_mimo`]: the other families,
-//!   each with its configuration, weights, state, CPU and GPU paths and
-//!   serializer
+//! - [`mamba1`], [`mamba2`], [`mamba3_siso`], [`mamba3_mimo`]: the four
+//!   families, each with its configuration, weights, state, CPU and GPU
+//!   paths and serializer
+//! - `gpu` (feature `cuda`): the GPU engine the families share, with the
+//!   context, buffers, GEMMs, AdamW, the loss scaler and graph capture
 //! - [`module`]: the backbones, the traits over them and the language
 //!   models
 //! - [`ops`]: shared dimensions, BLAS, norms and fast-math helpers
@@ -90,42 +90,55 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod config;
 pub mod dist;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 #[cfg(feature = "hf")]
 pub mod hf;
+pub mod mamba1;
 pub mod mamba2;
 pub mod mamba3_mimo;
 pub mod mamba3_siso;
-pub mod mamba_ssm;
 pub mod mlp;
 pub mod module;
 pub mod ops;
 
-// Convenience re-export aliases for the Mamba SSM CPU + GPU paths.
-// The canonical module paths are `mamba_ssm::cpu::*` / `mamba_ssm::gpu::*`;
-// these aliases keep `mamba_rs::inference` / `train` / `gpu` short for the
-// most common entrypoints.
+/// The 0.7 path of Mamba-1 and of the GPU engine, which 0.8 split into
+/// [`mamba1`] and `gpu`. It re-exports both, so code written for 0.7 still
+/// builds for one release.
+#[doc(hidden)]
+pub mod mamba_ssm {
+    pub use crate::mamba1::*;
+    #[cfg(feature = "cuda")]
+    pub mod gpu {
+        // The engine module re-exports the Mamba-1 GPU path itself.
+        pub use crate::gpu::*;
+    }
+}
+
+// Mamba-1's weights, state and serializer were root modules up to 0.7, and
+// the root keeps their paths for one release.
+#[doc(hidden)]
+pub use mamba1::{serialize, state, weights};
+
+// Short aliases kept from earlier releases: `mamba_rs::inference` and
+// `mamba_rs::train` point into the Mamba-1 CPU paths.
 pub mod inference {
-    pub use crate::mamba_ssm::cpu::inference::*;
-    pub use crate::mamba_ssm::cpu::prefill::*;
+    pub use crate::mamba1::cpu::inference::*;
+    pub use crate::mamba1::cpu::prefill::*;
 }
 pub mod train {
-    pub use crate::mamba_ssm::cpu::backward;
-    pub use crate::mamba_ssm::cpu::backward_ops;
-    pub use crate::mamba_ssm::cpu::flat;
-    pub use crate::mamba_ssm::cpu::forward;
-    pub use crate::mamba_ssm::cpu::parallel;
-    pub use crate::mamba_ssm::cpu::scratch;
-    pub use crate::mamba_ssm::cpu::target;
-    pub use crate::mamba_ssm::cpu::weights;
+    pub use crate::mamba1::cpu::backward;
+    pub use crate::mamba1::cpu::backward_ops;
+    pub use crate::mamba1::cpu::flat;
+    pub use crate::mamba1::cpu::forward;
+    pub use crate::mamba1::cpu::parallel;
+    pub use crate::mamba1::cpu::scratch;
+    pub use crate::mamba1::cpu::target;
+    pub use crate::mamba1::cpu::weights;
 
     // Re-export shared ops that were previously in train/
     pub use crate::ops::blas;
     pub use crate::ops::fast_math;
-}
-
-#[cfg(feature = "cuda")]
-pub mod gpu {
-    pub use crate::mamba_ssm::gpu::*;
 }
 
 #[cfg(feature = "cuda")]
@@ -137,13 +150,13 @@ pub mod gpu3 {
 pub use config::ModelFamily;
 
 // Mamba-1
-pub use mamba_ssm::config::MambaConfig;
-pub use mamba_ssm::cpu::inference::{
+pub use mamba1::config::MambaConfig;
+pub use mamba1::cpu::inference::{
     MambaLayerPacked, MambaLayerScratch, MambaPackedLinears, MambaStepScratch, mamba_block_step,
     mamba_layer_step, mamba_step, mamba_step_no_proj, mamba_step_no_proj_packed, mamba_step_packed,
 };
-pub use mamba_ssm::state::{MambaLayerState, MambaState};
-pub use mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
+pub use mamba1::state::{MambaLayerState, MambaState};
+pub use mamba1::weights::{MambaLayerWeights, MambaWeights};
 
 // Mamba-2
 pub use mamba2::{Mamba2Config, Mamba2LayerState, Mamba2LayerWeights, Mamba2State, Mamba2Weights};
@@ -171,9 +184,11 @@ pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbo
 // backbones and the trainers with the traits over them, the trainer's
 // options and metrics, and the language model.
 #[cfg(feature = "cuda")]
-pub use mamba_ssm::gpu::trainer::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+pub use gpu::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 #[cfg(feature = "cuda")]
-pub use mamba_ssm::gpu::{GemmMode, GpuOptions, MambaGpuBackbone, MambaGpuTrainer, WeightDtype};
+pub use gpu::{GemmMode, GpuOptions, WeightDtype};
+#[cfg(feature = "cuda")]
+pub use mamba1::gpu::{MambaGpuBackbone, MambaGpuTrainer};
 #[cfg(feature = "cuda")]
 pub use mamba2::gpu::{Mamba2GpuBackbone, Mamba2GpuTrainer};
 #[cfg(feature = "cuda")]

@@ -13,7 +13,7 @@ use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use super::core::{HeadScratch, HeadState, TokenIn, mimo_head_step, prepare_token, row_norm};
-use crate::mamba_ssm::cpu::prefill::{PrefillMode, zip_rows};
+use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::norms::rms_norm_weighted;

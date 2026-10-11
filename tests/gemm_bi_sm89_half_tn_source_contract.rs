@@ -1,6 +1,6 @@
 #[path = "support/triad_half_tn_vec2_epilogue_source.rs"]
 mod frozen_vec2;
-#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_half_tn_source.rs"]
+#[path = "../src/gpu/gemm_bi_triad/sm89_half_tn_source.rs"]
 mod production;
 
 use frozen_vec2::regpipe::compact as frozen_compact;
@@ -10,13 +10,13 @@ const SM80_OWNER: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
 #[test]
 #[cfg(feature = "cuda")]
 fn triad_retained_half_public_registry_and_getter_api_remain_compatible() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::gemm_bi_triad::{
         GemmBiKernels, SM89_HALF_AUTO_CELLS, SM89_HALF_KERNEL_SPECS, Sm89HalfKernelSpec,
         Sm89HalfRoute,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
-    use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
+    use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
+    use mamba_rs::gpu::kernels::MambaKernels;
 
     type GemmGetter = for<'a> fn(
         &'a GemmBiKernels,

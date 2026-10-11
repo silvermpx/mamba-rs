@@ -5,10 +5,10 @@
 //! first-position error orders of magnitude above float noise).
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
@@ -444,7 +444,7 @@ fn gpu_prefill_graph_replay_is_bitwise_for_family(family: BiGemmFamily) {
 /// only by typed-step rounding of the prompt — bounded, not bitwise.
 #[test]
 fn gpu_prefill_mixed_backbone_handoff() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 
     let cfg = tiny_cfg();

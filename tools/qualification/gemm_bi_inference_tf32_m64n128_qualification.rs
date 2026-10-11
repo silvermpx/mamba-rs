@@ -6,18 +6,18 @@ use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
 use cudarc::driver::{CudaGraph, sys};
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
     inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, CompilerIdentity, DeviceIdentity, ModuleKind, digest_hex,
 };
 use sha2::{Digest as _, Sha256};
@@ -1697,8 +1697,7 @@ mod tests {
     use super::*;
 
     fn metadata_with_run_identity(run_identity: &str) -> RunMetadata {
-        let target =
-            mamba_rs::mamba_ssm::gpu::kernel_identity::CudaTarget::new("compute_120").unwrap();
+        let target = mamba_rs::gpu::kernel_identity::CudaTarget::new("compute_120").unwrap();
         let compiler = CompilerIdentity {
             source_digest: [1; 32],
             invocation_digest: [2; 32],
@@ -1723,7 +1722,7 @@ mod tests {
             compute_capability: (12, 0),
             multiprocessor_count: 170,
             target,
-            driver: mamba_rs::mamba_ssm::gpu::kernel_identity::DriverIdentity {
+            driver: mamba_rs::gpu::kernel_identity::DriverIdentity {
                 api_version: 13_000,
                 build_sources: 1,
                 build_digest: [7; 32],

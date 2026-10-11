@@ -7,17 +7,17 @@
 //! pass before a benchmark number means anything.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_bi_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_bi_forward_raw};
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, Sm89CellRoute, inference_forward,
     inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 
 #[path = "support/inference_full_mantissa.rs"]
 mod inference_full_mantissa;

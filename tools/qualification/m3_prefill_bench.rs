@@ -6,13 +6,13 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -43,7 +43,7 @@ fn training_dtypes(value: Option<&str>) -> Result<&'static [WeightDtype], String
 
 fn warm_up_f16_training(
     graph_replayed: bool,
-    mut step: impl FnMut() -> Result<mamba_rs::mamba_ssm::gpu::trainer::StepMetrics, String>,
+    mut step: impl FnMut() -> Result<mamba_rs::gpu::train::StepMetrics, String>,
 ) -> Result<(usize, usize, f32), String> {
     let mut skipped = 0;
     let mut consecutive_clean = 0;
@@ -106,8 +106,8 @@ fn training_dtype_filter_rejects_a_misspelled_lane() {
 
 #[test]
 fn f16_training_warmup_restarts_after_overflow() {
-    use mamba_rs::mamba_ssm::gpu::loss_scaler::DynamicLossScaler;
-    use mamba_rs::mamba_ssm::gpu::trainer::StepMetrics;
+    use mamba_rs::gpu::loss_scaler::DynamicLossScaler;
+    use mamba_rs::gpu::train::StepMetrics;
 
     for graph_replayed in [false, true] {
         let mut scaler = DynamicLossScaler::new();
@@ -135,7 +135,7 @@ fn f16_training_warmup_restarts_after_overflow() {
 
 #[test]
 fn f16_training_warmup_stops_at_the_attempt_limit() {
-    use mamba_rs::mamba_ssm::gpu::trainer::StepMetrics;
+    use mamba_rs::gpu::train::StepMetrics;
 
     for intermittent in [false, true] {
         let mut attempts = 0usize;
@@ -378,8 +378,8 @@ fn m3_train_step_at_multichunk_shape() {
 #[test]
 #[ignore]
 fn m3_pooled_page_bench_typed_vs_f32() {
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
     use mamba_rs::mamba3_siso::gpu::prefill::{
         Mamba3Prefill, Mamba3PrefillPooledGraph, Mamba3PrefillRun,

@@ -1,7 +1,7 @@
 #![cfg(all(feature = "hf", feature = "cuda"))]
 
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::time::Instant;
 
 #[test]
@@ -10,7 +10,7 @@ fn profile_gpu_backbone_only() {
     // Test backbone-only speed (no lm_head) to isolate bottleneck
     use mamba_rs::MambaConfig;
     use mamba_rs::MambaWeights;
-    use mamba_rs::gpu::inference::MambaGpuBackbone;
+    use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
     // Use 130m-hf config
     let cfg = MambaConfig {

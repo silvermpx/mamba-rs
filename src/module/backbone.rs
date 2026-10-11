@@ -2,9 +2,9 @@ use crate::inference::{
     MambaPackedLinears, MambaStepScratch, mamba_step, mamba_step_no_proj,
     mamba_step_no_proj_packed, mamba_step_packed,
 };
-use crate::mamba_ssm::config::MambaConfig;
-use crate::mamba_ssm::state::MambaState;
-use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
+use crate::mamba1::config::MambaConfig;
+use crate::mamba1::state::MambaState;
+use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 
 /// Complete Mamba backbone: input_proj -> N layers -> norm_f.
 ///
@@ -350,9 +350,9 @@ impl MambaBackbone {
     pub fn alloc_prefill_scratch(
         &self,
         seq_len: usize,
-    ) -> crate::mamba_ssm::cpu::prefill::PrefillScratch {
+    ) -> crate::mamba1::cpu::prefill::PrefillScratch {
         let dims = crate::ops::dims::MambaDims::from_config(&self.cfg, seq_len, self.input_dim);
-        crate::mamba_ssm::cpu::prefill::PrefillScratch::new(&dims)
+        crate::mamba1::cpu::prefill::PrefillScratch::new(&dims)
     }
 
     /// Full-sequence prefill: run `seq_len` inputs through the batched
@@ -367,12 +367,12 @@ impl MambaBackbone {
         inputs: &[f32],
         outputs: &mut [f32],
         state: &mut MambaState,
-        scratch: &mut crate::mamba_ssm::cpu::prefill::PrefillScratch,
+        scratch: &mut crate::mamba1::cpu::prefill::PrefillScratch,
         seq_len: usize,
-        mode: crate::mamba_ssm::cpu::prefill::PrefillMode,
+        mode: crate::mamba1::cpu::prefill::PrefillMode,
     ) {
         let dims = crate::ops::dims::MambaDims::from_config(&self.cfg, seq_len, self.input_dim);
-        crate::mamba_ssm::cpu::prefill::forward_mamba_backbone_prefill_mode(
+        crate::mamba1::cpu::prefill::forward_mamba_backbone_prefill_mode(
             outputs,
             inputs,
             &self.weights,

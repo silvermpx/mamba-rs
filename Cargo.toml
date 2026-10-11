@@ -715,6 +715,10 @@ path = "tests/parallel_run_determinism.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "paths_from_0_7"
+path = "tests/paths_from_0_7.rs"
+
+[[test]]
 name = "prefill"
 path = "tests/prefill.rs"
 

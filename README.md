@@ -213,7 +213,7 @@ let (weights, cfg, input_dim) = load(Path::new("model.safetensors"))?;
 ```
 
 Each family has the same two functions in its own module:
-`mamba_ssm::serialize`, `mamba2::serialize`, `mamba3_siso::serialize` and
+`mamba1::serialize`, `mamba2::serialize`, `mamba3_siso::serialize` and
 `mamba3_mimo::serialize`. The file carries the configuration and the input
 width, so `load` needs nothing else. The official checkpoints load through
 `hf::load_hf` (Mamba), `hf::load_mamba2::load_hf_mamba2` and

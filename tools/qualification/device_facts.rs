@@ -13,10 +13,10 @@ mod arch;
 
 use cudarc::driver::sys::CUdevice_attribute_enum as DevAttr;
 use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::launch::{
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{
     grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
 };
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;

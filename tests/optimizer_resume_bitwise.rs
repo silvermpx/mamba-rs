@@ -7,9 +7,9 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -188,7 +188,7 @@ fn optimizer_state_len_mismatch_is_refused() {
 /// and single-process training silently diverge.
 #[test]
 fn apply_step_pair_matches_fused_applying_backward() {
-    use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+    use mamba_rs::gpu::train::BackwardOpts;
 
     let c = cfg();
     let n = 64 * c.d_model;
@@ -235,9 +235,9 @@ fn apply_step_pair_matches_fused_applying_backward() {
 /// handoff contract.
 #[test]
 fn m1_resume_with_recurrent_state_is_bit_continuous() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     fn m1_cfg() -> MambaConfig {
         MambaConfig {

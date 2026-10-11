@@ -1,6 +1,6 @@
 //! Hardened wall timing for GPU benches.
 
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::gpu::context::GpuCtx;
 
 /// Hardened wall timing: ~1s warm spin (not a fixed iteration count — a
 /// 0.1ms kernel and a 4ms window need different warm depths), sync, then

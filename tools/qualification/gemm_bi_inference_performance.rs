@@ -17,17 +17,17 @@ use std::time::{Duration, Instant};
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
 use gpu_quiet::QuietGpu;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceSm120HalfTile, InferenceTile, inference_forward,
     inference_forward_f32_legacy_baseline, inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, Sm120Bk, Sm120ForcedRoute,
     Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape,
     Sm120Stages, Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
@@ -35,8 +35,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
     qualify_physical_launch, resolve_sm120_forced, tf32_route_specs,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{
     ModuleKind, PhysicalGemmBackend, PolicyDtype, ResolvedGemmOp, ResolvedGemmRoute,
     TUNING_TABLE_REVISION, digest_hex,
 };
@@ -6303,7 +6303,7 @@ fn inference_sm120_half_legacy_overlay_requalification() {
     ctx.route_controls().set_family(BiGemmFamily::Inference);
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let rust_source_sha256 = sha256_file(&manifest.join("src/mamba_ssm/gpu/gemm_bi_inference.rs"));
+    let rust_source_sha256 = sha256_file(&manifest.join("src/gpu/gemm_bi_inference.rs"));
     let cuda_source_sha256 = sha256_file(&manifest.join("kernels/gemm_bi_inference/sm120/tma.cu"));
     let executable_sha256 =
         sha256_file(&std::env::current_exe().expect("current qualification executable path"));
@@ -10874,7 +10874,7 @@ fn inference_ada_vendor_launch(
         launch.arg(&bias_ptr);
         launch.arg(&rows);
         launch.arg(&cols);
-        unsafe { launch.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(shape.m * shape.n)) }
+        unsafe { launch.launch(mamba_rs::gpu::launch::grid_1d(shape.m * shape.n)) }
             .expect("Ada vendor bias broadcast");
         1.0f32
     } else {
@@ -11092,7 +11092,7 @@ fn inference_sm120_exact_tma_fma_b0_spike() {
             .expect("Inference exact SM120 TMA-FMA hot-cell forced launch");
     };
     let launch_auto = || {
-        mamba_rs::mamba_ssm::gpu::gemm_bi_inference::inference_forward(
+        mamba_rs::gpu::gemm_bi_inference::inference_forward(
             &ctx,
             auto_operands.c,
             auto_operands.x,
@@ -11968,7 +11968,7 @@ struct InferenceAutoPhysicalDescriptor {
     family: InferenceTile,
     symbol: &'static str,
     storage: [WeightDtype; 3],
-    backend: mamba_rs::mamba_ssm::gpu::kernel_identity::PhysicalGemmBackend,
+    backend: mamba_rs::gpu::kernel_identity::PhysicalGemmBackend,
     tile: (u32, u32),
     bk: u32,
     stages: u8,
@@ -14475,8 +14475,8 @@ fn inference_bundle_auto_tooling_request(
 #[cfg(test)]
 fn inference_bundle_auto_tooling_recorded_route(
     symbol: &'static str,
-    dtype: mamba_rs::mamba_ssm::gpu::kernel_identity::PolicyDtype,
-    backend: mamba_rs::mamba_ssm::gpu::kernel_identity::PhysicalGemmBackend,
+    dtype: mamba_rs::gpu::kernel_identity::PolicyDtype,
+    backend: mamba_rs::gpu::kernel_identity::PhysicalGemmBackend,
     shape: InferenceShape,
     geometry: ((u32, u32), u32, u8),
     launch: ((u32, u32, u32), (u32, u32, u32), u32),
@@ -14500,7 +14500,7 @@ fn inference_bundle_auto_tooling_recorded_route(
 
 #[test]
 fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_force_aliases() {
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
+    use mamba_rs::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
 
     let hot_b = InferenceShape {
         m: 4621,
@@ -14644,7 +14644,7 @@ fn inference_bundle_auto_tooling_resolves_literal_cohorts_without_rewriting_forc
 
 #[test]
 fn inference_bundle_auto_tooling_rejects_request_route_and_graph_mutations_closed() {
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
+    use mamba_rs::gpu::kernel_identity::{PhysicalGemmBackend, PolicyDtype};
 
     let shape = InferenceShape {
         m: 4621,

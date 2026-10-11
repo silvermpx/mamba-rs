@@ -21,13 +21,13 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::gpu::prefill::{
@@ -487,7 +487,7 @@ fn device_cast_f32_to_bf16_matches_host_rne() {
         b.arg(&d);
         b.arg(&sp);
         b.arg(&n_i);
-        unsafe { b.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(n)) }.unwrap();
+        unsafe { b.launch(mamba_rs::gpu::launch::grid_1d(n)) }.unwrap();
     }
     let mut widened = vec![0.0f32; n];
     dst.download_f32(&ctx.stream, &mut widened).unwrap();

@@ -19,20 +19,18 @@ use super::kernels::{
     CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
     chunk_state_geom, decode_rows, gated_norm_cfg, gated_norm_smem_bytes, step_cfg, step_rows,
 };
-use crate::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
-};
-use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
-use crate::mamba_ssm::gpu::device::GpuDevice;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::mamba_ssm::gpu::graph_capture::{
+use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::device::GpuDevice;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
+use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::ops::portable_math::exp_portable;
@@ -688,7 +686,7 @@ pub struct Mamba2GpuEngine {
 /// What a captured decode graph baked in: the GEMM route and its resolved
 /// launches, and every device address the replay reuses.
 struct CapturedStep {
-    gemm_route: crate::mamba_ssm::gpu::context::GemmRoute,
+    gemm_route: crate::gpu::context::GemmRoute,
     gemm_plan: Option<CapturedGemmGraphPlan>,
     /// The state's conv and SSM buffers, the scratch input row and the
     /// final-norm rows the host reads back.

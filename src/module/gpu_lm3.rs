@@ -1,9 +1,9 @@
 //! The Mamba-3 SISO language model of 0.7. [`MambaGpuLM`] serves every
 //! family and takes its place; [`GpuMamba3LM`] forwards to one.
 
-use crate::mamba_ssm::gpu::GpuOptions;
-use crate::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::gpu::GpuOptions;
+use crate::gpu::context::{GemmMode, GpuCtx};
+use crate::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use crate::mamba3_siso::weights::Mamba3Weights;

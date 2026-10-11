@@ -11,24 +11,24 @@
 //! GPU (stream-synchronized); decode and training time the public call,
 //! host transfers included.
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::{MambaGpuBackbone, MambaGpuState};
-use mamba_rs::mamba_ssm::gpu::prefill::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
+use mamba_rs::mamba1::gpu::forward::GpuMambaDims;
+use mamba_rs::mamba1::gpu::inference::{MambaGpuBackbone, MambaGpuState};
+use mamba_rs::mamba1::gpu::prefill::{
     PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
 };
-use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+use mamba_rs::mamba1::gpu::weights::GpuMambaWeights;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 const LAYERS: usize = 4;
 const PREFILL: [(usize, usize); 3] = [(1, 1024), (1, 4096), (8, 1024)];

@@ -1,7 +1,7 @@
 //! Full-sequence Mamba-3 CPU prefill contracts — the M3 twins of
 //! `prefill.rs`, plus the param-labeled M1-vs-M3 head-to-head latency probe.
 
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba3_siso::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;

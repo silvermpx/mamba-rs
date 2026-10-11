@@ -8,8 +8,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -25,9 +25,10 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 
 #[test]
 fn m1_trainer_bf16_smoke() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -95,9 +96,10 @@ fn m1_trainer_bf16_smoke() {
 /// layer residual stream + d_temporal hand-off.
 #[test]
 fn m1_trainer_multi_layer_bf16() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -225,9 +227,10 @@ fn m3_trainer_multi_layer_bf16() {
 
 #[test]
 fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -356,9 +359,10 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
 
 #[test]
 fn m1_trainer_f32_smoke() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,

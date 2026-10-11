@@ -17,22 +17,22 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
+use mamba_rs::mamba1::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
-use mamba_rs::mamba_ssm::gpu::prefill::{
+use mamba_rs::mamba1::gpu::inference::MambaGpuState;
+use mamba_rs::mamba1::gpu::prefill::{
     PrefillInputs, PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_full,
 };
-use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaTrainWeights, GpuMambaWeights};
+use mamba_rs::mamba1::gpu::weights::{GpuMambaTrainWeights, GpuMambaWeights};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -220,6 +220,6 @@ fn gpu_inference_prefill_matches_gpu_training_forward_parallel_scan() {
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
     };
-    let t = mamba_rs::mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD + 77;
+    let t = mamba_rs::mamba1::gpu::forward::PARALLEL_SCAN_THRESHOLD + 77;
     run_case(&cfg, 20, t, 0xBEEF, "parallel-scan");
 }

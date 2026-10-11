@@ -638,16 +638,16 @@ mod cuda_suite {
     use super::*;
     use cudarc::driver::{CudaFunction, CudaGraph, DeviceRepr, LaunchConfig, PushKernelArg, sys};
     use gpu_quiet::QuietGpu;
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         PhysicalQualificationRequest, PhysicalQualificationRoute, QualifiedPhysicalLaunch,
         Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
         presize_physical_qualification_suite, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::kernel_identity::{
         ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp,
     };
     use sha2::{Digest as _, Sha256};
@@ -949,7 +949,7 @@ mod cuda_suite {
                         "-DMAMBA_RS_STATE_CAP=256".to_owned(),
                         "--frandom-seed=1295072049".to_owned(),
                     ],
-                    include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+                    include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
                     ..Default::default()
                 };
                 cudarc::nvrtc::compile_ptx_with_opts(candidate_sm80_source(), options)

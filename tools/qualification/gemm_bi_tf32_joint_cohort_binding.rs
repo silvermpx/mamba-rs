@@ -65,15 +65,15 @@ fn paired_ratio_and_nearest_rank_are_order_unambiguous() {
 #[cfg(feature = "cuda")]
 mod live {
     use super::*;
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::GemmMode;
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         QualifiedPhysicalLaunch, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
         Tf32PortableTile, presize_physical_qualification_suite, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp, digest_hex};
+    use mamba_rs::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp, digest_hex};
 
     const SCREEN_WINDOWS: usize = 3;
     const OFFICIAL_WINDOWS: usize = 7;

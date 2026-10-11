@@ -153,8 +153,8 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba2_130m_gpu_matches_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::WeightDtype;
+    use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
@@ -243,8 +243,8 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");

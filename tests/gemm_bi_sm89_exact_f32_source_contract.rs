@@ -6,7 +6,7 @@ mod frozen_d768_out;
 mod frozen_dual;
 #[path = "support/triad_f32_tn_direct_prism_bk16_source.rs"]
 mod frozen_prism;
-#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_exact_f32_source.rs"]
+#[path = "../src/gpu/gemm_bi_triad/sm89_exact_f32_source.rs"]
 mod production;
 
 fn normalized(source: &str) -> String {

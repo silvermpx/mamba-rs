@@ -2,21 +2,21 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_CELLS_CC120,
     SM120_STREAMK_CELLS_CC121, SM120_STREAMK_KERNEL_SPECS, Sm120Bk, Sm120ForcedRoute,
     Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages,
     Sm120TensorMap, Sm120Tile, resolve_sm120_forced, sm120_target_candidates,
     validate_sm120_map_request,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{CudaTarget, DeviceCaps};
+use mamba_rs::gpu::kernel_identity::{CudaTarget, DeviceCaps};
 
 const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120/tma.cu");
-const CONTRACT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs");
-const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
-const MODULE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
-const BLAS_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/blas.rs");
+const CONTRACT_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/contract.rs");
+const LAUNCH_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/launch.rs");
+const MODULE_SOURCE: &str = include_str!("../src/gpu/gemm_bi_triad/modules.rs");
+const BLAS_SOURCE: &str = include_str!("../src/gpu/blas.rs");
 
 fn public_function_source(source: &str, name: &str) -> String {
     let marker = format!("pub fn {name}(");

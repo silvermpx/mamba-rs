@@ -28,8 +28,8 @@ use cudarc::driver::PushKernelArg;
 
 use super::error::DistError;
 use super::fold::shard_plan;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::device::GpuDevice;
+use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::device::GpuDevice;
 
 /// One thread per output element; the W addends are summed in a serial
 /// ascending-source-rank chain, so the association order is program

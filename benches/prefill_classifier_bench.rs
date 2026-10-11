@@ -2,9 +2,9 @@
 //! d384 x 24 layers) for the single and parallel prefill modes.
 //! The prefill contracts are tested in tests/prefill.rs.
 use mamba_rs::inference::{PrefillMode, PrefillScratch, forward_mamba_backbone_prefill_mode};
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaState;
-use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaState;
+use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::ops::dims::MambaDims;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {

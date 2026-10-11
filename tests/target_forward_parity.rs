@@ -18,14 +18,14 @@ mod arch;
 #[path = "common/digest.rs"]
 mod digest;
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::cpu::target::{MambaTargetSeqScratch, forward_mamba_target_sequence};
-use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::{GpuMambaDims, gpu_forward_mamba_target_burnin};
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaTrainWeights;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::cpu::target::{MambaTargetSeqScratch, forward_mamba_target_sequence};
+use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
+use mamba_rs::mamba1::gpu::forward::{GpuMambaDims, gpu_forward_mamba_target_burnin};
+use mamba_rs::mamba1::gpu::weights::GpuMambaTrainWeights;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::forward::{
     gpu_forward_mamba3_backbone, gpu_forward_mamba3_target_burnin,
@@ -38,7 +38,7 @@ use mamba_rs::mamba3_siso::gpu::state::{
 use mamba_rs::mamba3_siso::gpu::weights::GpuMamba3Weights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -250,7 +250,7 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
     let m3k = Mamba3Kernels::compile_with_state_cap(
         dev.context(),
         arch::arch0(),
-        mamba_rs::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state).unwrap(),
+        mamba_rs::gpu::kernels::state_capacity(cfg.d_state).unwrap(),
     )
     .expect("Mamba3Kernels");
     let dims = m3_dims(&cfg, batch, seq_len, parallel);

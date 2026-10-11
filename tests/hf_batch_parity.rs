@@ -26,8 +26,8 @@
 
 use std::path::PathBuf;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::module::lm::MambaLM;
 use mamba_rs::module::sample::SampleParams;
 use mamba_rs::{GpuOptions, MambaGpuLM};

@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM90A_AUTO_CELLS, SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TILE, Sm90aMapRequest,
     Sm90aOp, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, resolve_sm90a_forced,
     validate_sm90a_map_request,

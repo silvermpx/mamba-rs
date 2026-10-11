@@ -31,10 +31,11 @@ fn main() {
 mod cuda_example {
     use mamba_rs::GpuOptions;
     use mamba_rs::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::GemmMode;
+    use mamba_rs::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::train::{BackwardOpts, TrainSessionCfg};
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     pub fn run() -> Result<(), String> {
         let cfg = MambaConfig {

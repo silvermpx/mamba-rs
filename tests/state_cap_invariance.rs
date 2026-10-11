@@ -9,10 +9,10 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::launch::grid_1d;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::launch::grid_1d;
 
 type SequentialFamilyOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 

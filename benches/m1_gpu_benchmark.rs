@@ -1,20 +1,20 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::time::Instant;
 
 use mamba_rs::MambaBackbone;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::forward::{
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::gpu::inference::MambaGpuBackbone;
-use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
+use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 
 /// Full Mamba-1 GPU benchmark: inference, CUDA Graph, training fwd/bwd, CPU reference.
 ///
@@ -208,7 +208,7 @@ fn m1_gpu_benchmark() {
             let grads = GpuMambaGrads::new(&ctx.stream, &cfg, input_dim).unwrap();
             let mut d_temporal =
                 GpuBuffer::from_cpu(&ctx.stream, &vec![1.0f32; seq_len * cfg.d_model]).unwrap();
-            mamba_rs::gpu::backward::gpu_backward_mamba_backbone(
+            mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone(
                 &ctx,
                 &mut d_temporal,
                 &grads,

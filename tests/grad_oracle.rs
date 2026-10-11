@@ -28,8 +28,8 @@
 //! - Two configs: a rectangular `input_dim != d_model` (the vision patch
 //!   embed shape) and the square `input_dim == d_model` case.
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
 use mamba_rs::train::flat::MambaBackboneFlat;

@@ -24,12 +24,13 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -216,10 +217,10 @@ fn flag_on_mixed_matches_pedantic_loosely() {
 
 #[test]
 fn nn_forward_is_batch_invariant_within_bucket() {
-    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::blas::gpu_gemm_bi_forward_raw;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
 
     let device = GpuDevice::new(0).expect("gpu");
     let ctx = GpuCtx::new(&device).expect("ctx");

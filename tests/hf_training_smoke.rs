@@ -25,7 +25,7 @@
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::path::PathBuf;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -71,9 +71,10 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 #[test]
 #[ignore]
 fn hf_training_130m_bf16_smoke() {
+    use mamba_rs::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::train::TrainSessionCfg;
     use mamba_rs::hf::load::load_hf;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let dir = match find_model_dir("mamba-130m-hf") {
         Some(d) => d,

@@ -12,18 +12,16 @@
 //! fast path staged wrong bytes silently).
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::DtypedBuf;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_inference::{
     InferenceFwdOperands, InferenceShape, InferenceTile, inference_forward,
     inference_forward_with_tile,
 };
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
-};
+use mamba_rs::gpu::gemm_bi_triad::{TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile};
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.max(1);

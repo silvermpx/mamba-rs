@@ -2,13 +2,13 @@
 
 //! Live actual-AUTO qualification for the exact 18 frozen Ada half-Triad cells.
 
-use mamba_rs::mamba_ssm::gpu::context::{GpuCtx, HalfTriadPolicy};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::context::{GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, SM89_HALF_AUTO_CELLS,
     SM89_HALF_KERNEL_SPECS, TcTile, presize_physical_qualification_suite, qualify_physical_launch,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, PolicyDtype, digest_hex};
+use mamba_rs::gpu::kernel_identity::{ModuleKind, PolicyDtype, digest_hex};
 
 #[test]
 #[ignore = "requires an exclusive RTX 6000 Ada and explicit CUDA 12.8/13.0/13.2 selection"]
@@ -122,7 +122,7 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
                 dims,
                 PhysicalQualificationRoute::HalfForced {
                     dtype,
-                    tile: if op == mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn {
+                    tile: if op == mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn {
                         TcTile::Tile64
                     } else {
                         TcTile::Tile128
@@ -144,9 +144,9 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             .find(|spec| spec.route == route && spec.dtype == dtype)
             .ok_or_else(|| format!("missing spec for {op:?}/{dtype:?}/{dims:?}/{route:?}"))?;
         let (expected_rows, expected_columns) = match op {
-            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn => (dims.0, dims.2),
-            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn => (dims.1, dims.2),
-            mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt => (dims.0, dims.1),
+            mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nn => (dims.0, dims.2),
+            mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn => (dims.1, dims.2),
+            mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nt => (dims.0, dims.1),
         };
         let expected_grid = u32::try_from(expected_rows.div_ceil(spec.tile.0 as usize))
             .ok()
@@ -164,10 +164,10 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
             || evidence.uniform_module_kind() != Some(ModuleKind::TriadSm89Half)
             || evidence.uniform_execution_dtype()
                 != Some(match dtype {
-                    mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16 => PolicyDtype::Bf16,
-                    mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16 => PolicyDtype::F16,
-                    mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32
-                    | mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Tf32 => unreachable!(),
+                    mamba_rs::gpu::dtype::WeightDtype::Bf16 => PolicyDtype::Bf16,
+                    mamba_rs::gpu::dtype::WeightDtype::F16 => PolicyDtype::F16,
+                    mamba_rs::gpu::dtype::WeightDtype::F32
+                    | mamba_rs::gpu::dtype::WeightDtype::Tf32 => unreachable!(),
                 })
             || evidence.single_launch_tile() != Some(spec.tile)
             || !evidence.eager_graph_equal()
@@ -190,28 +190,28 @@ fn sm89_half_actual_auto_qualification() -> Result<(), String> {
         let mut reference = qualify_physical_launch(&reference_ctx, reference_request)?;
         let expected_reference_symbol = match (op, dtype) {
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nn,
+                mamba_rs::gpu::dtype::WeightDtype::F16,
             ) => "nn_tc_f16",
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nn,
+                mamba_rs::gpu::dtype::WeightDtype::Bf16,
             ) => "nn_tc_bf16",
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                mamba_rs::gpu::dtype::WeightDtype::F16,
             ) => "tn_tc64_f16",
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Tn,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                mamba_rs::gpu::dtype::WeightDtype::Bf16,
             ) => "tn_tc64_bf16",
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                mamba_rs::gpu::dtype::WeightDtype::F16,
             ) => "nt_tc_f16",
             (
-                mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt,
-                mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16,
+                mamba_rs::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                mamba_rs::gpu::dtype::WeightDtype::Bf16,
             ) => "nt_tc_bf16",
             _ => {
                 return Err(format!(

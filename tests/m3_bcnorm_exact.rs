@@ -5,9 +5,9 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::buffers::GpuByteBuffer;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use std::sync::Arc;
 
@@ -276,7 +276,7 @@ fn packed_bcnorm_matches_shared_tree_exactly() {
         cudarc::nvrtc::CompileOptions {
             arch: Some(device.nvrtc_target()),
             options,
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         },
     )

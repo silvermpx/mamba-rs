@@ -12,13 +12,13 @@
 //! host upload of the input and the download of the rows; both scans pay
 //! the same transfers.
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use std::time::Instant;
 
 use mamba_rs::config::ScanMode;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};

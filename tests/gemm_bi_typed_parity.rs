@@ -17,20 +17,20 @@
 
 use cudarc::driver::PushKernelArg;
 use half::{bf16, f16};
-use mamba_rs::mamba_ssm::gpu::blas::{
+use mamba_rs::gpu::blas::{
     TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad;
 use std::mem::size_of;
 
 #[path = "support/triad_half_tile_screen.rs"]
 mod triad_half_tile_screen;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::gpu::GemmMode;
 use triad_half_tile_screen::InferenceHalfS3Params;
 
 unsafe impl cudarc::driver::DeviceRepr for InferenceHalfS3Params {}
@@ -1572,8 +1572,8 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
 
 #[test]
 fn typed_native_api_names_are_distinct_from_full_policy_entries() {
-    let launch = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
-    let blas = include_str!("../src/mamba_ssm/gpu/blas.rs");
+    let launch = include_str!("../src/gpu/gemm_bi_triad/launch.rs");
+    let blas = include_str!("../src/gpu/blas.rs");
     for operation in ["forward", "backward_dw", "backward_dx"] {
         let full = format!("pub fn gemm_bi_{operation}_typed(");
         let native = format!("pub fn gemm_bi_{operation}_typed_native(");

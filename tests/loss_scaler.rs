@@ -10,11 +10,11 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
-use mamba_rs::mamba_ssm::gpu::loss_scaler::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::kernels::MambaKernels;
+use mamba_rs::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, check_inf_nan_gpu, scale_grads_gpu,
 };
 

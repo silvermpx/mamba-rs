@@ -6,10 +6,10 @@
 //! AdamW steps that lower a loss in every lane.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{
     Mamba2Config, Mamba2State, Mamba2Tape, Mamba2TrainScratch, Mamba2Weights,
@@ -320,7 +320,7 @@ fn m2_gpu_train_adamw_lowers_a_loss() {
 /// a repeated backward gives the same bits.
 #[test]
 fn m2_gpu_train_typed_lanes_track_the_cpu() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     for (dtype, fwd_tol, grad_tol) in [
         (WeightDtype::Tf32, 3e-3, 3e-2),
@@ -393,7 +393,7 @@ fn m2_gpu_train_typed_lanes_track_the_cpu() {
 /// bf16 and f16 AdamW lower the same loss as the f32 test.
 #[test]
 fn m2_gpu_train_half_lanes_lower_a_loss() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[1].1;
     let w = drawn(&cfg, input_dim, 31);
@@ -462,7 +462,7 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
 #[test]
 fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
     use mamba_rs::config::ScanMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let (input_dim, batch, seq) = (40usize, 2usize, 150usize);
     for (dtype, fwd_tol, grad_tol) in [
         (WeightDtype::F32, 5e-6, 5e-5),
@@ -556,7 +556,7 @@ fn worst_gradient(got: &Mamba2Weights, want: &Mamba2Weights) -> (f64, String) {
 #[test]
 fn m2_gpu_train_continues_a_carried_state() {
     use mamba_rs::config::ScanMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let (input_dim, batch) = (40usize, 2usize);
     let base = cases()[0].1;
     let shapes = [
@@ -666,7 +666,7 @@ fn m2_gpu_train_continues_a_carried_state() {
 #[test]
 fn m2_gpu_train_identity_input() {
     use mamba_rs::config::ScanMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let base = cases()[2].1;
     let (batch, seq) = (2usize, 100usize);
     let input_dim = base.d_model;
@@ -727,7 +727,7 @@ fn m2_gpu_train_identity_input() {
 /// and slices of the wrong length are refused, not run.
 #[test]
 fn m2_gpu_train_f16_overflow_skips_the_step() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     let (input_dim, batch, seq) = (40usize, 2usize, 70usize);
     let cfg = cases()[0].1;
     let w = drawn(&cfg, input_dim, 33);

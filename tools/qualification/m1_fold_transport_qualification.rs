@@ -5,10 +5,10 @@
 #[path = "support/m1_fold/raw.rs"]
 mod raw;
 
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::digest_hex;
-use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::kernel_identity::digest_hex;
+use mamba_rs::gpu::kernels::MambaKernels;
 
 #[test]
 #[ignore = "requires an Ada device and a qualified native compiler"]

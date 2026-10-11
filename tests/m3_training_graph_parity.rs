@@ -10,15 +10,15 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::adamw::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m3_specs_mixed, step_multi,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::PreparedGemmCaptureManifest;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::kernel_identity::PreparedGemmCaptureManifest;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
 use mamba_rs::mamba3_siso::gpu::forward_mixed::{
@@ -109,7 +109,7 @@ struct Setup {
     grads: GpuMamba3Grads,
     adam: GpuAdamW,
     bias: AdamWBiasFactors,
-    multi_plan: mamba_rs::mamba_ssm::gpu::adamw::AdamWMultiPlan,
+    multi_plan: mamba_rs::gpu::adamw::AdamWMultiPlan,
 }
 
 fn build(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setup {

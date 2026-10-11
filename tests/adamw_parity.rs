@@ -14,11 +14,11 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWParamPtrs, GpuAdamW};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
+use mamba_rs::gpu::adamw::{AdamWParamPtrs, GpuAdamW};
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::kernels::MambaKernels;
 
 /// CPU-side AdamW hyperparameters for the reference walk.
 #[derive(Clone, Copy)]
@@ -268,10 +268,10 @@ fn adamw_zero_weight_decay_matches_adam() {
 /// per-tensor weights) matches a CPU reference walk in the same arena order.
 #[test]
 fn adamw_m1_backbone_walks_all_tensors() {
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::adamw::step_m1;
-    use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+    use mamba_rs::gpu::adamw::step_m1;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
@@ -403,7 +403,7 @@ fn adamw_m1_backbone_walks_all_tensors() {
 /// M3 backbone equivalent of `adamw_m1_backbone_walks_all_tensors`.
 #[test]
 fn adamw_m3_backbone_walks_all_tensors() {
-    use mamba_rs::mamba_ssm::gpu::adamw::step_m3;
+    use mamba_rs::gpu::adamw::step_m3;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
     use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};

@@ -16,8 +16,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::mint_module_identity;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, digest_hex};
+use mamba_rs::gpu::gemm_bi_triad::mint_module_identity;
+use mamba_rs::gpu::kernel_identity::{ModuleKind, digest_hex};
 
 /// One module the cohorts can pin: kind, target, state capacity, and the
 /// device compute capability the Inference composition is gated on.

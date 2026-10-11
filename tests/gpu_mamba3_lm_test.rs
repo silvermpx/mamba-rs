@@ -2,7 +2,7 @@
 
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::module::sample::SampleParams;

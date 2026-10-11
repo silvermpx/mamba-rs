@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use crate::mamba_ssm::gpu::GpuOptions;
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::device::GpuDevice;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::gpu::GpuOptions;
+use crate::gpu::context::GpuCtx;
+use crate::gpu::device::GpuDevice;
+use crate::gpu::dtype::WeightDtype;
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::Mamba3MimoWeights;
 

@@ -11,24 +11,24 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::adamw::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m1_specs, step_m1_capturable,
 };
-use mamba_rs::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone;
+use mamba_rs::mamba1::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::mamba_ssm::gpu::training_graph::{
+use mamba_rs::mamba1::gpu::training_graph::{
     GpuMambaF32TrainingStepGraph, MambaF32Capture, MambaF32Replay,
 };
-use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -341,7 +341,7 @@ fn m1_f32_training_graph_matches_eager() {
 
 #[test]
 fn m3_f32_training_graph_matches_eager() {
-    use mamba_rs::mamba_ssm::gpu::adamw::{m3_specs, step_m3_capturable};
+    use mamba_rs::gpu::adamw::{m3_specs, step_m3_capturable};
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::backward::gpu_backward_mamba3_backbone;
     use mamba_rs::mamba3_siso::gpu::forward::gpu_forward_mamba3_backbone;

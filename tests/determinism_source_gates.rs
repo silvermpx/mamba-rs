@@ -75,7 +75,7 @@ fn kernels_contain_no_numeric_atomics() {
 fn tn_narrow_release_surface_excludes_measurement_only_routes() {
     let forbidden = [
         (
-            "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs",
+            "src/gpu/gemm_bi_triad/dispatch.rs",
             &[
                 "measurement_tn_narrow_splitm_partition",
                 "TnNarrowSplitMFused",
@@ -84,7 +84,7 @@ fn tn_narrow_release_surface_excludes_measurement_only_routes() {
             ][..],
         ),
         (
-            "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs",
+            "src/gpu/gemm_bi_triad/launch.rs",
             &[
                 "launch_forced_f32_tn_narrow_splitm",
                 "force_tn_narrow_splitm",
@@ -93,18 +93,18 @@ fn tn_narrow_release_surface_excludes_measurement_only_routes() {
             ][..],
         ),
         (
-            "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs",
+            "src/gpu/gemm_bi_triad/modules.rs",
             &["tn_narrow_splitm_fused", "tn_splitm_counter"][..],
         ),
         (
-            "src/mamba_ssm/gpu/kernel_identity.rs",
+            "src/gpu/kernel_identity.rs",
             &[
                 "ScalarFmaTnNarrowSplitMFusedV1",
                 "LastCtaPerOutputTileRuntimeSplitMReduceV1",
             ][..],
         ),
         (
-            "src/mamba_ssm/gpu/context.rs",
+            "src/gpu/context.rs",
             &["ScalarFmaTnNarrowSplitMFusedV1"][..],
         ),
         (

@@ -1,14 +1,12 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::cublas::sys::{cublasGetMathMode, cublasMath_t, cublasStatus_t};
-use mamba_rs::mamba_ssm::gpu::context::{
-    BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy,
-};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
 
 #[test]
 fn gemm_mode_names_and_default() {
-    use mamba_rs::mamba_ssm::gpu::context::GemmMode;
+    use mamba_rs::gpu::context::GemmMode;
     assert_eq!(GemmMode::default(), GemmMode::Deterministic);
     for (name, mode) in [
         ("deterministic", GemmMode::Deterministic),
@@ -29,7 +27,7 @@ fn gemm_mode_names_and_default() {
 
 #[test]
 fn gpu_module_reexports_the_canonical_gemm_mode() {
-    let mode: mamba_rs::mamba_ssm::gpu::GemmMode = GemmMode::CublasPedantic;
+    let mode: mamba_rs::gpu::GemmMode = GemmMode::CublasPedantic;
     assert_eq!(mode, GemmMode::CublasPedantic);
 }
 

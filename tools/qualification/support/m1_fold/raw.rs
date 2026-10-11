@@ -1,14 +1,12 @@
 //! Independent released fold oracle with guarded eager and graph comparisons.
 use cudarc::driver::{CudaFunction, CudaGraph, CudaModule, CudaStream, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuByteBuffer;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{FramedSha256, canonical_ptx_image, digest_hex};
-use mamba_rs::mamba_ssm::gpu::kernels::{MambaKernels, cuda_include_paths};
-use mamba_rs::mamba_ssm::gpu::launch::{
-    grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_tape_len,
-};
+use mamba_rs::gpu::buffers::GpuByteBuffer;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{FramedSha256, canonical_ptx_image, digest_hex};
+use mamba_rs::gpu::kernels::{MambaKernels, cuda_include_paths};
+use mamba_rs::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_tape_len};
 use std::sync::Arc;
 
 const GUARD: usize = 256;

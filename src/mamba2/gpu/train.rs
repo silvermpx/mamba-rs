@@ -23,9 +23,9 @@
 //! Windows carry the conv and SSM states from one call to the next, and
 //! the gradients stop at the states a window starts from.
 
-use crate::mamba_ssm::gpu::grad_window::{GradWindow, check_backward_opts};
-use crate::mamba_ssm::gpu::options::GpuOptions;
-use crate::mamba_ssm::gpu::trainer::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+use crate::gpu::grad_window::{GradWindow, check_backward_opts};
+use crate::gpu::options::GpuOptions;
+use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::check_device_envelope;
@@ -34,17 +34,17 @@ use super::kernels::{
     CHUNK, Mamba2Kernels, bc_tiles_smem_bytes, dx_tiles_geom, gated_norm_bwd_smem_bytes,
     seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
-use crate::mamba_ssm::gpu::adamw::GpuAdamW;
-use crate::mamba_ssm::gpu::blas::{
+use crate::gpu::adamw::GpuAdamW;
+use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs,
 };
-use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
-use crate::mamba_ssm::gpu::context::{GemmRole, GpuCtx};
-use crate::mamba_ssm::gpu::device::GpuDevice;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::{grid_1d, grid_colsum, grid_norm, validate_rows_capacity};
-use crate::mamba_ssm::gpu::loss_scaler::{
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
+use crate::gpu::context::{GemmRole, GpuCtx};
+use crate::gpu::device::GpuDevice;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm, validate_rows_capacity};
+use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
 use crate::mamba2::config::Mamba2Config;

@@ -10,20 +10,20 @@
 mod stamp;
 #[path = "../../tests/common/timed.rs"]
 mod timed;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
-use mamba_rs::mamba_ssm::gpu::prefill::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
+use mamba_rs::mamba1::gpu::forward::GpuMambaDims;
+use mamba_rs::mamba1::gpu::inference::MambaGpuState;
+use mamba_rs::mamba1::gpu::prefill::{
     PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::mamba1::gpu::weights::GpuMambaWeights;
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 /// Vision-classifier serve geometry (T_TOTAL, INPUT_DIM) — printed in
 /// every stamp so a drift is visible at the consumer when the upstream

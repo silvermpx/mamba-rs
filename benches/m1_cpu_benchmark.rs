@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use mamba_rs::MambaBackbone;
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::cpu::parallel::{parallel_mamba_backward, parallel_mamba_forward};
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::cpu::parallel::{parallel_mamba_backward, parallel_mamba_forward};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
 use mamba_rs::train::flat::MambaBackboneFlat;

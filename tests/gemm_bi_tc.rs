@@ -13,15 +13,15 @@
 #![cfg(feature = "cuda")]
 
 use half::{bf16, f16};
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::ModuleKind;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::blas::TypedPtr;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad;
+use mamba_rs::gpu::kernel_identity::ModuleKind;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -208,8 +208,8 @@ fn tc_forward_is_deterministic_and_all_m_batch_invariant() {
 #[test]
 #[ignore = "requires an SM89 GPU and exercises the deep Split-K policy boundary"]
 fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
-    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_forward_typed;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::TcTile;
+    use mamba_rs::gpu::blas::gemm_bi_forward_typed;
+    use mamba_rs::gpu::gemm_bi_triad::TcTile;
 
     let device = GpuDevice::new(0).expect("gpu");
     if device.compute_capability != (8, 9) {
@@ -407,9 +407,10 @@ fn tc_backward_matches_f32_reference_loosely() {
 
 #[test]
 fn tc_mixed_training_is_bit_identical_across_runs() {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+    use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
     fn digest(values: &[f32]) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -1056,7 +1057,7 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
             .unwrap();
             assert_eq!(tile, TcTile::Tile64, "{dt:?} TN route at M{m} K{k} N{n}");
             let resolved_route = resolved_route(&t.ctx, || {
-                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed(
+                mamba_rs::gpu::blas::gemm_bi_backward_dw_typed(
                     &t.ctx,
                     resolved.cached_ptr(),
                     dyp,
@@ -1097,7 +1098,7 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
                 // are its own contract, so the check is that the route is
                 // declared and repeatable.
                 let repeat = t.f32_buf(&initial);
-                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed(
+                mamba_rs::gpu::blas::gemm_bi_backward_dw_typed(
                     &t.ctx,
                     repeat.cached_ptr(),
                     dyp,
@@ -1166,7 +1167,7 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
             .unwrap();
             assert_eq!(tile, TcTile::Tile64, "{dt:?} NT route at M{m} K{k} N{n}");
             let resolved_route = resolved_route(&t.ctx, || {
-                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed(
+                mamba_rs::gpu::blas::gemm_bi_backward_dx_typed(
                     &t.ctx,
                     TypedPtr {
                         ptr: resolved.cached_ptr(),
@@ -1213,7 +1214,7 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
                 );
             } else {
                 let repeat = t.typed_buf(&sentinel, dt);
-                mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed(
+                mamba_rs::gpu::blas::gemm_bi_backward_dx_typed(
                     &t.ctx,
                     TypedPtr {
                         ptr: repeat.cached_ptr(),
@@ -1698,7 +1699,7 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
     use gemm_bi_triad::{
         PhysicalQualificationRequest, PhysicalQualificationRoute, TcTile, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::kernel_identity::{
         ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
     };
 
@@ -1760,7 +1761,7 @@ fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
     // the tensor-core tier.
     assert_eq!(
         t.ctx.route_controls().half_policy(),
-        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrder
+        mamba_rs::gpu::context::HalfTriadPolicy::AllowStreamKFixedOrder
     );
 }
 
@@ -1774,9 +1775,9 @@ fn sm89_automatic_dw_takes_the_half_relay_only_under_the_half_policy() {
     use gemm_bi_triad::{
         PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, HalfTriadPolicy};
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::blas::gemm_bi_backward_dw_typed;
+    use mamba_rs::gpu::context::{BiGemmFamily, HalfTriadPolicy};
+    use mamba_rs::gpu::kernel_identity::{
         ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
     };
 
@@ -1896,8 +1897,8 @@ fn sm89_automatic_dw_takes_the_half_relay_only_under_the_half_policy() {
 #[test]
 fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
     use gemm_bi_triad::TcTile;
-    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, HalfTriadPolicy};
+    use mamba_rs::gpu::blas::gemm_bi_backward_dw_typed;
+    use mamba_rs::gpu::context::{BiGemmFamily, HalfTriadPolicy};
 
     let device = GpuDevice::new(0).expect("device 0");
     if device.compute_capability != (8, 9) {

@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::time::Instant;
 
 use mamba_rs::gpu::buffers::GpuBuffer;

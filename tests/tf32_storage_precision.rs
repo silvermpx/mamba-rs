@@ -5,17 +5,18 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode};
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode};
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
+use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn m1_cfg() -> MambaConfig {
     MambaConfig {

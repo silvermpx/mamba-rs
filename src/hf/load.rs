@@ -5,8 +5,8 @@ use std::path::Path;
 
 use safetensors::SafeTensors;
 
-use crate::mamba_ssm::config::MambaConfig;
-use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
+use crate::mamba1::config::MambaConfig;
+use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::module::MambaBackbone;
 
 use super::bf16::bf16_bytes_to_f32;

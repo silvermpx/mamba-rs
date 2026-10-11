@@ -9,10 +9,10 @@ mod evidence;
 
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::sys::CUevent_flags;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 fn det(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.max(1);

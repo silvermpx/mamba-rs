@@ -343,7 +343,7 @@ mod llm {
     #[test]
     #[ignore]
     fn llm_prefill_vs_decode_all_models() {
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::dtype::WeightDtype;
         use mamba_rs::module::sample::SampleParams;
         use mamba_rs::{GpuOptions, MambaGpuLM};
 
@@ -428,7 +428,7 @@ mod llm {
     #[test]
     #[ignore]
     fn llm_long_context_prefill() {
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::dtype::WeightDtype;
         use mamba_rs::module::sample::SampleParams;
         use mamba_rs::{GpuOptions, MambaGpuLM};
 
@@ -495,7 +495,7 @@ mod llm {
     #[test]
     #[ignore]
     fn llm_batched_step_throughput() {
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::dtype::WeightDtype;
         use mamba_rs::module::sample::SampleParams;
         use mamba_rs::{GpuOptions, MambaGpuLM};
 
@@ -556,7 +556,7 @@ mod llm {
     #[test]
     #[ignore]
     fn llm_dtype_throughput_all_sizes() {
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::dtype::WeightDtype;
         use mamba_rs::module::sample::SampleParams;
         use mamba_rs::{GpuOptions, MambaGpuLM};
 

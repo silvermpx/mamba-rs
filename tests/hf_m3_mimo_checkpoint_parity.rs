@@ -122,9 +122,9 @@ fn mimo_187m_cpu_decode_matches_the_f64_oracle() {
 /// in bf16 the mean prompt NLL within a few hundredths of a nat; in both
 /// the greedy tokens wherever the oracle's margin clears the lane's noise.
 #[cfg(feature = "cuda")]
-fn mimo_187m_gpu_arm(dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype) {
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+fn mimo_187m_gpu_arm(dtype: mamba_rs::gpu::dtype::WeightDtype) {
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuEngine;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
@@ -231,12 +231,12 @@ fn mimo_187m_gpu_arm(dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype) {
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mimo_187m_gpu_matches_the_f64_oracle() {
-    mimo_187m_gpu_arm(mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32);
+    mimo_187m_gpu_arm(mamba_rs::gpu::dtype::WeightDtype::F32);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mimo_187m_gpu_bf16_tracks_the_f64_oracle() {
-    mimo_187m_gpu_arm(mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::Bf16);
+    mimo_187m_gpu_arm(mamba_rs::gpu::dtype::WeightDtype::Bf16);
 }

@@ -4,8 +4,8 @@
 //! timings taken on kernels production never launches have cost whole
 //! sessions before the stamp made the route part of the output.
 
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
 
 /// One STAMP line carrying the whole measurement identity. `route` names
 /// the kernel path the arm drives (e.g. "fold G=4" / "ungrouped" /

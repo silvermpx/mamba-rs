@@ -12,9 +12,9 @@ use mamba_rs::inference::{
     PrefillMode, PrefillScratch, forward_mamba_backbone_prefill,
     forward_mamba_backbone_prefill_mode, prefill_batch,
 };
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaState;
-use mamba_rs::mamba_ssm::MambaWeights;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaState;
+use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::module::MambaBackbone;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::flat::MambaBackboneFlat;

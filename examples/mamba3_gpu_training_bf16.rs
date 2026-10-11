@@ -21,8 +21,8 @@ mod cuda_example {
     use std::time::Instant;
 
     use mamba_rs::GpuOptions;
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::GemmMode;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;

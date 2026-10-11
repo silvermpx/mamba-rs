@@ -39,7 +39,7 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 
 fn bench_m1_dtype(
     dir: &std::path::Path,
-    dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype,
+    dtype: mamba_rs::gpu::dtype::WeightDtype,
     label: &str,
     use_graph: bool,
 ) {
@@ -91,7 +91,7 @@ fn bench_m1_bf16_vs_f32_130m() {
     };
     eprintln!("\n=== Mamba-1 130m bf16 vs f32 (RTX 6000 Ada) ===");
     for use_graph in [false, true] {
-        use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+        use mamba_rs::gpu::dtype::WeightDtype;
         bench_m1_dtype(&dir, WeightDtype::F32, "f32 ", use_graph);
         bench_m1_dtype(&dir, WeightDtype::Bf16, "bf16", use_graph);
         bench_m1_dtype(&dir, WeightDtype::F16, "f16 ", use_graph);
@@ -108,8 +108,8 @@ fn bench_m1_weight_compression_ratio() {
             return;
         }
     };
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::hf::load::load_hf;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     let hf = load_hf(&dir).unwrap();
     // Count total weight elements in the backbone + embed + lm_head.
     let mut total_elems: usize = hf.embed.len();
@@ -161,11 +161,7 @@ fn m3_bench_cfg() -> mamba_rs::mamba3_siso::config::Mamba3Config {
     }
 }
 
-fn bench_m3_dtype(
-    dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype,
-    label: &str,
-    use_graph: bool,
-) {
+fn bench_m3_dtype(dtype: mamba_rs::gpu::dtype::WeightDtype, label: &str, use_graph: bool) {
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{GpuOptions, Mamba3GpuBackbone, MambaGpuLM};
@@ -176,7 +172,7 @@ fn bench_m3_dtype(
 
     let t_build = Instant::now();
     let mut weights = Mamba3Weights::init(&cfg, d, 0xB00B);
-    if dtype != mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32 {
+    if dtype != mamba_rs::gpu::dtype::WeightDtype::F32 {
         // The mixed-precision pipeline requires an identity input_proj
         // (same clearing the determinism bench does for its bf16 leg).
         weights.input_proj_w.clear();
@@ -230,7 +226,7 @@ fn bench_m3_dtype(
 #[test]
 #[ignore]
 fn bench_m3_bf16_vs_f32_synthetic() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     eprintln!("\n=== Mamba-3 synthetic (d_model=256, n_layers=8, nh=32) bf16 vs f32 ===");
     for use_graph in [false, true] {
         bench_m3_dtype(WeightDtype::F32, "f32 ", use_graph);

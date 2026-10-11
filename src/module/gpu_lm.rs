@@ -8,21 +8,21 @@ use cudarc::driver::{CudaStream, PushKernelArg};
 use rayon::prelude::*;
 
 use crate::config::ModelFamily;
+use crate::gpu::GpuOptions;
+use crate::gpu::blas::{
+    TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
+    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
+};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::gpu::context::{GemmMode, GpuCtx};
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::launch::grid_1d;
 use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};
 use crate::hf::load_mamba2::load_hf_mamba2;
 use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
 use crate::hf::read_family;
-use crate::mamba_ssm::gpu::GpuOptions;
-use crate::mamba_ssm::gpu::blas::{
-    TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
-    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
-};
-use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use crate::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::inference::MambaGpuBackbone;
-use crate::mamba_ssm::gpu::launch::grid_1d;
+use crate::mamba1::gpu::inference::MambaGpuBackbone;
 use crate::mamba2::gpu::Mamba2GpuBackbone;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuBackbone;
 use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
@@ -795,8 +795,8 @@ mod pad_tests {
 #[cfg(test)]
 mod tied_head_capture_tests {
     use super::*;
-    use crate::mamba_ssm::weights::MambaWeights;
-    use crate::{config::ScanMode, mamba_ssm::config::MambaConfig};
+    use crate::mamba1::weights::MambaWeights;
+    use crate::{config::ScanMode, mamba1::config::MambaConfig};
 
     fn owned_lm(dtype: WeightDtype, tied: bool) -> MambaGpuLM {
         const D_MODEL: usize = 16;
@@ -846,8 +846,8 @@ mod tied_head_capture_tests {
     #[test]
     #[ignore = "needs a CUDA device and NVRTC"]
     fn m1_tied_and_untied_heads_all_storage_without_vendor_gemm() {
-        use crate::mamba_ssm::gpu::blas::vendor_gemm_test::Guard;
-        use crate::mamba_ssm::gpu::context::BiGemmFamily;
+        use crate::gpu::blas::vendor_gemm_test::Guard;
+        use crate::gpu::context::BiGemmFamily;
         let deny = Guard::new(true).unwrap();
         for family in [BiGemmFamily::Inference, BiGemmFamily::Triad] {
             for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {

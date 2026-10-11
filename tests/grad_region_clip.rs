@@ -6,10 +6,10 @@
 //! matrix plus a contiguous bias vector, repeating per layer).
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::grad_clip::{GradRegionGeom, alloc_partials, clip_region_device};
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::grad_clip::{GradRegionGeom, alloc_partials, clip_region_device};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

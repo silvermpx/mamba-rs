@@ -9,16 +9,16 @@
 //!
 //! Run: `cargo bench --bench family_compare_bench --features cuda`
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::trainer::TrainSessionCfg;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use std::time::Instant;
 
-use mamba_rs::gpu::inference::MambaGpuBackbone;
-use mamba_rs::gpu::trainer::MambaGpuTrainer;
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};

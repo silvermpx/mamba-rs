@@ -15,7 +15,7 @@
 //!   2. Runs a single forward+backward on each path with the same input
 //!      and upstream gradient.
 //!   3. Flattens both gradient trees into the `GpuMambaGrads.flat` layout
-//!      (defined in `src/mamba_ssm/gpu/weights.rs`), which is the canonical
+//!      (defined in `src/mamba1/gpu/weights.rs`), which is the canonical
 //!      optimizer-facing ordering.
 //!   4. Asserts per-tensor max relative error < 1e-3 and cosine
 //!      similarity > 0.9999. Tolerance is loose enough to absorb the
@@ -25,17 +25,17 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::forward::{
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone;
+use mamba_rs::mamba1::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
 use mamba_rs::train::flat::MambaBackboneFlat;
@@ -80,7 +80,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
 }
 
 /// Flatten a CPU `TrainMambaWeights` into the same linear order as the GPU
-/// `GpuMambaGrads.flat` allocation in `src/mamba_ssm/gpu/weights.rs:509-545`.
+/// `GpuMambaGrads.flat` allocation in `src/mamba1/gpu/weights.rs:509-545`.
 fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&g.input_proj_w);

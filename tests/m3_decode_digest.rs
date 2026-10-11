@@ -19,9 +19,9 @@ mod evidence;
 mod evidence_digest;
 
 use decode_snapshot::{DecodeSnapshot, validate_decode_pair};
-use mamba_rs::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::context::{GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::{Mamba3GpuEngine, Mamba3GpuEngineMixed};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;

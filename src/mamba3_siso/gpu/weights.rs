@@ -5,10 +5,8 @@
 //! - **Training**: per-tensor GpuBuffer (optimizer compatible)
 //! - **Gradients**: flat buffer + GradSlice views (single zero() clears all)
 
-use crate::mamba_ssm::gpu::buffers::{
-    GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn,
-};
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn};
+use crate::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
 use std::sync::Arc;
 

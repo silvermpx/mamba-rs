@@ -10,8 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Output};
 
-pub(crate) const MODULE_SOURCE: &str =
-    include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+pub(crate) const MODULE_SOURCE: &str = include_str!("../../src/gpu/gemm_bi_triad/modules.rs");
 pub(crate) fn assert_contains_all(source: &str, required: &[&str], contract: &str) {
     let mask = source_mask(source);
     for item in required {
@@ -1132,7 +1131,7 @@ pub(crate) fn qualification_semantic_digest(
     field: usize,
     domain: &[u8],
 ) -> Result<[u8; 32], String> {
-    let mut digest = mamba_rs::mamba_ssm::gpu::kernel_identity::FramedSha256::new(domain)
+    let mut digest = mamba_rs::gpu::kernel_identity::FramedSha256::new(domain)
         .required(b"route-count", &(rows.len() as u64).to_le_bytes());
     for row in rows {
         digest = digest
@@ -1146,10 +1145,9 @@ pub(crate) fn qualification_driver_jit_resource_summary(
 ) -> Result<(u32, u64, [u8; 32]), String> {
     let mut max_local_bytes = 0;
     let mut exception_count = 0;
-    let mut digest = mamba_rs::mamba_ssm::gpu::kernel_identity::FramedSha256::new(
-        b"tf32-driver-jit-local-resources.v1",
-    )
-    .required(b"route-count", &(rows.len() as u64).to_le_bytes());
+    let mut digest =
+        mamba_rs::gpu::kernel_identity::FramedSha256::new(b"tf32-driver-jit-local-resources.v1")
+            .required(b"route-count", &(rows.len() as u64).to_le_bytes());
     for row in rows {
         let route_identity = parse_sha256_hex(row[5], row[0])?;
         let registers = row[13]
@@ -1958,8 +1956,8 @@ pub(crate) struct QualifiedOpCensus {
     pub(crate) nt: usize,
 }
 pub(crate) fn qualified_op_census(cc: (u32, u32), expected_routes: usize) -> QualifiedOpCensus {
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_qualification_route_specs;
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+    use mamba_rs::gpu::gemm_bi_triad::tf32_qualification_route_specs;
+    use mamba_rs::gpu::kernel_identity::ResolvedGemmOp;
     let mut census = QualifiedOpCensus {
         nn: 0,
         tn: 0,

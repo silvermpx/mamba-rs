@@ -6,18 +6,18 @@
 //! this test has passed on the target Hopper/toolchain pair.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     SM90A_STAGES, SM90A_TILE, Sm90aForcedRoute, Sm90aLaunchOperands, Sm90aMapRequest,
     Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps, Sm90aShape, Sm90aWarpgroupSchedule,
     launch_sm90a_wgmma_forced, prepare_sm90a_tensor_maps, resolve_sm90a_forced,
     validate_sm90a_graph_replay,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::ModuleKind;
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::ModuleKind;
 
 const EDGE_DIMENSIONS: &[usize] = &[1, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129];
 const ASYMMETRIC: (usize, usize, usize) = (65, 127, 129);

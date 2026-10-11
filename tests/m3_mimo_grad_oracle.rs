@@ -2,7 +2,7 @@
 //! of the float64 reference step, and the training forward against the
 //! prefill.
 
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba3_mimo::{
     Mamba3MimoConfig, Mamba3MimoPrefillScratch, Mamba3MimoState, Mamba3MimoTape,
     Mamba3MimoTrainScratch, Mamba3MimoWeights, backward_mamba3_mimo_train,

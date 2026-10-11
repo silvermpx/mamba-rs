@@ -282,7 +282,7 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
             .unwrap_or_else(|| panic!("production arithmetic order changed at {token}"));
         ascending = tail;
     }
-    let registry = include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let registry = include_str!("../../src/gpu/gemm_bi_triad/modules.rs");
     assert!(!registry.contains("nn_m64n64_bk16_s2_exp"));
     assert!(!PRODUCTION_SOURCE.contains("Experiment"));
     assert!(!PRODUCTION_SOURCE.contains("EXPERIMENT"));
@@ -315,10 +315,10 @@ fn qualification_cells_match_the_exact_nn_performance_matrix() {
 
 #[test]
 fn production_scalar_module_owns_the_m64n64_source_and_required_handle() {
-    let modules = include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+    let modules = include_str!("../../src/gpu/gemm_bi_triad/modules.rs");
     for required in [
         "kernels/gemm_bi_triad/scalar_nn_m64n64.cu",
-        "include_str!(\"../../../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu\")",
+        "include_str!(\"../../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu\")",
         "\"nn_m64n64_bk16_s2\"",
         "pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction",
         "let gemm_bi_nn_m64n64_bk16_s2 = load(\"nn_m64n64_bk16_s2\")?",
@@ -365,7 +365,7 @@ fn production_compiles_for_the_portable_compute80_floor() {
             "-DNDEBUG".to_owned(),
             "-DGEMM_BI_GROUP_M=8".to_owned(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(compose_cuda_source(), options)
@@ -377,7 +377,7 @@ fn production_compiles_for_the_portable_compute80_floor() {
 
 #[cfg(feature = "cuda")]
 mod cuda_qualification {
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
+    use mamba_rs::gpu::GemmMode;
     use std::sync::Arc;
 
     use super::gpu_quiet::QuietGpu;
@@ -385,10 +385,10 @@ mod cuda_qualification {
         CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg,
         sys,
     };
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
 
     use super::{
         AdaShortScreenCell, GENERIC_SYMBOL, INFERENCE_COPYPLAN_SYMBOL, LiveCopyPlanStage,
@@ -655,7 +655,7 @@ mod cuda_qualification {
                 "-DNDEBUG".to_owned(),
                 "-DGEMM_BI_GROUP_M=16".to_owned(),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         cudarc::nvrtc::compile_ptx_with_opts(source, options)
@@ -1700,7 +1700,7 @@ mod cuda_qualification {
         let p = fixture.params;
         let alpha = 1.0_f32;
         let beta = 0.0_f32;
-        let dtype = mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32.cuda_data_type();
+        let dtype = mamba_rs::gpu::dtype::WeightDtype::F32.cuda_data_type();
         // Row-major C=A*B is column-major C^T=B^T*A^T. Explicit FAST_TF32,
         // never PEDANTIC. Comparative timing starts after the exclusive
         // qualification holder has been dropped.
@@ -1768,7 +1768,7 @@ mod cuda_qualification {
         }
 
         fn launch(&mut self, ctx: &GpuCtx) -> Result<(), String> {
-            mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
+            mamba_rs::gpu::blas::gpu_gemm_bi_forward_raw(
                 ctx,
                 &mut self.output.buffer,
                 &self.a.buffer,
@@ -1826,7 +1826,7 @@ mod cuda_qualification {
         graph: &CudaGraph,
         fixture: &PublicAutoFixture,
         stage: LiveCopyPlanStage,
-        expected: mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedKernelLaunch,
+        expected: mamba_rs::gpu::kernel_identity::ResolvedKernelLaunch,
     ) -> Result<(), String> {
         use std::ffi::CStr;
         let mut count = 0;
@@ -2008,12 +2008,10 @@ mod cuda_qualification {
         cells: &[AdaShortScreenCell],
     ) -> Result<(), String> {
         use cudarc::cublas::sys as blas;
-        use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        use mamba_rs::gpu::gemm_bi_triad::{
             PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
         };
-        use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-            ModuleKind, ResolvedGemmOp, ResolvedNumericContract,
-        };
+        use mamba_rs::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp, ResolvedNumericContract};
         use serde_json::json;
 
         let integrated = stage == LiveCopyPlanStage::Integrated;

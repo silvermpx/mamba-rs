@@ -23,9 +23,9 @@
 #![cfg(feature = "cuda")]
 
 #[cfg(feature = "hf")]
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 // ===========================================================================
 // HF 130m — extreme batch size parity + very long prompts

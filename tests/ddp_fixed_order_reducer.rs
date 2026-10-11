@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use mamba_rs::dist::EmulatedWorld;
 use mamba_rs::dist::reducer::{DetReduceKernel, LoopbackWorld, reduce_sum_reference};
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::device::GpuDevice;
 
 fn stream() -> Arc<cudarc::driver::CudaStream> {
     GpuDevice::new(0)

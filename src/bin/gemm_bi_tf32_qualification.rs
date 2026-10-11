@@ -118,7 +118,7 @@ fn parse_cc(value: &str) -> Result<(u32, u32), String> {
 }
 
 fn expected_routes_for_cc(cc: (u32, u32)) -> Option<usize> {
-    mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_qualification_route_specs(cc)
+    mamba_rs::gpu::gemm_bi_triad::tf32_qualification_route_specs(cc)
         .ok()
         .map(|specs| specs.len())
 }
@@ -414,9 +414,9 @@ fn environment_arguments() -> Result<Vec<String>, String> {
 
 #[cfg(not(test))]
 fn run() -> Result<(), String> {
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         Tf32QualificationConfig, Tf32QualificationSuite, run_tf32_qualification,
     };
 

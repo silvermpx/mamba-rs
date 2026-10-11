@@ -26,13 +26,14 @@
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::path::PathBuf;
 
 use mamba_rs::MambaGpuLM;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::hf::load::load_hf;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::module::sample::SampleParams;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -84,7 +85,7 @@ fn delta_norm(a: &[f32], b: &[f32]) -> f32 {
     l2_norm(&diff)
 }
 
-fn flatten_weights(w: &mamba_rs::mamba_ssm::MambaWeights) -> Vec<f32> {
+fn flatten_weights(w: &mamba_rs::mamba1::MambaWeights) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&w.input_proj_w);
     out.extend_from_slice(&w.input_proj_b);

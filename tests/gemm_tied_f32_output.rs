@@ -1,10 +1,10 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::{TiedLmDims, gpu_gemm_ex_tied_lm_head_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::blas::{TiedLmDims, gpu_gemm_ex_tied_lm_head_raw};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 const BATCH: usize = 2;
 const D_MODEL: usize = 1;

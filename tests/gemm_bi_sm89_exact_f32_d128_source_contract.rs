@@ -1,4 +1,4 @@
-#[path = "../src/mamba_ssm/gpu/gemm_bi_triad/sm89_exact_f32_d128_source.rs"]
+#[path = "../src/gpu/gemm_bi_triad/sm89_exact_f32_d128_source.rs"]
 mod production;
 
 #[test]

@@ -29,11 +29,12 @@ mod cuda_example {
     use std::time::Instant;
 
     use mamba_rs::GpuOptions;
-    use mamba_rs::mamba_ssm::MambaConfig;
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::GemmMode;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::GemmMode;
+    use mamba_rs::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaConfig;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     /// Deterministic pseudo-random input. `scale` caps the magnitude — with
     /// synthetic random d_temporal (no real loss signal), un-scaled gradients

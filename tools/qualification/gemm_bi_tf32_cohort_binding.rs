@@ -5,15 +5,15 @@
 //! module served each one; a stack the frozen sets do not describe serves them
 //! all from the exact families and fails here.
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
     Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
     presize_physical_qualification_suite, qualify_physical_launch,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::kernel_identity::{
     ModuleKind, ResolvedGemmOp, ResolvedNumericContract, digest_hex,
 };
 use sha2::{Digest as _, Sha256};
@@ -292,7 +292,7 @@ fn word_digest(words: &[u32]) -> String {
 }
 
 fn assert_sm89_nt_finalist_manifest(
-    launch: &mamba_rs::mamba_ssm::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
+    launch: &mamba_rs::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
     dims: (usize, usize, usize),
 ) {
     let evidence = launch.evidence();
@@ -321,7 +321,7 @@ fn assert_sm89_nt_finalist_manifest(
 
 fn run_exact_words(
     ctx: &GpuCtx,
-    launch: &mut mamba_rs::mamba_ssm::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
+    launch: &mut mamba_rs::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
     request: PhysicalQualificationRequest,
     output: &[u32],
     a: &[u32],

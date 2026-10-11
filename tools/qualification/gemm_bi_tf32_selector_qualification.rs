@@ -7,19 +7,17 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path as FsPath, PathBuf};
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::blas::{gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dx_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, GradSlice};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::{gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dx_raw};
+use mamba_rs::gpu::buffers::{GpuBuffer, GradSlice};
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, QualifiedPhysicalLaunch,
     presize_physical_qualification_suite, qualify_physical_launch,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ModuleKind, PolicyDtype, ResolvedGemmOp, digest_hex,
-};
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{ModuleKind, PolicyDtype, ResolvedGemmOp, digest_hex};
 use sha2::{Digest as _, Sha256};
 
 const WINDOWS_PER_ORDER: usize = 101;

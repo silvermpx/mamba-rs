@@ -15,15 +15,15 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::blas::{
+use mamba_rs::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dw_grad_typed,
     gpu_gemm_bi_backward_dx_raw, gpu_gemm_ex_backward_dx_typed,
 };
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{grid_1d, grid_norm};
 
 fn deterministic_random(n: usize, seed: u64) -> Vec<f32> {
     // Uniform [-0.5, 0.5] for non-rmsnorm tests.

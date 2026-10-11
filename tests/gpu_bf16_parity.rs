@@ -8,7 +8,7 @@
 #![cfg(all(feature = "hf", feature = "cuda"))]
 
 #[cfg(feature = "cuda")]
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::path::PathBuf;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
@@ -79,7 +79,7 @@ fn test_gpu_lm_bf16_matches_f32_130m() {
             return;
         }
     };
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{GpuOptions, MambaGpuLM};
 
@@ -147,7 +147,7 @@ fn test_gpu_lm_bf16_matches_f32_130m() {
 #[test]
 #[ignore]
 fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{GpuOptions, MambaGpuLM};
 
@@ -215,7 +215,7 @@ fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
 /// new mixed native code paths.
 #[test]
 fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
-    use mamba_rs::gpu::inference::MambaGpuBackbone;
+    use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
     use mamba_rs::{MambaBackbone, MambaConfig};
 
     let cfg = MambaConfig::default();
@@ -233,7 +233,7 @@ fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
     .unwrap();
 
     // Verify temporal_dtype reports F32 for F32 engine.
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::gpu::dtype::WeightDtype;
     assert_eq!(
         gpu_bb.dtype(),
         WeightDtype::F32,

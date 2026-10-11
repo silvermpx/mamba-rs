@@ -219,7 +219,7 @@ pub fn parallel_mamba3_backward(
     let n_threads = rayon::current_num_threads().min(batch_size);
 
     // Reusable per-thread gradient slots (zero-allocation rule) — see the
-    // M1 counterpart in mamba_ssm/cpu/parallel.rs for rationale.
+    // M1 counterpart in mamba1/cpu/parallel.rs for rationale.
     let mut pool_guard = M3_GRAD_SLOT_POOL.lock().unwrap();
     let rebuild = match pool_guard.as_ref() {
         Some(p) => p.dims != *dims || p.input_dim != input_dim || p.slots.len() < n_threads,

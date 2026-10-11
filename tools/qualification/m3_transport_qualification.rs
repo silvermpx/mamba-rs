@@ -5,8 +5,8 @@
 #[path = "support/m3_transport/raw.rs"]
 mod raw;
 
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
 
 #[test]

@@ -1,6 +1,11 @@
 //! Configuration shared by the model families: the family itself and the
 //! scan mode of the GPU recurrence.
 
+// Mamba-1's configuration lived here up to 0.7. Code written then still
+// finds it here for one release, its home is `mamba1::config`.
+#[doc(hidden)]
+pub use crate::mamba1::config::MambaConfig;
+
 /// The model families this crate runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -35,7 +40,7 @@ pub enum ScanMode {
 impl ScanMode {
     /// Auto threshold: sequential at or below, parallel above. Single source
     /// of truth for the GPU dispatch (re-exported as
-    /// `mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD`).
+    /// `mamba1::gpu::forward::PARALLEL_SCAN_THRESHOLD`).
     pub const PARALLEL_SCAN_THRESHOLD: usize = 64;
 
     /// Resolve the effective scan choice for a sequence length and state dim.

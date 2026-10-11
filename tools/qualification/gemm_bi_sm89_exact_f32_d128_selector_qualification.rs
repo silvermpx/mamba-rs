@@ -1,4 +1,4 @@
-use mamba_rs::mamba_ssm::gpu::GemmMode;
+use mamba_rs::gpu::GemmMode;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QualificationPhase {
     ModuleAbiResources,
@@ -109,17 +109,17 @@ mod live {
     use super::*;
     use crate::full_mantissa::finite_full_mantissa_values;
     use cudarc::driver::{LaunchConfig, PushKernelArg};
-    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_backward_dw_grad;
-    use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, GradSlice};
-    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    use mamba_rs::gpu::blas::gpu_gemm_bi_backward_dw_grad;
+    use mamba_rs::gpu::buffers::{GpuBuffer, GradSlice};
+    use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::gemm_bi_triad::{
         D128_IN_SYMBOL, D128_OUT_SYMBOL, PhysicalQualificationF32Epilogue,
         PhysicalQualificationRequest, PhysicalQualificationRoute, QualifiedPhysicalLaunch,
         SM89_EXACT_F32_D128_KERNEL_SPECS, Sm89ExactF32D128Route, qualify_physical_launch,
     };
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::kernel_identity::{
         ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp, ResolvedNumericContract,
         ResolvedOutputOwnership,
     };

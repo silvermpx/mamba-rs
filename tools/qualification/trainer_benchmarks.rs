@@ -28,12 +28,12 @@ mod stamp;
 #[path = "../../tests/common/timed.rs"]
 mod timed;
 
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
+use mamba_rs::gpu::GpuOptions;
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::dtype::WeightDtype;
 
 /// Apply `MAMBA_RS_BENCH_TIER` to a freshly built context; unset means the
 /// deterministic mode as shipped.
@@ -75,8 +75,8 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 // LM workload — Mamba-1 at 130m-ish shape, all 3 dtypes
 // ═══════════════════════════════════════════════════════════════════════
 
-fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::mamba_ssm::MambaConfig {
-    mamba_rs::mamba_ssm::MambaConfig {
+fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::mamba1::MambaConfig {
+    mamba_rs::mamba1::MambaConfig {
         d_model: 768,
         n_layers: 24,
         d_state: 16,
@@ -102,13 +102,14 @@ fn run_lm(
 
 fn run_lm_shape(
     dtype: WeightDtype,
-    cfg: mamba_rs::mamba_ssm::MambaConfig,
+    cfg: mamba_rs::mamba1::MambaConfig,
     batch: usize,
     seq_len: usize,
     suffix: &str,
 ) -> Result<(), String> {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let input_dim = cfg.d_model;
     let n = batch * seq_len * input_dim;
@@ -318,7 +319,7 @@ fn bench_lm_train_production_shape() {
         Ok("par") => mamba_rs::config::ScanMode::Parallel,
         _ => mamba_rs::config::ScanMode::Auto,
     };
-    let cfg = mamba_rs::mamba_ssm::MambaConfig {
+    let cfg = mamba_rs::mamba1::MambaConfig {
         d_model: dm,
         n_layers: layers,
         d_state: 16,
@@ -338,8 +339,9 @@ fn bench_lm_train_production_shape() {
 #[test]
 #[ignore]
 fn bench_production_split_fwd_bwd() {
-    use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
+    use mamba_rs::gpu::train::{BackwardOpts, TrainSessionCfg};
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
     let get = |k: &str, d: usize| -> usize {
         std::env::var(k)
             .ok()
@@ -356,7 +358,7 @@ fn bench_production_split_fwd_bwd() {
         Ok("f16") => WeightDtype::F16,
         _ => WeightDtype::Bf16,
     };
-    let cfg = mamba_rs::mamba_ssm::MambaConfig {
+    let cfg = mamba_rs::mamba1::MambaConfig {
         d_model: dm,
         n_layers: layers,
         d_state: 16,
@@ -575,10 +577,10 @@ fn bench_rl_train_f16() {
 #[ignore]
 fn bench_scan_kernels_isolated() {
     use cudarc::driver::PushKernelArg;
-    use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd};
+    use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd};
 
     let (b, t, di, ds) = (8usize, 1300usize, 768usize, 16usize);
     let device = GpuDevice::new(0).unwrap();
@@ -665,7 +667,7 @@ fn bench_scan_kernels_isolated() {
     };
     let fwd_tape = GpuBuffer::zeros(
         &ctx.stream,
-        mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+        mamba_rs::gpu::launch::scan_tape_len(b, t, di, ds),
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -735,11 +737,7 @@ fn bench_scan_kernels_isolated() {
     let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
     let d_a_log_local = GpuBuffer::zeros(
         &ctx.stream,
-        b * t
-            .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
-            .max(1)
-            * di
-            * ds,
+        b * t.div_ceil(mamba_rs::gpu::launch::SCAN_CHUNK).max(1) * di * ds,
     )
     .unwrap();
 
@@ -788,7 +786,7 @@ fn bench_scan_kernels_isolated() {
     // variant too so the ledger reflects the real trainer path.
     let tape = GpuBuffer::zeros(
         &ctx.stream,
-        mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+        mamba_rs::gpu::launch::scan_tape_len(b, t, di, ds),
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -860,7 +858,7 @@ fn bench_scan_kernels_isolated() {
     // the slim tape. The pre-0.6.4 ledger timed only the ungrouped
     // kernel, which the trainer launches solely when d_inner is not
     // divisible by the d-group - never at production shapes.
-    use mamba_rs::mamba_ssm::gpu::launch::{SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold};
+    use mamba_rs::gpu::launch::{SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold};
     let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     ctx.stream.synchronize().unwrap();
@@ -937,10 +935,10 @@ fn bench_scan_kernels_isolated() {
 #[ignore]
 fn bench_colsum_kernels_isolated() {
     use cudarc::driver::PushKernelArg;
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::launch::{grid_col_tree_reduce, grid_colsum};
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::launch::{grid_col_tree_reduce, grid_colsum};
 
     let bt = 8usize * 1300;
     let device = GpuDevice::new(0).unwrap();
@@ -990,10 +988,10 @@ fn bench_colsum_kernels_isolated() {
 #[ignore]
 fn bench_bwd_kernels_isolated() {
     use cudarc::driver::PushKernelArg;
-    use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::launch::{grid_1d, grid_conv_tiled};
+    use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::launch::{grid_1d, grid_conv_tiled};
 
     let (b, t, di, ds, dc) = (8usize, 1300usize, 768usize, 16usize, 4usize);
     let bt = b * t;
@@ -1102,7 +1100,7 @@ fn bench_bwd_kernels_isolated() {
     // fused dB/dC reducer (tmajor) - BOTH depths: production reduces the
     // FOLD output (di/G rows); the full-depth arm stays as the labelled
     // legacy reference (the pre-0.6.4 ledger row was this one only).
-    use mamba_rs::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP;
+    use mamba_rs::gpu::launch::SCAN_BWD_DGROUP;
     let reduce_di = (di / SCAN_BWD_DGROUP) as i32;
     let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
     let d_c_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
@@ -1155,12 +1153,10 @@ fn bench_bwd_kernels_isolated() {
 #[test]
 #[ignore]
 fn bench_bwd_gemms_isolated() {
-    use mamba_rs::mamba_ssm::gpu::blas::{
-        TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed,
-    };
-    use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::gpu::blas::{TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed};
+    use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+    use mamba_rs::gpu::context::GpuCtx;
+    use mamba_rs::gpu::device::GpuDevice;
 
     let device = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();

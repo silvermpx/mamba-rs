@@ -5,9 +5,9 @@
 //! give the whole window); and the half and tf32 storage lanes.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::cpu::prefill::PrefillMode;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuEngine;
 use mamba_rs::mamba3_mimo::{
     Mamba3MimoConfig, Mamba3MimoPrefillScratch, Mamba3MimoState, Mamba3MimoStepScratch,

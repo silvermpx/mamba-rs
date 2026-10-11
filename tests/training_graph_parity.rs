@@ -10,28 +10,29 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::MambaConfig;
-use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::GpuOptions;
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
-use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::forward::{GpuMambaDims, GpuRecurrentState};
-use mamba_rs::mamba_ssm::gpu::forward_mixed::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
+use mamba_rs::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::kernel_identity::PreparedGemmCaptureManifest;
+use mamba_rs::gpu::train::TrainSessionCfg;
+use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
+use mamba_rs::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
+use mamba_rs::mamba1::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
-use mamba_rs::mamba_ssm::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
-use mamba_rs::mamba_ssm::gpu::training_graph::{
+use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+use mamba_rs::mamba1::gpu::training_graph::{
     GpuMambaTrainingStepGraph, MambaMixedCapture, MambaMixedReplay,
 };
-use mamba_rs::mamba_ssm::gpu::weights::GpuMambaGrads;
-use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
+use mamba_rs::mamba1::gpu::weights::GpuMambaGrads;
+use mamba_rs::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 fn tiny_cfg() -> MambaConfig {
     MambaConfig {
@@ -374,13 +375,13 @@ fn recompute_a_neg_eager_test(ctx: &GpuCtx, setup: &mut Setup) {
         b1.arg(&dst_a);
         b1.arg(&src);
         b1.arg(&n_i32);
-        unsafe { b1.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(per_layer)) }.unwrap();
+        unsafe { b1.launch(mamba_rs::gpu::launch::grid_1d(per_layer)) }.unwrap();
         let dst_s = setup.state.a_neg_all.inner_at(li * per_layer);
         let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
         b2.arg(&dst_s);
         b2.arg(&src);
         b2.arg(&n_i32);
-        unsafe { b2.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(per_layer)) }.unwrap();
+        unsafe { b2.launch(mamba_rs::gpu::launch::grid_1d(per_layer)) }.unwrap();
     }
 }
 

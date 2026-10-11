@@ -4,7 +4,7 @@
 //! instead of a literal, so a reading on a new board comes off that
 //! board's SASS rather than PTX JIT-compiled for another one.
 
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+use mamba_rs::gpu::device::GpuDevice;
 
 /// NVRTC arch of device 0 — the cure for the hardcoded "sm_89" that had
 /// every M3 isolated number on the 5090 read off JIT'd sm_89 PTX instead

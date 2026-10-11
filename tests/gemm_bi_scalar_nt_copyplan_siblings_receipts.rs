@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-const DISPATCH: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs");
+const DISPATCH: &str = include_str!("../src/gpu/gemm_bi_triad/dispatch.rs");
 const MINTED: &str = include_str!("fixtures/ada_f32_nt_copyplan_mint_identities.jsonl");
 const TOOLKITS: [(i32, i32); 3] = [(12, 8), (13, 0), (13, 2)];
 const FIELDS: [&str; 5] = [

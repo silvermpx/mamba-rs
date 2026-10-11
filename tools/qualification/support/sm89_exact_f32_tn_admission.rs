@@ -5,16 +5,14 @@
 //! file deliberately compiles no CUDA source and does not participate in AUTO.
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
-use mamba_rs::mamba_ssm::gpu::{
-    blas::gpu_gemm_bi_backward_dw_grad,
-    buffers::{GpuBuffer, GradSlice},
-    context::GpuCtx,
-    gemm_bi_triad::{
-        D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL, Sm89ExactF32DualChunkParams,
-        Sm89ExactF32TnRoute,
-    },
-    graph_capture::capture_into_graph,
+use mamba_rs::gpu::blas::gpu_gemm_bi_backward_dw_grad;
+use mamba_rs::gpu::buffers::{GpuBuffer, GradSlice};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::gemm_bi_triad::{
+    D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL, Sm89ExactF32DualChunkParams,
+    Sm89ExactF32TnRoute,
 };
+use mamba_rs::gpu::graph_capture::capture_into_graph;
 
 const GUARD_ELEMENTS: usize = 64;
 const GUARD_BITS: u32 = 0x7fc0_3189;

@@ -1248,8 +1248,8 @@ fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
 fn source_sha() -> Result<String, String> {
     let mut digest = Sha256::new();
     for path in [
-        "src/mamba_ssm/gpu/gemm_bi_inference.rs",
-        "src/mamba_ssm/gpu/kernel_identity.rs",
+        "src/gpu/gemm_bi_inference.rs",
+        "src/gpu/kernel_identity.rs",
         "tests/gemm_bi_inference_performance.rs",
         "tests/support/inference_sm89_toolkit_admission.rs",
     ] {

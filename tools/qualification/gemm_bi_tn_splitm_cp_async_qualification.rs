@@ -174,10 +174,10 @@ fn experimental_export_is_absent_from_production() {
     ] {
         assert!(!SCALAR_SOURCE.contains(forbidden));
         for source in [
-            include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs"),
-            include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs"),
-            include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs"),
-            include_str!("../../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs"),
+            include_str!("../../src/gpu/gemm_bi_triad/contract.rs"),
+            include_str!("../../src/gpu/gemm_bi_triad/dispatch.rs"),
+            include_str!("../../src/gpu/gemm_bi_triad/launch.rs"),
+            include_str!("../../src/gpu/gemm_bi_triad/modules.rs"),
         ] {
             assert!(!source.contains(forbidden));
         }
@@ -247,7 +247,7 @@ fn production_compiles_for_the_portable_compute80_floor() {
             "-DNDEBUG".to_owned(),
             "-DGEMM_BI_GROUP_M=8".to_owned(),
         ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
     let image = cudarc::nvrtc::compile_ptx_with_opts(compose_cuda_source(), options)
@@ -266,9 +266,9 @@ mod cuda_qualification {
     use cudarc::driver::{
         CudaFunction, CudaGraph, CudaModule, CudaStream, LaunchConfig, PushKernelArg,
     };
-    use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+    use mamba_rs::gpu::buffers::GpuBuffer;
+    use mamba_rs::gpu::device::GpuDevice;
+    use mamba_rs::gpu::graph_capture::capture_into_graph;
 
     use super::{
         ALIGNED_PARTIAL_SYMBOL, CASES, Case, PARTIAL_SYMBOL, REDUCER_SYMBOL, compose_cuda_source,
@@ -413,7 +413,7 @@ mod cuda_qualification {
                 "-DNDEBUG".to_owned(),
                 format!("-DGEMM_BI_GROUP_M={group_m}"),
             ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
         cudarc::nvrtc::compile_ptx_with_opts(compose_cuda_source(), options)

@@ -1,37 +1,37 @@
 //! High-level Mamba-3 training API.
 //!
-//! M3 analogue of [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer`]. Owns
+//! M3 analogue of [`crate::mamba1::gpu::trainer::MambaGpuTrainer`]. Owns
 //! mixed-precision weights + grads + Adam + acts + scratch + state + graph.
 //!
 //! Supports f32, bf16, and f16 (with dynamic loss scaler), including CUDA
 //! Graph capture for all three. See the M1 trainer for the
 //! precision-support rationale.
 
-use crate::mamba_ssm::gpu::options::GpuOptions;
+use crate::gpu::options::GpuOptions;
 use cudarc::driver::PushKernelArg;
 
-use crate::mamba_ssm::gpu::adamw::{
+use crate::gpu::adamw::{
     AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, build_multi_plan, m3_specs, m3_specs_mixed,
     step_multi,
 };
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
-use crate::mamba_ssm::gpu::context::{GemmMode, GemmRole, GpuCtx};
-use crate::mamba_ssm::gpu::device::GpuDevice;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::mamba_ssm::gpu::grad_clip::{
+use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::device::GpuDevice;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::gpu::grad_clip::{
     GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, scale_grads,
 };
-use crate::mamba_ssm::gpu::graph_capture::{
+use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::mamba_ssm::gpu::loss_scaler::{
+use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
-use crate::mamba_ssm::gpu::trainer::StepMetrics;
-pub use crate::mamba_ssm::gpu::trainer::{BackwardMetrics, BackwardOpts, TrainSessionCfg};
+use crate::gpu::train::StepMetrics;
+pub use crate::gpu::train::{BackwardMetrics, BackwardOpts, TrainSessionCfg};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::backward::gpu_backward_mamba3_backbone;
 use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
@@ -172,7 +172,7 @@ impl Mamba3GpuTrainer {
             &cfg,
             crate::mamba3_siso::route::RoutePurpose::Training,
         )?;
-        crate::mamba_ssm::gpu::launch::validate_kernel_arg_capacity(
+        crate::gpu::launch::validate_kernel_arg_capacity(
             session.batch,
             session.seq_len,
             cfg.d_inner(),
@@ -304,7 +304,7 @@ impl Mamba3GpuTrainer {
     /// update hyperparameters) for a bit-continuous resume. Checkpoints
     /// that carry only weights silently re-warm Adam from zero on load —
     /// the resumed run then provably diverges from the unbroken one.
-    pub fn optimizer_state(&self) -> Result<crate::mamba_ssm::gpu::adamw::AdamWStateBlob, String> {
+    pub fn optimizer_state(&self) -> Result<crate::gpu::adamw::AdamWStateBlob, String> {
         match &self.inner {
             Trainer3Inner::F32(t) => t.adam.export_state(&t.ctx.stream),
             Trainer3Inner::Mixed(t) => t.adam.export_state(&t.ctx.stream),
@@ -319,7 +319,7 @@ impl Mamba3GpuTrainer {
     /// rate is not part of the blob; re-apply the schedule afterwards.
     pub fn load_optimizer_state(
         &mut self,
-        blob: &crate::mamba_ssm::gpu::adamw::AdamWStateBlob,
+        blob: &crate::gpu::adamw::AdamWStateBlob,
     ) -> Result<(), String> {
         if self.has_graph() {
             return Err(
@@ -417,7 +417,7 @@ impl Mamba3GpuTrainer {
     /// per-tensor views and CUDA graphs retain its device address.
     ///
     /// ```compile_fail
-    /// use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+    /// use mamba_rs::gpu::buffers::GpuBuffer;
     /// use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
     /// fn replace_arena(trainer: &mut Mamba3GpuTrainer, replacement: GpuBuffer) {
     ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
@@ -655,7 +655,7 @@ impl Mamba3GpuTrainer {
     }
 
     /// Eager forward half of the split step — M3 mirror of
-    /// [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer::forward`]: runs the
+    /// [`crate::mamba1::gpu::trainer::MambaGpuTrainer::forward`]: runs the
     /// training forward and writes the FULL `batch * seq_len * d_model`
     /// POST-norm_f temporal output into caller-owned `temporal_out` (f32 on
     /// all dtypes). Stream-synchronized on return. Advances the recurrent
@@ -669,7 +669,7 @@ impl Mamba3GpuTrainer {
     }
 
     /// Backward + optimizer half of the split step — M3 mirror of
-    /// [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer::backward_step`].
+    /// [`crate::mamba1::gpu::trainer::MambaGpuTrainer::backward_step`].
     /// `d_temporal` is the gradient w.r.t. the IMMEDIATELY PRECEDING
     /// [`Self::forward`]'s temporal output. Errs when no forward is pending.
     pub fn backward_step(
@@ -776,7 +776,7 @@ pub(crate) struct Mamba3TrainerMixed {
     prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
 
     /// Route that produced the saved split-forward activations.
-    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    split_forward_route: Option<crate::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
     /// from `accumulate_only` backward calls — the next backward must NOT
     /// zero the arena.
@@ -805,7 +805,7 @@ pub(crate) struct Mamba3TrainerMixed {
     captured_f16_dt_scaled_ptr: u64,
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
-    captured_f16_gemm_route: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_f16_gemm_route: crate::gpu::context::GemmRoute,
 }
 
 impl Drop for Mamba3TrainerMixed {
@@ -852,7 +852,7 @@ impl Mamba3TrainerMixed {
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),
             arch,
-            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+            crate::gpu::kernels::state_capacity(cfg.d_state)?,
         )?;
 
         let weights =
@@ -1170,7 +1170,7 @@ impl Mamba3TrainerMixed {
         Ok(())
     }
 
-    /// f16 step. See M1 [`crate::mamba_ssm::gpu::trainer::MambaTrainerMixed::step_f16`]
+    /// f16 step. See M1 [`crate::mamba1::gpu::trainer::MambaTrainerMixed::step_f16`]
     /// for the full protocol; this is the M3 mirror.
     fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
@@ -1188,7 +1188,7 @@ impl Mamba3TrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(crate::mamba_ssm::gpu::launch::grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (m3 f16): {e:?}"))?;
         }
 
@@ -1797,7 +1797,7 @@ impl Mamba3TrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(crate::mamba_ssm::gpu::launch::grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (m3 f16 split): {e:?}"))?;
         }
         if let Some(ref mut u) = self.unscale_factor {
@@ -1973,7 +1973,7 @@ pub(crate) struct Mamba3TrainerF32 {
     prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     has_gemm_work: bool,
     /// Route that produced the saved split-forward activations.
-    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    split_forward_route: Option<crate::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
     /// from `accumulate_only` backward calls.
     grads_dirty: bool,
@@ -2016,7 +2016,7 @@ impl Mamba3TrainerF32 {
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),
             arch,
-            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+            crate::gpu::kernels::state_capacity(cfg.d_state)?,
         )?;
 
         let weights = GpuMamba3Weights::from_cpu(&ctx.stream, cpu_weights, &cfg, input_dim)?;
@@ -2251,7 +2251,7 @@ impl Mamba3TrainerF32 {
             &self.ctx,
             self.m3k
                 .adamw_step_multi
-                .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                .get(crate::gpu::dtype::WeightDtype::F32),
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),

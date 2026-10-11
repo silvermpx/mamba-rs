@@ -15,12 +15,12 @@ use std::sync::{Mutex, OnceLock};
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
 use gpu_quiet::QuietGpu;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy};
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy};
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::gemm_bi_triad::{
     F32TriadShape, PhysicalPaddedNnLayout, PhysicalQualificationF32Epilogue,
     PhysicalQualificationOffset, PhysicalQualificationRequest, PhysicalQualificationRoute,
     QualifiedGuardValidation, QualifiedPhysicalLaunch, QualifiedPhysicalLaunchEvidence,
@@ -29,13 +29,13 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     qualify_physical_launch, tf32_route_specs,
 };
 #[cfg(feature = "cuda-cublaslt-qualification")]
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+use mamba_rs::gpu::gemm_bi_triad::{
     Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute,
     Sm120PreparedLaunch, Sm120Schedule, Sm120Shape, Sm120Stages, Sm120Tile,
     launch_sm120_tma_prepared, prepare_sm120_tensor_maps, prepare_sm120_tma_forced,
 };
-use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+use mamba_rs::gpu::graph_capture::capture_into_graph;
+use mamba_rs::gpu::kernel_identity::{
     ArtifactIdentity, FramedSha256, GemmRouteIdentity, ModuleKind, PhysicalLaunchKind, PolicyDtype,
     ResolvedGemmOp, digest_hex,
 };

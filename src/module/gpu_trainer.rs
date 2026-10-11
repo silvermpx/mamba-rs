@@ -5,9 +5,10 @@
 //! weights come back through each trainer's `snapshot_master`, typed by its
 //! family.
 
-use crate::mamba_ssm::gpu::context::GpuCtx;
-use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::trainer::{BackwardMetrics, BackwardOpts, MambaGpuTrainer, StepMetrics};
+use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
+use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics};
+use crate::mamba1::gpu::trainer::MambaGpuTrainer;
 use crate::mamba2::gpu::Mamba2GpuTrainer;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
 use crate::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;

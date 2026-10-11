@@ -6,10 +6,10 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
-use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan;
+use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::launch::grid_parallel_scan;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -75,7 +75,7 @@ fn fused_softplus_fwd_matches_cpu() {
     let slim_mode = std::env::var("A9_SLIM").is_ok();
     let tape_buf = GpuBuffer::zeros(
         &ctx.stream,
-        mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+        mamba_rs::gpu::launch::scan_tape_len(b, t, di, ds),
     )
     .unwrap();
     let tape = if slim_mode {
