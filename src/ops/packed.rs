@@ -20,9 +20,13 @@ use super::blas::matvec_forward;
 pub const PANEL: usize = 64;
 
 /// Above this many weights a lone row splits its panels across the rayon
-/// pool: below it one core's share of the bandwidth finishes before the
-/// pool would wake.
-const PARALLEL_FLOATS: usize = 1 << 21;
+/// pool. A decode step does serial work between its projections, long
+/// enough for the pool's threads to park, so every split pays for waking
+/// them again: on a 6P+12E M5 Pro a mamba-130m in_proj (2.4M weights) split
+/// across the pool cost about 65 us a call more than reading it on one
+/// core, while splits of 8M weights and more still win by a wide margin.
+/// The isolated GEMV bench keeps the pool hot and does not show this.
+const PARALLEL_FLOATS: usize = 1 << 22;
 
 /// A weight `W[n_in, n_out]` in panels of [`PANEL`] columns.
 #[derive(Clone, Debug)]
