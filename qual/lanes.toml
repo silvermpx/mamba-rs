@@ -125,6 +125,7 @@
 "grad_region_clip" = "gate"
 "graph_capture_panic" = "gate"
 "hf_batch_parity" = "record"
+"hf_m1_checkpoint_parity" = "record"
 "hf_m2_checkpoint_parity" = "record"
 "hf_m3_checkpoint_parity" = "record"
 "hf_m3_mimo_checkpoint_parity" = "record"

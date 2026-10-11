@@ -438,6 +438,11 @@ path = "tests/graph_capture_panic.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "hf_m1_checkpoint_parity"
+path = "tests/hf_m1_checkpoint_parity.rs"
+required-features = ["hf"]
+
+[[test]]
 name = "hf_m2_checkpoint_parity"
 path = "tests/hf_m2_checkpoint_parity.rs"
 required-features = ["hf"]
