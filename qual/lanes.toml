@@ -39,6 +39,7 @@
 "ddp_reduction_tree" = "host"
 "conv_tiled_hash" = "contract"
 "decode_digest" = "contract"
+"gemm_modes_every_family" = "gate"
 "identity_mint" = "qualification"
 "m1_prefill_digest" = "contract"
 "m3_decode_digest" = "contract"

@@ -394,6 +394,11 @@ path = "tests/gpu_trainer_api.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "gemm_modes_every_family"
+path = "tests/gemm_modes_every_family.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_tied_f32_output"
 path = "tests/gemm_tied_f32_output.rs"
 required-features = ["cuda"]
