@@ -326,8 +326,9 @@ pub fn chunk_state_geom(hd: usize, ds: usize) -> (usize, usize) {
 
 /// The fused dx and token sums' state indices per staging pass and shared
 /// memory: the staging (the B or C rows and the dS or H rows of `nk`
-/// indices, later the three [64][P + 1] token rows), the weights [64][64],
-/// the dy rows [64][P rounded up to 4] and the acs and dt of the chunk. The
+/// indices, later the three `[64][P + 1]` token rows), the weights
+/// `[64][64]`, the dy rows `[64][P rounded up to 4]` and the acs and dt of
+/// the chunk. The
 /// largest pass that fits `cap` (all of N, then halves); `None` past 256
 /// channels (a block past 1024 threads) or when even one index does not fit.
 pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize) -> Option<(usize, usize)> {
@@ -349,7 +350,7 @@ pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize) -> Option<(usize, usize)>
 
 /// The tiled dB and dC's shared memory for a head of `hd` channels: the
 /// head's x or dy rows transposed (padded to 68), its dS or H columns of a
-/// 32-index tile, the group's dCB [64][64], the C or B rows of the tile and
+/// 32-index tile, the group's dCB `[64][64]`, the C or B rows of the tile and
 /// the rows' scales.
 pub fn bc_tiles_smem_bytes(hd: usize) -> usize {
     ((CHUNK + 4) * hd + 32 * hd + CHUNK * CHUNK + CHUNK * 32 + CHUNK) * 4

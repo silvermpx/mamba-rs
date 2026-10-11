@@ -14,7 +14,7 @@
 //!
 //! ## Usage
 //! ```ignore
-//! let session = TrainSessionCfg::new(input_dim, 8, 128); // batch 8, 128 tokens
+//! let session = TrainSessionCfg::new(input_dim, 8, 128); // 8 sequences of 128 tokens
 //! let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
 //! let mut trainer = MambaGpuTrainer::new(&cpu_weights, cfg, session, opts)?;
 //!
@@ -300,7 +300,7 @@ impl MambaGpuTrainer {
     /// Access the trainer's GPU execution context.
     ///
     /// Storage is reported separately by [`Self::dtype`]; inspect execution
-    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::bi_gemm_family`]. A captured
+    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::gemm_route`]. A captured
     /// graph retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.inner {

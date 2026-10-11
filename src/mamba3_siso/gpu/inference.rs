@@ -522,7 +522,7 @@ impl Mamba3GpuEngine {
     /// Access the context that owns this engine's GEMM mode and family.
     ///
     /// Storage remains f32; inspect execution with [`GpuCtx::gemm_mode`] and
-    /// [`GpuCtx::bi_gemm_family`] before graph capture.
+    /// [`GpuCtx::gemm_route`] before graph capture.
     pub fn ctx(&self) -> &GpuCtx {
         &self.ctx
     }
@@ -1173,9 +1173,8 @@ impl Mamba3GpuEngineMixed {
     /// CUDA execution context shared by the retained f32 engine and mixed path.
     ///
     /// Storage precision is available separately through [`Self::bulk_dtype`];
-    /// inspect GEMM execution with [`GpuCtx::gemm_mode`] and the dormant or
-    /// active deterministic family with [`GpuCtx::bi_gemm_family`]. Graph
-    /// capture retains this complete route.
+    /// inspect GEMM execution with [`GpuCtx::gemm_mode`] and the whole route
+    /// with [`GpuCtx::gemm_route`]. Graph capture retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         &self.engine.ctx
     }
@@ -2430,7 +2429,7 @@ impl Mamba3GpuBackbone {
     /// The selected storage dtype is available through [`Self::dtype`]; GEMM
     /// mode and deterministic family remain properties of this one context.
     /// Inspect them with [`GpuCtx::gemm_mode`] and
-    /// [`GpuCtx::bi_gemm_family`]; graph capture retains the complete route.
+    /// [`GpuCtx::gemm_route`]. Graph capture retains the complete route.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.engine {
             M3BackboneEngine::F32(e) => &e.ctx,

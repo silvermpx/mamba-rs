@@ -256,7 +256,7 @@ impl Mamba3GpuTrainer {
     /// Access the trainer's GPU execution context.
     ///
     /// Storage is reported separately by [`Self::dtype`]; inspect execution
-    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::bi_gemm_family`]. A captured
+    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::gemm_route`]. A captured
     /// graph retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.inner {

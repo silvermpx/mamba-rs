@@ -331,7 +331,7 @@ impl DistContext {
                 let gpu = crate::gpu::device::GpuDevice::new(*device)
                     .map_err(|e| DistError::Transport(format!("host reduce device: {e}")))?;
                 let stream = gpu.context().default_stream();
-                let mut buf = crate::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
+                let buf = crate::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
                     .map_err(|e| DistError::Transport(format!("host reduce stage: {e}")))?;
                 let sync = |tag: &str| {
                     stream
@@ -342,7 +342,7 @@ impl DistContext {
                     ReduceContract::FixedOrder => {
                         let st = self.fixed_order_state(*device)?;
                         c.with_watchdog("host-fixed-order", *barrier_timeout, || {
-                            super::reducer::reduce_sum_fixed_order_nccl(c, st, &mut buf, &stream)?;
+                            super::reducer::reduce_sum_fixed_order_nccl(c, st, &buf, &stream)?;
                             sync("host fixed-order reduce")
                         })?;
                     }

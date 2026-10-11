@@ -1,6 +1,6 @@
 //! Mamba-2 training on the GPU, in f32, tf32, bf16 or f16.
 //!
-//! The forward runs the prefill's launches (the shared [`M2Exec`] pieces)
+//! The forward runs the prefill's launches (the shared `M2Exec` pieces)
 //! and keeps, per layer, what the backward reads: the layer's input rows
 //! and norm, the normed rows, the projection, the conv output and the conv
 //! state the window started from, dt and its chunk cumsum, the C.B

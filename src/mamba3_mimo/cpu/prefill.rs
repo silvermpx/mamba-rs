@@ -3,7 +3,7 @@
 //!
 //! The projections run as GEMMs over every row of the window and the heads
 //! run in parallel, each walking the window token by token with the same
-//! [`mimo_head_step`] the decode runs. The BLAS-free GEMM adds every output
+//! `mimo_head_step` the decode runs. The BLAS-free GEMM adds every output
 //! in ascending k whatever the number of rows, so in the default build the
 //! prefill gives the decode chain's bits, for either [`PrefillMode`].
 

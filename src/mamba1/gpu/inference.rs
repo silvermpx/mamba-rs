@@ -1443,7 +1443,7 @@ impl MambaGpuEngine {
     /// Access the context that owns this engine's GEMM mode and family.
     ///
     /// Storage remains f32; inspect execution with [`GpuCtx::gemm_mode`] and
-    /// [`GpuCtx::bi_gemm_family`] before graph capture.
+    /// [`GpuCtx::gemm_route`] before graph capture.
     pub fn ctx(&self) -> &GpuCtx {
         &self.ctx
     }
@@ -2322,7 +2322,7 @@ impl MambaGpuEngineMixed {
     /// Access the retained engine context.
     ///
     /// Storage is reported by [`Self::bulk_dtype`]; inspect execution with
-    /// [`GpuCtx::gemm_mode`] and [`GpuCtx::bi_gemm_family`] before graph capture.
+    /// [`GpuCtx::gemm_mode`] and [`GpuCtx::gemm_route`] before graph capture.
     pub fn ctx(&self) -> &GpuCtx {
         &self.engine.ctx
     }
@@ -2846,7 +2846,7 @@ impl MambaGpuBackbone {
     /// Access the backbone's GPU execution context.
     ///
     /// Storage is reported separately by [`Self::dtype`]; inspect execution
-    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::bi_gemm_family`]. A captured
+    /// with [`GpuCtx::gemm_mode`] and [`GpuCtx::gemm_route`]. A captured
     /// graph retains this complete route.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.engine {

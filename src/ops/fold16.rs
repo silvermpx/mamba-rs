@@ -25,7 +25,7 @@ pub fn fold16_tree(l: &[f32; FOLD16]) -> f32 {
     t2[0] + t2[1]
 }
 
-/// sum_i a[i] * b[i] in the sixteen-lane order.
+/// `sum_i a[i] * b[i]` in the sixteen-lane order.
 #[inline]
 pub fn dot_fold16(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; FOLD16];
@@ -42,7 +42,7 @@ pub fn dot_fold16(a: &[f32], b: &[f32]) -> f32 {
     fold16_tree(&acc)
 }
 
-/// sum_i x[i]^2 in the sixteen-lane order.
+/// `sum_i x[i]^2` in the sixteen-lane order.
 #[inline]
 pub fn sum_sq_fold16(x: &[f32]) -> f32 {
     dot_fold16(x, x)
