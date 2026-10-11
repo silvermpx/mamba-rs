@@ -11,7 +11,7 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
-use mamba_rs::mamba3_siso::gpu::inference::{Mamba3GpuInferenceEngine, Mamba3GpuInferenceMixed};
+use mamba_rs::mamba3_siso::gpu::inference::{Mamba3GpuEngine, Mamba3GpuEngineMixed};
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::mamba3_siso::{Mamba3StepScratch, mamba3_step};
@@ -145,7 +145,7 @@ fn m3_gpu_decode_with_mlp_matches_cpu() {
         let (cfg0, w0) = without_mlp(&cfg, &w);
         let bare = cpu_decode(&cfg0, &w0, &inputs);
 
-        let engine = Mamba3GpuInferenceEngine::new(&device, &w, cfg, d, 1).unwrap();
+        let engine = Mamba3GpuEngine::new(&device, &w, cfg, d, 1).unwrap();
         let mut state = engine.alloc_state().unwrap();
         let mut scratch = engine.alloc_scratch().unwrap();
         let mut out = vec![0f32; d];
@@ -160,8 +160,7 @@ fn m3_gpu_decode_with_mlp_matches_cpu() {
             );
         }
 
-        let mixed =
-            Mamba3GpuInferenceMixed::new(&device, &w, cfg, d, 1, WeightDtype::Bf16).unwrap();
+        let mixed = Mamba3GpuEngineMixed::new(&device, &w, cfg, d, 1, WeightDtype::Bf16).unwrap();
         let mut state = mixed.alloc_state().unwrap();
         let mut scratch = mixed.alloc_mixed_scratch().unwrap();
         for (t, x) in inputs.iter().enumerate() {
@@ -227,7 +226,7 @@ fn m3_gpu_prefill_with_mlp_matches_cpu() {
         let (want_last, want_dec) = cpu(&cfg, &w);
         let (bare_last, bare_dec) = cpu(&cfg0, &w0);
 
-        let engine = Mamba3GpuInferenceEngine::new(&device, &w, cfg, d, 1).unwrap();
+        let engine = Mamba3GpuEngine::new(&device, &w, cfg, d, 1).unwrap();
         let stream = &engine.ctx().stream;
         let mut prefill = engine.alloc_prefill(seq_len).unwrap();
         let mut state = engine.alloc_state().unwrap();
@@ -266,8 +265,7 @@ fn m3_gpu_prefill_with_mlp_matches_cpu() {
             );
         }
 
-        let mixed =
-            Mamba3GpuInferenceMixed::new(&device, &w, cfg, d, 1, WeightDtype::Bf16).unwrap();
+        let mixed = Mamba3GpuEngineMixed::new(&device, &w, cfg, d, 1, WeightDtype::Bf16).unwrap();
         let stream = mixed.ctx_stream();
         let mut prefill = mixed.alloc_prefill(seq_len).unwrap();
         let mut state = mixed.alloc_state().unwrap();

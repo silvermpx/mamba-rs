@@ -33,7 +33,7 @@ use mamba_rs::mamba3_siso::gpu::prefill::{
     Mamba3Prefill, Mamba3PrefillOutputs, Mamba3PrefillPooledGraph, Mamba3PrefillRun,
 };
 use mamba_rs::mamba3_siso::gpu::state::{GpuMamba3Dims, GpuMamba3StateBufs};
-use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3MixedWeights, GpuMamba3WeightsInf};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
@@ -140,7 +140,7 @@ fn typed_prefill_matches_mixed_trainer_forward() {
 
         // MIXED trainer-forward reference temporal: the exact numeric
         // chain a production classifier checkpoint trains through.
-        let mut trainer = Mamba3Trainer::new_full(
+        let mut trainer = Mamba3GpuTrainer::new_full(
             0,
             &w,
             cfg,

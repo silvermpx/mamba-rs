@@ -6,7 +6,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 fn deterministic(n: usize, seed: u32) -> Vec<f32> {
@@ -67,7 +67,7 @@ fn tiny_cfg() -> Mamba3Config {
     }
 }
 
-fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f32>) {
+fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3GpuTrainer, Vec<f32>, Vec<f32>) {
     let cfg = tiny_cfg();
     let batch = 2;
     let seq_len = 64;
@@ -76,7 +76,7 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f
     let cpu = Mamba3Weights::init(&cfg, input_dim, 0x6A50_0000 ^ dtype as u64);
     let input = deterministic(n, 0xA11C_E001);
     let d_temporal = deterministic(n, 0xD7E0_0001);
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -219,7 +219,7 @@ fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
     let cpu = Mamba3Weights::init(&cfg, input_dim, 0x6A50_0001);
     let input = deterministic(n, 0xA11C_E001);
     let d_temporal = deterministic(n, 0xD7E0_0001);
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,

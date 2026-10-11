@@ -1,11 +1,11 @@
-//! Real-checkpoint convergence tests — demonstrate that `MambaTrainer`
+//! Real-checkpoint convergence tests — demonstrate that `MambaGpuTrainer`
 //! actually trains `state-spaces/mamba-130m-hf` for many steps across
 //! ALL three supported dtypes (f32, bf16, f16) without exploding, and
 //! that the resulting weights still produce valid inference output.
 //!
 //! Each test:
 //! 1. Loads mamba-130m-hf (d_model=768, n_layers=24).
-//! 2. Builds a `MambaTrainer` in the target dtype from the HF backbone.
+//! 2. Builds a `MambaGpuTrainer` in the target dtype from the HF backbone.
 //! 3. Runs 30 training steps with a fixed `d_temporal` signal that
 //!    points toward a deterministic pattern.
 //! 4. Snapshots weights every 5 steps and asserts `||θ_t − θ_0||` grows
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use mamba_rs::hf::load::load_hf;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
 
@@ -176,7 +176,7 @@ fn run_convergence(dtype: WeightDtype) {
     let n = batch * seq_len * input_dim;
     let tune = cfg_for(dtype);
 
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &hf_weights,
         cfg,

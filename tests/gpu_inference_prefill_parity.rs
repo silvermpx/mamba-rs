@@ -27,7 +27,7 @@ use mamba_rs::mamba_ssm::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
+use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
 use mamba_rs::mamba_ssm::gpu::prefill::{
     PrefillInputs, PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_full,
@@ -124,7 +124,7 @@ fn run_case(cfg: &MambaConfig, input_dim: usize, seq_len: usize, seed: u64, labe
 
     // ---- GPU INFERENCE prefill, official API ----
     let inf_w = GpuMambaWeights::from_cpu(&ctx.stream, &w, cfg).expect("inference weights");
-    let mut inf_state = GpuInferenceState::zeros(&ctx.stream, batch, cfg).expect("inference state");
+    let mut inf_state = MambaGpuState::zeros(&ctx.stream, batch, cfg).expect("inference state");
     let mut inf_scratch = GpuMambaTargetScratch::new(&ctx.stream, &gpu_dims).expect("inf scratch");
     let mut a_neg_buf = GpuBuffer::zeros(&ctx.stream, nl * di * ds).unwrap();
     a_neg_buf.upload(&ctx.stream, &a_neg_flat).unwrap();

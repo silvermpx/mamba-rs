@@ -4,7 +4,7 @@
 //! cargo run --release --example custom_loss --features cuda
 //! ```
 //!
-//! The fused `MambaTrainer::step(input, d_temporal)` requires the caller to
+//! The fused `MambaGpuTrainer::step(input, d_temporal)` requires the caller to
 //! already hold the loss gradient, but computing a loss needs the forward
 //! activations first. The split API resolves that:
 //!
@@ -33,7 +33,7 @@ mod cuda_example {
     use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
 
     pub fn run() -> Result<(), String> {
         let cfg = MambaConfig {
@@ -50,7 +50,7 @@ mod cuda_example {
         let weights = MambaWeights::init(&cfg, input_dim, 42);
         // A trainer context runs the Triad family in the deterministic mode;
         // the split forward/backward path below always executes eagerly.
-        let mut trainer = MambaTrainer::new_full_with_mode(
+        let mut trainer = MambaGpuTrainer::new_full_with_mode(
             0,
             &weights,
             cfg,

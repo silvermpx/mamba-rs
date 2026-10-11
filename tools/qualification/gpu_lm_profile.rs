@@ -8,7 +8,7 @@ fn profile_gpu_backbone_only() {
     // Test backbone-only speed (no lm_head) to isolate bottleneck
     use mamba_rs::MambaConfig;
     use mamba_rs::MambaWeights;
-    use mamba_rs::gpu::inference::GpuMambaBackbone;
+    use mamba_rs::gpu::inference::MambaGpuBackbone;
 
     // Use 130m-hf config
     let cfg = MambaConfig {
@@ -20,7 +20,7 @@ fn profile_gpu_backbone_only() {
         ..Default::default()
     };
     let weights = MambaWeights::init(&cfg, 768, 42);
-    let mut bb = GpuMambaBackbone::new(0, &weights, cfg, 768, 1).unwrap();
+    let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 768, 1).unwrap();
 
     let input = vec![0.1f32; 768];
     let mut output = vec![0.0f32; 768];

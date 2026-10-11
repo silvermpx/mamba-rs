@@ -9,7 +9,7 @@
 //! For each dtype (f32, bf16, f16):
 //!   1. Load `state-spaces/mamba-130m-hf` via `GpuMambaLM`.
 //!   2. Run greedy generation → record `tokens_before`, save last logits.
-//!   3. Build a `MambaTrainer` from the same backbone weights.
+//!   3. Build a `MambaGpuTrainer` from the same backbone weights.
 //!   4. Train 20 steps with a fixed deterministic gradient signal.
 //!   5. Cross-load the trained master weights back into a fresh
 //!      `GpuMambaLM` (via snapshot + rebuild) and generate again.
@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 use mamba_rs::hf::load::load_hf;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
 
@@ -143,7 +143,7 @@ fn run_full_cycle(dtype: WeightDtype) {
         _ => (3e-5f32, 0.01f32),
     };
 
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &hf_weights,
         cfg,

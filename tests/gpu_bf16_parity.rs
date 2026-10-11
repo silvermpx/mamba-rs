@@ -209,7 +209,7 @@ fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
 /// new mixed native code paths.
 #[test]
 fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
-    use mamba_rs::gpu::inference::GpuMambaBackbone;
+    use mamba_rs::gpu::inference::MambaGpuBackbone;
     use mamba_rs::{MambaBackbone, MambaConfig};
 
     let cfg = MambaConfig::default();
@@ -218,7 +218,7 @@ fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
     let bb = MambaBackbone::init(cfg, input_dim, 0xC0FFEE);
 
     let mut gpu_bb =
-        GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
+        MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
 
     // Verify temporal_dtype reports F32 for F32 engine.
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;

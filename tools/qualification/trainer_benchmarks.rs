@@ -1,5 +1,5 @@
 //! workload-style training benchmarks via the high-level
-//! `MambaTrainer` / `Mamba3Trainer` API, sweeping all three precisions
+//! `MambaGpuTrainer` / `Mamba3GpuTrainer` API, sweeping all three precisions
 //! (f32 / bf16 / f16) × eager vs CUDA Graph.
 //!
 //! Two workloads:
@@ -107,7 +107,7 @@ fn run_lm_shape(
     suffix: &str,
 ) -> Result<(), String> {
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let input_dim = cfg.d_model;
     let n = batch * seq_len * input_dim;
@@ -123,7 +123,7 @@ fn run_lm_shape(
     }
 
     // Conservative lr so f16 doesn't NaN out before timing finishes.
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -339,7 +339,7 @@ fn bench_lm_train_production_shape() {
 #[ignore]
 fn bench_production_split_fwd_bwd() {
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
     let get = |k: &str, d: usize| -> usize {
         std::env::var(k)
             .ok()
@@ -375,7 +375,7 @@ fn bench_production_split_fwd_bwd() {
     for lw in cpu.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -459,7 +459,7 @@ fn rl_cfg() -> mamba_rs::mamba3_siso::config::Mamba3Config {
 }
 
 fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
-    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = rl_cfg();
@@ -487,7 +487,7 @@ fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
         cpu.input_proj_b.clear();
     }
 
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,

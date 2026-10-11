@@ -1,4 +1,4 @@
-//! Smoke tests — `MambaTrainer` (M1) and `Mamba3Trainer` (M3)
+//! Smoke tests — `MambaGpuTrainer` (M1) and `Mamba3GpuTrainer` (M3)
 //! high-level APIs. Validates:
 //!   1. Eager steps run without panic.
 //!   2. `capture_graph()` succeeds.
@@ -26,7 +26,7 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 fn m1_trainer_bf16_smoke() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -50,7 +50,7 @@ fn m1_trainer_bf16_smoke() {
     }
 
     let mut trainer =
-        MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
+        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
             .expect("construct");
 
     let before = trainer.snapshot_master().unwrap();
@@ -92,7 +92,7 @@ fn m1_trainer_bf16_smoke() {
 fn m1_trainer_multi_layer_bf16() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -115,7 +115,7 @@ fn m1_trainer_multi_layer_bf16() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -158,7 +158,7 @@ fn m1_trainer_multi_layer_bf16() {
 #[test]
 fn m3_trainer_multi_layer_bf16() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -182,7 +182,7 @@ fn m3_trainer_multi_layer_bf16() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -224,7 +224,7 @@ fn m3_trainer_multi_layer_bf16() {
 fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -250,7 +250,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
     // Tiny lr — synthetic random d_temporal at default lr blows up f16
     // weights within a few steps; this test cares about the API path,
     // not convergence.
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -294,7 +294,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
 #[test]
 fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -318,7 +318,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,
@@ -357,7 +357,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
 fn m1_trainer_f32_smoke() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -380,7 +380,7 @@ fn m1_trainer_f32_smoke() {
     }
 
     let mut trainer =
-        MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
+        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
             .expect("construct f32");
     assert_eq!(trainer.dtype(), WeightDtype::F32);
 
@@ -401,7 +401,7 @@ fn m1_trainer_f32_smoke() {
 #[test]
 fn m3_trainer_bf16_smoke() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -425,9 +425,16 @@ fn m3_trainer_bf16_smoke() {
     cpu.input_proj_w.clear();
     cpu.input_proj_b.clear();
 
-    let mut trainer =
-        Mamba3Trainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
-            .expect("construct");
+    let mut trainer = Mamba3GpuTrainer::new_with_dtype(
+        0,
+        &cpu,
+        cfg,
+        input_dim,
+        batch,
+        seq_len,
+        WeightDtype::Bf16,
+    )
+    .expect("construct");
 
     let before = trainer.snapshot_master().unwrap();
 
@@ -459,7 +466,7 @@ fn m3_trainer_bf16_smoke() {
 #[test]
 fn m3_trainer_f32_smoke() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -493,7 +500,7 @@ fn m3_trainer_f32_smoke() {
     cpu.input_proj_b = vec![0.0; cfg.d_model];
 
     let mut trainer =
-        Mamba3Trainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
+        Mamba3GpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F32)
             .expect("construct f32");
     assert_eq!(trainer.dtype(), WeightDtype::F32);
 

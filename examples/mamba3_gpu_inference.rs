@@ -13,7 +13,7 @@ fn main() {
     {
         use mamba_rs::mamba_ssm::gpu::GemmMode;
         use mamba_rs::mamba3_siso::config::Mamba3Config;
-        use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+        use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
         use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
         let cfg = Mamba3Config::default();
@@ -31,7 +31,7 @@ fn main() {
 
         // Create the GPU backbone (uploads weights, compiles the kernels)
         // with f32 storage and the deterministic GEMM mode.
-        let mut gpu = GpuMamba3Backbone::new_with_mode(
+        let mut gpu = Mamba3GpuBackbone::new_with_mode(
             0, // GPU device 0
             &weights,
             cfg,

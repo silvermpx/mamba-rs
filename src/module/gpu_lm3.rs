@@ -18,7 +18,7 @@ use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
-use crate::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use crate::mamba3_siso::weights::Mamba3Weights;
 
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
@@ -53,7 +53,7 @@ enum EmbedStorage {
 
 /// Unified GPU Mamba-3 language model.
 ///
-/// Wraps `GpuMamba3Backbone` + embedding table + optional lm_head. Mirrors
+/// Wraps `Mamba3GpuBackbone` + embedding table + optional lm_head. Mirrors
 /// the M1 `GpuMambaLM` API:
 /// - `from_weights(cpu_weights, embed, lm_head, cfg, gpu)` — f32 storage.
 /// - `from_weights_with_dtype(..., dtype)` — f32 / bf16 / f16 storage.
@@ -61,7 +61,7 @@ enum EmbedStorage {
 /// Since no HF Mamba-3 SISO checkpoint is public, construction takes CPU
 /// weights + embedding + optional lm_head directly (no HF loader).
 pub struct GpuMamba3LM {
-    backbone: GpuMamba3Backbone,
+    backbone: Mamba3GpuBackbone,
     embed_storage: EmbedStorage,
     embed_cpu: Vec<f32>,
     input_cpu: Vec<f32>,
@@ -268,7 +268,7 @@ impl GpuMamba3LM {
         }
 
         let backbone = match mode {
-            Some(mode) => GpuMamba3Backbone::new_with_dtype_and_mode(
+            Some(mode) => Mamba3GpuBackbone::new_with_dtype_and_mode(
                 gpu_ordinal,
                 &weights,
                 cfg,
@@ -277,7 +277,7 @@ impl GpuMamba3LM {
                 dtype,
                 mode,
             )?,
-            None => GpuMamba3Backbone::new_with_dtype(
+            None => Mamba3GpuBackbone::new_with_dtype(
                 gpu_ordinal,
                 &weights,
                 cfg,

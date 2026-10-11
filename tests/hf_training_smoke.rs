@@ -2,7 +2,7 @@
 //!
 //! Current coverage wires the HF loader into inference only
 //! (`gpu_lm_test.rs`, `gpu_bf16_parity.rs`). This test drives the full
-//! `MambaTrainer` through a few gradient steps starting from real
+//! `MambaGpuTrainer` through a few gradient steps starting from real
 //! `state-spaces/mamba-130m-hf` weights and asserts that:
 //!
 //! 1. The loader → trainer hand-off succeeds with the real HF shapes
@@ -71,7 +71,7 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 fn hf_training_130m_bf16_smoke() {
     use mamba_rs::hf::load::load_hf;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     let dir = match find_model_dir("mamba-130m-hf") {
         Some(d) => d,
@@ -101,7 +101,7 @@ fn hf_training_130m_bf16_smoke() {
     let n = batch * seq_len * input_dim;
 
     // lr=1e-6 with bf16 gives small but finite updates on real-weight grads.
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         hf.backbone.weights(),
         cfg,

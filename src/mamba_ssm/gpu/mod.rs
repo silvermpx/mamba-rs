@@ -56,3 +56,8 @@ pub mod weights_mixed_train;
 
 pub use dtype::WeightDtype;
 pub use gemm_mode::GemmMode;
+pub use inference::{
+    MambaGpuBackbone, MambaGpuEngine, MambaGpuEngineMixed, MambaGpuScratch, MambaGpuScratchMixed,
+    MambaGpuState,
+};
+pub use trainer::MambaGpuTrainer;

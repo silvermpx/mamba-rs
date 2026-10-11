@@ -20,8 +20,12 @@ mod transport;
 pub mod weights;
 pub mod weights_mixed_train;
 
-pub use inference::GpuMamba3Backbone;
+pub use inference::{
+    Mamba3GpuBackbone, Mamba3GpuEngine, Mamba3GpuEngineMixed, Mamba3GpuScratch,
+    Mamba3GpuScratchMixed, Mamba3GpuState,
+};
 pub use kernels::Mamba3Kernels;
+pub use trainer::Mamba3GpuTrainer;
 pub use weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3LayerWeightsInf,
     GpuMamba3Weights, GpuMamba3WeightsInf,

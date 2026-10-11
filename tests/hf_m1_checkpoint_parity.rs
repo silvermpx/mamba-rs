@@ -189,15 +189,15 @@ fn gpu_decode_rows(
     golden: &Golden,
     dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype,
 ) -> (
-    mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone,
+    mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone,
     Vec<Vec<f32>>,
 ) {
-    use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
+    use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
     let d = model.d_model;
     let cfg = *model.backbone.config();
     let mut gpu =
-        GpuMambaBackbone::new_with_dtype(0, model.backbone.weights(), cfg, d, 1, dtype).unwrap();
+        MambaGpuBackbone::new_with_dtype(0, model.backbone.weights(), cfg, d, 1, dtype).unwrap();
     let mut head = Head::new(model);
     let mut hidden = vec![0f32; d];
     let rows = golden
@@ -222,7 +222,7 @@ fn gpu_decode_rows(
 fn mamba_130m_gpu_matches_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
+    use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
     let (model, golden) = checkpoint();
     let d = model.d_model;
@@ -249,7 +249,7 @@ fn mamba_130m_gpu_matches_the_f64_oracle() {
 
     let t_len = golden.ids.len();
     let cfg = *model.backbone.config();
-    let mut fresh = GpuMambaBackbone::new(0, model.backbone.weights(), cfg, d, 1).unwrap();
+    let mut fresh = MambaGpuBackbone::new(0, model.backbone.weights(), cfg, d, 1).unwrap();
     let prompt: Vec<f32> = golden
         .ids
         .iter()

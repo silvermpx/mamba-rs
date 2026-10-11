@@ -18,7 +18,7 @@ fn main() {
     #[cfg(feature = "cuda")]
     {
         use mamba_rs::WeightDtype;
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
         use mamba_rs::mamba_ssm::gpu::GemmMode;
         use mamba_rs::{MambaBackbone, MambaConfig};
 
@@ -37,7 +37,7 @@ fn main() {
         // Storage dtype and GEMM mode are chosen explicitly here; the
         // no-mode constructors read MAMBA_RS_GEMM_MODE instead and default
         // to Deterministic when it is absent.
-        let mut gpu_bb = GpuMambaBackbone::new_with_dtype_and_mode(
+        let mut gpu_bb = MambaGpuBackbone::new_with_dtype_and_mode(
             0, // GPU ordinal
             cpu_backbone.weights(),
             *cpu_backbone.config(),
@@ -78,7 +78,7 @@ fn main() {
         // fallible: it is refused while a graph is being captured, and a
         // graph captured before the change refuses to replay after it, so
         // change the mode before capturing.
-        let mut vendor_bb = GpuMambaBackbone::new_with_dtype_and_mode(
+        let mut vendor_bb = MambaGpuBackbone::new_with_dtype_and_mode(
             0,
             cpu_backbone.weights(),
             *cpu_backbone.config(),

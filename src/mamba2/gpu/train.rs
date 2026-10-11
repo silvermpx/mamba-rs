@@ -579,10 +579,17 @@ impl Mamba2GpuTrainer {
         Ok(trainer)
     }
 
-    /// The storage dtype this trainer runs.
     /// The model's configuration.
-    pub fn cfg(&self) -> &Mamba2Config {
+    pub fn config(&self) -> &Mamba2Config {
         &self.cfg
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "renamed to `config`, the name every family uses"
+    )]
+    pub fn cfg(&self) -> &Mamba2Config {
+        self.config()
     }
 
     /// Sequences per window.
@@ -612,6 +619,7 @@ impl Mamba2GpuTrainer {
         }
     }
 
+    /// The storage dtype this trainer runs.
     pub fn dtype(&self) -> WeightDtype {
         self.dtype
     }

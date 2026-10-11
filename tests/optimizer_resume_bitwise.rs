@@ -9,7 +9,7 @@
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 fn cfg() -> Mamba3Config {
@@ -61,9 +61,9 @@ fn weight_bits(w: &Mamba3Weights) -> Vec<u32> {
     out
 }
 
-fn build(cpu: &Mamba3Weights, dtype: WeightDtype) -> Mamba3Trainer {
+fn build(cpu: &Mamba3Weights, dtype: WeightDtype) -> Mamba3GpuTrainer {
     let c = cfg();
-    Mamba3Trainer::new_with_dtype(0, cpu, c, c.d_model, 1, 64, dtype).unwrap()
+    Mamba3GpuTrainer::new_with_dtype(0, cpu, c, c.d_model, 1, 64, dtype).unwrap()
 }
 
 /// The f32 forward has no identity-proj branch (it always runs the GEMM),
@@ -89,7 +89,7 @@ fn base_weights(c: &Mamba3Config, dtype: WeightDtype) -> Mamba3Weights {
     cpu
 }
 
-fn run_steps(trainer: &mut Mamba3Trainer, from: usize, to: usize, n: usize, dm_n: usize) {
+fn run_steps(trainer: &mut Mamba3GpuTrainer, from: usize, to: usize, n: usize, dm_n: usize) {
     for s in from..to {
         let input = det(n, 0x1000 + s as u32);
         let d_temporal = det(dm_n, 0x2000 + s as u32);
@@ -229,7 +229,7 @@ fn apply_step_pair_matches_fused_applying_backward() {
 fn m1_resume_with_recurrent_state_is_bit_continuous() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
 
     fn m1_cfg() -> MambaConfig {
         MambaConfig {
@@ -269,8 +269,8 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
         push(&w.norm_f_weight);
         out
     }
-    fn m1_build(cpu: &MambaWeights, c: &MambaConfig) -> MambaTrainer {
-        MambaTrainer::new_with_dtype(0, cpu, *c, c.d_model, 1, 4, WeightDtype::F32).unwrap()
+    fn m1_build(cpu: &MambaWeights, c: &MambaConfig) -> MambaGpuTrainer {
+        MambaGpuTrainer::new_with_dtype(0, cpu, *c, c.d_model, 1, 4, WeightDtype::F32).unwrap()
     }
 
     let c = m1_cfg();

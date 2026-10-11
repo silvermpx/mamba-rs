@@ -11,19 +11,19 @@
 
 use std::time::Instant;
 
-use mamba_rs::gpu::inference::GpuMambaBackbone;
-use mamba_rs::gpu::trainer::MambaTrainer;
+use mamba_rs::gpu::inference::MambaGpuBackbone;
+use mamba_rs::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba2::gpu::{Mamba2GpuInferenceEngine, Mamba2GpuTrainer};
+use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};
 use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoWeights};
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
-use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
+use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 const LAYERS: usize = 4;
@@ -94,7 +94,7 @@ fn mamba1(device_ordinal: usize, dtype: WeightDtype) -> Row {
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
         let mut bb =
-            GpuMambaBackbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
+            MambaGpuBackbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
         let input = det(b * D_MODEL, 12);
         let mut out = vec![0f32; b * D_MODEL];
         bb.step(&input, &mut out).unwrap();
@@ -103,7 +103,7 @@ fn mamba1(device_ordinal: usize, dtype: WeightDtype) -> Row {
     }
     let (b, t) = TRAIN;
     let mut tr =
-        MambaTrainer::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, t, dtype).unwrap();
+        MambaGpuTrainer::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, t, dtype).unwrap();
     let input = det(b * t * D_MODEL, 13);
     let d_out = det(b * t * D_MODEL, 14);
     let train = median_us(2, 7, || {
@@ -129,7 +129,7 @@ fn siso(device_ordinal: usize, dtype: WeightDtype) -> Row {
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
         let mut bb =
-            GpuMamba3Backbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
+            Mamba3GpuBackbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, dtype).unwrap();
         let input = det(b * D_MODEL, 12);
         let mut out = vec![0f32; b * D_MODEL];
         bb.step(&input, &mut out).unwrap();
@@ -138,7 +138,7 @@ fn siso(device_ordinal: usize, dtype: WeightDtype) -> Row {
     }
     let prompt = {
         let mut bb =
-            GpuMamba3Backbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, 1, dtype).unwrap();
+            Mamba3GpuBackbone::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, 1, dtype).unwrap();
         bb.supports_prefill().then(|| {
             let mut pf = bb.alloc_prefill(PROMPT).unwrap();
             let host = det(PROMPT * D_MODEL, 11);
@@ -154,7 +154,7 @@ fn siso(device_ordinal: usize, dtype: WeightDtype) -> Row {
     // refuses, and the row says so instead of a time.
     let (b, t) = TRAIN;
     let train_ms =
-        match Mamba3Trainer::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, t, dtype) {
+        match Mamba3GpuTrainer::new_with_dtype(device_ordinal, &w, cfg, D_MODEL, b, t, dtype) {
             Ok(mut tr) => {
                 let input = det(b * t * D_MODEL, 13);
                 let d_out = det(b * t * D_MODEL, 14);
@@ -189,7 +189,7 @@ fn mamba2(device: &GpuDevice, dtype: WeightDtype) -> Row {
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
         let mut eng =
-            Mamba2GpuInferenceEngine::new_with_dtype(device, &w, (cfg, D_MODEL, b), dtype).unwrap();
+            Mamba2GpuEngine::new_with_dtype(device, &w, (cfg, D_MODEL, b), dtype).unwrap();
         let (mut st, mut sc) = (eng.alloc_state().unwrap(), eng.alloc_scratch().unwrap());
         let input = det(b * D_MODEL, 12);
         let mut out = vec![0f32; b * D_MODEL];
@@ -200,8 +200,7 @@ fn mamba2(device: &GpuDevice, dtype: WeightDtype) -> Row {
         });
     }
     let prompt = {
-        let eng =
-            Mamba2GpuInferenceEngine::new_with_dtype(device, &w, (cfg, D_MODEL, 1), dtype).unwrap();
+        let eng = Mamba2GpuEngine::new_with_dtype(device, &w, (cfg, D_MODEL, 1), dtype).unwrap();
         let mut st = eng.alloc_state().unwrap();
         let mut pf = eng.alloc_prefill(PROMPT).unwrap();
         let input = det(PROMPT * D_MODEL, 11);

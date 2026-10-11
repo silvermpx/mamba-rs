@@ -7,7 +7,7 @@
 //! Demonstrates the low-level CPU training primitives
 //! (`forward_mamba_backbone_batched` + `backward_mamba_backbone_batched`).
 //! Fine for RL actors and research sandboxes. For production GPU training
-//! see [`MambaTrainer`] and the `gpu_training_bf16` example.
+//! see [`MambaGpuTrainer`] and the `gpu_training_bf16` example.
 
 use mamba_rs::MambaWeights;
 use mamba_rs::mamba_ssm::MambaConfig;

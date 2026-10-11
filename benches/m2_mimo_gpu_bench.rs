@@ -17,7 +17,7 @@ use std::time::Instant;
 use mamba_rs::config::ScanMode;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba2::gpu::{Mamba2GpuInferenceEngine, Mamba2GpuTrainer};
+use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};
 use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoWeights};
@@ -93,13 +93,8 @@ fn mamba2(device: &GpuDevice, part: &str) {
                     scan_mode: mode,
                     ..base
                 };
-                let eng = Mamba2GpuInferenceEngine::new_with_dtype(
-                    device,
-                    &w,
-                    (cfg, input_dim, b),
-                    dtype,
-                )
-                .unwrap();
+                let eng = Mamba2GpuEngine::new_with_dtype(device, &w, (cfg, input_dim, b), dtype)
+                    .unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut pf = eng.alloc_prefill(t).unwrap();
                 let input = det(b * t * input_dim, 11);
@@ -117,8 +112,7 @@ fn mamba2(device: &GpuDevice, part: &str) {
     for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
             let mut eng =
-                Mamba2GpuInferenceEngine::new_with_dtype(device, &w, (base, input_dim, b), dtype)
-                    .unwrap();
+                Mamba2GpuEngine::new_with_dtype(device, &w, (base, input_dim, b), dtype).unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut sc = eng.alloc_scratch().unwrap();
             let input = det(b * input_dim, 12);

@@ -129,7 +129,7 @@ pub use mamba3_siso::{
 };
 
 /// Convenience re-export of the storage-dtype selector used by the
-/// mixed-precision GPU API (`GpuMambaBackbone::new_with_dtype`,
-/// `GpuMamba3Backbone::new_with_dtype`, `GpuMambaLM::from_hf_with_dtype`).
+/// mixed-precision GPU API (`MambaGpuBackbone::new_with_dtype`,
+/// `Mamba3GpuBackbone::new_with_dtype`, `GpuMambaLM::from_hf_with_dtype`).
 #[cfg(feature = "cuda")]
 pub use mamba_ssm::gpu::dtype::WeightDtype;

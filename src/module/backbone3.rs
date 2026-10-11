@@ -20,7 +20,7 @@ use crate::mamba3_siso::weights::Mamba3Weights;
 /// is owned by the caller (`Mamba3State`) so multiple sessions can run
 /// concurrently against shared weights.
 ///
-/// For GPU inference see `crate::mamba3_siso::gpu::GpuMamba3Backbone`;
+/// For GPU inference see `crate::mamba3_siso::gpu::Mamba3GpuBackbone`;
 /// for LM-style generation with sampling see
 /// `crate::module::gpu_lm3::GpuMamba3LM` (feature `cuda` + `hf`).
 pub struct Mamba3Backbone {

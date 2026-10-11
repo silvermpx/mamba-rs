@@ -31,7 +31,7 @@ use std::{cell::Cell, sync::Arc};
 type Stream = Arc<cudarc::driver::CudaStream>;
 
 /// Persistent recurrent state for GPU Mamba-3 inference (all layers).
-pub struct Mamba3GpuInferenceState {
+pub struct Mamba3GpuState {
     /// SSM hidden state: `[n_layers * batch * nh * hd * ds]`.
     pub ssm_state: GpuBuffer,
     /// K state (previous B post-RoPE): `[n_layers * batch * nh * ds]`.
@@ -48,7 +48,7 @@ pub struct Mamba3GpuInferenceState {
     pub n_angles: usize,
 }
 
-impl Mamba3GpuInferenceState {
+impl Mamba3GpuState {
     /// Allocate zeroed state for all layers.
     pub fn zeros(stream: &Stream, batch: usize, cfg: &Mamba3Config) -> Result<Self, String> {
         let nh = cfg.nheads();
@@ -94,7 +94,7 @@ impl Mamba3GpuInferenceState {
 }
 
 /// Scratch buffers for T=1 inference (minimal, reused every step).
-pub struct Mamba3GpuInferenceScratch {
+pub struct Mamba3GpuScratch {
     pub gpu_input: GpuBuffer,     // [batch * input_dim] — H2D landing
     pub temporal: GpuBuffer,      // [batch * d_model] — working buffer
     pub residual: GpuBuffer,      // [batch * d_model] — saved for skip connection
@@ -129,7 +129,7 @@ pub struct Mamba3GpuInferenceScratch {
     pub mlp_act: GpuBuffer,
 }
 
-impl Mamba3GpuInferenceScratch {
+impl Mamba3GpuScratch {
     pub fn zeros(
         stream: &Stream,
         batch: usize,
@@ -188,7 +188,7 @@ impl Mamba3GpuInferenceScratch {
 use crate::mamba_ssm::gpu::buffers::DtypedBuf;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 
-pub struct Mamba3GpuInferenceMixedScratch {
+pub struct Mamba3GpuScratchMixed {
     pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
     /// The input cast to the weight dtype for the input projection,
     /// `[batch * input_dim]` (one element without a projection). Its own
@@ -235,7 +235,7 @@ pub struct Mamba3GpuInferenceMixedScratch {
     pub dtype: WeightDtype,
 }
 
-impl Mamba3GpuInferenceMixedScratch {
+impl Mamba3GpuScratchMixed {
     pub fn zeros(
         stream: &Stream,
         batch: usize,
@@ -244,7 +244,7 @@ impl Mamba3GpuInferenceMixedScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         if matches!(dtype, WeightDtype::F32) {
-            return Err("Mamba3GpuInferenceMixedScratch requires bf16 or f16 dtype".to_string());
+            return Err("Mamba3GpuScratchMixed requires bf16 or f16 dtype".to_string());
         }
         let dm = cfg.d_model;
         let di = cfg.d_inner();
@@ -297,12 +297,12 @@ impl Mamba3GpuInferenceMixedScratch {
 /// Supports CUDA Graph capture with a validated GEMM-only inventory.
 ///
 /// Usage:
-/// 1. `Mamba3GpuInferenceEngine::new()` — compile kernels, upload weights
+/// 1. `Mamba3GpuEngine::new()` — compile kernels, upload weights
 /// 2. Allocate state + scratch via `alloc_state()` / `alloc_scratch()`
 /// 3. Call `step()` each timestep
 /// 4. Optionally call `capture_graph()` for faster inference
 /// 5. Call `state.reset()` on episode boundaries
-pub struct Mamba3GpuInferenceEngine {
+pub struct Mamba3GpuEngine {
     pub kernels: Mamba3Kernels,
     pub weights: GpuMamba3WeightsInf,
     /// Full CUDA execution context (stream + cuBLAS with its Graph-safe
@@ -326,14 +326,14 @@ pub struct Mamba3GpuInferenceEngine {
     captured_scratch_ptr: u64,
 }
 
-impl Drop for Mamba3GpuInferenceEngine {
+impl Drop for Mamba3GpuEngine {
     fn drop(&mut self) {
         let _ = self.ctx.stream.synchronize();
         drop(self.graph.take());
     }
 }
 
-impl Mamba3GpuInferenceEngine {
+impl Mamba3GpuEngine {
     /// Create an f32 M3 inference engine in the GEMM mode `MAMBA_RS_GEMM_MODE`
     /// names (`deterministic` when unset). Use [`Self::new_with_mode`] to pick the
     /// mode in code and [`Self::ctx`] to inspect the route before graph capture.
@@ -451,8 +451,8 @@ impl Mamba3GpuInferenceEngine {
     /// cuBLAS workspace, both module sets, functions, and weights must stay fixed.
     pub unsafe fn capture_graph(
         &mut self,
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
             "M3 f32 inference graph capture requires a successful eager step".to_string()
@@ -509,13 +509,13 @@ impl Mamba3GpuInferenceEngine {
     }
 
     /// Allocate zeroed inference state.
-    pub fn alloc_state(&self) -> Result<Mamba3GpuInferenceState, String> {
-        Mamba3GpuInferenceState::zeros(&self.ctx.stream, self.batch, &self.cfg)
+    pub fn alloc_state(&self) -> Result<Mamba3GpuState, String> {
+        Mamba3GpuState::zeros(&self.ctx.stream, self.batch, &self.cfg)
     }
 
     /// Allocate scratch buffers.
-    pub fn alloc_scratch(&self) -> Result<Mamba3GpuInferenceScratch, String> {
-        Mamba3GpuInferenceScratch::zeros(&self.ctx.stream, self.batch, &self.cfg, self.input_dim)
+    pub fn alloc_scratch(&self) -> Result<Mamba3GpuScratch, String> {
+        Mamba3GpuScratch::zeros(&self.ctx.stream, self.batch, &self.cfg, self.input_dim)
     }
 
     /// Access the context that owns this engine's GEMM mode and family.
@@ -568,7 +568,7 @@ impl Mamba3GpuInferenceEngine {
         prefill: &mut super::prefill::Mamba3Prefill,
         mamba_input: &GpuBuffer,
         seq_len: usize,
-        state: &mut Mamba3GpuInferenceState,
+        state: &mut Mamba3GpuState,
         carry_state: bool,
         last_hidden: &mut GpuBuffer,
     ) -> Result<(), String> {
@@ -607,8 +607,8 @@ impl Mamba3GpuInferenceEngine {
     /// No H2D/D2H — safe for CUDA Graph capture.
     fn step_kernels(
         &self,
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         use cudarc::driver::PushKernelArg;
 
@@ -688,8 +688,8 @@ impl Mamba3GpuInferenceEngine {
     pub fn step_layer_kernels(
         &self,
         layer_idx: usize,
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         use cudarc::driver::PushKernelArg;
 
@@ -945,7 +945,7 @@ impl Mamba3GpuInferenceEngine {
     fn step_mlp_kernels(
         &self,
         layer_idx: usize,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         use cudarc::driver::PushKernelArg;
 
@@ -1030,8 +1030,8 @@ impl Mamba3GpuInferenceEngine {
         &self,
         input: &[f32],
         output: &mut [f32],
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         // H2D: upload input (outside graph)
         self.eager_gemm_manifest.set(None);
@@ -1075,14 +1075,14 @@ impl Mamba3GpuInferenceEngine {
     }
 
     /// Run a step and keep `scratch.temporal` on GPU (no D2H download).
-    /// Mirrors `GpuMambaInference::step_gpu_only` on the M1 side — the LM
+    /// Mirrors `MambaGpuEngine::step_gpu_only` on the M1 side — the LM
     /// wrapper chains `step_gpu_only → lm_head_gemm` without going through
     /// CPU for the hidden state.
     pub fn step_gpu_only(
         &self,
         input: &[f32],
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
@@ -1107,7 +1107,7 @@ impl Mamba3GpuInferenceEngine {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Mamba3GpuInferenceMixed — end-to-end bf16/f16 inference engine.
+// Mamba3GpuEngineMixed — end-to-end bf16/f16 inference engine.
 //
 // Wraps the f32 engine (for ctx/kernels/cublas/cfg) plus mixed-dtype
 // weights. All activations run in bf16/f16 through the layer; recurrence
@@ -1118,8 +1118,8 @@ impl Mamba3GpuInferenceEngine {
 use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 
-pub struct Mamba3GpuInferenceMixed {
-    engine: Mamba3GpuInferenceEngine, // owns ctx + kernels + blas + (unused f32 weights)
+pub struct Mamba3GpuEngineMixed {
+    engine: Mamba3GpuEngine, // owns ctx + kernels + blas + (unused f32 weights)
     mixed_weights: GpuMamba3MixedWeights,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
@@ -1131,14 +1131,14 @@ pub struct Mamba3GpuInferenceMixed {
     captured_bi_upcast_ptrs: [u64; 3],
 }
 
-impl Drop for Mamba3GpuInferenceMixed {
+impl Drop for Mamba3GpuEngineMixed {
     fn drop(&mut self) {
         let _ = self.engine.ctx.stream.synchronize();
         drop(self.graph.take());
     }
 }
 
-impl Mamba3GpuInferenceMixed {
+impl Mamba3GpuEngineMixed {
     fn has_gemm_work(&self) -> bool {
         self.engine.batch != 0 && (self.engine.cfg.n_layers != 0 || !self.engine.identity_proj)
     }
@@ -1235,7 +1235,7 @@ impl Mamba3GpuInferenceMixed {
         // weights (needed because the mixed path still consumes f32 biases
         // and per-head coefficients via the f32 engine's weight-agnostic
         // pointer views).
-        let engine = Mamba3GpuInferenceEngine::new_inner(
+        let engine = Mamba3GpuEngine::new_inner(
             device,
             cpu_weights,
             cfg,
@@ -1260,12 +1260,12 @@ impl Mamba3GpuInferenceMixed {
         })
     }
 
-    pub fn alloc_state(&self) -> Result<Mamba3GpuInferenceState, String> {
+    pub fn alloc_state(&self) -> Result<Mamba3GpuState, String> {
         self.engine.alloc_state()
     }
 
-    pub fn alloc_mixed_scratch(&self) -> Result<Mamba3GpuInferenceMixedScratch, String> {
-        Mamba3GpuInferenceMixedScratch::zeros(
+    pub fn alloc_mixed_scratch(&self) -> Result<Mamba3GpuScratchMixed, String> {
+        Mamba3GpuScratchMixed::zeros(
             &self.engine.ctx.stream,
             self.engine.batch,
             &self.engine.cfg,
@@ -1282,7 +1282,7 @@ impl Mamba3GpuInferenceMixed {
         self.mixed_weights.bulk_dtype
     }
 
-    pub fn engine_ref(&self) -> &Mamba3GpuInferenceEngine {
+    pub fn engine_ref(&self) -> &Mamba3GpuEngine {
         &self.engine
     }
 
@@ -1312,7 +1312,7 @@ impl Mamba3GpuInferenceMixed {
         prefill: &mut super::prefill::Mamba3Prefill,
         mamba_input: &GpuBuffer,
         seq_len: usize,
-        state: &mut Mamba3GpuInferenceState,
+        state: &mut Mamba3GpuState,
         carry_state: bool,
         last_hidden: &mut GpuBuffer,
     ) -> Result<(), String> {
@@ -1347,8 +1347,8 @@ impl Mamba3GpuInferenceMixed {
     /// into the f32 residual.
     pub(super) fn step_kernels_mixed_native(
         &self,
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceMixedScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
         use crate::mamba_ssm::gpu::launch::grid_1d;
         use cudarc::driver::PushKernelArg;
@@ -1853,8 +1853,8 @@ impl Mamba3GpuInferenceMixed {
         &self,
         input: &[f32],
         output: &mut [f32],
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceMixedScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -1892,8 +1892,8 @@ impl Mamba3GpuInferenceMixed {
     pub fn step_gpu_only_mixed_native(
         &self,
         input: &[f32],
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceMixedScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -1948,8 +1948,8 @@ impl Mamba3GpuInferenceMixed {
     /// cuBLAS workspace, both module sets, functions, and weights must stay fixed.
     pub unsafe fn capture_graph_mixed_native(
         &mut self,
-        state: &mut Mamba3GpuInferenceState,
-        scratch: &mut Mamba3GpuInferenceMixedScratch,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
         let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
             "M3 mixed inference graph capture requires a successful eager step".to_string()
@@ -1988,7 +1988,7 @@ impl Mamba3GpuInferenceMixed {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// GpuMamba3Backbone — high-level wrapper (owns engine + state + scratch)
+// Mamba3GpuBackbone — high-level wrapper (owns engine + state + scratch)
 // ═══════════════════════════════════════════════════════════════════
 
 /// High-level GPU Mamba-3 backbone: owns engine, state, and scratch.
@@ -1996,13 +1996,13 @@ impl Mamba3GpuInferenceMixed {
 /// Guarantees the same buffers are used during capture and replay.
 /// Simple API: `new()` → `step()` → `capture_graph()` → `reset()`.
 enum M3BackboneEngine {
-    F32(Box<Mamba3GpuInferenceEngine>),
-    Mixed(Box<Mamba3GpuInferenceMixed>),
+    F32(Box<Mamba3GpuEngine>),
+    Mixed(Box<Mamba3GpuEngineMixed>),
 }
 
 enum M3BackboneScratch {
-    F32(Box<Mamba3GpuInferenceScratch>),
-    Mixed(Box<Mamba3GpuInferenceMixedScratch>),
+    F32(Box<Mamba3GpuScratch>),
+    Mixed(Box<Mamba3GpuScratchMixed>),
 }
 
 impl M3BackboneScratch {
@@ -2022,13 +2022,13 @@ impl M3BackboneScratch {
 }
 
 /// High-level Mamba-3 GPU backbone — unified API over f32 / bf16 / f16 storage.
-pub struct GpuMamba3Backbone {
+pub struct Mamba3GpuBackbone {
     engine: M3BackboneEngine,
-    state: Mamba3GpuInferenceState,
+    state: Mamba3GpuState,
     scratch: M3BackboneScratch,
 }
 
-impl GpuMamba3Backbone {
+impl Mamba3GpuBackbone {
     /// Create an f32 M3 backbone in the GEMM mode `MAMBA_RS_GEMM_MODE` names
     /// (`deterministic` when unset).
     ///
@@ -2133,7 +2133,7 @@ impl GpuMamba3Backbone {
         let device = GpuDevice::new(gpu_ordinal)?;
         let (engine, state, scratch) = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => {
-                let e = Mamba3GpuInferenceEngine::new_inner(
+                let e = Mamba3GpuEngine::new_inner(
                     &device,
                     cpu_weights,
                     cfg,
@@ -2148,7 +2148,7 @@ impl GpuMamba3Backbone {
             }
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let e = match mode {
-                    Some(mode) => Mamba3GpuInferenceMixed::new_with_mode(
+                    Some(mode) => Mamba3GpuEngineMixed::new_with_mode(
                         &device,
                         cpu_weights,
                         cfg,
@@ -2157,7 +2157,7 @@ impl GpuMamba3Backbone {
                         dtype,
                         mode,
                     )?,
-                    None => Mamba3GpuInferenceMixed::new(
+                    None => Mamba3GpuEngineMixed::new(
                         &device,
                         cpu_weights,
                         cfg,
@@ -2400,6 +2400,21 @@ impl GpuMamba3Backbone {
     }
 }
 
+// The names these types carried before 0.8, when each family named its GPU
+// types its own way.
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuBackbone`")]
+pub type GpuMamba3Backbone = Mamba3GpuBackbone;
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuEngine`")]
+pub type Mamba3GpuInferenceEngine = Mamba3GpuEngine;
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuEngineMixed`")]
+pub type Mamba3GpuInferenceMixed = Mamba3GpuEngineMixed;
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuState`")]
+pub type Mamba3GpuInferenceState = Mamba3GpuState;
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuScratch`")]
+pub type Mamba3GpuInferenceScratch = Mamba3GpuScratch;
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuScratchMixed`")]
+pub type Mamba3GpuInferenceMixedScratch = Mamba3GpuScratchMixed;
+
 #[cfg(test)]
 mod model_gemm_manifest_tests {
     use super::*;
@@ -2463,7 +2478,7 @@ mod model_gemm_manifest_tests {
         let cfg = config(1);
         let weights = weights(&cfg, cfg.d_model, true);
 
-        let backbone = GpuMamba3Backbone::new(0, &weights, cfg, cfg.d_model, 1)
+        let backbone = Mamba3GpuBackbone::new(0, &weights, cfg, cfg.d_model, 1)
             .expect("construct M3 F32 backbone from owned identity-projection weights");
 
         assert_eq!(backbone.ctx().gemm_mode(), GemmMode::Deterministic);
@@ -2478,8 +2493,8 @@ mod model_gemm_manifest_tests {
         let mut weights = Mamba3Weights::init(&cfg, cfg.d_model, 0x9050_0003);
         weights.input_proj_w.clear();
         weights.input_proj_b.clear();
-        let mut engine = Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1)
-            .expect("M3 owned fixture");
+        let mut engine =
+            Mamba3GpuEngine::new(&device, &weights, cfg, cfg.d_model, 1).expect("M3 owned fixture");
         engine.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         engine.ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         let mut state = engine.alloc_state().unwrap();
@@ -2518,14 +2533,9 @@ mod model_gemm_manifest_tests {
                 eprintln!("M3 F32 {family:?} tc={tc} B{batch} nonidentity");
                 let input = vec![0.01; batch * 24];
                 let mut output = vec![0.0; batch * cfg.d_model];
-                let mut engine = Mamba3GpuInferenceEngine::new(
-                    &device,
-                    &weights(&cfg, 24, false),
-                    cfg,
-                    24,
-                    batch,
-                )
-                .unwrap();
+                let mut engine =
+                    Mamba3GpuEngine::new(&device, &weights(&cfg, 24, false), cfg, 24, batch)
+                        .unwrap();
                 configure(&engine.ctx, family, tc);
                 let mut state = engine.alloc_state().unwrap();
                 let mut scratch = engine.alloc_scratch().unwrap();
@@ -2570,7 +2580,7 @@ mod model_gemm_manifest_tests {
                 for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
                     eprintln!("M3 {dtype:?} native {family:?} tc={tc} B{batch}");
                     let input = vec![0.01; batch * cfg.d_model];
-                    let mut engine = Mamba3GpuInferenceMixed::new(
+                    let mut engine = Mamba3GpuEngineMixed::new(
                         &device,
                         &weights(&cfg, cfg.d_model, true),
                         cfg,
@@ -2646,8 +2656,7 @@ mod model_gemm_manifest_tests {
         let weights = weights(&cfg, cfg.d_model, true);
         let input = vec![0.01; cfg.d_model];
         let mut output = vec![0.0; cfg.d_model];
-        let mut engine =
-            Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+        let mut engine = Mamba3GpuEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
         configure(&engine.ctx, BiGemmFamily::Inference, true);
         let mut state = engine.alloc_state().unwrap();
         let mut scratch = engine.alloc_scratch().unwrap();
@@ -2702,7 +2711,7 @@ mod model_gemm_manifest_tests {
         drop(engine);
 
         let mut engine =
-            Mamba3GpuInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::F16)
+            Mamba3GpuEngineMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::F16)
                 .unwrap();
         configure(&engine.engine.ctx, BiGemmFamily::Inference, true);
         let mut state = engine.alloc_state().unwrap();
@@ -2766,8 +2775,7 @@ mod model_gemm_manifest_tests {
         let cfg = config(1);
         let weights = weights(&cfg, cfg.d_model, true);
         for mode in [GemmMode::CublasFast, GemmMode::CublasPedantic] {
-            let mut engine =
-                Mamba3GpuInferenceEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+            let mut engine = Mamba3GpuEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
             engine.ctx.set_gemm_mode(mode).unwrap();
             let mut state = engine.alloc_state().unwrap();
             let mut scratch = engine.alloc_scratch().unwrap();

@@ -262,7 +262,7 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 
 fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -300,7 +300,7 @@ fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     }
 
     let label = format!("M3-{dtype:?}-T{seq_len}");
-    let mut trainer = Mamba3Trainer::new_full(
+    let mut trainer = Mamba3GpuTrainer::new_full(
         0,
         &cpu,
         cfg,

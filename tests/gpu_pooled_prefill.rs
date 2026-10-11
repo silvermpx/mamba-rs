@@ -13,7 +13,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::{GpuBuffer, PinnedHostBuf};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
+use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
 use mamba_rs::mamba_ssm::gpu::prefill::{
     PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
@@ -37,7 +37,7 @@ struct Rig {
     ctx: GpuCtx,
     weights: GpuMambaWeights,
     scratch: GpuMambaTargetScratch,
-    state: GpuInferenceState,
+    state: MambaGpuState,
     a_neg: GpuBuffer,
     input: GpuBuffer,
     dims: GpuMambaDims,
@@ -77,7 +77,7 @@ fn rig(seq_len: usize) -> Rig {
     let ctx = GpuCtx::new(&device).expect("ctx");
     let weights = GpuMambaWeights::from_cpu(&ctx.stream, &w, &cfg).expect("weights");
     let scratch = GpuMambaTargetScratch::new(&ctx.stream, &dims).expect("scratch");
-    let state = GpuInferenceState::zeros(&ctx.stream, 1, &cfg).expect("state");
+    let state = MambaGpuState::zeros(&ctx.stream, 1, &cfg).expect("state");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];
     for (l, lw) in w.layers.iter().enumerate() {
         a_neg_flat[l * di * ds..(l + 1) * di * ds].copy_from_slice(&lw.a_neg);

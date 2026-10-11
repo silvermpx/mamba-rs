@@ -13,7 +13,7 @@ use crate::mamba_ssm::gpu::blas::{
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GemmMode;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
+use crate::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
 /// Threshold: if a prompt has more tokens than this, use the parallel prefill
 /// path (single kernel launch per layer over all T tokens) instead of the
@@ -97,7 +97,7 @@ enum EmbedStorage {
 /// let tokens = lm.generate(&[1, 2, 3], &SampleParams::default()).unwrap();
 /// ```
 pub struct GpuMambaLM {
-    backbone: GpuMambaBackbone,
+    backbone: MambaGpuBackbone,
     embed_storage: EmbedStorage,
     /// CPU mirror of embed table for per-token lookup → host scratch buffer.
     embed_cpu: Vec<f32>,
@@ -242,7 +242,7 @@ impl GpuMambaLM {
 
         let cfg = *cpu_backbone.config();
         let backbone = match mode {
-            Some(mode) => GpuMambaBackbone::new_with_dtype_and_mode(
+            Some(mode) => MambaGpuBackbone::new_with_dtype_and_mode(
                 gpu_ordinal,
                 cpu_backbone.weights(),
                 cfg,
@@ -251,7 +251,7 @@ impl GpuMambaLM {
                 dtype,
                 mode,
             )?,
-            None => GpuMambaBackbone::new_with_dtype(
+            None => MambaGpuBackbone::new_with_dtype(
                 gpu_ordinal,
                 cpu_backbone.weights(),
                 cfg,
@@ -861,7 +861,7 @@ mod tied_head_capture_tests {
         weights.input_proj_w.clear();
         weights.input_proj_b.clear();
         let backbone =
-            GpuMambaBackbone::new_with_dtype(0, &weights, cfg, D_MODEL, 1, dtype).unwrap();
+            MambaGpuBackbone::new_with_dtype(0, &weights, cfg, D_MODEL, 1, dtype).unwrap();
         let stream = backbone.stream().clone();
         let embed_cpu = vec![0.125; VOCAB_PADDED * D_MODEL];
         let embed_storage = if dtype == WeightDtype::F32 {

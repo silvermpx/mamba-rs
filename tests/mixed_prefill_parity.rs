@@ -16,7 +16,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
+use mamba_rs::mamba_ssm::gpu::inference::MambaGpuState;
 use mamba_rs::mamba_ssm::gpu::prefill::{PrefillInputs, gpu_forward_inference_prefill_mixed};
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaMixedWeights;
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
@@ -76,7 +76,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
     let device = GpuDevice::new(0).expect("device");
     let ctx = GpuCtx::new(&device).expect("ctx");
     let weights = GpuMambaMixedWeights::from_cpu(&ctx.stream, &w, &cfg, dtype).expect("weights");
-    let mut state = GpuInferenceState::zeros(&ctx.stream, batch, &cfg).expect("state");
+    let mut state = MambaGpuState::zeros(&ctx.stream, batch, &cfg).expect("state");
     let mut scratch = GpuMambaTargetMixedScratch::new(&ctx.stream, &dims, dtype).expect("scratch");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];
     for (l, lw) in w.layers.iter().enumerate() {

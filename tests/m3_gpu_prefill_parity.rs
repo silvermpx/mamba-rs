@@ -304,7 +304,7 @@ fn gpu_prefill_split_window_reproduces_full_window() {
 fn gpu_prefill_then_decode_handoff() {
     use mamba_rs::mamba3_siso::Mamba3StepScratch;
     use mamba_rs::mamba3_siso::cpu::inference::mamba3_step;
-    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceEngine;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
     let cfg = tiny_cfg();
     // FULL weights incl a real input projection: the CPU step path has no
@@ -331,7 +331,7 @@ fn gpu_prefill_then_decode_handoff() {
 
     // GPU: engine prefill entry, then the ordinary decode step.
     let device = GpuDevice::new(0).expect("cuda device");
-    let engine = Mamba3GpuInferenceEngine::new(&device, &w, tiny_cfg(), dm, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(&device, &w, tiny_cfg(), dm, 1).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let mut prefill = engine.alloc_prefill(seq_len).unwrap();
@@ -444,7 +444,7 @@ fn gpu_prefill_graph_replay_is_bitwise_for_family(family: BiGemmFamily) {
 #[test]
 fn gpu_prefill_mixed_backbone_handoff() {
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 
     let cfg = tiny_cfg();
     let w = identity_weights(&cfg, 77);
@@ -456,7 +456,7 @@ fn gpu_prefill_mixed_backbone_handoff() {
 
     // Reference: typed step loop over prompt + decode tokens.
     let mut bb_steps =
-        GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
+        Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
     let mut out_ref = vec![0.0f32; dm];
     let mut ref_outs = Vec::new();
     for t in 0..t_prompt {
@@ -473,7 +473,7 @@ fn gpu_prefill_mixed_backbone_handoff() {
 
     // Prefill lane: one-pass prompt, then the same decode tokens.
     let mut bb_pre =
-        GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
+        Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
     let stream = bb_pre.stream().clone();
     let mut gpu_prompt = GpuBuffer::zeros(&stream, t_prompt * dm).unwrap();
     stream.synchronize().unwrap();

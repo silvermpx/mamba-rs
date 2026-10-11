@@ -20,11 +20,11 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
-use mamba_rs::mamba_ssm::gpu::inference::{GpuInferenceState, GpuMambaBackbone};
+use mamba_rs::mamba_ssm::gpu::inference::{MambaGpuBackbone, MambaGpuState};
 use mamba_rs::mamba_ssm::gpu::prefill::{
     PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
 };
-use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::mamba_ssm::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
@@ -104,7 +104,7 @@ fn prefill_rate(device: &GpuDevice, cfg: MambaConfig, input_dim: usize, b: usize
     let ctx = GpuCtx::new_with_state_cap(device, ds).unwrap();
     let weights = GpuMambaWeights::from_cpu(&ctx.stream, &w, &cfg).unwrap();
     let mut scratch = GpuMambaTargetScratch::new(&ctx.stream, &dims).unwrap();
-    let mut state = GpuInferenceState::zeros(&ctx.stream, b, &cfg).unwrap();
+    let mut state = MambaGpuState::zeros(&ctx.stream, b, &cfg).unwrap();
     let a_neg_flat: Vec<f32> = w.layers.iter().flat_map(|lw| lw.a_neg.clone()).collect();
     let mut a_neg = GpuBuffer::zeros(&ctx.stream, nl * di * ds).unwrap();
     a_neg.upload(&ctx.stream, &a_neg_flat).unwrap();
@@ -173,7 +173,7 @@ fn decode() {
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
         for &b in &DECODE_BATCH {
             let mut bb =
-                GpuMambaBackbone::new_with_dtype(0, &w, cfg, cfg.d_model, b, dtype).unwrap();
+                MambaGpuBackbone::new_with_dtype(0, &w, cfg, cfg.d_model, b, dtype).unwrap();
             let input = det(b * cfg.d_model, 12);
             let mut out = vec![0f32; b * cfg.d_model];
             let eager = median_us(20, 200, || bb.step(&input, &mut out).unwrap());
@@ -196,7 +196,7 @@ fn train() {
             let cfg = mixer(mode);
             let w = MambaWeights::init(&cfg, cfg.d_model, 7);
             let mut tr =
-                MambaTrainer::new_with_dtype(0, &w, cfg, cfg.d_model, b, t, dtype).unwrap();
+                MambaGpuTrainer::new_with_dtype(0, &w, cfg, cfg.d_model, b, t, dtype).unwrap();
             let input = det(b * t * cfg.d_model, 13);
             let d_out = det(b * t * cfg.d_model, 14);
             let us = median_us(2, 7, || {

@@ -26,7 +26,7 @@
 
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
@@ -94,7 +94,7 @@ fn run_repeatability(dtype: WeightDtype) {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut a = MambaTrainer::new_full(
+    let mut a = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg_m,
@@ -108,7 +108,7 @@ fn run_repeatability(dtype: WeightDtype) {
         dtype,
     )
     .unwrap();
-    let mut b = MambaTrainer::new_full(
+    let mut b = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg_m,
@@ -202,7 +202,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
     };
 
     // Trainer A: eager for 3 steps
-    let mut a = MambaTrainer::new_full(
+    let mut a = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg_m,
@@ -229,7 +229,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Trainer B: warmup eager 1 step, then capture + replay 2 times on
     // the SAME inputs that eager A used for steps 2,3.
-    let mut b = MambaTrainer::new_full(
+    let mut b = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg_m,
@@ -280,7 +280,7 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Now drive a SECOND B trainer and replay 10 times — all replays
     // must land at the same terminal weights.
-    let mut c = MambaTrainer::new_full(
+    let mut c = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg_m,

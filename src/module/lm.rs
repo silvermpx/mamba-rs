@@ -212,7 +212,7 @@ impl MambaLM {
     ///
     /// The weights come from an official checkpoint
     /// (`hf::load_mamba3::load_hf_mamba3`), local training
-    /// (`Mamba3Trainer::snapshot_master`) or
+    /// (`Mamba3GpuTrainer::snapshot_master`) or
     /// `mamba3_siso::serialize::load_mamba3`, through
     /// [`Mamba3Backbone::from_weights`].
     pub fn from_mamba3(

@@ -6,7 +6,7 @@ use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::gpu::mamba3_gpu::{
     GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
@@ -49,7 +49,7 @@ fn m3_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, no graph) ---");
     for &b in &[1usize, 4, 16, 64] {
-        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb = Mamba3GpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];
 
@@ -73,7 +73,7 @@ fn m3_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, CUDA Graph) ---");
     for &b in &[1usize, 4, 16, 64] {
-        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb = Mamba3GpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         bb.capture_graph().unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];

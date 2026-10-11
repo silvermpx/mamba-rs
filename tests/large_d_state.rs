@@ -9,7 +9,7 @@
 use mamba_rs::MambaBackbone;
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
+use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -41,7 +41,7 @@ fn check_step_parity(d_state: usize) {
     let mut state = cpu_bb.alloc_state();
     let mut scratch = cpu_bb.alloc_scratch();
 
-    let mut gpu_bb = GpuMambaBackbone::new(0, &weights, cfg, input_dim, 1).unwrap();
+    let mut gpu_bb = MambaGpuBackbone::new(0, &weights, cfg, input_dim, 1).unwrap();
 
     let steps = 12usize;
     let mut cpu_out = vec![0.0f32; dm];

@@ -154,7 +154,7 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba2_130m_gpu_matches_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba2::gpu::Mamba2GpuInferenceEngine;
+    use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
     let golden = load_golden(&root.join("goldens/mamba2-130m"));
@@ -165,7 +165,7 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
     let vocab_padded = model.embed.len() / d;
     let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba2GpuInferenceEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
+    let engine = Mamba2GpuEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let t_len = golden.ids.len();
@@ -243,7 +243,7 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
 fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba2::gpu::Mamba2GpuInferenceEngine;
+    use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
     let golden = load_golden(&root.join("goldens/mamba2-130m"));
@@ -254,13 +254,9 @@ fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
     let vocab_padded = model.embed.len() / d;
     let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba2GpuInferenceEngine::new_with_dtype(
-        &device,
-        &model.weights,
-        (cfg, d, 1),
-        WeightDtype::Bf16,
-    )
-    .unwrap();
+    let engine =
+        Mamba2GpuEngine::new_with_dtype(&device, &model.weights, (cfg, d, 1), WeightDtype::Bf16)
+            .unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let t_len = golden.ids.len();

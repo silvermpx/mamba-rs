@@ -25,7 +25,7 @@ use mamba_rs::dist::{Bootstrap, Devices, DistConfig, EmulatedWorld, Rendezvous, 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 /// Rounds and world size are env-tunable for multi-GPU validation:
@@ -112,9 +112,9 @@ fn base_weights() -> Mamba3Weights {
     w
 }
 
-fn build_trainer(device: usize) -> Mamba3Trainer {
+fn build_trainer(device: usize) -> Mamba3GpuTrainer {
     let c = cfg();
-    Mamba3Trainer::new_with_dtype(
+    Mamba3GpuTrainer::new_with_dtype(
         device,
         &base_weights(),
         c,
@@ -141,7 +141,7 @@ fn emulated_final_bits() -> Vec<u32> {
     let n = 64 * c.d_model;
     let world = test_world();
     let ew = EmulatedWorld::new(world).unwrap();
-    let mut ranks: Vec<Mamba3Trainer> = (0..world).map(|_| build_trainer(0)).collect();
+    let mut ranks: Vec<Mamba3GpuTrainer> = (0..world).map(|_| build_trainer(0)).collect();
     let mut out = vec![0.0f32; n];
     for round in 0..test_rounds() {
         let mut arenas = Vec::with_capacity(world);

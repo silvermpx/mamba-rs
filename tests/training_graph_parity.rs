@@ -25,7 +25,7 @@ use mamba_rs::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::mamba_ssm::gpu::training_graph::{
     GpuMambaTrainingStepGraph, MambaMixedCapture, MambaMixedReplay,
 };
@@ -77,7 +77,7 @@ fn assert_first_triad_step_captures(dtype: WeightDtype) {
     let n = batch * seq_len * input_dim;
     let input = det_input(n, 0xA11C_1001);
     let d_temporal = det_input(n, 0xD7E0_1001);
-    let mut trainer = MambaTrainer::new_full(
+    let mut trainer = MambaGpuTrainer::new_full(
         0,
         &cpu,
         cfg,

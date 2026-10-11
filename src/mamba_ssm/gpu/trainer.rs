@@ -1,7 +1,7 @@
 //! High-level Mamba SSM training API.
 //!
-//! Mirrors the shape of [`super::inference::GpuMambaBackbone`] but on the
-//! training side. A single [`MambaTrainer`] owns EVERY piece of state
+//! Mirrors the shape of [`super::inference::MambaGpuBackbone`] but on the
+//! training side. A single [`MambaGpuTrainer`] owns EVERY piece of state
 //! needed to run a full training step:
 //!
 //!   * mixed-precision weights (master + compute shadow)
@@ -14,7 +14,7 @@
 //!
 //! ## Usage
 //! ```ignore
-//! let mut trainer = MambaTrainer::new_with_dtype(
+//! let mut trainer = MambaGpuTrainer::new_with_dtype(
 //!     0, &cpu_weights, cfg, input_dim=dm, batch=8, seq_len=128,
 //!     WeightDtype::Bf16,
 //! )?;
@@ -158,7 +158,7 @@ impl TrainSessionCfg {
     }
 }
 
-/// Per-step metrics returned by [`MambaTrainer::step`].
+/// Per-step metrics returned by [`MambaGpuTrainer::step`].
 #[derive(Debug, Clone)]
 pub struct StepMetrics {
     /// 1-indexed step counter (matches `adam.step`).
@@ -186,7 +186,7 @@ impl StepMetrics {
     }
 }
 
-/// Options for [`MambaTrainer::backward_step`].
+/// Options for [`MambaGpuTrainer::backward_step`].
 ///
 /// `#[non_exhaustive]` + `with_*` builders: cross-crate struct literals are
 /// blocked on purpose so future fields stay semver-minor. The derived
@@ -263,7 +263,7 @@ impl BackwardOpts {
     }
 }
 
-/// Metrics returned by [`MambaTrainer::backward_step`].
+/// Metrics returned by [`MambaGpuTrainer::backward_step`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BackwardMetrics {
@@ -282,7 +282,7 @@ pub struct BackwardMetrics {
     pub overflow_skipped: Option<bool>,
 }
 
-/// Internal precision-dispatch enum. Hidden behind [`MambaTrainer`] so the
+/// Internal precision-dispatch enum. Hidden behind [`MambaGpuTrainer`] so the
 /// public API is a single struct with a single set of method names — caller
 /// never matches `F32`/`Mixed` directly. Mirrors `inference::BackboneEngine`.
 enum TrainerInner {
@@ -291,13 +291,13 @@ enum TrainerInner {
 }
 
 /// High-level Mamba SSM training wrapper. Same shape as
-/// [`super::inference::GpuMambaBackbone`]: one public struct, one method
+/// [`super::inference::MambaGpuBackbone`]: one public struct, one method
 /// per operation, dtype dispatch happens internally on the private enum.
-pub struct MambaTrainer {
+pub struct MambaGpuTrainer {
     inner: TrainerInner,
 }
 
-impl MambaTrainer {
+impl MambaGpuTrainer {
     /// Construct a trainer with default Adam settings in the GEMM mode
     /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
@@ -533,8 +533,8 @@ impl MambaTrainer {
     /// per-tensor views and CUDA graphs retain its device address.
     ///
     /// ```compile_fail
-    /// use mamba_rs::mamba_ssm::gpu::{buffers::GpuBuffer, trainer::MambaTrainer};
-    /// fn replace_arena(trainer: &mut MambaTrainer, replacement: GpuBuffer) {
+    /// use mamba_rs::mamba_ssm::gpu::{buffers::GpuBuffer, trainer::MambaGpuTrainer};
+    /// fn replace_arena(trainer: &mut MambaGpuTrainer, replacement: GpuBuffer) {
     ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
     /// }
     /// ```
@@ -1333,7 +1333,7 @@ impl MambaTrainerMixed {
         Ok(StepMetrics::plain(step, replayed))
     }
 
-    /// Split forward (see [`MambaTrainer::forward`]): eager forward, upcast
+    /// Split forward (see [`MambaGpuTrainer::forward`]): eager forward, upcast
     /// the typed post-norm_f output into the dedicated f32 staging buffer,
     /// sync, download into `temporal_out`.
     pub(crate) fn forward_split(
@@ -1389,7 +1389,7 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`MambaTrainer::backward_step`]).
+    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]).
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
@@ -2456,7 +2456,7 @@ impl MambaTrainerF32 {
         Ok(StepMetrics::plain(step, replayed))
     }
 
-    /// Split forward (see [`MambaTrainer::forward`]): eager forward into the
+    /// Split forward (see [`MambaGpuTrainer::forward`]): eager forward into the
     /// existing `self.temporal` device buffer, sync, download into
     /// `temporal_out`. Zero new device allocation — the buffer already
     /// exists and was previously write-only.
@@ -2493,7 +2493,7 @@ impl MambaTrainerF32 {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`MambaTrainer::backward_step`]).
+    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]).
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
@@ -2740,3 +2740,8 @@ impl MambaTrainerF32 {
         Ok(out)
     }
 }
+
+// The names these types carried before 0.8, when each family named its GPU
+// types its own way.
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuTrainer`")]
+pub type MambaTrainer = MambaGpuTrainer;

@@ -10,7 +10,7 @@ use mamba_rs::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::gpu::inference::GpuMambaBackbone;
+use mamba_rs::gpu::inference::MambaGpuBackbone;
 use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
@@ -45,7 +45,7 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, no graph) ---");
     for &b in &batch_sizes {
-        let mut bb = GpuMambaBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb = MambaGpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];
 
@@ -70,7 +70,7 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, CUDA Graph) ---");
     for &b in &batch_sizes {
-        let mut bb = GpuMambaBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
+        let mut bb = MambaGpuBackbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         bb.capture_graph().unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];

@@ -4,7 +4,7 @@
 //! cargo run --release --example mamba3_gpu_training_bf16 --features cuda
 //! ```
 //!
-//! Mamba-3 analogue of `gpu_training_bf16.rs`. Uses [`Mamba3Trainer`] with
+//! Mamba-3 analogue of `gpu_training_bf16.rs`. Uses [`Mamba3GpuTrainer`] with
 //! an explicit deterministic GEMM mode (Triad family) to run the full
 //! forward + backward + AdamW + master-to-compute sync per step, captures
 //! the whole thing as one CUDA Graph, and prints the eager and graph step
@@ -23,7 +23,7 @@ mod cuda_example {
     use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     /// Deterministic pseudo-random input. `scale` caps the magnitude — with
@@ -81,7 +81,7 @@ mod cuda_example {
         // Modest lr for synthetic-gradient stability (see gpu_training_bf16.rs).
         let lr = 1e-5_f32;
         let wd = 1e-2_f32;
-        let mut trainer = Mamba3Trainer::new_full_with_mode(
+        let mut trainer = Mamba3GpuTrainer::new_full_with_mode(
             0,
             &cpu,
             cfg,

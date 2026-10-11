@@ -14,7 +14,7 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
-use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceEngine;
+use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, step_head_cfg};
 use mamba_rs::mamba3_siso::route::HeadTier;
 use mamba_rs::mamba3_siso::state::Mamba3State;
@@ -227,7 +227,7 @@ fn m3_block_tier_decode_matches_cpu() {
     let device = GpuDevice::new(0).unwrap();
     for (d_model, hd, ds) in [(128usize, 64usize, 128usize), (96, 48, 64), (128, 128, 32)] {
         let (cfg, w) = block_cfg(d_model, hd, ds);
-        let engine = Mamba3GpuInferenceEngine::new(&device, &w, cfg, d_model, 1).unwrap();
+        let engine = Mamba3GpuEngine::new(&device, &w, cfg, d_model, 1).unwrap();
         let mut gpu_state = engine.alloc_state().unwrap();
         let mut gpu_scratch = engine.alloc_scratch().unwrap();
         let mut cpu_state = Mamba3State::zeros(&cfg);
@@ -281,7 +281,7 @@ fn m3_block_tier_prefill_then_decode_matches_cpu() {
         &dims,
     );
 
-    let engine = Mamba3GpuInferenceEngine::new(&device, &w, cfg, d_model, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(&device, &w, cfg, d_model, 1).unwrap();
     let stream = &engine.ctx().stream;
     let mut prefill = engine.alloc_prefill(seq_len).unwrap();
     let mut gpu_state = engine.alloc_state().unwrap();

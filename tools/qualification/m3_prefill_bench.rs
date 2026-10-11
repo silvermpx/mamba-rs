@@ -12,7 +12,7 @@ use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
@@ -173,7 +173,7 @@ fn m3_prefill_latency_at_serve_shape() {
     w.input_proj_w.clear();
     w.input_proj_b.clear();
 
-    let mut bb = GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::F32).unwrap();
+    let mut bb = Mamba3GpuBackbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::F32).unwrap();
     eprintln!(
         "prefill route: mode={:?} family={:?} route={:?} tensor_cores={} f32_policy={:?}",
         bb.ctx().gemm_mode(),
@@ -218,7 +218,7 @@ fn m3_prefill_latency_at_serve_shape() {
 #[test]
 #[ignore]
 fn m3_train_step_at_multichunk_shape() {
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 
     let cfg = Mamba3Config {
         d_model: 384,
@@ -270,7 +270,8 @@ fn m3_train_step_at_multichunk_shape() {
             w.input_proj_b.clear();
         }
         let mut tr =
-            Mamba3Trainer::new_with_dtype(0, &w, cfg, cfg.d_model, batch, seq_len, dtype).unwrap();
+            Mamba3GpuTrainer::new_with_dtype(0, &w, cfg, cfg.d_model, batch, seq_len, dtype)
+                .unwrap();
         eprintln!(
             "train route: dtype={dtype:?} scan={:?} parallel={} mode={:?} family={:?} route={:?} tensor_cores_allowed={} f32_policy={:?} B={batch} T={seq_len} layers={} state_cap={} iters={iters}",
             cfg.scan_mode,

@@ -27,7 +27,7 @@
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -103,7 +103,7 @@ fn run_training(
         weight_decay: 0.0,
     };
     let mut trainer =
-        MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("construct trainer");
+        MambaGpuTrainer::new_full(0, &cpu, cfg, session, dtype).expect("construct trainer");
     trainer
         .ctx()
         .set_gemm_mode(if invariant {

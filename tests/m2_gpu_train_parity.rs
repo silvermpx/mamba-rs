@@ -7,7 +7,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba2::gpu::{Mamba2GpuInferenceEngine, Mamba2GpuTrainer};
+use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{
     Mamba2Config, Mamba2State, Mamba2Tape, Mamba2TrainScratch, Mamba2Weights,
     backward_mamba2_train, forward_mamba2_train,
@@ -234,7 +234,7 @@ fn m2_gpu_train_forward_tracks_the_prefill() {
         let mut tr = Mamba2GpuTrainer::new(&device, &w, (cfg, input_dim, batch, seq)).unwrap();
         let mut got = vec![0f32; batch * seq * dm];
         tr.forward(&inputs, &mut got).unwrap();
-        let engine = Mamba2GpuInferenceEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let engine = Mamba2GpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
         let mut st = engine.alloc_state().unwrap();
         let mut pf = engine.alloc_prefill(seq).unwrap();
         let mut want = vec![0f32; batch * seq * dm];

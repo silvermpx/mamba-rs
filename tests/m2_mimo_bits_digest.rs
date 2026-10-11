@@ -20,7 +20,7 @@ use digest::{Digest, fnv1a_f32};
 use mamba_rs::config::ScanMode;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba2::gpu::{Mamba2GpuInferenceEngine, Mamba2GpuTrainer};
+use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
 use mamba_rs::mamba2::{Mamba2Config, Mamba2Weights};
 use mamba_rs::mamba3_mimo::gpu::{Mamba3MimoGpuEngine, Mamba3MimoGpuTrainer};
 use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoWeights};
@@ -83,13 +83,9 @@ fn print_m2_bits_digest() {
                     scan_mode: mode,
                     ..base
                 };
-                let eng = Mamba2GpuInferenceEngine::new_with_dtype(
-                    &device,
-                    &w,
-                    (cfg, INPUT_DIM, BATCH),
-                    dtype,
-                )
-                .unwrap();
+                let eng =
+                    Mamba2GpuEngine::new_with_dtype(&device, &w, (cfg, INPUT_DIM, BATCH), dtype)
+                        .unwrap();
                 let mut st = eng.alloc_state().unwrap();
                 let mut sc = eng.alloc_scratch().unwrap();
                 let mut pf = eng.alloc_prefill(SEQ).unwrap();

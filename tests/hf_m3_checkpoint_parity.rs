@@ -227,7 +227,7 @@ fn top_margin(golden: &m3_golden::Golden, t: usize) -> f64 {
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn siso_187m_gpu_decode_matches_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceEngine;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
@@ -237,7 +237,7 @@ fn siso_187m_gpu_decode_matches_the_f64_oracle() {
     let vocab = model.vocab_size;
     let vocab_padded = model.embed.len() / d;
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba3GpuInferenceEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let mut hidden = vec![0f32; d];
@@ -313,7 +313,7 @@ fn siso_187m_gpu_decode_matches_the_f64_oracle() {
 fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceEngine;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
@@ -324,7 +324,7 @@ fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
     let vocab_padded = model.embed.len() / d;
     let t_len = golden.ids.len();
     let device = GpuDevice::new(0).unwrap();
-    let engine = Mamba3GpuInferenceEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(&device, &model.weights, cfg, d, 1).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let mut prefill = engine.alloc_prefill(t_len).unwrap();
@@ -418,7 +418,7 @@ fn siso_187m_gpu_bf16_tracks_the_f64_oracle() {
     use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceMixed;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngineMixed;
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
@@ -430,8 +430,7 @@ fn siso_187m_gpu_bf16_tracks_the_f64_oracle() {
     let t_len = golden.ids.len();
     let device = GpuDevice::new(0).unwrap();
     let engine =
-        Mamba3GpuInferenceMixed::new(&device, &model.weights, cfg, d, 1, WeightDtype::Bf16)
-            .unwrap();
+        Mamba3GpuEngineMixed::new(&device, &model.weights, cfg, d, 1, WeightDtype::Bf16).unwrap();
     let mut hidden = vec![0f32; d];
     let mut logits = vec![0f32; vocab];
     let mut head_scratch = vec![0f32; vocab_padded];

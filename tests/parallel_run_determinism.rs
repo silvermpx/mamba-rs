@@ -24,7 +24,7 @@ use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD;
-use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer};
+use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -96,7 +96,7 @@ fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
     let mut trainer =
-        MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
+        MambaGpuTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
             .expect("trainer");
     match tier {
         GemmTier::Cublas => trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap(),

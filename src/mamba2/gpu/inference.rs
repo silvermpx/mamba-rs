@@ -656,7 +656,7 @@ pub struct Mamba2GpuScratch {
 }
 
 /// The Mamba-2 decode and prefill engine.
-pub struct Mamba2GpuInferenceEngine {
+pub struct Mamba2GpuEngine {
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
     cfg: Mamba2Config,
@@ -687,7 +687,7 @@ struct CapturedStep {
     bi_upcast: [u64; 3],
 }
 
-impl Drop for Mamba2GpuInferenceEngine {
+impl Drop for Mamba2GpuEngine {
     fn drop(&mut self) {
         // A replay may still be in flight on the stream: the graph is
         // destroyed only after it finished.
@@ -696,7 +696,7 @@ impl Drop for Mamba2GpuInferenceEngine {
     }
 }
 
-impl Mamba2GpuInferenceEngine {
+impl Mamba2GpuEngine {
     /// An f32 engine for `batch` sequences, in the GEMM mode
     /// `MAMBA_RS_GEMM_MODE` names (deterministic when unset).
     pub fn new(
@@ -810,8 +810,16 @@ impl Mamba2GpuInferenceEngine {
     }
 
     /// The model's configuration.
-    pub fn cfg(&self) -> &Mamba2Config {
+    pub fn config(&self) -> &Mamba2Config {
         &self.cfg
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "renamed to `config`, the name every family uses"
+    )]
+    pub fn cfg(&self) -> &Mamba2Config {
+        self.config()
     }
 
     /// Sequences per call.
@@ -1302,3 +1310,8 @@ pub struct Mamba2GpuPrefill {
     out: DtypedBuf,
     final_rows: GpuBuffer,
 }
+
+// The names these types carried before 0.8, when each family named its GPU
+// types its own way.
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba2GpuEngine`")]
+pub type Mamba2GpuInferenceEngine = Mamba2GpuEngine;

@@ -9,7 +9,7 @@
 use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer};
+use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaGpuTrainer};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -48,7 +48,7 @@ fn scan_mode_bench_classifier_shape() {
         for lw in cpu.layers.iter_mut() {
             lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
         }
-        let mut trainer = MambaTrainer::new_with_dtype(
+        let mut trainer = MambaGpuTrainer::new_with_dtype(
             0,
             &cpu,
             cfg,

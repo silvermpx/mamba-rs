@@ -407,7 +407,7 @@ fn tc_backward_matches_f32_reference_loosely() {
 #[test]
 fn tc_mixed_training_is_bit_identical_across_runs() {
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
     use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
     fn digest(values: &[f32]) -> u64 {
@@ -465,7 +465,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
             weight_decay: 0.0,
         };
         let mut tr =
-            MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
+            MambaGpuTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
         tr.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
         tr.ctx().route_controls().set_tensor_cores(true);
         let n = 4 * 256 * cfg.d_model;

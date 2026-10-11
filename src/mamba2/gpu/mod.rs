@@ -8,6 +8,6 @@ pub mod inference;
 pub mod kernels;
 pub mod train;
 
-pub use inference::{Mamba2GpuInferenceEngine, Mamba2GpuPrefill, Mamba2GpuScratch, Mamba2GpuState};
+pub use inference::{Mamba2GpuEngine, Mamba2GpuPrefill, Mamba2GpuScratch, Mamba2GpuState};
 pub use kernels::Mamba2Kernels;
 pub use train::Mamba2GpuTrainer;

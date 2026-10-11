@@ -2,7 +2,7 @@
 //!
 //! Processes T tokens of a prompt in a single forward pass using the
 //! `ssm_burnin_forward_nosave` / `ssm_parallel_scan_fwd_nosave` kernels,
-//! producing the final hidden state in `GpuInferenceState` + last-timestep
+//! producing the final hidden state in `MambaGpuState` + last-timestep
 //! temporal output. Avoids the O(T) kernel-launch overhead of step-by-step
 //! prefill — 10-40× speedup for prompts with T > 128.
 //!
@@ -29,7 +29,7 @@ use super::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
-use super::inference::GpuInferenceState;
+use super::inference::MambaGpuState;
 use super::kernel_identity::CapturedGemmGraphPlan;
 use super::launch::{grid_1d, grid_colsum, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
@@ -115,7 +115,7 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     ctx: &GpuCtx,
     target_temporal: &mut GpuBuffer,
     inputs: PrefillInputs<'_, W>,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let PrefillInputs {
@@ -147,7 +147,7 @@ pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
     ctx: &GpuCtx,
     outputs: PrefillOutputs<'_>,
     inputs: PrefillInputs<'_, W>,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let PrefillInputs {
@@ -185,7 +185,7 @@ pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
     ctx: &GpuCtx,
     outputs: PrefillOutputs<'_>,
     inputs: PrefillRawInputs<'_, W>,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let PrefillRawInputs {
@@ -255,7 +255,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
     ctx: &GpuCtx,
     pooled_sum: &mut GpuBuffer,
     inputs: PrefillRawInputs<'_, W>,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let dims: GpuMambaDims = scratch.dims;
@@ -362,7 +362,7 @@ impl PrefillPooledGraph {
         ctx: &GpuCtx,
         pooled_sum: &mut GpuBuffer,
         inputs: PrefillRawInputs<'_, W>,
-        state: &mut GpuInferenceState,
+        state: &mut MambaGpuState,
         scratch: &mut GpuMambaTargetScratch,
     ) -> Result<Self, String> {
         // Lazy BI scratch must exist BEFORE the capture (see
@@ -511,7 +511,7 @@ fn prefill_body<W: MambaWeightsView>(
     ctx: &GpuCtx,
     weights: &W,
     a_neg_all: &GpuBuffer,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetScratch,
     final_out: Option<&mut GpuBuffer>,
 ) -> Result<(), String> {
@@ -942,7 +942,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
     ctx: &GpuCtx,
     target_temporal: &super::buffers::DtypedBuf,
     inputs: PrefillInputs<'_, W>,
-    state: &mut GpuInferenceState,
+    state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetMixedScratch,
 ) -> Result<(), String> {
     let PrefillInputs {

@@ -660,10 +660,17 @@ impl Mamba3MimoGpuTrainer {
         Ok(trainer)
     }
 
-    /// The storage dtype this trainer runs.
     /// The model's configuration.
-    pub fn cfg(&self) -> &Mamba3MimoConfig {
+    pub fn config(&self) -> &Mamba3MimoConfig {
         &self.cfg
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "renamed to `config`, the name every family uses"
+    )]
+    pub fn cfg(&self) -> &Mamba3MimoConfig {
+        self.config()
     }
 
     /// Sequences per window.
@@ -693,6 +700,7 @@ impl Mamba3MimoGpuTrainer {
         }
     }
 
+    /// The storage dtype this trainer runs.
     pub fn dtype(&self) -> WeightDtype {
         self.dtype
     }

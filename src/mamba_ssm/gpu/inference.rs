@@ -92,7 +92,7 @@ mod model_gemm_manifest_tests {
         let weights = weights(&cfg, cfg.d_model, true);
         let input = vec![0.01; cfg.d_model];
         let mut output = vec![0.0; cfg.d_model];
-        let mut f32 = GpuMambaInference::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
+        let mut f32 = MambaGpuEngine::new(&device, &weights, cfg, cfg.d_model, 1).unwrap();
         configure(&f32.ctx, BiGemmFamily::Inference, true);
         let mut state = f32.alloc_state().unwrap();
         let mut scratch = f32.alloc_scratch().unwrap();
@@ -136,7 +136,7 @@ mod model_gemm_manifest_tests {
                     eprintln!(
                         "installed-opposite graph: attempted={path:?} gpu_only={gpu_only} invalid_upload={invalid_upload}"
                     );
-                    let mut engine = GpuMambaInferenceMixed::new(
+                    let mut engine = MambaGpuEngineMixed::new(
                         &device,
                         &weights,
                         cfg,
@@ -257,7 +257,7 @@ mod model_gemm_manifest_tests {
         }
 
         let mut engine =
-            GpuMambaInferenceMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
+            MambaGpuEngineMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
                 .unwrap();
         configure(&engine.engine.ctx, BiGemmFamily::Inference, true);
         let mut state = engine.alloc_state().unwrap();
@@ -386,7 +386,7 @@ mod model_gemm_manifest_tests {
                 let input = vec![0.01; batch * 24];
                 let mut output = vec![0.0; batch * cfg.d_model];
                 let mut engine =
-                    GpuMambaInference::new(&device, &weights(&cfg, 24, false), cfg, 24, batch)
+                    MambaGpuEngine::new(&device, &weights(&cfg, 24, false), cfg, 24, batch)
                         .unwrap();
                 configure(&engine.ctx, family, tc);
                 let mut state = engine.alloc_state().unwrap();
@@ -446,7 +446,7 @@ mod model_gemm_manifest_tests {
                         let native = path == MixedGraphPath::Native;
                         let input_dim = if native { cfg.d_model } else { 24 };
                         let input = vec![0.01; batch * input_dim];
-                        let mut engine = GpuMambaInferenceMixed::new(
+                        let mut engine = MambaGpuEngineMixed::new(
                             &device,
                             &weights(&cfg, input_dim, native),
                             cfg,
@@ -589,7 +589,7 @@ mod model_gemm_manifest_tests {
 /// Note: GPU conv uses `d_conv` slots (full window), while CPU inference uses
 /// `d_conv - 1` (history only). The conv1d step kernels handle the
 /// shift-register semantics with the full `d_conv` layout.
-pub struct GpuInferenceState {
+pub struct MambaGpuState {
     pub conv: GpuBuffer,
     pub ssm: GpuBuffer,
     batch: usize,
@@ -598,7 +598,7 @@ pub struct GpuInferenceState {
     d_state: usize,
 }
 
-impl GpuInferenceState {
+impl MambaGpuState {
     /// Allocate zeroed inference state.
     pub fn zeros(
         stream: &Arc<cudarc::driver::CudaStream>,
@@ -648,7 +648,7 @@ impl GpuInferenceState {
 ///
 /// All GPU buffers are sized for a fixed batch size. Host staging buffers
 /// handle H2D/D2H transfers outside CUDA Graph capture.
-pub struct GpuInferenceScratch {
+pub struct MambaGpuScratch {
     // GPU scratch (reused per step)
     pub gpu_input: GpuBuffer,
     pub temporal: GpuBuffer,
@@ -662,7 +662,7 @@ pub struct GpuInferenceScratch {
     pub rms_buf: GpuBuffer,
 }
 
-impl GpuInferenceScratch {
+impl MambaGpuScratch {
     /// Allocate scratch buffers for the given batch size and config.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
@@ -695,7 +695,7 @@ impl GpuInferenceScratch {
 
 /// Scratch for mixed-precision inference with bf16/f16 activations.
 ///
-/// Kept separate from `GpuInferenceScratch` (f32) so the RL training path
+/// Kept separate from `MambaGpuScratch` (f32) so the RL training path
 /// touches nothing. Dtype policy per-tensor:
 ///
 /// - **Half dtype** (bf16/f16, matches weight dtype) — all linear-layer
@@ -709,7 +709,7 @@ impl GpuInferenceScratch {
 ///   (per-batch statistic). The residual stream is the only
 ///   non-negotiable f32: over 24+ layers, bf16 residual drifts
 ///   measurably (llama.cpp #9590).
-pub struct GpuInferenceMixedScratch {
+pub struct MambaGpuScratchMixed {
     pub gpu_input: GpuBuffer,
     pub temporal: DtypedBuf,
     pub residual: GpuBuffer,
@@ -723,9 +723,9 @@ pub struct GpuInferenceMixedScratch {
     pub dtype: WeightDtype,
 }
 
-impl GpuInferenceMixedScratch {
+impl MambaGpuScratchMixed {
     /// Allocate mixed-precision scratch. `dtype` must match the weight dtype
-    /// of the `GpuMambaInferenceMixed` engine that will use this scratch.
+    /// of the `MambaGpuEngineMixed` engine that will use this scratch.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
         batch: usize,
@@ -734,8 +734,8 @@ impl GpuInferenceMixedScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         if matches!(dtype, WeightDtype::F32) {
-            return Err("GpuInferenceMixedScratch requires bf16 or f16 dtype (use \
-                 GpuInferenceScratch for f32)"
+            return Err("MambaGpuScratchMixed requires bf16 or f16 dtype (use \
+                 MambaGpuScratch for f32)"
                 .to_string());
         }
         let dm = cfg.d_model;
@@ -765,12 +765,12 @@ impl GpuInferenceMixedScratch {
 /// GPU Mamba inference engine — owns kernels, weights, cuBLAS.
 ///
 /// Lifecycle:
-/// 1. `GpuMambaInference::new()` — compile kernels, upload weights
+/// 1. `MambaGpuEngine::new()` — compile kernels, upload weights
 /// 2. Allocate state + scratch via `alloc_state()` / `alloc_scratch()`
 /// 3. Call `step()` each timestep
 /// 4. Optionally call `capture_graph()` for ~2-5x speedup
 /// 5. Call `state.reset()` on episode boundaries
-pub struct GpuMambaInference {
+pub struct MambaGpuEngine {
     pub(super) ctx: GpuCtx,
     pub(super) weights: GpuMambaWeights,
     pub(super) a_neg_all: GpuBuffer,
@@ -789,14 +789,14 @@ pub struct GpuMambaInference {
     captured_scratch_ptr: u64,
 }
 
-impl Drop for GpuMambaInference {
+impl Drop for MambaGpuEngine {
     fn drop(&mut self) {
         let _ = self.ctx.stream.synchronize();
         drop(self.graph.take());
     }
 }
 
-impl GpuMambaInference {
+impl MambaGpuEngine {
     fn dims(&self, seq_len: usize) -> GpuMambaDims {
         GpuMambaDims {
             batch: self.batch,
@@ -942,8 +942,8 @@ impl GpuMambaInference {
     /// cuBLAS workspace, modules, functions, and weights must also stay fixed.
     pub unsafe fn capture_graph(
         &mut self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
             "M1 f32 inference graph capture requires a successful eager step".to_string()
@@ -1000,13 +1000,13 @@ impl GpuMambaInference {
     }
 
     /// Allocate zeroed inference state for this engine's batch size.
-    pub fn alloc_state(&self) -> Result<GpuInferenceState, String> {
-        GpuInferenceState::zeros(&self.ctx.stream, self.batch, &self.cfg)
+    pub fn alloc_state(&self) -> Result<MambaGpuState, String> {
+        MambaGpuState::zeros(&self.ctx.stream, self.batch, &self.cfg)
     }
 
     /// Allocate scratch buffers for this engine.
-    pub fn alloc_scratch(&self) -> Result<GpuInferenceScratch, String> {
-        GpuInferenceScratch::new(&self.ctx.stream, self.batch, &self.cfg, self.input_dim)
+    pub fn alloc_scratch(&self) -> Result<MambaGpuScratch, String> {
+        MambaGpuScratch::new(&self.ctx.stream, self.batch, &self.cfg, self.input_dim)
     }
 
     /// Run one inference step: input → output.
@@ -1019,13 +1019,13 @@ impl GpuMambaInference {
     /// When a graph is captured, all GPU pointers are baked in at capture time.
     /// The `state` and `scratch` parameters MUST be the same objects used during
     /// capture — passing different buffers silently operates on the original ones.
-    /// Use [`GpuMambaBackbone`] which owns state/scratch and guarantees this.
+    /// Use [`MambaGpuBackbone`] which owns state/scratch and guarantees this.
     pub fn step(
         &self,
         input: &[f32],
         output: &mut [f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         // H2D: upload raw input (outside graph)
         self.eager_gemm_manifest.set(None);
@@ -1071,8 +1071,8 @@ impl GpuMambaInference {
     pub fn step_gpu_only(
         &self,
         input: &[f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
@@ -1096,7 +1096,7 @@ impl GpuMambaInference {
     }
 
     /// Get the temporal output buffer (on GPU). Valid after `step_gpu_only`.
-    pub fn temporal_buffer<'a>(&self, scratch: &'a GpuInferenceScratch) -> &'a GpuBuffer {
+    pub fn temporal_buffer<'a>(&self, scratch: &'a MambaGpuScratch) -> &'a GpuBuffer {
         &scratch.temporal
     }
 
@@ -1110,8 +1110,8 @@ impl GpuMambaInference {
     /// ```
     fn step_kernels(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         // F32 path uses the typed-kernel dispatch via generic. This should be
         // identical to the legacy f32-only kernels because TypedKernel.get(F32)
@@ -1124,8 +1124,8 @@ impl GpuMambaInference {
     #[doc(hidden)]
     pub fn step_kernels_f32_debug(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
         stop_after_layer: usize,
     ) -> Result<(), String> {
         self.step_kernels_generic_impl(&self.weights, state, scratch, Some(stop_after_layer))
@@ -1137,8 +1137,8 @@ impl GpuMambaInference {
     pub(super) fn step_kernels_generic<W: MambaWeightsView>(
         &self,
         weights: &W,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         self.step_kernels_generic_impl(weights, state, scratch, None)
     }
@@ -1146,8 +1146,8 @@ impl GpuMambaInference {
     fn step_kernels_generic_impl<W: MambaWeightsView>(
         &self,
         weights: &W,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
         stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let b = self.batch;
@@ -1464,8 +1464,8 @@ enum MixedGraphPath {
 /// parameters stay F32. The context selects deterministic or vendor GEMMs.
 /// Legacy F32-activation and native half-activation paths have separate eager
 /// permits; their shared graph slot is bound to exactly one captured path.
-pub struct GpuMambaInferenceMixed {
-    engine: GpuMambaInference, // owns ctx + (possibly unused) f32 weights
+pub struct MambaGpuEngineMixed {
+    engine: MambaGpuEngine, // owns ctx + (possibly unused) f32 weights
     mixed_weights: GpuMambaMixedWeights,
     a_neg_all: GpuBuffer,
     graph: Option<cudarc::driver::CudaGraph>,
@@ -1480,14 +1480,14 @@ pub struct GpuMambaInferenceMixed {
     captured_bi_upcast_ptrs: [u64; 3],
 }
 
-impl Drop for GpuMambaInferenceMixed {
+impl Drop for MambaGpuEngineMixed {
     fn drop(&mut self) {
         let _ = self.engine.ctx.stream.synchronize();
         drop(self.graph.take());
     }
 }
 
-impl GpuMambaInferenceMixed {
+impl MambaGpuEngineMixed {
     fn ensure_graph_scratch(&self) -> Result<(), String> {
         self.engine.ctx.ensure_graph_scratch_ptrs(
             self.captured_half_staging_ptr,
@@ -1583,7 +1583,7 @@ impl GpuMambaInferenceMixed {
         cfg.validate()?;
         // Create f32 engine first (builds ctx, kernels, a_neg_all via CPU upload path).
         // We'll then discard its `weights` flat buffer and replace with mixed arena.
-        let engine = GpuMambaInference::new_inner(
+        let engine = MambaGpuEngine::new_inner(
             device,
             cpu_weights,
             cfg,
@@ -1648,8 +1648,8 @@ impl GpuMambaInferenceMixed {
         &self,
         input: &[f32],
         output: &mut [f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         self.eager_legacy_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -1686,8 +1686,8 @@ impl GpuMambaInferenceMixed {
     pub fn step_gpu_only(
         &self,
         input: &[f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         self.eager_legacy_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -1717,8 +1717,8 @@ impl GpuMambaInferenceMixed {
 
     fn step_kernels_mixed(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         // Legacy f32-activation path: upcasts activations to f32 around
         // every GEMM via the cast-staging buffer inside gpu_gemm_forward_dispatch.
@@ -1746,8 +1746,8 @@ impl GpuMambaInferenceMixed {
     #[doc(hidden)]
     pub fn step_kernels_mixed_native_debug(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
         stop_after_layer: usize,
     ) -> Result<(), String> {
         self.step_kernels_mixed_native_impl(state, scratch, Some(stop_after_layer))
@@ -1755,16 +1755,16 @@ impl GpuMambaInferenceMixed {
 
     pub(super) fn step_kernels_mixed_native(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
     ) -> Result<(), String> {
         self.step_kernels_mixed_native_impl(state, scratch, None)
     }
 
     fn step_kernels_mixed_native_impl(
         &self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
         stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let engine = &self.engine;
@@ -2097,8 +2097,8 @@ impl GpuMambaInferenceMixed {
         &self,
         input: &[f32],
         output: &mut [f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
     ) -> Result<(), String> {
         self.eager_mixed_native_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -2138,8 +2138,8 @@ impl GpuMambaInferenceMixed {
     pub fn step_gpu_only_mixed_native(
         &self,
         input: &[f32],
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
     ) -> Result<(), String> {
         self.eager_mixed_native_gemm_manifest.set(None);
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
@@ -2168,9 +2168,9 @@ impl GpuMambaInferenceMixed {
         }
     }
 
-    /// Allocate a `GpuInferenceMixedScratch` sized for this engine.
-    pub fn alloc_mixed_scratch(&self) -> Result<GpuInferenceMixedScratch, String> {
-        GpuInferenceMixedScratch::new(
+    /// Allocate a `MambaGpuScratchMixed` sized for this engine.
+    pub fn alloc_mixed_scratch(&self) -> Result<MambaGpuScratchMixed, String> {
+        MambaGpuScratchMixed::new(
             &self.engine.ctx.stream,
             self.engine.batch,
             &self.engine.cfg,
@@ -2206,8 +2206,8 @@ impl GpuMambaInferenceMixed {
     /// cuBLAS workspace, modules, functions, and weights must also stay fixed.
     pub unsafe fn capture_graph_mixed_native(
         &mut self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceMixedScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratchMixed,
     ) -> Result<(), String> {
         let manifest = self
             .eager_mixed_native_gemm_manifest
@@ -2263,8 +2263,8 @@ impl GpuMambaInferenceMixed {
     /// cuBLAS workspace, modules, functions, and weights must also stay fixed.
     pub unsafe fn capture_graph(
         &mut self,
-        state: &mut GpuInferenceState,
-        scratch: &mut GpuInferenceScratch,
+        state: &mut MambaGpuState,
+        scratch: &mut MambaGpuScratch,
     ) -> Result<(), String> {
         let manifest = self.eager_legacy_gemm_manifest.take().ok_or_else(|| {
             "M1 legacy mixed inference graph capture requires a successful eager step".to_string()
@@ -2302,11 +2302,11 @@ impl GpuMambaInferenceMixed {
         Ok(())
     }
 
-    pub fn alloc_state(&self) -> Result<GpuInferenceState, String> {
+    pub fn alloc_state(&self) -> Result<MambaGpuState, String> {
         self.engine.alloc_state()
     }
 
-    pub fn alloc_scratch(&self) -> Result<GpuInferenceScratch, String> {
+    pub fn alloc_scratch(&self) -> Result<MambaGpuScratch, String> {
         self.engine.alloc_scratch()
     }
 
@@ -2340,7 +2340,7 @@ impl GpuMambaInferenceMixed {
 
     /// Access the underlying f32 inference engine (used by unified backbone
     /// wrapper to read cfg/batch/input_dim).
-    pub fn engine_ref(&self) -> &GpuMambaInference {
+    pub fn engine_ref(&self) -> &MambaGpuEngine {
         &self.engine
     }
 
@@ -2365,11 +2365,11 @@ impl GpuMambaInferenceMixed {
 ///
 /// ```rust,no_run
 /// use mamba_rs::MambaConfig;
-/// use mamba_rs::gpu::inference::GpuMambaBackbone;
+/// use mamba_rs::gpu::inference::MambaGpuBackbone;
 ///
 /// let cfg = MambaConfig::default();
 /// let weights = mamba_rs::MambaWeights::init(&cfg, 128, 42);
-/// let mut bb = GpuMambaBackbone::new(0, &weights, cfg, 128, 1).unwrap();
+/// let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 128, 1).unwrap();
 /// bb.capture_graph().unwrap(); // optional ~2-5x speedup
 ///
 /// let input = vec![0.1f32; 128];
@@ -2380,13 +2380,13 @@ impl GpuMambaInferenceMixed {
 /// Internal engine variant. Box the larger variant to keep enum size small
 /// (Mixed includes f32 engine + mixed weights arena + a_neg_all).
 enum BackboneEngine {
-    F32(Box<GpuMambaInference>),
-    Mixed(Box<GpuMambaInferenceMixed>),
+    F32(Box<MambaGpuEngine>),
+    Mixed(Box<MambaGpuEngineMixed>),
 }
 
 enum BackboneScratch {
-    F32(GpuInferenceScratch),
-    Mixed(GpuInferenceMixedScratch),
+    F32(MambaGpuScratch),
+    Mixed(MambaGpuScratchMixed),
 }
 
 impl BackboneScratch {
@@ -2421,17 +2421,17 @@ impl BackboneScratch {
 ///
 /// ```rust,no_run
 /// use mamba_rs::MambaConfig;
-/// use mamba_rs::gpu::inference::GpuMambaBackbone;
+/// use mamba_rs::gpu::inference::MambaGpuBackbone;
 /// use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 ///
 /// let cfg = MambaConfig::default();
 /// let weights = mamba_rs::MambaWeights::init(&cfg, 128, 42);
 ///
 /// // f32 (default)
-/// let mut bb = GpuMambaBackbone::new(0, &weights, cfg, 128, 1).unwrap();
+/// let mut bb = MambaGpuBackbone::new(0, &weights, cfg, 128, 1).unwrap();
 ///
 /// // bf16 (half VRAM)
-/// let mut bb_bf16 = GpuMambaBackbone::new_with_dtype(
+/// let mut bb_bf16 = MambaGpuBackbone::new_with_dtype(
 ///     0, &weights, cfg, 128, 1, WeightDtype::Bf16
 /// ).unwrap();
 ///
@@ -2439,13 +2439,13 @@ impl BackboneScratch {
 /// let mut output = vec![0.0f32; 128];
 /// bb.step(&vec![0.1f32; 128], &mut output).unwrap();
 /// ```
-pub struct GpuMambaBackbone {
+pub struct MambaGpuBackbone {
     engine: BackboneEngine,
-    state: GpuInferenceState,
+    state: MambaGpuState,
     scratch: BackboneScratch,
 }
 
-impl GpuMambaBackbone {
+impl MambaGpuBackbone {
     /// Create an f32 GPU backbone in the GEMM mode `MAMBA_RS_GEMM_MODE` names
     /// (`deterministic` when unset).
     ///
@@ -2551,7 +2551,7 @@ impl GpuMambaBackbone {
         let device = GpuDevice::new(gpu_ordinal)?;
         let (engine, state, scratch) = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => {
-                let e = GpuMambaInference::new_inner(
+                let e = MambaGpuEngine::new_inner(
                     &device,
                     cpu_weights,
                     cfg,
@@ -2566,7 +2566,7 @@ impl GpuMambaBackbone {
             }
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let e = match mode {
-                    Some(mode) => GpuMambaInferenceMixed::new_with_mode(
+                    Some(mode) => MambaGpuEngineMixed::new_with_mode(
                         &device,
                         cpu_weights,
                         cfg,
@@ -2575,7 +2575,7 @@ impl GpuMambaBackbone {
                         dtype,
                         mode,
                     )?,
-                    None => GpuMambaInferenceMixed::new(
+                    None => MambaGpuEngineMixed::new(
                         &device,
                         cpu_weights,
                         cfg,
@@ -2884,3 +2884,18 @@ impl GpuMambaBackbone {
         super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
     }
 }
+
+// The names these types carried before 0.8, when each family named its GPU
+// types its own way.
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuBackbone`")]
+pub type GpuMambaBackbone = MambaGpuBackbone;
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuEngine`")]
+pub type GpuMambaInference = MambaGpuEngine;
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuEngineMixed`")]
+pub type GpuMambaInferenceMixed = MambaGpuEngineMixed;
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuState`")]
+pub type GpuInferenceState = MambaGpuState;
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuScratch`")]
+pub type GpuInferenceScratch = MambaGpuScratch;
+#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuScratchMixed`")]
+pub type GpuInferenceMixedScratch = MambaGpuScratchMixed;

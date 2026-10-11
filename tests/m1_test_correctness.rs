@@ -740,7 +740,7 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_inference_matches_cpu() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -750,7 +750,7 @@ mod gpu_tests {
 
         // GPU backbone
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
 
         // CPU states
         let mut cpu_states: Vec<MambaState> = (0..batch).map(|_| bb.alloc_state()).collect();
@@ -789,7 +789,7 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_inference_cuda_graph() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -800,7 +800,7 @@ mod gpu_tests {
         // handle (and therefore the same TF32 algorithm selections) is used
         // for both non-graph and graph runs, giving bit-identical results.
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
 
         let input = vec![0.1f32; input_dim];
 
@@ -833,14 +833,14 @@ mod gpu_tests {
 
     #[test]
     fn test_gpu_inference_state_reset() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
         let bb = MambaBackbone::init(cfg, input_dim, 42);
 
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
 
         let input = vec![0.1f32; input_dim];
         let mut out_first = vec![0.0f32; cfg.d_model];
@@ -1797,7 +1797,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_inference_batch_parity() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1807,11 +1807,11 @@ mod gpu_extra_tests {
 
         // GPU batch=4: run all samples together
         let mut gpu_batch =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, batch).unwrap();
 
         // GPU batch=1: run each sample individually (reuse single engine, reset between samples)
         let mut gpu_single =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
 
         // First step only (state=zero for both paths, so results must match)
         let inputs: Vec<f32> = (0..batch * input_dim).map(|i| (i as f32) * 0.001).collect();
@@ -1845,13 +1845,13 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_inference_long_sequence_stability() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
         let bb = MambaBackbone::init(cfg, input_dim, 42);
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
 
         let mut output = vec![0.0f32; cfg.d_model];
         for step in 0..200 {
@@ -1868,7 +1868,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_cuda_graph_matches_cpu() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1876,7 +1876,7 @@ mod gpu_extra_tests {
 
         // GPU with CUDA Graph
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
         gpu_bb.capture_graph().unwrap();
 
         // CPU
@@ -2025,7 +2025,7 @@ mod gpu_extra_tests {
 
     #[test]
     fn test_gpu_custom_config() {
-        use mamba_rs::gpu::inference::GpuMambaBackbone;
+        use mamba_rs::gpu::inference::MambaGpuBackbone;
 
         let cfg = MambaConfig {
             d_model: 64,
@@ -2040,7 +2040,7 @@ mod gpu_extra_tests {
         let bb = MambaBackbone::init(cfg, input_dim, 99);
 
         let mut gpu_bb =
-            GpuMambaBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
+            MambaGpuBackbone::new(0, bb.weights(), *bb.config(), input_dim, 1).unwrap();
 
         let mut cpu_state = bb.alloc_state();
         let mut cpu_scratch = bb.alloc_scratch();

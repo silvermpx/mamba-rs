@@ -6,7 +6,7 @@
 use mamba_rs::MambaBackbone;
 use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba_ssm::MambaWeights;
-use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
+use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -39,7 +39,7 @@ fn m1_step_cost_across_state_capacities() {
         let input_dim = cfg.d_model;
         let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);
         let weights: MambaWeights = cpu_bb.weights().clone();
-        let mut gpu_bb = GpuMambaBackbone::new(0, &weights, cfg, input_dim, 1).unwrap();
+        let mut gpu_bb = MambaGpuBackbone::new(0, &weights, cfg, input_dim, 1).unwrap();
         let input = det(input_dim, 0x77);
         let mut out = vec![0.0f32; input_dim];
         for _ in 0..50 {

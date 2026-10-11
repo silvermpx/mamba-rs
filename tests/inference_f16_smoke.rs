@@ -1,5 +1,5 @@
 //! verify f16 inference works end-to-end through the public
-//! `GpuMambaBackbone` / `GpuMamba3Backbone` wrappers.
+//! `MambaGpuBackbone` / `Mamba3GpuBackbone` wrappers.
 //!
 //! f16 inference was once thought to be missing from the wrapper API;
 //! both wrappers have always dispatched `Bf16 | F16` into the `Mixed`
@@ -14,7 +14,7 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 fn m1_inference_f16_wrapper_smoke() {
     use mamba_rs::mamba_ssm::MambaConfig;
     use mamba_rs::mamba_ssm::MambaWeights;
-    use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
+    use mamba_rs::mamba_ssm::gpu::inference::MambaGpuBackbone;
 
     let cfg = MambaConfig {
         d_model: 64,
@@ -35,7 +35,7 @@ fn m1_inference_f16_wrapper_smoke() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut bb = GpuMambaBackbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
+    let mut bb = MambaGpuBackbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
         .expect("construct f16 backbone");
     assert_eq!(bb.dtype(), WeightDtype::F16);
 
@@ -49,7 +49,7 @@ fn m1_inference_f16_wrapper_smoke() {
 #[test]
 fn m3_inference_f16_wrapper_smoke() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -72,7 +72,7 @@ fn m3_inference_f16_wrapper_smoke() {
     cpu.input_proj_b.clear();
 
     let mut bb =
-        GpuMamba3Backbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
+        Mamba3GpuBackbone::new_with_dtype(0, &cpu, cfg, input_dim, batch, WeightDtype::F16)
             .expect("construct M3 f16 backbone");
     assert_eq!(bb.dtype(), WeightDtype::F16);
 

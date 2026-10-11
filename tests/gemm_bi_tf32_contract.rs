@@ -89,25 +89,25 @@ fn struct_scope_for_type<'a>(source: &'a str, type_name: &str) -> &'a str {
 #[test]
 fn struct_scope_parser_distinguishes_exact_type_from_prefix_collision() {
     let source = r#"
-        struct Mamba3GpuInferenceMixedScratch { scratch_only: usize }
+        struct Mamba3GpuScratchMixed { scratch_only: usize }
         struct Mamba3GpuInferenceMixed_extra { suffix_only: usize }
-        // struct Mamba3GpuInferenceMixed { comment_only: usize }
-        pub struct Mamba3GpuInferenceMixed { captured_plan: Option<Plan> }
+        // struct Mamba3GpuEngineMixed { comment_only: usize }
+        pub struct Mamba3GpuEngineMixed { captured_plan: Option<Plan> }
         struct Mamba3GpuInferenceMixedOther { other_only: usize }
     "#;
     assert_eq!(
-        struct_scope_for_type(source, "Mamba3GpuInferenceMixed"),
-        "struct Mamba3GpuInferenceMixed { captured_plan: Option<Plan> }"
+        struct_scope_for_type(source, "Mamba3GpuEngineMixed"),
+        "struct Mamba3GpuEngineMixed { captured_plan: Option<Plan> }"
     );
     assert_eq!(
-        struct_scope_for_type(source, "Mamba3GpuInferenceMixedScratch"),
-        "struct Mamba3GpuInferenceMixedScratch { scratch_only: usize }"
+        struct_scope_for_type(source, "Mamba3GpuScratchMixed"),
+        "struct Mamba3GpuScratchMixed { scratch_only: usize }"
     );
     assert!(
         std::panic::catch_unwind(|| {
             struct_scope_for_type(
-                "struct Mamba3GpuInferenceMixedScratch { scratch: usize }",
-                "Mamba3GpuInferenceMixed",
+                "struct Mamba3GpuScratchMixed { scratch: usize }",
+                "Mamba3GpuEngineMixed",
             )
         })
         .is_err(),
@@ -4183,31 +4183,31 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
     let decode_holders = [
         (
             INFERENCE_SOURCE,
-            "GpuMambaInference",
+            "MambaGpuEngine",
             "capture_graph",
             &["step", "step_gpu_only"][..],
         ),
         (
             INFERENCE_SOURCE,
-            "GpuMambaInferenceMixed",
+            "MambaGpuEngineMixed",
             "capture_graph",
             &["step", "step_gpu_only"][..],
         ),
         (
             INFERENCE_SOURCE,
-            "GpuMambaInferenceMixed",
+            "MambaGpuEngineMixed",
             "capture_graph_mixed_native",
             &["step_mixed_native", "step_gpu_only_mixed_native"][..],
         ),
         (
             MAMBA3_INFERENCE_SOURCE,
-            "Mamba3GpuInferenceEngine",
+            "Mamba3GpuEngine",
             "capture_graph",
             &["step", "step_gpu_only"][..],
         ),
         (
             MAMBA3_INFERENCE_SOURCE,
-            "Mamba3GpuInferenceMixed",
+            "Mamba3GpuEngineMixed",
             "capture_graph_mixed_native",
             &["step_mixed_native", "step_gpu_only_mixed_native"][..],
         ),
@@ -4279,7 +4279,7 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
         ("capture_graph", "Legacy"),
         ("capture_graph_mixed_native", "Native"),
     ] {
-        let capture = method_scope_for_type(INFERENCE_SOURCE, "GpuMambaInferenceMixed", capture);
+        let capture = method_scope_for_type(INFERENCE_SOURCE, "MambaGpuEngineMixed", capture);
         assert_code_contains_all(
             capture,
             &[&format!(
@@ -4290,7 +4290,7 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
     }
     let launch = method_scope_for_type(
         INFERENCE_SOURCE,
-        "GpuMambaInferenceMixed",
+        "MambaGpuEngineMixed",
         "launch_captured_graph",
     );
     assert_code_contains_all(

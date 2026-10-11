@@ -277,8 +277,16 @@ impl Mamba3MimoGpuEngine {
     }
 
     /// The model's configuration.
-    pub fn cfg(&self) -> &Mamba3MimoConfig {
+    pub fn config(&self) -> &Mamba3MimoConfig {
         &self.cfg
+    }
+
+    #[deprecated(
+        since = "0.8.0",
+        note = "renamed to `config`, the name every family uses"
+    )]
+    pub fn cfg(&self) -> &Mamba3MimoConfig {
+        self.config()
     }
 
     /// Sequences per call.

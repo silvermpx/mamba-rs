@@ -1,6 +1,6 @@
 //! High-level Mamba-3 training API.
 //!
-//! M3 analogue of [`crate::mamba_ssm::gpu::trainer::MambaTrainer`]. Owns
+//! M3 analogue of [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer`]. Owns
 //! mixed-precision weights + grads + Adam + acts + scratch + state + graph.
 //!
 //! Supports f32, bf16, and f16 (with dynamic loss scaler), including CUDA
@@ -70,13 +70,13 @@ enum Trainer3Inner {
 }
 
 /// High-level Mamba-3 training wrapper. Same shape as
-/// [`crate::mamba3_siso::gpu::inference::GpuMamba3Backbone`]: one public
+/// [`crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone`]: one public
 /// struct, one method per operation, dtype dispatch happens internally.
-pub struct Mamba3Trainer {
+pub struct Mamba3GpuTrainer {
     inner: Trainer3Inner,
 }
 
-impl Mamba3Trainer {
+impl Mamba3GpuTrainer {
     /// Construct an M3 trainer with default Adam settings in the GEMM mode
     /// `MAMBA_RS_GEMM_MODE` names (`deterministic` when unset).
     ///
@@ -236,7 +236,7 @@ impl Mamba3Trainer {
     /// Set the AdamW learning rate for subsequent EAGER steps. Errs while a
     /// captured graph exists — the lr is baked by value into the captured
     /// AdamW kernel; a field write would silently not apply under replay.
-    /// Mirrors `MambaTrainer::set_lr`.
+    /// Mirrors `MambaGpuTrainer::set_lr`.
     pub fn set_lr(&mut self, lr: f32) -> Result<(), String> {
         if !lr.is_finite() || lr <= 0.0 {
             return Err(format!("set_lr: invalid learning rate {lr}"));
@@ -378,8 +378,8 @@ impl Mamba3Trainer {
     ///
     /// ```compile_fail
     /// use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-    /// use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
-    /// fn replace_arena(trainer: &mut Mamba3Trainer, replacement: GpuBuffer) {
+    /// use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
+    /// fn replace_arena(trainer: &mut Mamba3GpuTrainer, replacement: GpuBuffer) {
     ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
     /// }
     /// ```
@@ -463,7 +463,7 @@ impl Mamba3Trainer {
     /// ON since 0.7.4; OFF reproduces the numbers of 0.7.3 and earlier. Errs
     /// while a captured graph exists (the decay coefficient is baked by
     /// value into the captured per-tensor launches). Mirrors
-    /// `MambaTrainer::set_reference_no_decay`.
+    /// `MambaGpuTrainer::set_reference_no_decay`.
     pub fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
         if self.has_graph() {
             return Err(
@@ -501,7 +501,7 @@ impl Mamba3Trainer {
     }
 
     /// Drop any captured step graph so `drop_graph -> set_lr ->
-    /// capture_graph` is expressible. Mirrors `MambaTrainer::drop_graph`.
+    /// capture_graph` is expressible. Mirrors `MambaGpuTrainer::drop_graph`.
     pub fn drop_graph(&mut self) {
         match &mut self.inner {
             Trainer3Inner::F32(t) => {
@@ -615,7 +615,7 @@ impl Mamba3Trainer {
     }
 
     /// Eager forward half of the split step — M3 mirror of
-    /// [`crate::mamba_ssm::gpu::trainer::MambaTrainer::forward`]: runs the
+    /// [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer::forward`]: runs the
     /// training forward and writes the FULL `batch * seq_len * d_model`
     /// POST-norm_f temporal output into caller-owned `temporal_out` (f32 on
     /// all dtypes). Stream-synchronized on return. Advances the recurrent
@@ -629,7 +629,7 @@ impl Mamba3Trainer {
     }
 
     /// Backward + optimizer half of the split step — M3 mirror of
-    /// [`crate::mamba_ssm::gpu::trainer::MambaTrainer::backward_step`].
+    /// [`crate::mamba_ssm::gpu::trainer::MambaGpuTrainer::backward_step`].
     /// `d_temporal` is the gradient w.r.t. the IMMEDIATELY PRECEDING
     /// [`Self::forward`]'s temporal output. Errs when no forward is pending.
     pub fn backward_step(
@@ -1567,7 +1567,7 @@ impl Mamba3TrainerMixed {
         Ok(())
     }
 
-    /// Split forward (see [`Mamba3Trainer::forward`]). The M3 mixed forward
+    /// Split forward (see [`Mamba3GpuTrainer::forward`]). The M3 mixed forward
     /// already writes f32 temporal — no upcast staging needed (unlike M1).
     pub(crate) fn forward_split(
         &mut self,
@@ -1602,7 +1602,7 @@ impl Mamba3TrainerMixed {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`Mamba3Trainer::backward_step`]).
+    /// Split backward + optimizer (see [`Mamba3GpuTrainer::backward_step`]).
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
@@ -2278,7 +2278,7 @@ impl Mamba3TrainerF32 {
         Ok(())
     }
 
-    /// Split forward (see [`Mamba3Trainer::forward`]).
+    /// Split forward (see [`Mamba3GpuTrainer::forward`]).
     pub(crate) fn forward_split(
         &mut self,
         input: &[f32],
@@ -2310,7 +2310,7 @@ impl Mamba3TrainerF32 {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`Mamba3Trainer::backward_step`]).
+    /// Split backward + optimizer (see [`Mamba3GpuTrainer::backward_step`]).
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
@@ -2473,3 +2473,8 @@ impl Mamba3TrainerF32 {
         Ok(out)
     }
 }
+
+// The names these types carried before 0.8, when each family named its GPU
+// types its own way.
+#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuTrainer`")]
+pub type Mamba3Trainer = Mamba3GpuTrainer;

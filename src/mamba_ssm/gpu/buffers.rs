@@ -736,7 +736,7 @@ impl Drop for GpuByteBuffer {
 
 /// Dtype-aware owning buffer — holds activation scratch in any dtype.
 ///
-/// Used by GpuInferenceScratch to hold activations in f32/bf16/fp16 uniformly.
+/// Used by MambaGpuScratch to hold activations in f32/bf16/fp16 uniformly.
 /// Exposes `.cached_ptr()` + `.len_elems()` so all existing kernel call-sites
 /// work unchanged. `upload_f32` / `download_f32` do on-the-fly dtype conversion
 /// for CPU <-> GPU transfers.

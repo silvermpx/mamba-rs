@@ -21,6 +21,31 @@
 - The Inference retained bundle and the Ada copy-plan routes no longer
   depend on the state capacity; they are admitted at every capacity
   instead of only 16 and 64.
+- The GPU types of the four families follow one naming scheme, the family
+  first and then `Gpu` and the role. The old names stay as deprecated
+  aliases for this release.
+
+  | Old name | New name |
+  |---|---|
+  | `GpuMambaBackbone` | `MambaGpuBackbone` |
+  | `GpuMambaInference` | `MambaGpuEngine` |
+  | `GpuMambaInferenceMixed` | `MambaGpuEngineMixed` |
+  | `GpuInferenceState` | `MambaGpuState` |
+  | `GpuInferenceScratch` | `MambaGpuScratch` |
+  | `GpuInferenceMixedScratch` | `MambaGpuScratchMixed` |
+  | `MambaTrainer` | `MambaGpuTrainer` |
+  | `GpuMamba3Backbone` | `Mamba3GpuBackbone` |
+  | `Mamba3GpuInferenceEngine` | `Mamba3GpuEngine` |
+  | `Mamba3GpuInferenceMixed` | `Mamba3GpuEngineMixed` |
+  | `Mamba3GpuInferenceState` | `Mamba3GpuState` |
+  | `Mamba3GpuInferenceScratch` | `Mamba3GpuScratch` |
+  | `Mamba3GpuInferenceMixedScratch` | `Mamba3GpuScratchMixed` |
+  | `Mamba3Trainer` | `Mamba3GpuTrainer` |
+  | `Mamba2GpuInferenceEngine` | `Mamba2GpuEngine` |
+
+  The Mamba-2 and MIMO engines and trainers answer `config()` like the
+  others. Their `cfg()` stays as a deprecated alias. Every family's `gpu`
+  module now exports its backbone, engines, state, scratch and trainer.
 - Mamba-1 keeps its configuration, weights, state and safetensors
   serializer in its own module, as the other families do:
   `mamba_rs::mamba_ssm::{config, weights, state, serialize}`. The crate

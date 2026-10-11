@@ -4,7 +4,7 @@
 //! cargo run --release --example gpu_training_bf16 --features cuda
 //! ```
 //!
-//! Runs a short synthetic training loop through [`MambaTrainer`], exercising
+//! Runs a short synthetic training loop through [`MambaGpuTrainer`], exercising
 //! the full training stack: bf16 compute shadow with f32 master AdamW, the
 //! deterministic GEMM mode on the Triad family (a trainer context), CUDA
 //! Graph capture of the complete forward + backward + optimizer step, and
@@ -32,7 +32,7 @@ mod cuda_example {
     use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaGpuTrainer, TrainSessionCfg};
 
     /// Deterministic pseudo-random input. `scale` caps the magnitude — with
     /// synthetic random d_temporal (no real loss signal), un-scaled gradients
@@ -89,7 +89,7 @@ mod cuda_example {
         let wd = 1e-3_f32;
         // Explicit storage dtype and GEMM mode; `new_full` would read
         // MAMBA_RS_GEMM_MODE instead and default to Deterministic.
-        let mut trainer = MambaTrainer::new_full_with_mode(
+        let mut trainer = MambaGpuTrainer::new_full_with_mode(
             0,
             &cpu,
             cfg,

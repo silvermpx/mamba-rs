@@ -1,4 +1,4 @@
-//! M3 split-step API contracts: `Mamba3Trainer::forward` / `backward_step`
+//! M3 split-step API contracts: `Mamba3GpuTrainer::forward` / `backward_step`
 //! against the fused `step()` — the M3 twins of `trainer_split.rs`.
 //!
 //! Same specification: the split is an EAGER re-composition of the exact
@@ -12,7 +12,7 @@
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
-use mamba_rs::mamba3_siso::gpu::trainer::{BackwardOpts, Mamba3Trainer, TrainSessionCfg};
+use mamba_rs::mamba3_siso::gpu::trainer::{BackwardOpts, Mamba3GpuTrainer, TrainSessionCfg};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -123,10 +123,12 @@ fn run_split_vs_fused(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
 
-    let mut fused = Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-        .expect("fused trainer");
-    let mut split = Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
-        .expect("split trainer");
+    let mut fused =
+        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+            .expect("fused trainer");
+    let mut split =
+        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+            .expect("split trainer");
 
     let mut temporal_out = vec![0.0f32; n_out];
     for step in 0..3u32 {
@@ -168,7 +170,7 @@ fn m3_split_interlock_and_accumulate_window() {
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
     let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
-    let mut t = Mamba3Trainer::new_full(
+    let mut t = Mamba3GpuTrainer::new_full(
         0,
         &w,
         cfg,
@@ -231,7 +233,7 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
     let mut trainer =
-        Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
             .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA2, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB2, 0.01);
@@ -272,7 +274,7 @@ fn assert_reset_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
     let mut trainer =
-        Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
             .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA3, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB3, 0.01);
@@ -309,7 +311,7 @@ fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
     let mut trainer =
-        Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        Mamba3GpuTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
             .expect("trainer");
     let input = det(batch * seq_len * input_dim, 0xA4, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xB4, 0.01);
@@ -358,7 +360,7 @@ fn m3_f16_split_scaler_protocol() {
     let mut w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
-    let mut t = Mamba3Trainer::new_full(
+    let mut t = Mamba3GpuTrainer::new_full(
         0,
         &w,
         cfg,

@@ -23,7 +23,7 @@ use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::context::{GemmMode, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::inference::{GpuMambaInference, GpuMambaInferenceMixed};
+use mamba_rs::mamba_ssm::gpu::inference::{MambaGpuEngine, MambaGpuEngineMixed};
 use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -126,7 +126,7 @@ fn decode_run_digest() {
 
     let mut snapshots = Vec::new();
     for graph in [false, true] {
-        let engine = GpuMambaInference::new(&device, &w, cfg, input_dim, batch).unwrap();
+        let engine = MambaGpuEngine::new(&device, &w, cfg, input_dim, batch).unwrap();
         let mut state = engine.alloc_state().unwrap();
         let mut scratch = engine.alloc_scratch().unwrap();
         let mut out = vec![f32::NAN; batch * cfg.d_model];
@@ -203,8 +203,7 @@ fn decode_run_digest_mixed(dtype: WeightDtype) {
 
     let mut snapshots = Vec::new();
     for graph in [false, true] {
-        let engine =
-            GpuMambaInferenceMixed::new(&device, &w, cfg, input_dim, batch, dtype).unwrap();
+        let engine = MambaGpuEngineMixed::new(&device, &w, cfg, input_dim, batch, dtype).unwrap();
         let mut state = engine.alloc_state().unwrap();
         let mut scratch = engine.alloc_mixed_scratch().unwrap();
         let mut out = vec![f32::NAN; batch * cfg.d_model];
