@@ -325,11 +325,12 @@ fn m3_gradients_match_f64_central_differences() {
                     for i in probe_indices(&cfg, name, g) {
                         let perturb = |sign: f32| -> (Vec<TrainMamba3LayerWeights>, f64) {
                             let mut wp = weights.clone();
-                            let mut tp = tensors(&mut wp[l]);
-                            let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
-                            v[i] += sign * 1e-3 * v[i].abs().max(1.0);
-                            let at = f64::from(v[i]);
-                            drop(tp);
+                            let at = {
+                                let mut tp = tensors(&mut wp[l]);
+                                let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
+                                v[i] += sign * 1e-3 * v[i].abs().max(1.0);
+                                f64::from(v[i])
+                            };
                             (wp, at)
                         };
                         let (plus, hp) = perturb(1.0);
