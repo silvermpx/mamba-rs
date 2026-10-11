@@ -20,14 +20,14 @@ test, bench and tool directories is reachable from the manifest.
 |---|---|---|
 | host | regressions that need no GPU and no CUDA feature | `cargo test --no-default-features` (CI, any machine) |
 | gate | CUDA regressions with no ignored arm | `qual/run.sh gate` (`cargo test --release --features cuda`) |
-| toolkit | compile gates, identity and source contracts: the CUDA toolkit (NVRTC), no device | `qual/run.sh toolkit`, once per toolkit build on the build box; `qual/run.sh board` is the gate lane without it, for a board that only has to run |
-| contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`; every target runs, the reds are named at the end) |
-| record | manual instruments that need model assets or foreign hardware, still under `tests/` | `qual/run.sh record` lists them; run one at a time |
+| toolkit | compile gates, identity and source contracts: the CUDA toolkit (NVRTC), no device | `qual/run.sh toolkit`, once per toolkit build on the build box. `qual/run.sh board` is the gate lane without it, for a board that only has to run |
+| contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`. Every target runs, the reds are named at the end) |
+| record | manual instruments that need model assets or foreign hardware, still under `tests/` | `qual/run.sh record` lists them. Run one at a time |
 | bench | timing instruments under `benches/`, no verdict | `cargo bench --features cuda --bench <name> [-- <instrument>]` |
 | qualification | hardware, toolkit and inventory instruments under `tools/qualification/` | `cargo test --release --features "cuda hf qualification" --test <name> -- --ignored`, one per board and toolkit |
 
 Kernel-candidate stands, scouts and diagnostics are kept in the
-maintainers' archive with an index of their origin; they are outside the
+maintainers' archive with an index of their origin. They are outside the
 crate and its targets.
 
 ## Evidence
@@ -44,7 +44,7 @@ cargo run --release --example acceptance_diff -- base.tsv candidate.tsv
 which prints every moved or one-sided cell and exits non-zero on any
 difference. A release candidate's capture must be byte-identical to the last
 accepted one for every cell whose kernels the release does not intentionally
-change; an intentional change re-records its cells in the same commit that
+change. An intentional change re-records its cells in the same commit that
 makes it.
 
 Every performance table that is published records the board, driver,
@@ -54,7 +54,7 @@ dtype, eager or graph path, and
 the window count and aggregation. Boards are reported separately.
 
 It also records how the route was admitted on the board it was timed on.
-A route the board holds a frozen cohort for is a measured winner there; a
+A route the board holds a frozen cohort for is a measured winner there. A
 route the board admitted by the first-use bit proof carries the speed
 evidence of the board it was measured on and none of its own, and a table
 may not present the two as the same claim.
@@ -69,10 +69,10 @@ may not present the two as the same claim.
 2. `qual/run.sh gate` green on each qualification board, and a GPU context
    created on at least one board of every module family the release
    claims (a board without an architecture module, an SM120 board, and
-   an SM90a or SM100 board when one is available); a claim for a family
+   an SM90a or SM100 board when one is available). A claim for a family
    no board of which has booted the release is not made.
-3. `qual/run.sh contract` on each board, with the evidence capture on;
-   the lane runs every target and names each red at its end; a target
+3. `qual/run.sh contract` on each board, with the evidence capture on.
+   The lane runs every target and names each red at its end. A target
    written for another board skips there, so no red is allowed.
    `acceptance_diff` against the previous
    release's capture clean, or every difference accounted for by an
@@ -81,15 +81,15 @@ may not present the two as the same claim.
    and toolkit (`qual/run.sh qualification` lists them), with raw logs kept.
 5. Package: `cargo package --allow-dirty --no-verify`, extract the `.crate`
    into a fresh directory and inspect it directly: no archive or local
-   tooling material; every declared target path and fixture
-   present; `cargo test --lib --no-default-features --no-run` and
+   tooling material. Every declared target path and fixture
+   present. `cargo test --lib --no-default-features --no-run` and
    `cargo test --no-default-features` pass offline inside the extracted
-   tree; one qualification tool and one bench build from it.
+   tree. One qualification tool and one bench build from it.
 6. `cargo publish --locked --dry-run`: the dependency resolution CI tested
    is the one that ships.
 7. The previous release has been measured against the release candidate
    on the same board with identical settings, kernel by kernel and as
    whole training and inference steps, and the result is in the changelog
-   and on the benchmark page; if it has not run, the changelog says so.
+   and on the benchmark page. If it has not run, the changelog says so.
 8. Tag only after the release commit's CI is green and a maintainer has
    approved publication.

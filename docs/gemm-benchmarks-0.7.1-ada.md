@@ -1,8 +1,8 @@
-# GEMM benchmarks — 0.7.1, RTX 6000 Ada
+# GEMM benchmarks, 0.7.1, RTX 6000 Ada
 
 Measured on September 14, 2026, with the assembled deterministic Inference
 and Triad dispatchers. The baseline is the released 0.7.0 source, not a
-development checkpoint. These are GEMM timings; whole training steps are
+development checkpoint. These are GEMM timings. Whole training steps are
 reported separately in [Mamba-1](mamba1-benchmarks.md) and
 [Mamba-3](mamba3-benchmarks.md).
 
@@ -16,9 +16,9 @@ reported separately in [Mamba-1](mamba1-benchmarks.md) and
 | released source | `e2917a47494b4a1d652f5c818c3974ec3fcdd1ca` (`v0.7.0`) |
 | assembled source | `83079104fe1efa7ad5dca0a28c5b48bcd86c5b14` |
 | host compiler | Rust 1.98.1, release profile |
-| GEMM mode | `Deterministic`; no forced candidate selection |
+| GEMM mode | `Deterministic`. No forced candidate selection |
 | cuBLAS workspace | 32 MiB |
-| capacities | 64 for the direct version comparison; 16 in a separate companion pass |
+| capacities | 64 for the direct version comparison. 16 in a separate companion pass |
 
 The 0.7.0 harness uses a capacity-64 context. Each version's capacity-64
 suite ran twice in the order old, new, new, old. Capacity 16 ran once on
@@ -31,9 +31,9 @@ execution and graph replay are never pooled.
 
 The GPU was reserved for timing, with no resident model process. Quiet
 checks bracket the measured pairs in the current harness and the Triad
-baseline; the native 0.7.0 Inference logger lacks those per-pair fields.
+baseline. The native 0.7.0 Inference logger lacks those per-pair fields.
 Every process has a separate idle preflight. Old and new sources use
-separate kernel caches; compilation and setup are outside the event windows.
+separate kernel caches. Compilation and setup are outside the event windows.
 Source and executable hashes are checked before and after the campaign.
 
 **Ratios above 1 mean faster.** `old/new` is 0.7.0 deterministic time
@@ -44,7 +44,7 @@ BF16/F16 Fast uses `CUBLAS_COMPUTE_32F` with native half inputs and F32
 accumulation. TF32 uses `CUBLAS_COMPUTE_32F_FAST_TF32`. Exact F32 is shown
 twice: against `CUBLAS_COMPUTE_32F_PEDANTIC` and against Fast TF32. The
 latter compares different arithmetic precision, not equivalent modes.
-Inference bias-on timings include cuBLAS's separate bias launch; the
+Inference bias-on timings include cuBLAS's separate bias launch. The
 deterministic arm fuses it. Triad has no bias.
 
 No new RTX 5090 timing is claimed here. Its earlier measurements remain
@@ -111,7 +111,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 
 ## Full matrix, capacity 64
 
-### inference — BF16 → BF16 / Fast
+### inference, BF16 → BF16 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -136,7 +136,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 60.87 | 60.88 | 1.000× | 77.48 | 1.273× |
 | hot_e / bias on | graph | 60.69 | 60.70 | 1.000× | 76.40 | 1.259× |
 
-### inference — BF16 → F32 / Fast
+### inference, BF16 → F32 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -161,7 +161,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 85.30 | 85.26 | 1.000× | 77.73 | 0.912× |
 | hot_e / bias on | graph | 85.13 | 85.10 | 1.000× | 76.90 | 0.904× |
 
-### inference — F16 → F16 / Fast
+### inference, F16 → F16 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -186,7 +186,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 61.99 | 61.88 | 1.002× | 69.25 | 1.119× |
 | hot_e / bias on | graph | 62.30 | 61.74 | 1.009× | 68.54 | 1.110× |
 
-### inference — F16 → F32 / Fast
+### inference, F16 → F32 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -211,7 +211,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 85.26 | 85.26 | 1.000× | 69.65 | 0.817× |
 | hot_e / bias on | graph | 85.05 | 85.06 | 1.000× | 69.02 | 0.811× |
 
-### inference — exact F32 / Pedantic
+### inference, exact F32 / Pedantic
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -236,7 +236,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 287.54 | 266.83 | 1.078× | 277.66 | 1.041× |
 | hot_e / bias on | graph | 299.80 | 265.96 | 1.127× | 275.74 | 1.037× |
 
-### inference — exact F32 / Fast TF32
+### inference, exact F32 / Fast TF32
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -261,7 +261,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 240.66 | 218.82 | 1.100× | 106.95 | 0.489× |
 | hot_e / bias on | graph | 245.58 | 219.39 | 1.119× | 106.47 | 0.485× |
 
-### inference — TF32 / Fast TF32
+### inference, TF32 / Fast TF32
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -286,7 +286,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | hot_e / bias on | eager | 119.52 | 119.52 | 1.000× | 98.64 | 0.825× |
 | hot_e / bias on | graph | 119.16 | 119.17 | 1.000× | 97.71 | 0.820× |
 
-### triad — BF16 / Fast
+### triad, BF16 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -321,7 +321,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / prism_in_proj | eager | 77.60 | 77.59 | 1.000× | 54.88 | 0.707× |
 | tn / prism_in_proj | graph | 76.96 | 77.02 | 0.999× | 53.46 | 0.694× |
 
-### triad — F16 / Fast
+### triad, F16 / Fast
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -356,7 +356,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / prism_in_proj | eager | 77.58 | 77.67 | 0.999× | 54.91 | 0.707× |
 | tn / prism_in_proj | graph | 76.95 | 77.06 | 0.999× | 53.47 | 0.694× |
 
-### triad — exact F32 / Fast TF32
+### triad, exact F32 / Fast TF32
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -391,7 +391,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / prism_in_proj | eager | 235.04 | 235.05 | 1.000× | 100.29 | 0.427× |
 | tn / prism_in_proj | graph | 234.06 | 234.05 | 1.000× | 99.28 | 0.424× |
 
-### triad — exact F32 / Pedantic
+### triad, exact F32 / Pedantic
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -426,7 +426,7 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / prism_in_proj | eager | 235.11 | 235.17 | 1.000× | 189.60 | 0.806× |
 | tn / prism_in_proj | graph | 234.12 | 234.13 | 1.000× | 187.87 | 0.802× |
 
-### triad — TF32 / Fast TF32
+### triad, TF32 / Fast TF32
 
 | case | path | 0.7.0 µs | 0.7.1 µs | old/new | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|---:|---:|
@@ -476,9 +476,9 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 
 ## Full matrix, capacity 16
 
-Capacity 16 has no matched old-source run; no release speedup is inferred for it.
+Capacity 16 has no matched old-source run. No release speedup is inferred for it.
 
-### inference — BF16 → BF16 / Fast
+### inference, BF16 → BF16 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -503,7 +503,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 60.89 | 77.81 | 1.278× |
 | hot_e / bias on | graph | 60.69 | 76.40 | 1.259× |
 
-### inference — BF16 → F32 / Fast
+### inference, BF16 → F32 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -528,7 +528,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 85.27 | 77.76 | 0.912× |
 | hot_e / bias on | graph | 85.10 | 76.91 | 0.904× |
 
-### inference — F16 → F16 / Fast
+### inference, F16 → F16 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -553,7 +553,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 61.87 | 69.23 | 1.119× |
 | hot_e / bias on | graph | 61.75 | 68.54 | 1.110× |
 
-### inference — F16 → F32 / Fast
+### inference, F16 → F32 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -578,7 +578,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 85.26 | 69.72 | 0.818× |
 | hot_e / bias on | graph | 85.05 | 69.00 | 0.811× |
 
-### inference — exact F32 / Pedantic
+### inference, exact F32 / Pedantic
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -603,7 +603,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 266.08 | 276.25 | 1.038× |
 | hot_e / bias on | graph | 265.89 | 275.63 | 1.037× |
 
-### inference — exact F32 / Fast TF32
+### inference, exact F32 / Fast TF32
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -628,7 +628,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 218.15 | 106.80 | 0.490× |
 | hot_e / bias on | graph | 216.02 | 104.92 | 0.486× |
 
-### inference — TF32 / Fast TF32
+### inference, TF32 / Fast TF32
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -653,7 +653,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | hot_e / bias on | eager | 119.54 | 98.65 | 0.825× |
 | hot_e / bias on | graph | 119.17 | 97.72 | 0.820× |
 
-### triad — BF16 / Fast
+### triad, BF16 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -688,7 +688,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | tn / prism_in_proj | eager | 77.73 | 55.01 | 0.708× |
 | tn / prism_in_proj | graph | 77.06 | 53.46 | 0.694× |
 
-### triad — F16 / Fast
+### triad, F16 / Fast
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -723,7 +723,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | tn / prism_in_proj | eager | 77.60 | 54.90 | 0.707× |
 | tn / prism_in_proj | graph | 76.80 | 53.48 | 0.696× |
 
-### triad — exact F32 / Fast TF32
+### triad, exact F32 / Fast TF32
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -758,7 +758,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | tn / prism_in_proj | eager | 235.03 | 100.22 | 0.426× |
 | tn / prism_in_proj | graph | 234.07 | 99.29 | 0.424× |
 
-### triad — exact F32 / Pedantic
+### triad, exact F32 / Pedantic
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -793,7 +793,7 @@ Capacity 16 has no matched old-source run; no release speedup is inferred for it
 | tn / prism_in_proj | eager | 235.14 | 189.51 | 0.806× |
 | tn / prism_in_proj | graph | 234.11 | 187.84 | 0.802× |
 
-### triad — TF32 / Fast TF32
+### triad, TF32 / Fast TF32
 
 | case | path | 0.7.1 µs | cuBLAS µs | cuBLAS/new |
 |---|---|---:|---:|---:|
@@ -883,7 +883,7 @@ Four cases outside the exact-F32 release average, measured once per capacity.
 
 Use a separate clean source tree and a fresh private kernel cache for each
 version, with the toolkit named above. First select the idle CC 8.9 Ada GPU
-to measure; do not copy the UUID in this page unless it names your device:
+to measure. Do not copy the UUID in this page unless it names your device:
 
 ```sh
 nvidia-smi --query-gpu=uuid,name,compute_cap --format=csv
@@ -911,7 +911,7 @@ trusted user-owned home/cache parent: use a physical absolute path with no
 symlink components and no group- or world-writable ancestor, and keep the
 new leaf at mode 0700. A general temporary directory is not suitable because
 the loader rejects caches with writable ancestors. The cache shown is for
-the current checkout; create a separate one in the v0.7.0 checkout.
+the current checkout. Create a separate one in the v0.7.0 checkout.
 `git rev-parse HEAD` binds every record to the source actually being run.
 
 ```sh
@@ -948,7 +948,7 @@ test ! -e "$GEMM_BI_FINAL_AUTO_JSONL"
 
 Before every additional Triad invocation, create another `TRIAD_OUT_DIR`
 with `mktemp -d` and point `GEMM_BI_FINAL_AUTO_JSONL` at its nonexistent
-`evidence.jsonl`; the sink uses create-new semantics. In the native v0.7.0
+`evidence.jsonl`. The sink uses create-new semantics. In the native v0.7.0
 checkout, require `git rev-parse HEAD` to equal the released SHA shown
 above, create a separate private cache, bind that SHA, and leave capacity
 unset because its default is already 64:
@@ -964,7 +964,7 @@ unset GEMM_BI_QUAL_STATE_CAP
 ```
 
 Repeat the current suite with capacity 16 for the companion table. A
-complete Inference run emits 280 paired records; a complete Triad run emits
+complete Inference run emits 280 paired records. A complete Triad run emits
 324 plus its completion record. Do not publish a filtered run as the full
 matrix. Run both capacity-64 suites twice per tree in old, new, new, old order.
 

@@ -14,12 +14,12 @@ The tables below retain the historical 0.7.0 measurements, including the
 RTX 5090 results. They have not been relabelled as 0.7.1 results or scaled
 from the Ada measurements.
 
-Kernel names on this page are spelled as the tree spells them today; the
+Kernel names on this page are spelled as the tree spells them today. The
 renaming carried no kernel change. Two rows name a kernel this tree no
 longer composes - the d128 weight gradients `tn_sm89_f32_d128_in_m16n16_f64fold`
 and `tn_sm89_f32_d128_out_m8n16_f64fold`, which the unreleased wave
 replaced with faster routes of the same bits. Their numbers stand as the
-measurement of the kernel that ran then; the routes that replaced them and
+measurement of the kernel that ran then. The routes that replaced them and
 what they measure are in [CHANGELOG.md](../CHANGELOG.md).
 
 ## 0.7.0 measurement scope
@@ -45,7 +45,7 @@ tables were taken on the RTX 6000 Ada against the unchanged 0.6.9 tree
 ## How to read the numbers
 
 - **Speedup** means cuBLAS time divided by mamba-rs time. Above 1.0 the
-  deterministic kernel is faster than cuBLAS; below 1.0 it is slower. In
+  deterministic kernel is faster than cuBLAS. Below 1.0 it is slower. In
   the old-versus-new tables the speedup is 0.6.9 time divided by 0.7.0
   time, so above 1.0 means 0.7.0 is faster.
 - **Comparators are chosen by precision contract.** Exact f32 kernels are
@@ -56,20 +56,20 @@ tables were taken on the RTX 6000 Ada against the unchanged 0.6.9 tree
   precisions, not a like-for-like one. Deterministic TF32 kernels are
   compared with cuBLAS Fast TF32. bf16 and f16 kernels are compared with
   cuBLAS Fast (`CUBLAS_COMPUTE_32F`), which runs the native half-precision
-  tensor-core kernels with f32 accumulation; TF32 does not apply to half
+  tensor-core kernels with f32 accumulation. TF32 does not apply to half
   inputs. cuBLAS Pedantic for half inputs is the slower, more careful
   accumulation and appears in the training-step tables.
 - **Eager and graph** are two measurements: eager times individual kernel
   launches, graph times the replay of a captured CUDA graph holding the same
   launches. On the RTX 5090 the event timer has a 2.048 µs grid, so graph
   timings of the smallest shapes sit on that grid and their ratios are step
-  counts rather than resolved differences; those rows are marked.
+  counts rather than resolved differences. Those rows are marked.
 - **These are kernel timings, not model timings.** A training step or a
   decode step spends most of its time outside the GEMMs. The whole-model
   comparison of 0.6.9 against 0.7.0 is in its own section below.
 - **Bias.** In the Inference family tables the cuBLAS arm includes the
   separate bias-broadcast kernel cuBLAS needs, because that is what a model
-  pays; the deterministic kernels fuse the bias. The Triad tables have no
+  pays. The deterministic kernels fuse the bias. The Triad tables have no
   bias.
 
 ## Summary
@@ -89,13 +89,13 @@ Geometric mean over the ten shape and bias combinations.
 | F32 → F32, exact | cuBLAS Fast TF32 | 0.462× | 0.459× | 0.772× | 0.776× |
 
 On the RTX 5090 every one of the ten cells wins in each of the four
-half-precision rows. On Ada the native half rows win eight of ten; the two
+half-precision rows. On Ada the native half rows win eight of ten. The two
 losses are the two largest shapes with bias off. The exact-f32 row against
 Pedantic on Ada is parity, not a win.
 
 ### Triad family (training), NN, TN and NT products
 
-Geometric mean over the cells of each row; the wins column counts cells
+Geometric mean over the cells of each row. The wins column counts cells
 where the deterministic kernel was faster.
 
 | precision | compared with | cells | Ada eager | Ada graph | Ada wins | RTX 5090 eager | RTX 5090 graph | RTX 5090 wins |
@@ -109,7 +109,7 @@ where the deterministic kernel was faster.
 The family averages hide a split by shape. On the large training shapes
 (d768, the 4096-row deep shape and the 4621-row classifier page) the half
 rows are above parity on both boards: Ada BF16 1.086×, F16 1.098×, RTX 5090
-1.060× for both. The six small d128 shapes pull the averages down; on those
+1.060× for both. The six small d128 shapes pull the averages down. On those
 shapes a launch costs more than the arithmetic, and the RTX 5090's eager
 launches are especially expensive (about 21 µs against 4 to 12 µs from a
 graph). The Triad does not beat cuBLAS Fast as a whole on either board.
@@ -121,17 +121,17 @@ For every cell the program times three arms in the same process with CUDA
 events, 21 windows of calibrated launch counts, the arms rotating inside
 each window in mirrored order: the tree's deterministic kernel, cuBLAS in
 the tree's fast setting and cuBLAS in the tree's pedantic setting. Each
-tree runs as its own process, in mirrored blocks (old, new, new, old);
-the table shows the median of the four runs of each tree. Before timing,
+tree runs as its own process, in mirrored blocks (old, new, new, old).
+The table shows the median of the four runs of each tree. Before timing,
 every arm's output is compared with the pedantic arm's (relative L2 below
 5e-2 in every cell, below 1e-4 for the exact-f32 kernels). Deterministic
 means the tree's own kernels (the 0.6.9 tree's `MAMBA_RS_BATCH_INVARIANT`
-flag; 0.7.x has no such switch); half precision runs with tensor cores on
+flag. 0.7.x has no such switch). Half precision runs with tensor cores on
 both trees, f32 on the exact kernels. The
 speedup is 0.6.9 time divided by 0.7.0 time.
 
 The 0.6.9 tree has no deterministic TF32, so there is no old kernel to put
-beside the new TF32 kernels; those are compared with cuBLAS Fast TF32 in
+beside the new TF32 kernels. Those are compared with cuBLAS Fast TF32 in
 the Triad tables further down.
 
 Geometric mean of the speedup by family, precision and shape class:
@@ -150,7 +150,7 @@ d128 shapes (2.0× and 3.0×) and the exact-f32 input-gradient kernel on
 the d768 in_proj shape (2.3×). No cell is behind 0.6.9. The smallest
 gains are on the deep 4096-row shape: its half-precision forward and
 input-gradient kernels are within 3 percent of the old ones and its
-exact-f32 weight gradient is 1.05×; its exact-f32 forward, which an
+exact-f32 weight gradient is 1.05×. Its exact-f32 forward, which an
 earlier measurement had 10 percent behind 0.6.9 while the scalar kernel
 served it, is 1.11× on the copy-plan kernel in this program and 1.5× in
 the isolated matrix. The small d128 half kernels are the same portable
@@ -159,7 +159,7 @@ kernels in both trees.
 The cuBLAS arms are the control: on the calls that are identical in both
 trees (half precision, `COMPUTE_32F`) the new process measured 0 to 12
 percent slower than the old one on the same board, which is run-to-run
-drift on a power-capped GPU; dividing each tree's deterministic time by
+drift on a power-capped GPU. Dividing each tree's deterministic time by
 its own cuBLAS Fast time moves the averages above by at most 0.06 for
 half precision and 0.14 for f32, in the direction of the new kernels. The
 f32 and Pedantic arms differ between the trees in the cuBLAS call they
@@ -261,7 +261,7 @@ old) with private kernel caches and an idle check before every process.
 `MambaTrainer::step` with graph replay, three warmups and twenty timed
 steps per arm, median of the four runs of each tree, milliseconds per step.
 The deterministic arms are like for like (the same precision contract in
-both trees); the cuBLAS arms are the same library called from both trees
+both trees). The cuBLAS arms are the same library called from both trees
 and agree to within 1 to 2 percent, which is the control for the
 comparison.
 
@@ -285,10 +285,10 @@ two route changes of this release together: the stream-K weight gradient
 on every deep reduction, on by default, and the parallel scan route from
 65 steps on (the changelog's Performance section has the parts). The
 cuBLAS arms moved with them, since they share every kernel but the
-products. The f32 rows are exact f32; with the weights stored as
+products. The f32 rows are exact f32. With the weights stored as
 `WeightDtype::Tf32` (`MAMBA_RS_BI_F32_POLICY=tf32` in the 0.7.x spelling)
 the d768 f32 step takes the deterministic TF32 kernels (the only shape of
-the four with a measured one; the others keep the exact kernels and the
+the four with a measured one. The others keep the exact kernels and the
 same time).
 
 ### Inference step
@@ -298,7 +298,7 @@ same time).
 5000 eager and 5000 to 10000 graph steps per batch, median of the four
 alternating runs of each tree, microseconds per step. Both trees run the
 inference family (`Fixed` with the batch-invariant flag in 0.6.9,
-`Inference` in 0.7.0); bf16 uses an identity input projection on both
+`Inference` in 0.7.0). bf16 uses an identity input projection on both
 sides. The
 outputs of the two trees are bit-identical at every batch, step and path,
 and the CPU reference agrees (cosine 1.000000 in f32, at least 0.99998 in
@@ -347,10 +347,10 @@ A model this small spends its step on kernel launches rather than on
 arithmetic, so the new GEMM kernels alone left both tables where 0.6.9
 had them (within 3 percent from batch 1 to 64). The gains above come from
 the Mamba kernel pass, which fused the decode step into seven kernels per
-layer instead of eleven on both families; the bit identity of the outputs
+layer instead of eleven on both families. The bit identity of the outputs
 was checked on both trees. The first measurement of this step on the
-release tree was 45 µs per graph replay slower than 0.6.9 at every batch;
-that was host-side work in the replay validation (a launch set digest
+release tree was 45 µs per graph replay slower than 0.6.9 at every batch.
+That was host-side work in the replay validation (a launch set digest
 rebuilt on every replay), fixed in 0.7.0 before release.
 
 
@@ -362,12 +362,12 @@ The kernel comparisons against cuBLAS use one harness
 each cell the deterministic kernel and the cuBLAS kernel are timed with
 CUDA events in alternating windows, 21 windows in each of two mirrored
 orders, so 42 paired ratios per cell and path. The number reported is the
-inverse of the lower median of those 42 ratios; the microsecond columns are
+inverse of the lower median of those 42 ratios. The microsecond columns are
 the lower medians of the two arms and are printed for scale. A median of
 paired ratios is not the ratio of the two medians, so the columns do not
 divide exactly into each other. Each arm's launch count per window is
 calibrated so a window lasts a few milliseconds. The deterministic arm is
-the production automatic selection with no forced tile; the kernel name in
+the production automatic selection with no forced tile. The kernel name in
 each row is the symbol that actually ran.
 
 The old-versus-new kernel tables use one adapter compiled against both
@@ -642,7 +642,7 @@ split reduction followed by its reducer).
 
 ### RTX 6000 Ada
 
-#### BF16 in; BF16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
+#### BF16 in, BF16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
@@ -664,7 +664,7 @@ split reduction followed by its reducer).
 
 Geometric mean over the 15 cells: eager 0.884×, graph 0.865× (mamba-rs faster in 7 of 15 cells eager, 7 of 15 graph).
 
-#### F16 in; F16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
+#### F16 in, F16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
@@ -760,7 +760,7 @@ Geometric mean over the 15 cells: eager 0.776×, graph 0.773× (mamba-rs faster 
 
 ### RTX 5090
 
-#### BF16 in; BF16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
+#### BF16 in, BF16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
@@ -784,7 +784,7 @@ Geometric mean over the 15 cells: eager 0.741×, graph 0.927× (mamba-rs faster 
 
 ‡ Both sides sit on the 2.048 µs event-timer grid of this board in graph mode, so the ratio is a step count, not a resolved difference.
 
-#### F16 in; F16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
+#### F16 in, F16 out for NN and NT, F32 out for TN, against cuBLAS Fast (COMPUTE_32F)
 
 | shape | op | M × K × N | mamba-rs kernel chain | mamba-rs eager µs | cuBLAS eager µs | eager speedup | mamba-rs graph µs | cuBLAS graph µs | graph speedup |
 |---|:--:|---|---|---:|---:|---:|---:|---:|---:|
@@ -903,5 +903,5 @@ cargo bench --features cuda --bench gemm_bi_trainer_step_bench
 ```
 
 The old-versus-new runs need the 0.6.9 tree checked out beside the release
-tree; the adapters and the runner scripts are kept with the measurement
+tree. The adapters and the runner scripts are kept with the measurement
 packet in the maintainers' archive.

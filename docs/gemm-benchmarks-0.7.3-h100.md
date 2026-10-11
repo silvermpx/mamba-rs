@@ -17,19 +17,19 @@ where no candidate was admitted. The training-step rows are on the
 | measured GPU UUID | `GPU-508ace01-a2b3-bec9-5fe1-855752e6b08c` |
 | driver / toolkit | 610.57.04 / CUDA 13.2, NVRTC 13.2.78 |
 | host compiler | Rust 1.98.1, release profile |
-| GEMM mode | `Deterministic`; the automatic route, no forced candidate |
+| GEMM mode | `Deterministic`. The automatic route, no forced candidate |
 | storage precisions | exact F32, TF32, BF16, F16 |
-| path | eager; every cell times three arms in one process |
+| path | eager. Every cell times three arms in one process |
 
 Each cell times the deterministic route, cuBLAS in the tree's fast
 setting (TF32 handle math) and cuBLAS in the tree's pedantic setting in
 windows of calibrated launch counts, 21 windows, the arm order mirrored
-from window to window; the number is the lower median per arm. The row's
+from window to window. The number is the lower median per arm. The row's
 `route` is the symbol the dispatcher recorded for the launch.
 
 `fast/det` and `pedantic/det` divide the vendor time by ours on this
 board: above 1.0 the deterministic route is faster than that vendor
-setting. cuBLAS on Hopper runs WGMMA kernels; the common tier does not,
+setting. cuBLAS on Hopper runs WGMMA kernels. The common tier does not,
 which is what these ratios measure. There is no earlier record of this
 board.
 
@@ -38,10 +38,10 @@ creation: ptxas 13.2 for `sm_90a` allocates `nt_sm89_m128n128_bk64_s3_bxor_f16`
 and five siblings above their Ada register gates, puts 104 bytes of local
 memory under `tn_sm89_tf32_m192n192_w3x4_bk32_s2`, and takes
 `tn_sm89_tf32_pre_rna_m64n64_bk32_s3` and the `tn_sm89_tf32_pre_rna_transpose_32x32`
-helper above their gates; their siblings serve.
+helper above their gates. Their siblings serve.
 
 
-Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board; `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
+Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board. `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
 
 ## triad - bf16
 

@@ -1,6 +1,7 @@
 # Mamba-3 SISO Architecture
 
 Reference: Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space Principles* (ICLR 2026, arXiv 2603.15569).
+The MIMO variant is described in [mamba3-mimo-architecture.md](mamba3-mimo-architecture.md).
 
 ## Pipeline
 
@@ -44,10 +45,13 @@ Reference: Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
     output [B, T, d_model]
 ```
 
-Activations in the split: `sp` = softplus(dd_dt + dt_bias) on dt; `-ht` =
-`-heavy_tail(dd_A)` clamped at `-a_floor` on A (state-spaces/mamba
-`heavy_tail_activation`: `1 + x` for `x >= 0`, `1 / (1 - x)` for `x < 0`);
-`sig` = sigmoid on the trapezoid gate λ.
+Activations in the split:
+
+- `sp` on dt: `softplus(dd_dt + dt_bias)`.
+- `-ht` on A: `-heavy_tail(dd_A)` clamped at `-a_floor`, where
+  `heavy_tail` is state-spaces/mamba's `heavy_tail_activation`, `1 + x`
+  for `x >= 0` and `1 / (1 - x)` for `x < 0`.
+- `sig` on the trapezoid gate λ: the sigmoid.
 
 ## Key Differences from Mamba SSM
 
@@ -85,11 +89,12 @@ Applied as 2D rotation pairs to B and C before SSM recurrence.
 
 ## Recurrent State
 
-4 persistent states per layer:
-- `ssm_state`: `[nheads, headdim, d_state]` — SSM hidden state
-- `k_state`: `[nheads, d_state]` — previous K (post-RoPE B)
-- `v_state`: `[nheads, headdim]` — previous x
-- `angle_state`: `[nheads, num_rope_angles]` — cumulative RoPE angles
+Four states per layer persist from token to token:
+
+- `ssm_state`, `[nheads, headdim, d_state]`: the SSM hidden state
+- `k_state`, `[nheads, d_state]`: the previous K (B after RoPE)
+- `v_state`, `[nheads, headdim]`: the previous x
+- `angle_state`, `[nheads, num_rope_angles]`: the accumulated RoPE angles
 
 All four carry through `forward_mamba3_backbone_prefill` (the
 full-sequence batched-SGEMM CPU forward, no activation tape) exactly as
@@ -104,24 +109,25 @@ pooled output is per sample (`[B * d_model]`), each sample summed over its
 own rows, so batching a prefill does not change a sample's bits. The modes
 are described in [gemm-modes.md](gemm-modes.md).
 
-There is no public Mamba-3 SISO checkpoint; the GPU and CPU paths are
-exercised with synthetic weights from `Mamba3Weights::init` and with
-models trained in this crate.
+The official SISO checkpoints load through
+`hf::load_mamba3::load_hf_mamba3`. `tests/hf_m3_checkpoint_parity.rs`
+holds the 187m model on the CPU and on the GPU to a float64 transcription
+of the reference (`tools/oracles/m3_oracle.py`).
 
 ## Weight Layout
 
 | Weight | Shape | Bias |
 |--------|-------|------|
 | in_proj | [d_model, in_proj_dim] | No |
-| dt_bias | [nheads] | — |
-| b_norm_weight | [d_state] | — |
-| c_norm_weight | [d_state] | — |
-| b_bias | [nheads * d_state] | — |
-| c_bias | [nheads * d_state] | — |
-| D | [nheads] | — |
-| norm_gate_weight | [d_inner] | — |
+| dt_bias | [nheads] | n/a |
+| b_norm_weight | [d_state] | n/a |
+| c_norm_weight | [d_state] | n/a |
+| b_bias | [nheads * d_state] | n/a |
+| c_bias | [nheads * d_state] | n/a |
+| D | [nheads] | n/a |
+| norm_gate_weight | [d_inner] | n/a |
 | out_proj | [d_inner, d_model] | No |
-| norm | [d_model] | — |
+| norm | [d_model] | n/a |
 
 Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_angles`.
 
@@ -136,7 +142,7 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 | elementwise.cu | 12 | Residual, fill, last-step gather, column sums, vec ops |
 | gemm_bi_inference/casts.cu | 4 | Casts between f32 and bf16/f16 |
 
-Counted by kernel family; the typed variants (f32, bf16, f16) of a family
+Counted by kernel family. The typed variants (f32, bf16, f16) of a family
 share one row.
 
 ## Chunked scan and carried state (contract)
@@ -149,8 +155,8 @@ every training window starts from a zero state, and the state a window
 writes back is not consumed by the next one. Consequences a consumer must
 respect:
 
-- `reset_state()` before a chunked training window is a no-op by design;
-  the window never sees a nonzero incoming state either way.
+- `reset_state()` before a chunked training window is a no-op by design.
+  The window never sees a nonzero incoming state either way.
 - Packing several documents into one row is not masked, on this path or in
   the reference implementation: the scan would carry state across the
   document boundary inside a window. Train one document (or one padded

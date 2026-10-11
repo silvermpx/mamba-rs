@@ -14,14 +14,14 @@ capture 89 of 89 identical), and the training-step rows are on the
 | measured GPU UUID | `GPU-c563a487-19d0-b99b-2910-293badfa6a25` |
 | driver / toolkit | 610.43.02 / CUDA 13.2, NVRTC 13.2.78 |
 | host compiler | Rust 1.98.1, release profile |
-| GEMM mode | `Deterministic`; the automatic route, no forced candidate |
+| GEMM mode | `Deterministic`. The automatic route, no forced candidate |
 | storage precisions | exact F32, TF32, BF16, F16 |
-| path | eager; every cell times three arms in one process |
+| path | eager. Every cell times three arms in one process |
 
 Each cell times the deterministic route, cuBLAS in the tree's fast
 setting (TF32 handle math) and cuBLAS in the tree's pedantic setting in
 windows of calibrated launch counts, 21 windows, the arm order mirrored
-from window to window; the number is the lower median per arm. The row's
+from window to window. The number is the lower median per arm. The row's
 `route` is the symbol the dispatcher recorded for the launch: the board's
 own SM120 kernels on the shapes its table names, the common tier
 elsewhere, the scalar tier where no candidate was admitted.
@@ -29,7 +29,7 @@ elsewhere, the scalar tier where no candidate was admitted.
 `fast/det` and `pedantic/det` divide the vendor time by ours on this
 board: above 1.0 the deterministic route is faster than that vendor
 setting. There is no earlier per-cell record of this board to compare
-against; the 0.7.2 tree on it had no route this adapter can time.
+against. The 0.7.2 tree on it had no route this adapter can time.
 
 What this board leaves out of the common tier, said aloud at context
 creation: ptxas for `compute_120` allocates more registers than the Ada
@@ -39,13 +39,13 @@ gates of eleven common kernels allow, so the six half tiles of the
 `nt_sm89_tf32_a_ldmatrix_m128n96_bk32_s3`, `tn_sm89_tf32_pre_rna_m128n96_bk32_s3`,
 `tn_sm89_tf32_pre_rna_m64n64_bk32_s3` and the `tn_sm89_tf32_pre_rna_transpose_32x32`
 helper, and the TF32 finalist `nt_sm89_mma_tf32_compact8_m128n64_bk32_s2`
-are excluded here while their siblings serve; the inference overlay is
+are excluded here while their siblings serve. The inference overlay is
 not composed on CC 12.x at all. Each of these is a candidate for the
 board's own tuning pass, where the gate would be measured for this
 target rather than inherited from the Ada.
 
 
-Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board; `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
+Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board. `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
 
 ## triad - bf16
 

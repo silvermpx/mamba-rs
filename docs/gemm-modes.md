@@ -11,7 +11,7 @@ how to set it, and exactly what each one promises.
 | mode | who multiplies | what you get |
 |---|---|---|
 | `Deterministic` (default) | the crate's own kernels | the same bits every run, the same bits from an eager call and from a captured CUDA graph, and for inference the same bits for a row whether it is decoded alone or inside a batch. cuBLAS is never called. |
-| `CublasFast` | cuBLAS with `CUBLAS_TF32_TENSOR_OP_MATH` and `CUBLAS_COMPUTE_32F` | the vendor's fast path. f32 inputs may be multiplied on TF32 tensor cores; bf16 and f16 inputs use ordinary f32 accumulation. |
+| `CublasFast` | cuBLAS with `CUBLAS_TF32_TENSOR_OP_MATH` and `CUBLAS_COMPUTE_32F` | the vendor's fast path. f32 inputs may be multiplied on TF32 tensor cores. bf16 and f16 inputs use ordinary f32 accumulation. |
 | `CublasPedantic` | cuBLAS with `CUBLAS_PEDANTIC_MATH` and `CUBLAS_COMPUTE_32F_PEDANTIC` | the vendor's most accurate f32 accumulation. This is what mamba-rs 0.6.9 and earlier ran by default. |
 
 cuBLAS gives repeatable results under the conditions NVIDIA documents
@@ -36,42 +36,42 @@ kernel, is in [GEMM benchmarks](determinism-benchmarks.md).
 ## Setting the mode and the storage precision
 
 A GPU context has two settings and nothing else. `WeightDtype` picks how
-weights are stored and, with it, the precision of every product;
+weights are stored and, with it, the precision of every product.
 `GemmMode` picks who multiplies. Every route accumulates in f32. Inside the
 deterministic mode the kernels are chosen from the two and from the
-context's role (a model context or a trainer); there is no further knob.
+context's role (a model context or a trainer). There is no further knob.
 
 | `WeightDtype` | storage | products in the deterministic mode |
 |---|---|---|
 | `F32` (default) | f32 | exact: one fused multiply-add per step in ascending K order, f32 throughout |
-| `Tf32` | f32 | deterministic TF32 where a measured kernel exists for the shape and the board, the exact f32 kernel elsewhere. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order; it is not the vendor's Fast TF32, and its bits are reproducible like the rest of the mode. Under `CublasFast` the vendor's TF32 already applies to every f32 product; under `CublasPedantic` the products are pedantic f32 |
+| `Tf32` | f32 | deterministic TF32 where a measured kernel exists for the shape and the board, the exact f32 kernel elsewhere. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order. It is not the vendor's Fast TF32, and its bits are reproducible like the rest of the mode. Under `CublasFast` the vendor's TF32 already applies to every f32 product. Under `CublasPedantic` the products are pedantic f32 |
 | `Bf16` | bf16 | tensor-core kernels with f32 accumulation |
-| `F16` | f16 | tensor-core kernels with f32 accumulation; training runs the dynamic loss scaler |
+| `F16` | f16 | tensor-core kernels with f32 accumulation. Training runs the dynamic loss scaler |
 
-Every GPU entry point comes in two forms. The plain constructor reads the
-environment variable `MAMBA_RS_GEMM_MODE` and defaults to `Deterministic`.
-The `*_with_mode` twin takes the mode as its last argument and ignores the
-environment entirely. The storage precision is always an argument.
+Every GPU backbone, trainer and language model is built from one
+`GpuOptions` value: the device, the storage precision and an optional
+mode. When the options name a mode, it is used and the environment is
+ignored. When they leave it unset, the constructor reads the environment
+variable `MAMBA_RS_GEMM_MODE` and defaults to `Deterministic`.
 
-| plain constructor (reads the environment) | explicit twin |
-|---|---|
-| `GpuCtx::new_from_env`, `GpuCtx::new_from_env_with_state_cap` | `GpuCtx::new_with_mode`, `GpuCtx::new_with_state_cap_and_mode` (`GpuCtx::new` and `new_with_state_cap` are `Deterministic` and read nothing) |
-| `GpuMambaBackbone::new`, `new_with_dtype` | `GpuMambaBackbone::new_with_mode`, `new_with_dtype_and_mode` |
-| `GpuMamba3Backbone::new`, `new_with_dtype` | `GpuMamba3Backbone::new_with_mode`, `new_with_dtype_and_mode` |
-| `GpuMambaLM::from_hf`, `from_hf_with_dtype`, `from_hf_with_dtype_batch` | `GpuMambaLM::from_hf_with_mode`, `from_hf_with_dtype_and_mode`, `from_hf_with_dtype_batch_and_mode` |
-| `GpuMamba3LM::from_weights`, `Mamba3LmBuild::build` | `GpuMamba3LM::from_weights_with_mode`, `build_with_mode` |
-| `GpuMamba3LM::from_weights_with_dtype` | `Mamba3LmBuild { dtype, batch: 1, .. }.build_with_mode(mode)` |
-| `MambaTrainer::new_full`, `Mamba3Trainer::new_full` | `MambaTrainer::new_full_with_mode`, `Mamba3Trainer::new_full_with_mode` |
-| `MambaTrainer::new_with_dtype`, `Mamba3Trainer::new_with_dtype` | `new_full_with_mode` with `TrainSessionCfg::new(input_dim, batch, seq_len)`, which carries the same default optimizer settings |
+| built from | the mode from the environment | the mode in code |
+|---|---|---|
+| a model, trainer or language model of any family | `GpuOptions::default()` | `GpuOptions::default().mode(mode)` |
+| a bare context | `GpuCtx::new_from_env`, `GpuCtx::new_from_env_with_state_cap` | `GpuCtx::new_with_mode`, `GpuCtx::new_with_state_cap_and_mode` |
+
+`GpuCtx::new` and `new_with_state_cap` are `Deterministic` and read
+nothing. The 0.7 constructors of the Mamba and SISO types (`new_with_mode`,
+`new_with_dtype`, `new_with_dtype_and_mode`, `new_full`,
+`new_full_with_mode`, and `from_hf_with_*` of the language model) stay as
+deprecated wrappers for this release.
 
 ```rust
-use mamba_rs::gpu::inference::GpuMambaBackbone;
-use mamba_rs::mamba_ssm::gpu::GemmMode;
-use mamba_rs::WeightDtype;
+use mamba_rs::{GemmMode, GpuOptions, MambaGpuBackbone, WeightDtype};
 
-let mut gpu = GpuMambaBackbone::new_with_dtype_and_mode(
-    0, &weights, cfg, input_dim, batch, WeightDtype::Bf16, GemmMode::CublasFast,
-)?;
+let opts = GpuOptions::default()
+    .dtype(WeightDtype::Bf16)
+    .mode(GemmMode::CublasFast);
+let mut gpu = MambaGpuBackbone::new(&weights, cfg, input_dim, batch, opts)?;
 assert_eq!(gpu.ctx().gemm_mode(), GemmMode::CublasFast);
 ```
 
@@ -85,13 +85,13 @@ gpu.ctx().set_gemm_mode(GemmMode::Deterministic)?;
 `set_gemm_mode` returns an error while a CUDA graph is being captured on
 the context's stream or while a GEMM route is being recorded, and it
 restores the previous cuBLAS setting if the change fails half way. Change
-the mode before capturing a graph; a graph captured in one mode refuses to
+the mode before capturing a graph. A graph captured in one mode refuses to
 replay in another (see [Graphs](#graphs)).
 
 ### The environment variable
 
-The plain constructors read one variable once, at construction; the
-`*_with_mode` constructors ignore it.
+A constructor reads the variable once, when the options leave the mode
+unset. A mode given in code ignores it.
 
 | variable | values | default |
 |---|---|---|
@@ -101,7 +101,7 @@ Nothing else in the environment changes a GEMM route. The variables that
 tuned the deterministic mode in 0.7.0 to 0.7.2 (`MAMBA_RS_BI_GEMM_FAMILY`,
 `MAMBA_RS_BI_TENSOR_CORES`, `MAMBA_RS_BI_F32_POLICY`,
 `MAMBA_RS_BI_HALF_POLICY`, `MAMBA_RS_ARCH_RUNG`) and the pre-0.7 selectors
-(`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_FAST_GEMM`) are no longer read; a
+(`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_FAST_GEMM`) are no longer read. A
 program that set `MAMBA_RS_BI_F32_POLICY=tf32` stores its weights as
 `WeightDtype::Tf32` instead, and the 0.6.9 numbers are
 `MAMBA_RS_GEMM_MODE=cublas-pedantic`.
@@ -113,8 +113,8 @@ them, chosen by its role:
 
 | family | kernels | used by | shapes | batch invariance |
 |---|---|---|---|---|
-| `Inference` | `kernels/gemm_bi_inference/` | model and LM contexts (`GpuMambaBackbone`, `GpuMamba3Backbone`, `GpuMambaLM`, `GpuMamba3LM` and the engines under them) | the forward product only (`Y = X W + b`) | every output element is computed from its own row of X and its own column of W in one fixed order, never split across thread blocks, so a row's result is bit-identical at any batch size |
-| `Triad` | `kernels/gemm_bi_triad/` | trainers (`MambaTrainer`, `Mamba3Trainer`) and plain `GpuCtx` | forward, weight gradient and input gradient (the NN, TN and NT products) | bit-identical across every batch size that lands in the same dispatch bucket; crossing a bucket boundary changes the association deterministically |
+| `Inference` | `kernels/gemm_bi_inference/` | model and language model contexts (the GPU backbones of every family, `MambaGpuLM` and the engines under them) | the forward product only (`Y = X W + b`) | every output element is computed from its own row of X and its own column of W in one fixed order, never split across thread blocks, so a row's result is bit-identical at any batch size |
+| `Triad` | `kernels/gemm_bi_triad/` | the trainers of every family and plain `GpuCtx` | forward, weight gradient and input gradient (the NN, TN and NT products) | bit-identical across every batch size that lands in the same dispatch bucket. Crossing a bucket boundary changes the association deterministically |
 
 The weight-gradient product always runs on the Triad kernels, whatever the
 family, because the Inference family has no transposed products. The
@@ -124,20 +124,20 @@ family refuses to replay with the other.
 ### What the deterministic mode chooses by itself
 
 - bf16 and f16 products run on the tensor-core kernels wherever a shape
-  and board gate admits one; the scalar kernels serve the rest. The
+  and board gate admits one. The scalar kernels serve the rest. The
   tensor-core kernels are their own bit family: repeated launches of one
   kernel are bit-identical, but they do not reproduce the scalar kernels'
   bits.
 - A half-precision weight gradient takes the stream-K kernel whenever the
   reduction is deep enough for its persistent grid to pay (32 or more
-  64-row slabs per multiprocessor); it folds per-block partial sums in a
+  64-row slabs per multiprocessor). It folds per-block partial sums in a
   fixed order and is a separate bit family from the tiled kernels.
 - A half-precision weight gradient on a measured cell whose tile count
   just exceeds the resident CTA count takes the relay kernel instead: it
   walks the same persistent grid of (tile, slab) units, but when a tile's
   chain crosses a block boundary the earlier block hands its accumulators
   to the next one untouched. Nothing is folded, so the relay reproduces
-  the tiled kernel bit for bit; only the grid differs.
+  the tiled kernel bit for bit. Only the grid differs.
 - f32 products are exact unless the weights are stored as `Tf32`, which
   permits the deterministic TF32 kernels on the shapes and boards where
   they were measured and stays exact everywhere else.
@@ -146,7 +146,7 @@ family refuses to replay with the other.
 
 ## What is guaranteed
 
-The guarantees below are backed by tests in the repository; the section
+The guarantees below are backed by tests in the repository. The section
 after this one lists what is not claimed.
 
 - **Run to run.** Within one process, one build and one GPU, the same
@@ -156,16 +156,16 @@ after this one lists what is not claimed.
 - **Eager versus captured graph.** A kernel launched eagerly and the same
   kernel replayed from a captured graph produce the same bits. At the
   whole-step level this is tested bit for bit for the Mamba-1 bf16 training
-  step, the Mamba-1 pooled prefill and the Mamba-3 f32 serving prefill; the
+  step, the Mamba-1 pooled prefill and the Mamba-3 f32 serving prefill. The
   Mamba-3 bf16 training step and the f32 training steps are tested to a
   1e-5 tolerance.
 - **Batch invariance.** The Inference family gives the same bits for a row
-  at every batch size; measured through a whole model, batch 1 against
+  at every batch size. Measured through a whole model, batch 1 against
   batch 32 on the same prompt gives a KL divergence of about 8e-11
   (`tests/extreme_edge_coverage.rs`), where cuBLAS gives about 1e-3. The
   Triad family gives the same bits within a dispatch bucket.
 - **No hidden vendor call.** In the deterministic mode every cuBLAS entry
-  point in the crate returns an error instead of running; a model context
+  point in the crate returns an error instead of running. A model context
   never reaches one.
 - **Route recording.** A captured graph stores the complete numeric route
   (mode, storage precision and role, the kernels selected, compiler and
@@ -199,7 +199,7 @@ be re-run.
 
 On an RTX 5090 (compute capability 12.0) the qualified kernels use tensor
 maps that must be built outside a capture, so the first step of a model
-must run eagerly before `capture_graph`; the capture fails closed
+must run eagerly before `capture_graph`. The capture fails closed
 otherwise. The GPU staging buffers also cannot grow inside a capture, so
 the largest shape a graph will see must run once before the capture or be
 pre-sized with the `presize_*` methods on `GpuCtx`.
@@ -214,7 +214,7 @@ board. The board decides which of them it will actually use.
 
 "Measured" below means the automatic kernel selection on that board was
 timed cell by cell and the winners were frozen with the board, the
-toolkit and the compiled artifact; the driver build is not part of that
+toolkit and the compiled artifact. The driver build is not part of that
 identity. "Proven" means the board holds no such evidence and admits the
 route by the first-use bit proof described in the next section: the bits
 are guaranteed, the speed is the speed of the board the route was
@@ -223,23 +223,23 @@ measured on, which is a claim about that board and not about this one.
 
 | GPU | bf16 and f16 | exact f32 (`F32`) | deterministic TF32 (`Tf32`) |
 |---|---|---|---|
-| RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes; portable kernels for the rest | measured; scalar kernels elsewhere | measured joint kernels on their cells; the portable tier on the measured cells and their neighbourhood; scalar kernels elsewhere |
-| RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2; nearby shapes take the nearest measured entry within a factor of 8 on each dimension; the common cells serve the shapes those entries do not, proven at first use | qualified TMA-fed FMA kernels; the common exact-f32 cells proven at first use, scalar elsewhere | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 on their cells; the portable tier on the common cells and their neighbourhood elsewhere |
-| SM80, SM86, SM87 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood; proven specialized cells where they match |
-| SM90 and SM90a | proven on the measured cells, portable elsewhere; a native WGMMA kernel is tried behind a first-use self-check on CUDA 13.3 and newer | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
-| SM100 family (CC 10.0, 10.3, 10.7, 11.0) | proven on the measured cells, portable elsewhere; a native `tcgen05` kernel is tried behind the same self-check | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
+| RTX 6000 Ada (SM89) | measured on CUDA 12.8, 13.0 and 13.2 for the large shapes and the classifier shapes. Portable kernels for the rest | measured. Scalar kernels elsewhere | measured joint kernels on their cells. The portable tier on the measured cells and their neighbourhood. Scalar kernels elsewhere |
+| RTX 5090 (CC 12.0) | 60 measured tiled entries and 12 stream-K entries on CUDA 13.2. Nearby shapes take the nearest measured entry within a factor of 8 on each dimension. The common cells serve the shapes those entries do not, proven at first use | qualified TMA-fed FMA kernels. The common exact-f32 cells proven at first use, scalar elsewhere | frozen retained kernels on CUDA 12.8, 13.0 and 13.2 on their cells. The portable tier on the common cells and their neighbourhood elsewhere |
+| SM80, SM86, SM87 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood. Proven specialized cells where they match |
+| SM90 and SM90a | proven on the measured cells, portable elsewhere. A native WGMMA kernel is tried behind a first-use self-check on CUDA 13.3 and newer | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
+| SM100 family (CC 10.0, 10.3, 10.7, 11.0) | proven on the measured cells, portable elsewhere. A native `tcgen05` kernel is tried behind the same self-check | proven on the measured cells, scalar elsewhere | the board's own cohort where one is frozen (none yet), then the portable tier on the measured cells and their neighbourhood |
 | CC 10.1 and CC 12.1 | proven on the measured cells, portable elsewhere | proven on the measured cells, scalar elsewhere | portable tier on the measured cells and their neighbourhood |
 
 "The measured cells and their neighbourhood" for the portable TF32 tier
-means: a shape the census measured takes its measured tile; a contiguous
+means: a shape the census measured takes its measured tile. A contiguous
 shape within a factor of four of a measured shape on every dimension and
 staged the same way (an operand takes the 16-byte loads only when its
 leading dimension is a multiple of four floats) takes the tile of the
 nearest measured shape, a wide tile brought down to 64x64 when the shape
-would not fill the board with it; any other shape takes the exact f32
+would not fill the board with it. Any other shape takes the exact f32
 kernel, as before. Held out one at a time, the measured cells reproduce their
 own tiles from their neighbours 33 times in 38 at that factor. A board
-with its own TF32 module reads its own cohort first; a shape that cohort
+with its own TF32 module reads its own cohort first. A shape that cohort
 does not name takes the common tier the same way every other board does.
 The board's own measured kernels are never displaced by a common one on
 a shape they name.
@@ -249,14 +249,14 @@ rule above: it is composed on every SM80-tier target except CC 12.x, whose
 own kernels serve there and whose module must stay byte-identical to the
 artifact its frozen cohorts were minted against. The overlay's measured
 cells compile as a module of their own, `InferenceSm89Cells`, admitted by
-symbol; the Inference module holds only the kernels its frozen cohorts pin.
+symbol. The Inference module holds only the kernels its frozen cohorts pin.
 The `sm89` in a kernel's symbol names the board its tile was measured
-on; its source lives in the `sm80` folder of its family, the tier every
+on. Its source lives in the `sm80` folder of its family, the tier every
 supported board runs, beside the portable kernels it is proven against
 on any other board.
 
 The Hopper and Blackwell native kernels are guarded by a numeric
-self-check against the portable kernels at first use; if it fails, the
+self-check against the portable kernels at first use. If it fails, the
 portable kernels serve for the rest of the process. They are not measured
 winners on any board.
 
@@ -278,7 +278,7 @@ precision, shape) cell, the launcher runs the candidate and the reference
 route of the same numeric contract on the same operands, each into its
 own scratch output, and compares every output word:
 
-- equal words admit the candidate for the rest of the process;
+- equal words admit the candidate for the rest of the process.
 - any difference declines it, once, with the reason printed, and the
   reference route serves that cell for the rest of the process.
 
@@ -308,7 +308,7 @@ and because an admitted candidate is bit-equal to it, the bits a process
 produces never depend on which call came first. The consequence to know
 is that a process whose very first use of a cell happens inside a capture
 records the reference route in that graph and uses the candidate eagerly
-afterwards; the two agree bit for bit, but they are different kernels in
+afterwards. The two agree bit for bit, but they are different kernels in
 the recorded route.
 
 `GpuCtx::gemm_route()` reports which kind of admission the route holds,

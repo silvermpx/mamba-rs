@@ -69,11 +69,12 @@ forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
 
 ## Recurrent State
 
-2 persistent states per layer:
-- `conv_state`: `[(d_conv - 1) * d_inner]` — conv1d history (the training
-  pipeline uses a `d_conv`-wide shift register; the prefill widens on
-  entry and writes the last `d_conv - 1` entries back on exit)
-- `ssm_state`: `[d_inner, d_state]` — SSM hidden state
+Two states per layer persist from token to token:
+
+- `conv_state`, `[(d_conv - 1) * d_inner]`: the conv1d history. The
+  training pipeline uses a shift register `d_conv` wide, and the prefill
+  widens on entry and writes the last `d_conv - 1` entries back on exit.
+- `ssm_state`, `[d_inner, d_state]`: the SSM hidden state.
 
 ## Weight Layout
 
@@ -83,10 +84,10 @@ forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
 | conv1d | [d_inner, d_conv] | Yes |
 | x_proj | [d_inner, dt_rank + 2*d_state] | No |
 | dt_proj | [dt_rank, d_inner] | Yes |
-| A_log | [d_inner, d_state] | — |
-| D | [d_inner] | — |
+| A_log | [d_inner, d_state] | n/a |
+| D | [d_inner] | n/a |
 | out_proj | [d_inner, d_model] | No |
-| norm | [d_model] | — |
+| norm | [d_model] | n/a |
 
 ## Numeric routes: the scan and the GEMM
 
@@ -97,15 +98,15 @@ tolerance parity holds, because different reduction orders are different
 bit families.
 
 The scan is chosen by `ScanMode::{Sequential, Parallel, Auto}` on
-`MambaConfig`. `Auto` uses the parallel scan above T = 256, and any
-`d_state` above 64 uses it at every length; that rule dates from a time
+`MambaConfig`. `Auto` uses the parallel scan above T = 64, and any
+`d_state` above 64 uses it at every length. That rule dates from a time
 when the sequential kernels were capped at 64 and stays because it is part
 of the numeric identity of existing runs. At long sequences the parallel
 scan is also the faster path.
 
 The GEMM is chosen by the context's `GemmMode`. In the default
 `Deterministic` mode a model context uses the Inference kernels and a
-trainer the Triad kernels; `CublasFast` and `CublasPedantic` select cuBLAS.
+trainer the Triad kernels. `CublasFast` and `CublasPedantic` select cuBLAS.
 The modes, the storage precisions, the environment variable and the
 graph rules are described in
 [gemm-modes.md](gemm-modes.md), and the measurements in

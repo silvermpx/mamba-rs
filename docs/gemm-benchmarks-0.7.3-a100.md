@@ -14,14 +14,14 @@ capture 89 of 89 identical), and the training-step rows are on the
 | measured GPU UUID | `GPU-1842567e-ae39-1f51-cce1-aa2d42583d91` |
 | driver / toolkit | 595.58.03 / CUDA 13.2, NVRTC 13.2.78 |
 | host compiler | Rust 1.98.1, release profile |
-| GEMM mode | `Deterministic`; the automatic route, no forced candidate |
+| GEMM mode | `Deterministic`. The automatic route, no forced candidate |
 | storage precisions | exact F32, TF32, BF16, F16 |
-| path | eager; every cell times three arms in one process |
+| path | eager. Every cell times three arms in one process |
 
 Each cell times the deterministic route, cuBLAS in the tree's fast
 setting (TF32 handle math) and cuBLAS in the tree's pedantic setting in
 windows of calibrated launch counts, 21 windows, the arm order mirrored
-from window to window; the number is the lower median per arm. The row's
+from window to window. The number is the lower median per arm. The row's
 `route` is the symbol the dispatcher recorded for the launch. This board
 has no kernels of its own: every route is the common tier, admitted at
 first use by the bit proof against the portable reference, or the scalar
@@ -29,7 +29,7 @@ tier where no candidate was admitted.
 
 `fast/det` and `pedantic/det` divide the vendor time by ours on this
 board: above 1.0 the deterministic route is faster than that vendor
-setting. There is no earlier per-cell record of this board; the 0.7.2
+setting. There is no earlier per-cell record of this board. The 0.7.2
 tree on it had no route this adapter can time.
 
 Two common routes do not serve here, and the context says so once:
@@ -41,7 +41,7 @@ route of the same numeric contract on this board, which is exactly the
 case the first-use proof exists for.
 
 
-Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board; `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
+Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the deterministic route the dispatcher chose on this board. `fast` is cuBLAS with TF32 handle math and `pedantic` is cuBLAS pedantic on the same board, the vendor controls. `fast/det` and `pedantic/det` divide the vendor time by ours: above 1.0 the deterministic route is faster.
 
 ## triad - bf16
 

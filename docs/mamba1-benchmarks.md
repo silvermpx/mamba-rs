@@ -3,17 +3,17 @@
 Unless a heading names another board, the numbers were taken on an
 Intel Xeon Gold 5412U (48 threads) with an NVIDIA RTX 6000 Ada Generation
 (48 GB), CUDA 13.2, driver 595.45. Every table is a measurement of the
-release, board and toolkit named in its heading; the tables are kept as
+release, board and toolkit named in its heading. The tables are kept as
 history and are not remeasured for each release. The decode numbers were
 taken with the batch-invariant kernels of the Inference family, which on
 0.6.x were an opt-in and in 0.7.0 are what the default
-`GemmMode::Deterministic` selects for a model context; a row's output is
+`GemmMode::Deterministic` selects for a model context. A row's output is
 bit-identical at every batch size (cross-batch KL below 1e-10). The
 current kernel comparisons against cuBLAS are in
 [determinism-benchmarks.md](determinism-benchmarks.md) and the modes in
 [gemm-modes.md](gemm-modes.md).
 
-## Training step — 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
+## Training step, 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
 
 Measurements on September 18, 2026: the assembled `0.7.3` (kernel sources
 at `e6d06d6c0c8739d17a1f3d4a08c103822fc266f7`) against the `0.7.1` numbers
@@ -23,8 +23,8 @@ CUDA 13.2.51 / NVRTC 13.2, Rust 1.98.1, release build.
 
 Both versions run the public trainer in the default `Deterministic`
 GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
-separate storage precisions; the F32 row is exact f32. Training with the
-weights stored as `Tf32` is measured in the next section; the separate
+separate storage precisions. The F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section. The separate
 [GEMM tables](gemm-benchmarks-0.7.3-ada.md) cover kernel timings.
 
 Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
@@ -36,9 +36,9 @@ handling and synchronization.
 Initialization, compilation and graph capture are outside the timers.
 
 Each storage ran once, one process on an otherwise idle board, with its
-own kernel cache; the 0.7.1 column is that release's median of two
+own kernel cache. The 0.7.1 column is that release's median of two
 processes, from that section. `old/new` above 1 means 0.7.3 is
-faster. A single process has no range to show; the 0.7.1 process ranges
+faster. A single process has no range to show. The 0.7.1 process ranges
 in that section are the run-to-run band of this instrument on this
 board, about 0.1 percent.
 
@@ -60,17 +60,17 @@ whose kernels are 0.7.1's, and the 0.7.3 tree each ran the BF16 and F16
 instrument once more under the CUDA profiler that afternoon, and gave
 112.41 against 112.43 ms/step for BF16 and 114.53 against 114.42 for F16
 in graph replay, with the same peak memory to the mebibyte and the same
-kernel census. The two releases run the same step on this board; the
+kernel census. The two releases run the same step on this board. The
 September 14 column is that day's board.
 
 Mamba-1 uses the parallel scan, d_conv 4 and a capacity-16 context.
 Each process warms up for three steps, averages ten eager steps, then
 captures and averages thirty graph steps. The retained Ada BF16/F16
-backward fold is selected through the normal model path; no candidate
+backward fold is selected through the normal model path. No candidate
 override is used. The F32 row keeps its existing fold implementation.
 The fixture retains its initialized input projection for F32 and uses
 the mixed trainer's identity branch for BF16/F16. Compare each dtype
-with the same dtype in the previous release; these are not controlled
+with the same dtype in the previous release. These are not controlled
 storage-precision comparisons.
 
 Reproduce with `trainer_benchmarks::bench_lm_train_production_shape`,
@@ -104,7 +104,7 @@ The assembled source passed the same-board 0.7.1 comparison for all
 263 ledger keys, the 161 original normalized Mamba keys and the 102
 decode keys, with no changed or missing key. These bit checks and the
 whole-step timings are separate evidence. The RTX 5090 was not
-measured for this release; its 0.7.2 tables remain its latest.
+measured for this release. Its 0.7.2 tables remain its latest.
 
 ## Mamba-1 supplemental F32 training with deterministic TF32
 
@@ -112,15 +112,15 @@ Separate measurements with deterministic TF32 permitted compare the
 `0.7.1` numbers of the matching section below with the assembled
 `0.7.3`. The same F32 measurement fixture, compiled against 0.7.3, ran
 once with its own kernel cache on an RTX 6000 Ada in the same CUDA 13.2
-environment; the 0.7.1 column is that release's median of two processes.
+environment. The 0.7.1 column is that release's median of two processes.
 
 The tree ran in the deterministic mode with the weights stored as
 `Tf32`, the route `MAMBA_RS_BI_F32_POLICY=tf32` names. The route permits
 deterministic TF32 where a qualified kernel exists and stays exact
-everywhere else; it does not force every GEMM to use TF32.
+everywhere else. It does not force every GEMM to use TF32.
 
 Shape: d_model 384, 24 layers, B=8, T=1300, parallel scan,
-capacity-16 context; ten eager and thirty graph timed steps. Every timed step
+capacity-16 context. Ten eager and thirty graph timed steps. Every timed step
 performed its optimizer update.
 
 | execution | 0.7.1 ms/step | 0.7.3 ms/step | old/new |
@@ -129,21 +129,21 @@ performed its optimizer update.
 | graph | 180.58 | 180.91 | 0.998× |
 
 Peak device memory is the maximum 200 ms NVML sample across setup, eager,
-capture and graph execution in the process; it is not an allocator
+capture and graph execution in the process. It is not an allocator
 high-water mark or an individual-step measurement.
 
 | model | 0.7.1 peak MiB | 0.7.3 peak MiB |
 |---|---:|---:|
 | Mamba-1 | 7546 | 7626 |
 
-## Training step — 0.7.2 to 0.7.3 (RTX 5090, CUDA 13.2)
+## Training step, 0.7.2 to 0.7.3 (RTX 5090, CUDA 13.2)
 
 Measured on September 18, 2026 on a rented RTX 5090 (170 SMs, driver
 610.43.02, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release build): the
 assembled `0.7.3` once per storage against the `0.7.2` numbers of the
 0.7.0 to 0.7.1 section for this board below (0.7.2 changed no kernel or
-route; those columns are its measurement of the same instrument). Same
-shape and instrument settings as the Ada section above; the 0.7.3
+route. Those columns are its measurement of the same instrument). Same
+shape and instrument settings as the Ada section above. The 0.7.3
 process ran once, so no range is shown. `old/new` above 1 means 0.7.3 is
 faster.
 
@@ -151,8 +151,8 @@ Per-cell GEMM timings of the final tree on this board, against cuBLAS on
 the same board and against the board's own tier, are on the
 [RTX 5090 GEMM page](gemm-benchmarks-0.7.3-rtx5090.md).
 
-The board keeps its own measured SM120 kernels on every shape they name;
-the gain comes from the shapes they do not name, which ran on the scalar
+The board keeps its own measured SM120 kernels on every shape they name.
+The gain comes from the shapes they do not name, which ran on the scalar
 or portable kernels in 0.7.2 and take the common cells, proven at first
 use on this board, in 0.7.3. The bit ledger against 0.7.2 on this board
 holds on all 263 keys.
@@ -178,13 +178,13 @@ process:
 | F32 | 7660 |
 | TF32 | 8339 |
 
-## Training step — 0.7.2 to 0.7.3 (A100 SXM4 40 GB, CUDA 13.2)
+## Training step, 0.7.2 to 0.7.3 (A100 SXM4 40 GB, CUDA 13.2)
 
 Measured on September 18, 2026 on a rented A100 SXM4 40 GB (108 SMs,
 driver 595.58.03, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release
 build). This board had no saved numbers, so `0.7.2` and `0.7.3` each ran
 once, old then new, in separate trees with separate kernel caches. Same
-shape and instrument settings as the Ada section above; 0.7.2 spells the
+shape and instrument settings as the Ada section above. 0.7.2 spells the
 TF32 storage as `MAMBA_RS_BENCH_DTYPE=f32` with `MAMBA_RS_BI_F32_POLICY=tf32`.
 `old/new` above 1 means 0.7.3 is faster.
 
@@ -218,7 +218,7 @@ process:
 | F32 | 7527 | 7529 |
 | TF32 | 7527 | 7527 |
 
-## Training step — 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
+## Training step, 0.7.0 to 0.7.1 (RTX 6000 Ada, CUDA 13.2)
 
 Fresh measurements on September 14, 2026: released `v0.7.0`
 (`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) against assembled `0.7.1`
@@ -227,8 +227,8 @@ Fresh measurements on September 14, 2026: released `v0.7.0`
 
 Both versions run the public trainer in the default `Deterministic`
 GEMM mode, with the Triad family. BF16, F16 and full-precision F32 are
-separate storage precisions; the F32 row is exact f32. Training with the
-weights stored as `Tf32` is measured in the next section; the separate
+separate storage precisions. The F32 row is exact f32. Training with the
+weights stored as `Tf32` is measured in the next section. The separate
 [GEMM tables](gemm-benchmarks-0.7.1-ada.md) cover kernel timings.
 
 Shape: d_model 384, d_state 16, expand 2, 24 layers, B=8, T=1300,
@@ -241,7 +241,7 @@ Initialization, compilation and graph capture are outside the timers.
 
 Each dtype ran as old, new, new, old on an otherwise idle board, with
 separate source trees and kernel caches. Each table entry is the median
-of the two process-average step times; parentheses show their range,
+of the two process-average step times. Parentheses show their range,
 not a confidence interval. `old/new` above 1 means 0.7.1 is faster.
 
 No timed step skipped its optimizer update because of overflow.
@@ -258,11 +258,11 @@ No timed step skipped its optimizer update because of overflow.
 Mamba-1 uses the parallel scan, d_conv 4 and a capacity-16 context.
 Each process warms up for three steps, averages ten eager steps, then
 captures and averages thirty graph steps. The retained Ada BF16/F16
-backward fold is selected through the normal model path; no candidate
+backward fold is selected through the normal model path. No candidate
 override is used. The F32 row keeps its existing fold implementation.
 The fixture retains its initialized input projection for F32 and uses
 the mixed trainer's identity branch for BF16/F16. Compare each dtype
-with the same dtype in the previous release; these are not controlled
+with the same dtype in the previous release. These are not controlled
 storage-precision comparisons.
 
 Reproduce with `trainer_benchmarks::bench_lm_train_production_shape`,
@@ -301,27 +301,27 @@ The assembled source passed the same-board 0.7.0 comparison for all
 expanded decode cells. No changed or missing cell was observed in either
 comparison. These bit checks and the whole-step timings are separate
 evidence. Earlier prefill/decode tables below remain historical
-measurements; the RTX 5090 training step is measured in its own section.
+measurements. The RTX 5090 training step is measured in its own section.
 
 ## Mamba-1 supplemental F32 training with deterministic TF32
 
 Separate measurements with deterministic TF32 permitted compare released `v0.7.0`
 (`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) with assembled `0.7.1`
 (`83079104fe1efa7ad5dca0a28c5b48bcd86c5b14`). The same F32 measurement
-fixture is compiled against each version; runs use separate
+fixture is compiled against each version. Runs use separate
 kernel caches on an RTX 6000 Ada in the same CUDA 13.2 environment.
 
 Both trees ran in the deterministic mode with the 0.7.x opt-in
 `MAMBA_RS_BI_F32_POLICY=tf32`, the route that `WeightDtype::Tf32` now
 names. The route permits deterministic TF32 where a qualified kernel
-exists and stays exact everywhere else; it does not force every GEMM to
+exists and stays exact everywhere else. It does not force every GEMM to
 use TF32.
 
 Shape: d_model 384, 24 layers, B=8, T=1300, parallel scan,
-capacity-16 context; ten eager and thirty graph timed steps per process.
+capacity-16 context. Ten eager and thirty graph timed steps per process.
 Each tree has two
 process observations in old, new, new, old order. Values are medians of the
-two process-average timings; parentheses are the process range, not a
+two process-average timings. Parentheses are the process range, not a
 confidence interval. Every timed step performed its optimizer update.
 
 | execution | v0.7.0 ms/step median (range) | 0.7.1 ms/step median (range) | old/new |
@@ -330,14 +330,14 @@ confidence interval. Every timed step performed its optimizer update.
 | graph | 180.86 (180.81–180.90) | 180.58 (180.33–180.82) | 1.002× |
 
 Peak device memory is the maximum 200 ms NVML sample across setup, eager,
-capture and graph execution in each process; it is not an allocator
+capture and graph execution in each process. It is not an allocator
 high-water mark or an individual-step measurement.
 
 | model | v0.7.0 peak MiB median (range) | 0.7.1 peak MiB median (range) |
 |---|---:|---:|
 | Mamba-1 | 7544.0 (7544–7544) | 7546.0 (7546–7546) |
 
-## Training step — 0.7.3 (H100 PCIe, CUDA 13.2)
+## Training step, 0.7.3 (H100 PCIe, CUDA 13.2)
 
 Measured on September 18, 2026 on a rented H100 PCIe (driver 610.57.04,
 CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.98.1, release build): the final
@@ -356,19 +356,19 @@ The per-cell GEMM timings against cuBLAS on the same board are on the
 | exact F32 | 201.33 |
 | F32, TF32 permitted | 181.56 |
 
-## Training step — 0.7.0 to 0.7.1 (RTX 5090, CUDA 13.2)
+## Training step, 0.7.0 to 0.7.1 (RTX 5090, CUDA 13.2)
 
 Measurements on September 16, 2026: released `v0.7.0`
 (`e2917a47494b4a1d652f5c818c3974ec3fcdd1ca`) against released `v0.7.1`
 (`1988e4b86f44b2a7819ab7336804774041640c0f`, run from the 0.7.2 tree,
 which changes no kernel or route). One RTX 5090, 170 SMs, driver
 595.58.03, CUDA 13.2 / NVRTC 13.2, Rust 1.98.1, release build. The board
-reports 100 % utilization while idle under this driver; a quiet card was
+reports 100 % utilization while idle under this driver. A quiet card was
 judged by resident memory and the compute-process list instead.
 
 Same shape, fixtures, timers and instrument as the Ada section above:
 d_model 384, 24 layers, B=8, T=1300, parallel scan, capacity-16 context,
-default `Deterministic` mode with the Triad family; the TF32 rows use
+default `Deterministic` mode with the Triad family. The TF32 rows use
 `MAMBA_RS_BI_F32_POLICY=tf32`, the 0.7.x spelling of `WeightDtype::Tf32`.
 Each dtype ran as old, new, new, old with
 separate trees and kernel caches. Entries are the median of the two
@@ -401,12 +401,12 @@ board matched on all 161 original Mamba keys, none moved, none missing.
 
 The sections below retain their original versions, boards and measurement
 protocols. Prefill and decode were not retimed in the 0.7.1 training
-comparison; the RTX 5090 training step of 0.7.1 is measured above.
+comparison. The RTX 5090 training step of 0.7.1 is measured above.
 
-## Serving prefill — classifier page shape (0.6.4, RTX 5090, CUDA 13.0)
+## Serving prefill, classifier page shape (0.6.4, RTX 5090, CUDA 13.0)
 
 Shape: B=1, T=4621, d_model=384, 24 layers, f32 weights, cuBLAS+TF32
-(the production serve tier); one page = one prefill + one 1.5 KB pooled
+(the production serve tier). One page = one prefill + one 1.5 KB pooled
 download. Bit-identical outputs across 0.6.3 -> 0.6.4
 (16-cell prefill hash gate).
 
@@ -423,10 +423,10 @@ order, the scan's shared memory is sized from the run-time `d_state`, and
 the RMSNorm keeps its row in registers. What remains is the parallel scan
 itself plus the four forward GEMMs.
 
-## Training step — production shape (2x RTX 5090, CUDA 13.0)
+## Training step, production shape (2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, deterministic GEMMs with
-tensor cores, graph replay; the step time is for one GPU of the pair. A
+tensor cores, graph replay. The step time is for one GPU of the pair. A
 kernel pass took this step from 441.4 to 131.5 ms (-70%) with run-to-run
 bit determinism kept throughout (one deliberate change of bit family,
 recorded in the changelog). The activation tape of the scan is gone
@@ -446,10 +446,10 @@ Isolated ledger at 131.5 (x24-layer ms): scan fwd 10.7 / bwd ~20 plus
 fold partials, backward GEMMs 15.4 (dt_proj 3.5), conv dw 2.6 / dx
 1.5, dB/dC reducer ~2.5.
 
-## Training step — production shape, the 0.7.0 kernel pass (RTX 6000 Ada, CUDA 13.2)
+## Training step, production shape, the 0.7.0 kernel pass (RTX 6000 Ada, CUDA 13.2)
 
 Same shape as above (d_model 384, 24 layers, B=8, T=1300, graph replay),
-one board, the deterministic GEMMs of 0.7.0 in both columns; the pass
+one board, the deterministic GEMMs of 0.7.0 in both columns. The pass
 touched the kernels around them, then moved the weight gradient to the
 stream-K kernel. The digest suites of the decode step, the scan forward
 and backward, the convolution and the whole training runs were recorded
@@ -468,7 +468,7 @@ kernel per tile, no pre-activation tape), the B/C reduction 222 to 206 µs,
 the conv burn-in forward 98 to 87 µs, the column sums over the batch 165
 to 215 µs down to 61 µs. The scan forward is unchanged at 0.81 ms.
 
-## LLM Inference — state-spaces/mamba-*-hf (end-to-end, graph-captured)
+## LLM Inference, state-spaces/mamba-*-hf (end-to-end, graph-captured)
 
 Production checkpoints loaded from HuggingFace, greedy decode, 100-token generation.
 
@@ -484,8 +484,8 @@ Production checkpoints loaded from HuggingFace, greedy decode, 100-token generat
 bf16/f16 weight VRAM footprint is exactly half of f32. Throughput gain
 grows with model size as the workload becomes increasingly bandwidth-bound.
 
-130m row from `bench_m1_bf16_vs_f32_130m` (100-token steady-state run);
-larger sizes from `llm_dtype_throughput_all_sizes` (50-token sweep —
+130m row from `bench_m1_bf16_vs_f32_130m` (100-token steady-state run).
+Larger sizes from `llm_dtype_throughput_all_sizes` (50-token sweep,
 shorter window, a few percent below steady-state).
 
 ### Prefill vs Decode (bf16, prompt=128 tokens, +100 decoded)
@@ -512,7 +512,7 @@ cross-batch bit identity.)
 
 The cost per token is flat at large T, as expected of a state-space
 model. Prompts shorter than 256 tokens run step by step on the decode
-kernels, which keeps the cross-batch bit identity; longer prompts switch
+kernels, which keeps the cross-batch bit identity. Longer prompts switch
 to the batched parallel prefill, whose GEMMs run on the deterministic
 tensor-core kernels (4096-token prefill: 843 ms on the scalar kernels,
 329 ms on the tensor-core kernels).
@@ -521,7 +521,7 @@ tensor-core kernels (4096-token prefill: 843 ms on the scalar kernels,
 
 Concurrent generation across N envs sharing one GPU. Each env produces
 its own logits, with strict cross-env bit-identity (slot 0 at B=N is
-identical to a standalone B=1 run on the same prompt —
+identical to a standalone B=1 run on the same prompt,
 `tests/gpu_batch_test.rs`).
 
 | B (envs) | tok/s/env | tok/s total | µs/env/tok |
@@ -534,7 +534,7 @@ identical to a standalone B=1 run on the same prompt —
 
 Per-environment latency grows with B because each environment's row is
 its own block and loads its own weight stream. cuBLAS would share the
-weights across rows for higher aggregate throughput; this kernel keeps
+weights across rows for higher aggregate throughput. This kernel keeps
 every environment's bits independent of the batch it is in.
 
 ### Numerical parity vs f32 (tests/gpu_bf16_parity.rs)
@@ -552,7 +552,7 @@ Greedy top-1 match over 15 tokens + KL(f32 ‖ bf16) on final logits:
 
 | Test | b=1 vs b=N KL | Status |
 |------|---:|---|
-| `bf16_batch_divergence_known` (adversarial; original bug KL=2.7) | top-1 match | ✓ |
+| `bf16_batch_divergence_known` (adversarial. Original bug KL=2.7) | top-1 match | ✓ |
 | `bf16_multi_length_parity` (lengths 3, 5, 32, 63, 64, 65, 128) | ≤ 3.7e-11 | ✓ |
 | `inference_extreme_batch_parity_bf16_b16` | 2.55e-12 | ✓ |
 | `inference_extreme_batch_parity_bf16_b32` | 7.96e-11 | ✓ |
@@ -580,7 +580,7 @@ CUDA Graph capture saves ~45 µs/step in kernel launch overhead.
 | bf16 | 38.9 ms |
 | f16  | 29.6 ms |
 
-(Measured on 0.6.x with the cuBLAS Pedantic lane; bf16 training at B=1
+(Measured on 0.6.x with the cuBLAS Pedantic lane. bf16 training at B=1
 T=32 is dominated by thin-shape GEMMs.)
 
 ## RL Training (synthetic d_model=128, 3 layers, B=1, T=32, graph)
@@ -611,7 +611,7 @@ T=32 is dominated by thin-shape GEMMs.)
 ## Summary
 
 - bf16 and f16 give 42 to 82 percent more decode throughput than f32 on
-  the four HuggingFace sizes; 15 of 15 greedy tokens match f32 and the
+  the four HuggingFace sizes. 15 of 15 greedy tokens match f32 and the
   final-logit KL is at most 1.1e-3.
 - Batch invariance: a row's bits are the same at batch 1 and at batch N
   (cross-batch KL below 1e-10) on the kernels that serve both decode and
@@ -620,7 +620,7 @@ T=32 is dominated by thin-shape GEMMs.)
   4096-token prompt takes 329 ms against 843 ms on the scalar kernels.
 - CUDA Graph capture saves about 45 µs of launch overhead per step.
 - Prefill cost per token is flat from 1024 to 4096 tokens.
-- All GPU buffers are allocated at construction; a step allocates nothing
+- All GPU buffers are allocated at construction. A step allocates nothing
   by design.
 
 Reproduce:
