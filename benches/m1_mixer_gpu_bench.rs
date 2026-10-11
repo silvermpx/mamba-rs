@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -26,7 +26,7 @@ use mamba_rs::mamba_ssm::gpu::prefill::{
 };
 use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 const LAYERS: usize = 4;
 const PREFILL: [(usize, usize); 3] = [(1, 1024), (1, 4096), (8, 1024)];

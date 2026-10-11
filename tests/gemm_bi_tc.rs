@@ -406,9 +406,9 @@ fn tc_backward_matches_f32_reference_loosely() {
 
 #[test]
 fn tc_mixed_training_is_bit_identical_across_runs() {
-    use mamba_rs::config::{MambaConfig, ScanMode};
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
+    use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
     fn digest(values: &[f32]) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;

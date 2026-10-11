@@ -366,7 +366,7 @@ Mamba-3 has the same surface (`forward_mamba3_backbone_prefill` and
 ## Serialization
 
 ```rust
-use mamba_rs::serialize;
+use mamba_rs::mamba_ssm::serialize;
 
 serialize::save(Path::new("model.safetensors"), backbone.weights(), cfg, input_dim)?;
 let (weights, cfg, input_dim) = serialize::load(Path::new("model.safetensors"))?;

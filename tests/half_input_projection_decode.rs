@@ -5,13 +5,13 @@
 //! the storage precision of the f32 decode, repeats its bits, and replays
 //! them from a captured graph.
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 const INPUT_DIM: usize = 40;
 const BATCH: usize = 2;

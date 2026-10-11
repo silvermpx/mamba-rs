@@ -10,7 +10,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
@@ -30,7 +31,6 @@ use mamba_rs::mamba_ssm::gpu::training_graph::{
 };
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaGrads;
 use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
-use mamba_rs::weights::MambaWeights;
 
 fn tiny_cfg() -> MambaConfig {
     MambaConfig {

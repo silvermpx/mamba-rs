@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
 use mamba_rs::mamba2::Mamba2Config;
 use mamba_rs::mamba3_mimo::Mamba3MimoConfig;
 use mamba_rs::mamba3_siso::config::Mamba3Config;

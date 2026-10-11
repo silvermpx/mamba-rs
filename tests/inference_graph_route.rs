@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::context::{
     BiGemmFamily, F32TriadPolicy, GemmMode, GpuCtx, HalfTriadPolicy,
 };
@@ -10,7 +10,7 @@ use mamba_rs::mamba_ssm::gpu::inference::{GpuMambaInference, GpuMambaInferenceMi
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::{Mamba3GpuInferenceEngine, Mamba3GpuInferenceMixed};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 const OUTPUT_POISON_BITS: u32 = 0x7fc0_d00d;
 

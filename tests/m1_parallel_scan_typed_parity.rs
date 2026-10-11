@@ -6,7 +6,7 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -22,7 +22,7 @@ use mamba_rs::mamba_ssm::gpu::forward_mixed::{
 };
 use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn tiny_cfg() -> MambaConfig {
     // C-1 re-arm: this was ScanMode::Sequential —

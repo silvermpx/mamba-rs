@@ -268,10 +268,10 @@ fn adamw_zero_weight_decay_matches_adam() {
 /// per-tensor weights) matches a CPU reference walk in the same arena order.
 #[test]
 fn adamw_m1_backbone_walks_all_tensors() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::adamw::step_m1;
     use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
-    use mamba_rs::weights::MambaWeights;
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();

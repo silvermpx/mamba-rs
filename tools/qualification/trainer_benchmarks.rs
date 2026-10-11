@@ -74,8 +74,8 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 // LM workload — Mamba-1 at 130m-ish shape, all 3 dtypes
 // ═══════════════════════════════════════════════════════════════════════
 
-fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::config::MambaConfig {
-    mamba_rs::config::MambaConfig {
+fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::mamba_ssm::MambaConfig {
+    mamba_rs::mamba_ssm::MambaConfig {
         d_model: 768,
         n_layers: 24,
         d_state: 16,
@@ -101,13 +101,13 @@ fn run_lm(
 
 fn run_lm_shape(
     dtype: WeightDtype,
-    cfg: mamba_rs::config::MambaConfig,
+    cfg: mamba_rs::mamba_ssm::MambaConfig,
     batch: usize,
     seq_len: usize,
     suffix: &str,
 ) -> Result<(), String> {
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
 
     let input_dim = cfg.d_model;
     let n = batch * seq_len * input_dim;
@@ -318,7 +318,7 @@ fn bench_lm_train_production_shape() {
         Ok("par") => mamba_rs::config::ScanMode::Parallel,
         _ => mamba_rs::config::ScanMode::Auto,
     };
-    let cfg = mamba_rs::config::MambaConfig {
+    let cfg = mamba_rs::mamba_ssm::MambaConfig {
         d_model: dm,
         n_layers: layers,
         d_state: 16,
@@ -338,8 +338,8 @@ fn bench_lm_train_production_shape() {
 #[test]
 #[ignore]
 fn bench_production_split_fwd_bwd() {
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
     let get = |k: &str, d: usize| -> usize {
         std::env::var(k)
             .ok()
@@ -356,7 +356,7 @@ fn bench_production_split_fwd_bwd() {
         Ok("f16") => WeightDtype::F16,
         _ => WeightDtype::Bf16,
     };
-    let cfg = mamba_rs::config::MambaConfig {
+    let cfg = mamba_rs::mamba_ssm::MambaConfig {
         d_model: dm,
         n_layers: layers,
         d_state: 16,

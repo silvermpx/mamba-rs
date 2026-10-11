@@ -2,7 +2,7 @@
 //!
 //! Used by all optimized forward/backward functions (O1-O5 flat layout).
 
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
 
 /// Collected Mamba dimensions to avoid passing 8+ separate usize params.
 /// Used by all optimized forward/backward functions.

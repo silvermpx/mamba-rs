@@ -227,9 +227,9 @@ fn apply_step_pair_matches_fused_applying_backward() {
 /// handoff contract.
 #[test]
 fn m1_resume_with_recurrent_state_is_bit_continuous() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
-    use mamba_rs::weights::MambaWeights;
 
     fn m1_cfg() -> MambaConfig {
         MambaConfig {

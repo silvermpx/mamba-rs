@@ -235,7 +235,7 @@ impl GpuMambaTrainingStepGraph {
     /// pointer checks diagnose drift but do not extend any CUDA lifetime.
     pub unsafe fn capture(
         ctx: &GpuCtx,
-        cfg: &crate::config::MambaConfig,
+        cfg: &crate::mamba_ssm::config::MambaConfig,
         cap: MambaMixedCapture<'_>,
         batch: usize,
         seq_len: usize,
@@ -640,7 +640,7 @@ impl GpuMambaF32TrainingStepGraph {
     /// pointer checks diagnose drift but do not extend any CUDA lifetime.
     pub unsafe fn capture(
         ctx: &GpuCtx,
-        cfg: &crate::config::MambaConfig,
+        cfg: &crate::mamba_ssm::config::MambaConfig,
         cap: MambaF32Capture<'_>,
         batch: usize,
         seq_len: usize,

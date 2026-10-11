@@ -20,7 +20,7 @@ mod hash_outputs;
 #[path = "common/stamp.rs"]
 mod stamp;
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -33,7 +33,7 @@ use mamba_rs::mamba_ssm::gpu::prefill::{
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 /// Vision-classifier serve geometry (T_TOTAL, INPUT_DIM) — printed in
 /// every stamp so a drift is visible at the consumer when the upstream

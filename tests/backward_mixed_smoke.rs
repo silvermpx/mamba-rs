@@ -9,7 +9,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -21,7 +22,6 @@ use mamba_rs::mamba_ssm::gpu::forward_mixed::{
 };
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaGrads;
 use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
-use mamba_rs::weights::MambaWeights;
 
 fn tiny_cfg() -> MambaConfig {
     MambaConfig {

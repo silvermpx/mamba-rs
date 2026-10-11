@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 use mamba_rs::MambaBackbone;
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::cpu::parallel::{parallel_mamba_backward, parallel_mamba_forward};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
@@ -9,7 +10,6 @@ use mamba_rs::train::flat::MambaBackboneFlat;
 use mamba_rs::train::forward::forward_mamba_backbone_batched;
 use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
 use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use mamba_rs::weights::MambaWeights;
 
 fn configs() -> [(&'static str, MambaConfig); 4] {
     [

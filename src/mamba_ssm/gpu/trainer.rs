@@ -47,7 +47,7 @@
 
 use cudarc::driver::PushKernelArg;
 
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
 use crate::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, build_multi_plan, m1_specs, m1_specs_mixed,
     step_multi,
@@ -123,7 +123,7 @@ use crate::mamba_ssm::gpu::training_graph::{
 };
 use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
-use crate::weights::MambaWeights;
+use crate::mamba_ssm::weights::MambaWeights;
 
 /// Training-session hyperparameters shared by the M1 and M3 trainer
 /// constructors: tensor shape fixed at construction + AdamW hyperparams.

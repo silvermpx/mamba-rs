@@ -12,9 +12,9 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 #[test]
 fn m1_inference_f16_wrapper_smoke() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
-    use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
         d_model: 64,

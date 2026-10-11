@@ -1,10 +1,10 @@
-use crate::config::MambaConfig;
 use crate::inference::{
     MambaPackedLinears, MambaStepScratch, mamba_step, mamba_step_no_proj,
     mamba_step_no_proj_packed, mamba_step_packed,
 };
-use crate::state::MambaState;
-use crate::weights::{MambaLayerWeights, MambaWeights};
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::state::MambaState;
+use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 
 /// Complete Mamba backbone: input_proj -> N layers -> norm_f.
 ///

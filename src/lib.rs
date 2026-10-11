@@ -78,9 +78,6 @@ pub mod mamba_ssm;
 pub mod mlp;
 pub mod module;
 pub mod ops;
-pub mod serialize;
-pub mod state;
-pub mod weights;
 
 // Convenience re-export aliases for the Mamba SSM CPU + GPU paths.
 // The canonical module paths are `mamba_ssm::cpu::*` / `mamba_ssm::gpu::*`;
@@ -116,14 +113,14 @@ pub mod gpu3 {
     pub use crate::mamba3_siso::gpu::*;
 }
 
-pub use config::MambaConfig;
+pub use mamba_ssm::config::MambaConfig;
 pub use mamba_ssm::cpu::inference::{
     MambaLayerPacked, MambaLayerScratch, MambaPackedLinears, MambaStepScratch, mamba_block_step,
     mamba_layer_step, mamba_step, mamba_step_no_proj, mamba_step_no_proj_packed, mamba_step_packed,
 };
+pub use mamba_ssm::state::{MambaLayerState, MambaState};
+pub use mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 pub use module::MambaBackbone;
-pub use state::{MambaLayerState, MambaState};
-pub use weights::{MambaLayerWeights, MambaWeights};
 
 // Mamba-3 SISO re-exports
 pub use mamba3_siso::{

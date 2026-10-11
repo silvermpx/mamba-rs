@@ -10,8 +10,8 @@
 
 use super::buffers::{GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn};
 use super::dtype::WeightDtype;
-use crate::config::MambaConfig;
-use crate::weights::MambaWeights;
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::weights::MambaWeights;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------

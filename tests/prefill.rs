@@ -8,19 +8,19 @@
 //! - identity input_proj branch == explicit eye projection, bitwise;
 //! - batch helper == sequential prefills, bitwise.
 
-use mamba_rs::config::MambaConfig;
 use mamba_rs::inference::{
     PrefillMode, PrefillScratch, forward_mamba_backbone_prefill,
     forward_mamba_backbone_prefill_mode, prefill_batch,
 };
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaState;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::module::MambaBackbone;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::state::MambaState;
 use mamba_rs::train::flat::MambaBackboneFlat;
 use mamba_rs::train::forward::forward_mamba_backbone_batched;
 use mamba_rs::train::scratch::PhaseScratch;
 use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

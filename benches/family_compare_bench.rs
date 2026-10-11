@@ -11,9 +11,10 @@
 
 use std::time::Instant;
 
-use mamba_rs::config::MambaConfig;
 use mamba_rs::gpu::inference::GpuMambaBackbone;
 use mamba_rs::gpu::trainer::MambaTrainer;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba2::gpu::{Mamba2GpuInferenceEngine, Mamba2GpuTrainer};
@@ -24,7 +25,6 @@ use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::weights::MambaWeights;
 
 const LAYERS: usize = 4;
 const D_MODEL: usize = 768;

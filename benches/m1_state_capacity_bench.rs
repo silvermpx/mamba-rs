@@ -4,9 +4,9 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::MambaBackbone;
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;

@@ -33,11 +33,11 @@ fn m1_vs_m3_prefill_head_to_head() {
 
     // M1 at the classify center shape.
     {
-        use mamba_rs::config::MambaConfig;
         use mamba_rs::inference::{PrefillScratch, forward_mamba_backbone_prefill_mode};
+        use mamba_rs::mamba_ssm::MambaConfig;
+        use mamba_rs::mamba_ssm::MambaState;
+        use mamba_rs::mamba_ssm::MambaWeights;
         use mamba_rs::ops::dims::MambaDims;
-        use mamba_rs::state::MambaState;
-        use mamba_rs::weights::MambaWeights;
         let cfg = MambaConfig {
             d_model: 384,
             n_layers: 24,

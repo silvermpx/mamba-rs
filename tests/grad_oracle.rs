@@ -28,14 +28,14 @@
 //! - Two configs: a rectangular `input_dim != d_model` (the vision patch
 //!   embed shape) and the square `input_dim == d_model` case.
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
 use mamba_rs::train::backward::backward_mamba_backbone_batched;
 use mamba_rs::train::flat::MambaBackboneFlat;
 use mamba_rs::train::forward::forward_mamba_backbone_batched;
 use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
 use mamba_rs::train::weights::TrainMambaWeights;
-use mamba_rs::weights::MambaWeights;
 
 /// Deterministic xorshift pseudo-random fill (same idiom as the parity tests).
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {

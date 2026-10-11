@@ -5,9 +5,9 @@ use std::path::Path;
 
 use safetensors::SafeTensors;
 
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 use crate::module::MambaBackbone;
-use crate::weights::{MambaLayerWeights, MambaWeights};
 
 use super::bf16::bf16_bytes_to_f32;
 use super::config_json::{ModelFamily, parse_config_json};

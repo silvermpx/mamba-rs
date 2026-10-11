@@ -157,8 +157,9 @@ fn test_serialize_roundtrip() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
 
-    mamba_rs::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
-    let (loaded_w, loaded_cfg, loaded_input_dim) = mamba_rs::serialize::load(&path).unwrap();
+    mamba_rs::mamba_ssm::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
+    let (loaded_w, loaded_cfg, loaded_input_dim) =
+        mamba_rs::mamba_ssm::serialize::load(&path).unwrap();
 
     assert_eq!(loaded_cfg.d_model, cfg.d_model);
     assert_eq!(loaded_cfg.d_state, cfg.d_state);
@@ -202,8 +203,9 @@ fn test_serialize_inference_parity() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
 
-    mamba_rs::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
-    let (loaded_w, loaded_cfg, loaded_input_dim) = mamba_rs::serialize::load(&path).unwrap();
+    mamba_rs::mamba_ssm::serialize::save(&path, bb.weights(), bb.config(), bb.input_dim()).unwrap();
+    let (loaded_w, loaded_cfg, loaded_input_dim) =
+        mamba_rs::mamba_ssm::serialize::load(&path).unwrap();
     let bb2 = MambaBackbone::from_weights(loaded_cfg, loaded_w).unwrap();
     assert_eq!(bb2.input_dim(), loaded_input_dim);
 

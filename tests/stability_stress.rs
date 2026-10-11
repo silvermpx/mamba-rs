@@ -24,10 +24,10 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;

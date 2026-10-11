@@ -3,7 +3,6 @@
 use std::time::Instant;
 
 use mamba_rs::MambaBackbone;
-use mamba_rs::config::MambaConfig;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -13,7 +12,8 @@ use mamba_rs::gpu::forward::{
 };
 use mamba_rs::gpu::inference::GpuMambaBackbone;
 use mamba_rs::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 
 /// Full Mamba-1 GPU benchmark: inference, CUDA Graph, training fwd/bwd, CPU reference.
 ///

@@ -15,11 +15,11 @@
 
 use std::sync::Arc;
 
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::weights::{GpuMambaMixedWeights, GpuMambaTrainWeights};
-use crate::weights::MambaWeights;
+use crate::mamba_ssm::weights::MambaWeights;
 
 /// Mixed-precision training weights.
 ///

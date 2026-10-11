@@ -18,7 +18,7 @@ use super::kernel_identity::{
     build_resolved_gemm_launch_set,
 };
 use super::kernels::MambaKernels;
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;

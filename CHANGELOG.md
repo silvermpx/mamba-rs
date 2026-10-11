@@ -21,6 +21,13 @@
 - The Inference retained bundle and the Ada copy-plan routes no longer
   depend on the state capacity; they are admitted at every capacity
   instead of only 16 and 64.
+- Mamba-1 keeps its configuration, weights, state and safetensors
+  serializer in its own module, as the other families do:
+  `mamba_rs::mamba_ssm::{config, weights, state, serialize}`. The crate
+  root still re-exports `MambaConfig`, `MambaWeights`, `MambaLayerWeights`,
+  `MambaState` and `MambaLayerState`; the root modules `weights`, `state`
+  and `serialize` are gone, and `mamba_rs::config` holds only `ScanMode`,
+  which the families share.
 
 ## 0.7.5 (2026-09-23)
 

@@ -24,9 +24,9 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 
 #[test]
 fn m1_trainer_bf16_smoke() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
-    use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -90,9 +90,9 @@ fn m1_trainer_bf16_smoke() {
 /// layer residual stream + d_temporal hand-off.
 #[test]
 fn m1_trainer_multi_layer_bf16() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -222,9 +222,9 @@ fn m3_trainer_multi_layer_bf16() {
 
 #[test]
 fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -355,9 +355,9 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
 
 #[test]
 fn m1_trainer_f32_smoke() {
-    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
-    use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
         d_model: 32,

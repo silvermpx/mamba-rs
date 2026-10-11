@@ -82,7 +82,7 @@ fn delta_norm(a: &[f32], b: &[f32]) -> f32 {
     l2_norm(&diff)
 }
 
-fn flatten_weights(w: &mamba_rs::weights::MambaWeights) -> Vec<f32> {
+fn flatten_weights(w: &mamba_rs::mamba_ssm::MambaWeights) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&w.input_proj_w);
     out.extend_from_slice(&w.input_proj_b);

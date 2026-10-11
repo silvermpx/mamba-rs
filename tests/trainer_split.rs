@@ -13,7 +13,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
@@ -22,7 +23,6 @@ use mamba_rs::train::flat::MambaBackboneFlat;
 use mamba_rs::train::forward::forward_mamba_backbone_batched;
 use mamba_rs::train::scratch::PhaseScratch;
 use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

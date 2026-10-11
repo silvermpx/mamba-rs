@@ -1,4 +1,4 @@
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
 
 /// Weight storage for a single Mamba layer.
 ///

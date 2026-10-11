@@ -841,9 +841,9 @@ mod pad_tests {
 #[cfg(test)]
 mod tied_head_capture_tests {
     use super::*;
-    use crate::config::{MambaConfig, ScanMode};
     use crate::mamba_ssm::gpu::context::GemmMode;
-    use crate::weights::MambaWeights;
+    use crate::mamba_ssm::weights::MambaWeights;
+    use crate::{config::ScanMode, mamba_ssm::config::MambaConfig};
 
     fn owned_lm(dtype: WeightDtype, tied: bool) -> GpuMambaLM {
         const D_MODEL: usize = 16;

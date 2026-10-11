@@ -87,7 +87,7 @@ impl Mamba3Config {
     /// point.
     ///
     /// Returns `Err` with a description on invalid configuration — same
-    /// contract as [`crate::config::MambaConfig::validate`] (the old
+    /// contract as [`crate::mamba_ssm::config::MambaConfig::validate`] (the old
     /// panicking variant made library constructors abort instead of
     /// surfacing a recoverable error).
     pub fn validate(&self) -> Result<(), String> {

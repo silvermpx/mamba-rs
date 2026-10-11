@@ -18,8 +18,8 @@
 //! Metadata stores config as JSON: `d_model`, `d_state`, `d_conv`, `expand`,
 //! `n_layers`, `input_dim`.
 
-use crate::config::MambaConfig;
-use crate::weights::{MambaLayerWeights, MambaWeights};
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 use safetensors::serialize_to_file;
 use safetensors::tensor::{SafeTensors, TensorView};
 use std::collections::HashMap;

@@ -21,8 +21,8 @@ use super::launch::{grid_1d, grid_norm};
 use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
 };
-use crate::config::MambaConfig;
-use crate::weights::MambaWeights;
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::weights::MambaWeights;
 use cudarc::driver::PushKernelArg;
 use std::cell::Cell;
 use std::sync::Arc;

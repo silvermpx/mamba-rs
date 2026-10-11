@@ -36,11 +36,11 @@
 
 use rayon::prelude::*;
 
+use crate::mamba_ssm::state::MambaState;
+use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
-use crate::state::MambaState;
-use crate::weights::{MambaLayerWeights, MambaWeights};
 
 /// Maximum `d_state` the stack-allocated per-channel `da` buffer covers.
 /// Matches the GPU dispatch ceiling for the sequential kernels.

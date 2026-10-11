@@ -4,7 +4,7 @@
 #[path = "common/hf_synthetic.rs"]
 mod hf_synthetic;
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -18,7 +18,7 @@ use mamba_rs::mamba3_siso::gpu::inference::{
 };
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 use std::process::Command;
 
 #[cfg(feature = "hf")]

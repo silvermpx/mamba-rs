@@ -30,10 +30,10 @@ fn main() {
 #[cfg(feature = "cuda")]
 mod cuda_example {
     use mamba_rs::MambaConfig;
+    use mamba_rs::mamba_ssm::MambaWeights;
     use mamba_rs::mamba_ssm::gpu::GemmMode;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
-    use mamba_rs::weights::MambaWeights;
 
     pub fn run() -> Result<(), String> {
         let cfg = MambaConfig {

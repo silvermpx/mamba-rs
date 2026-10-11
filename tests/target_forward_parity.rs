@@ -18,7 +18,7 @@ mod arch;
 #[path = "common/digest.rs"]
 mod digest;
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::cpu::target::{MambaTargetSeqScratch, forward_mamba_target_sequence};
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -38,7 +38,7 @@ use mamba_rs::mamba3_siso::gpu::state::{
 use mamba_rs::mamba3_siso::gpu::weights::GpuMamba3Weights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

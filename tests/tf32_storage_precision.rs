@@ -5,7 +5,7 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::{MambaConfig, ScanMode};
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GemmMode};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::inference::GpuMambaBackbone;
@@ -14,7 +14,7 @@ use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::weights::MambaWeights;
+use mamba_rs::{config::ScanMode, mamba_ssm::MambaConfig};
 
 fn m1_cfg() -> MambaConfig {
     MambaConfig {

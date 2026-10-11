@@ -9,11 +9,11 @@
 //! panels ([`MambaPackedLinears`]), the same bits as the row-major product
 //! without a BLAS, faster on the weights a decode streams from memory.
 
-use crate::config::MambaConfig;
+use crate::mamba_ssm::config::MambaConfig;
+use crate::mamba_ssm::state::MambaLayerState;
+use crate::mamba_ssm::weights::{MambaLayerWeights, MambaWeights};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::packed::{PackedLinear, linear_row as linear};
-use crate::state::MambaLayerState;
-use crate::weights::{MambaLayerWeights, MambaWeights};
 
 // ---------------------------------------------------------------------------
 // Packed projections
@@ -460,7 +460,7 @@ pub fn mamba_step_batch(
     inputs: &[f32],
     outputs: &mut [f32],
     weights: &MambaWeights,
-    states: &mut [crate::state::MambaState],
+    states: &mut [crate::mamba_ssm::state::MambaState],
     scratches: &mut [MambaStepScratch],
     cfg: &MambaConfig,
     input_dim: usize,

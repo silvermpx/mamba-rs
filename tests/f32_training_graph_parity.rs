@@ -11,7 +11,8 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::GemmMode;
 use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m1_specs, step_m1_capturable,
@@ -28,7 +29,6 @@ use mamba_rs::mamba_ssm::gpu::training_graph::{
     GpuMambaF32TrainingStepGraph, MambaF32Capture, MambaF32Replay,
 };
 use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;

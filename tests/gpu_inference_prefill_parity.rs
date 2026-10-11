@@ -17,7 +17,8 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::config::MambaConfig;
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::mamba_ssm::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -32,7 +33,6 @@ use mamba_rs::mamba_ssm::gpu::prefill::{
     gpu_forward_inference_prefill_full,
 };
 use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaTrainWeights, GpuMambaWeights};
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

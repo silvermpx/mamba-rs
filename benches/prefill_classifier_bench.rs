@@ -1,11 +1,11 @@
 //! CPU prefill latency at the vision-classifier page shape (T = 4621,
 //! d384 x 24 layers) for the single and parallel prefill modes.
 //! The prefill contracts are tested in tests/prefill.rs.
-use mamba_rs::config::MambaConfig;
 use mamba_rs::inference::{PrefillMode, PrefillScratch, forward_mamba_backbone_prefill_mode};
+use mamba_rs::mamba_ssm::MambaConfig;
+use mamba_rs::mamba_ssm::MambaState;
+use mamba_rs::mamba_ssm::MambaWeights;
 use mamba_rs::ops::dims::MambaDims;
-use mamba_rs::state::MambaState;
-use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
