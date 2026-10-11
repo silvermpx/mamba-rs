@@ -526,6 +526,14 @@ fn prefill_body<W: MambaWeightsView>(
     let xdbl_dim = dims.xdbl_dim;
     let d_conv = dims.d_conv;
     let t = seq_len;
+    // The parallel route runs on t-major rows: the conv writes u in them,
+    // the softplus writes delta in them into u once x_proj has read it, the
+    // scan reads both and writes its output into the dead row-major delta,
+    // and the gate kernel brings it back to row-major rows. Every value is
+    // computed as on the row-major route, so are the bits.
+    let ts = super::backward::tmajor_stride(&dims);
+    let tmajor_in = ts > 0 && scratch.u_t.len() >= b * di * ts;
+    let ts_i = if tmajor_in { ts as i32 } else { 0 };
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
 
@@ -608,6 +616,12 @@ fn prefill_body<W: MambaWeightsView>(
                 .stream
                 .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
             builder.arg(scratch.u.inner_mut());
+            let ut_ptr = if tmajor_in {
+                scratch.u_t.cached_ptr()
+            } else {
+                0
+            };
+            builder.arg(&ut_ptr);
             builder.arg(&conv_ptr); // INFERENCE STATE conv — persistent
             builder.arg(scratch.proj_flat.inner());
             let cw = lw.conv1d_weight();
@@ -620,6 +634,7 @@ fn prefill_body<W: MambaWeightsView>(
             builder.arg(&dc_i);
             let xs_i = (2 * di) as i32;
             builder.arg(&xs_i);
+            builder.arg(&ts_i);
             // T-tiled: 3 blocks at B=1 became ~111 - the serial T=4621
             // walk was the single largest prefill stage.
             unsafe { builder.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
@@ -664,7 +679,20 @@ fn prefill_body<W: MambaWeightsView>(
             Some(lw.dt_proj_b()),
             (bt, dt_rank, di),
         )?;
-        {
+        if tmajor_in {
+            let t_i = t as i32;
+            let di_i = di as i32;
+            let mut builder = ctx
+                .stream
+                .launch_builder(&ctx.kernels.softplus_fwd_tmajor.f32);
+            builder.arg(scratch.u.inner_mut());
+            builder.arg(scratch.delta.inner());
+            builder.arg(&t_i);
+            builder.arg(&di_i);
+            builder.arg(&ts_i);
+            unsafe { builder.launch(super::launch::grid_tmajor_tiles(b, t, di)) }
+                .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+        } else {
             let n = (bt * di) as i32;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_fwd);
             builder.arg(scratch.delta.inner_mut());
@@ -740,10 +768,15 @@ fn prefill_body<W: MambaWeightsView>(
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);
+                let (delta_in, u_in, y_out) = if tmajor_in {
+                    (&scratch.u, &scratch.u_t, &mut scratch.delta)
+                } else {
+                    (&scratch.delta, &scratch.u, &mut scratch.gated)
+                };
                 builder.arg(&ssm_ptr);
-                builder.arg(scratch.gated.inner_mut());
-                builder.arg(scratch.delta.inner());
-                builder.arg(scratch.u.inner());
+                builder.arg(y_out.inner_mut());
+                builder.arg(delta_in.inner());
+                builder.arg(u_in.inner());
                 builder.arg(scratch.b_gathered.inner());
                 builder.arg(scratch.c_gathered.inner());
                 builder.arg(&a_neg_ptr);
@@ -755,8 +788,21 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
+                builder.arg(&ts_i);
                 unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
                     .map_err(|e| format!("ssm_parallel prefill L{layer_idx}: {e:?}"))?;
+                if tmajor_in {
+                    let mut builder = ctx.stream.launch_builder(&ctx.kernels.gate_from_tmajor.f32);
+                    builder.arg(scratch.gated.inner_mut());
+                    builder.arg(scratch.delta.inner());
+                    builder.arg(scratch.proj_flat.inner());
+                    builder.arg(&t_i);
+                    builder.arg(&di_i);
+                    builder.arg(&ts_i);
+                    builder.arg(&gate_stride);
+                    unsafe { builder.launch(super::launch::grid_tmajor_tiles(b, t, di)) }
+                        .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                }
             } else {
                 let mut builder = ctx
                     .stream
@@ -968,6 +1014,10 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
     let d_conv = dims.d_conv;
     let t = seq_len;
     let k = &ctx.kernels;
+    // The t-major route, as in the f32 chain.
+    let ts = super::backward::tmajor_stride(&dims);
+    let tmajor_in = ts > 0 && scratch.u_t.len_elems() >= b * di * ts;
+    let ts_i = if tmajor_in { ts as i32 } else { 0 };
 
     // Seed the f32 residual stream with the incoming embeddings. `ip_out_flat`
     // is already f32 (CPU embed lookup); no downcast needed to set up residual.
@@ -1051,8 +1101,14 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 .stream
                 .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(dt));
             let u_ptr = scratch.u.cached_ptr();
+            let ut_ptr = if tmajor_in {
+                scratch.u_t.cached_ptr()
+            } else {
+                0
+            };
             let xb_ptr = scratch.proj_flat.cached_ptr();
             bld.arg(&u_ptr);
+            bld.arg(&ut_ptr);
             bld.arg(&conv_ptr);
             bld.arg(&xb_ptr);
             let cw = lw.conv1d_weight();
@@ -1065,6 +1121,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             bld.arg(&dc_i);
             let xs_i = (2 * di) as i32;
             bld.arg(&xs_i);
+            bld.arg(&ts_i);
             unsafe { bld.launch(super::launch::grid_conv_fwd_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
@@ -1125,7 +1182,20 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             Some(lw.dt_proj_b()),
             (bt, dt_rank, di),
         )?;
-        {
+        if tmajor_in {
+            let t_i = t as i32;
+            let di_i = di as i32;
+            let mut bld = ctx.stream.launch_builder(k.softplus_fwd_tmajor.get(dt));
+            let dst_ptr = scratch.u.cached_ptr();
+            let src_ptr = scratch.delta.cached_ptr();
+            bld.arg(&dst_ptr);
+            bld.arg(&src_ptr);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&ts_i);
+            unsafe { bld.launch(super::launch::grid_tmajor_tiles(b, t, di)) }
+                .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+        } else {
             let n = (bt * di) as i32;
             let mut bld = ctx.stream.launch_builder(k.softplus_fwd_typed.get(dt));
             let d_ptr = scratch.delta.cached_ptr();
@@ -1198,8 +1268,11 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            let delta_ptr = scratch.delta.cached_ptr();
-            let u_ptr = scratch.u.cached_ptr();
+            let (delta_ptr, u_ptr) = if tmajor_in {
+                (scratch.u.cached_ptr(), scratch.u_t.cached_ptr())
+            } else {
+                (scratch.delta.cached_ptr(), scratch.u.cached_ptr())
+            };
             let bb_ptr = scratch.b_gathered.cached_ptr();
             let cb_ptr = scratch.c_gathered.cached_ptr();
             let dp = lw.d_param();
@@ -1212,11 +1285,16 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let proj_ptr = scratch.proj_flat.cached_ptr();
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
+                let y_ptr = if tmajor_in {
+                    scratch.delta.cached_ptr()
+                } else {
+                    gated_out_ptr
+                };
                 let mut bld = ctx
                     .stream
                     .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(dt));
                 bld.arg(&ssm_ptr);
-                bld.arg(&gated_out_ptr);
+                bld.arg(&y_ptr);
                 bld.arg(&delta_ptr);
                 bld.arg(&u_ptr);
                 bld.arg(&bb_ptr);
@@ -1229,8 +1307,21 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
+                bld.arg(&ts_i);
                 unsafe { bld.launch(super::launch::grid_parallel_scan(b, di, ds)) }
                     .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
+                if tmajor_in {
+                    let mut bld = ctx.stream.launch_builder(k.gate_from_tmajor.get(dt));
+                    bld.arg(&gated_out_ptr);
+                    bld.arg(&y_ptr);
+                    bld.arg(&proj_ptr);
+                    bld.arg(&t_i);
+                    bld.arg(&di_i);
+                    bld.arg(&ts_i);
+                    bld.arg(&gate_stride);
+                    unsafe { bld.launch(super::launch::grid_tmajor_tiles(b, t, di)) }
+                        .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                }
             } else {
                 assert!(
                     ds <= k.state_cap,

@@ -689,6 +689,11 @@ pub struct GpuMambaTargetScratch {
     pub rms_discard: GpuBuffer, // [B*T] (RmsNorm scalars, discarded)
     pub b_gathered: GpuBuffer,  // [B*T*d_state]
     pub c_gathered: GpuBuffer,  // [B*T*d_state]
+    /// t-major rows [B, d_inner, stride] of `u` that the conv writes for
+    /// the parallel scan, the stride from `tmajor_stride`; one element when
+    /// these dims never take that route. On that route `u` and `delta` hold
+    /// t-major rows too, so both are allocated for them.
+    pub u_t: GpuBuffer,
     // Per-layer state (flat, with layer offsets — same pattern as online)
     pub conv_states: GpuBuffer, // [B*n_layers*d_inner*d_conv]
     pub ssm_states: GpuBuffer,  // [B*n_layers*d_inner*d_state]
@@ -711,23 +716,37 @@ impl GpuMambaTargetScratch {
         let n_layers = dims.n_layers;
         let bt = batch * dims.seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
+        let tm = batch * d_inner * tmajor_stride(dims);
 
         Ok(Self {
             proj_flat: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
-            u: GpuBuffer::zeros(stream, bt * d_inner)?,
+            u: GpuBuffer::zeros(stream, (bt * d_inner).max(tm))?,
             xdbl: GpuBuffer::zeros(stream, bt * xdbl_dim)?,
             dt_gather: GpuBuffer::zeros(stream, bt * dt_rank)?,
-            delta: GpuBuffer::zeros(stream, bt * d_inner)?,
+            delta: GpuBuffer::zeros(stream, (bt * d_inner).max(tm))?,
             gated: GpuBuffer::zeros(stream, bt * d_inner)?,
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
             rms_discard: GpuBuffer::zeros(stream, bt)?,
             b_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
             c_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
+            u_t: GpuBuffer::zeros(stream, tm.max(1))?,
             conv_states: GpuBuffer::zeros(stream, batch * n_layers * d_inner * d_conv)?,
             ssm_states: GpuBuffer::zeros(stream, batch * n_layers * d_inner * d_state)?,
             dims: *dims,
         })
+    }
+}
+
+/// Row stride of the t-major rows of the parallel nosave route: the
+/// sequence length rounded up to eight, so every row starts on a 32-byte
+/// boundary and a thread's eight times move as whole vectors; zero when the
+/// dims never take that route, so the sequential shapes pay no memory.
+pub(crate) fn tmajor_stride(dims: &super::forward::GpuMambaDims) -> usize {
+    if dims.scan_mode.use_parallel(dims.seq_len, dims.d_state) {
+        dims.seq_len.next_multiple_of(8)
+    } else {
+        0
     }
 }
 
@@ -754,6 +773,8 @@ pub struct GpuMambaTargetMixedScratch {
     pub rms_discard: GpuBuffer,
     pub b_gathered: DtypedBuf,
     pub c_gathered: DtypedBuf,
+    /// t-major copy of `u` for the parallel scan, as in the f32 scratch.
+    pub u_t: DtypedBuf,
     pub dims: super::forward::GpuMambaDims,
     pub dtype: WeightDtype,
 }
@@ -774,19 +795,21 @@ impl GpuMambaTargetMixedScratch {
         let dt_rank = dims.dt_rank;
         let bt = batch * dims.seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
+        let tm = batch * d_inner * tmajor_stride(dims);
 
         Ok(Self {
             proj_flat: DtypedBuf::zeros(stream, bt * 2 * d_inner, dtype)?,
-            u: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            u: DtypedBuf::zeros(stream, (bt * d_inner).max(tm), dtype)?,
             xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, bt * dt_rank, dtype)?,
-            delta: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            delta: DtypedBuf::zeros(stream, (bt * d_inner).max(tm), dtype)?,
             gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
             rms_discard: GpuBuffer::zeros(stream, bt)?,
             b_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
             c_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
+            u_t: DtypedBuf::zeros(stream, tm.max(1), dtype)?,
             dims: *dims,
             dtype,
         })

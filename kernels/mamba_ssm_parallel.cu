@@ -97,6 +97,31 @@ __device__ __forceinline__ void load_row8(
     }
 }
 
+// The store twin of load_row8: a thread's eight values at t0 .. t0+7 of one
+// t-major row, as 16-byte vectors when the span lies inside the row and is
+// 16-byte aligned, element by element otherwise.
+template <typename T>
+__device__ __forceinline__ void store_row8(
+    T* __restrict__ row, int t0, int T_len, const T vals[NITEMS]
+) {
+    T* p = row + t0;
+    if (t0 + NITEMS <= T_len && ((unsigned long long)p & 15ull) == 0) {
+        constexpr int PER16 = 16 / (int)sizeof(T);
+        #pragma unroll
+        for (int k = 0; k < NITEMS / PER16; k++) {
+            uint4 v;
+            T* e = reinterpret_cast<T*>(&v);
+            #pragma unroll
+            for (int j = 0; j < PER16; j++) e[j] = vals[k * PER16 + j];
+            reinterpret_cast<uint4*>(p)[k] = v;
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < NITEMS; i++)
+            if (t0 + i < T_len) p[i] = vals[i];
+    }
+}
+
 // ============================================================================
 // Warp-level inclusive scan of (a, b) pairs using warp shuffle.
 // After return, lane k holds compose(pair_0, ..., pair_k) within its warp.
@@ -714,7 +739,10 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     const float* __restrict__ D,       // [d_inner]
     const float* __restrict__ proj_gate, // in_proj output when gating fuses
     int gate_stride,                   // proj row stride; 0 = plain y store
-    int batch, int T, int d_inner, int d_state
+    int batch, int T, int d_inner, int d_state,
+    // > 0: delta, u and y in t-major rows [batch, d_inner, tstride], y
+    // stored ungated for gate_from_tmajor; 0: row-major rows.
+    int tstride
 ) {
     int bid = blockIdx.x;
     int did = blockIdx.y;
@@ -753,14 +781,25 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
         // exceeded the 32-byte sector either way, so direct loads drop the
         // staging barriers with no arithmetic change, as in the saving
         // twin. y keeps its staging, the one genuinely coalescing store.
+        // In t-major rows a thread's eight times are one 32-byte span and
+        // come in as vectors, the way B and C do. The values are the same.
         float delta_vals[NITEMS];
         float u_vals[NITEMS];
         float delta_u_vals[NITEMS];
+        long long row = ((long long)bid * d_inner + did) * tstride;
+        if (tstride > 0) {
+            load_row8(delta + row, chunk_start + threadIdx.x * NITEMS, T, delta_vals);
+            load_row8(u + row, chunk_start + threadIdx.x * NITEMS, T, u_vals);
+        } else {
+            #pragma unroll
+            for (int i = 0; i < NITEMS; i++) {
+                int t = chunk_start + threadIdx.x * NITEMS + i;
+                delta_vals[i] = (t < T) ? delta[(bid * T + t) * d_inner + did] : 0.0f;
+                u_vals[i] = (t < T) ? u[(bid * T + t) * d_inner + did] : 0.0f;
+            }
+        }
         #pragma unroll
         for (int i = 0; i < NITEMS; i++) {
-            int t = chunk_start + threadIdx.x * NITEMS + i;
-            delta_vals[i] = (t < T) ? delta[(bid * T + t) * d_inner + did] : 0.0f;
-            u_vals[i] = (t < T) ? u[(bid * T + t) * d_inner + did] : 0.0f;
             delta_u_vals[i] = delta_vals[i] * u_vals[i];
         }
 
@@ -854,22 +893,27 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             }
         } // end d_state loop
 
-        // Direct per-thread stores, as in the saving kernel.
-        #pragma unroll
-        for (int i = 0; i < NITEMS; i++) {
-            int t = chunk_start + threadIdx.x * NITEMS + i;
-            if (t < T) {
-                float yv = out_vals[i];
-                if (gate_stride > 0) {
-                    // Fused gating: the same one-rounding product the
-                    // separate elementwise mul performed, on the same
-                    // SiLU formula split_gate_silu used - bit-identical
-                    // to the three-kernel chain it replaces.
-                    float g = proj_gate[(bid * T + t) * gate_stride
-                                        + d_inner + did];
-                    yv *= g / (1.0f + exp2f(-g * 1.4426950408889634f));
+        // Direct per-thread stores, as in the saving kernel; on the t-major
+        // route a thread's eight times are one span of its channel's row.
+        if (tstride > 0) {
+            store_row8(y_out + row, chunk_start + threadIdx.x * NITEMS, T, out_vals);
+        } else {
+            #pragma unroll
+            for (int i = 0; i < NITEMS; i++) {
+                int t = chunk_start + threadIdx.x * NITEMS + i;
+                if (t < T) {
+                    float yv = out_vals[i];
+                    if (gate_stride > 0) {
+                        // Fused gating: the same one-rounding product the
+                        // separate elementwise mul performed, on the same
+                        // SiLU formula split_gate_silu used - bit-identical
+                        // to the three-kernel chain it replaces.
+                        float g = proj_gate[(bid * T + t) * gate_stride
+                                            + d_inner + did];
+                        yv *= g / (1.0f + exp2f(-g * 1.4426950408889634f));
+                    }
+                    y_out[(bid * T + t) * d_inner + did] = yv;
                 }
-                y_out[(bid * T + t) * d_inner + did] = yv;
             }
         }
     } // end chunk loop
@@ -1107,7 +1151,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     const float* __restrict__ D,                                              \
     const T_ACT* __restrict__ proj_gate,                                      \
     int gate_stride,                                                          \
-    int batch, int T, int d_inner, int d_state                                \
+    int batch, int T, int d_inner, int d_state,                               \
+    int tstride /* t-major rows when > 0, see the f32 twin */                 \
 ) {                                                                           \
     int bid = blockIdx.x;                                                     \
     int did = blockIdx.y;                                                     \
@@ -1138,13 +1183,23 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         float delta_vals[NITEMS];                                             \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
+        long long row = ((long long)bid * d_inner + did) * tstride;          \
+        if (tstride > 0) {                                                    \
+            load_row8(delta + row, chunk_start + threadIdx.x * NITEMS, T,     \
+                      delta_vals);                                            \
+            load_row8(u + row, chunk_start + threadIdx.x * NITEMS, T, u_vals); \
+        } else {                                                              \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                delta_vals[i] = (t < T)                                       \
+                    ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;      \
+                u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])  \
+                                    : 0.0f;                                   \
+            }                                                                 \
+        }                                                                     \
         _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
-            delta_vals[i] = (t < T)                                           \
-                ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;          \
-            u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
-                                : 0.0f;                                       \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
         }                                                                     \
         float out_vals[NITEMS];                                               \
@@ -1228,23 +1283,31 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         }                                                                     \
                                                              \
         /* Direct per-thread stores, as in the f32 kernel. */                 \
-        _Pragma("unroll")                                                      \
-        for (int i = 0; i < NITEMS; i++) {                                    \
-            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
-            if (t < T) {                                                      \
-                T_ACT ty = FROM_F(out_vals[i]);                               \
-                if (gate_stride > 0) {                                        \
-                    /* Round-trip emulation of the replaced chain: the     \
-                     * baseline stored y typed, stored SiLU(gate) typed,   \
-                     * then multiplied the reloaded values with one final  \
-                     * rounding - reproduce each rounding in place.     */ \
-                    float g = to_f(proj_gate[(bid * T + t) * gate_stride    \
-                                             + d_inner + did]);              \
-                    T_ACT tg = FROM_F(                                       \
-                        g / (1.0f + exp2f(-g * 1.4426950408889634f)));       \
-                    ty = FROM_F(to_f(ty) * to_f(tg));                        \
+        if (tstride > 0) {                                                    \
+            T_ACT y8[NITEMS];                                                 \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < NITEMS; i++) y8[i] = FROM_F(out_vals[i]);     \
+            store_row8(y_out + row, chunk_start + threadIdx.x * NITEMS, T, y8); \
+        } else {                                                              \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                if (t < T) {                                                  \
+                    T_ACT ty = FROM_F(out_vals[i]);                           \
+                    if (gate_stride > 0) {                                    \
+                        /* Round-trip emulation of the replaced chain: the \
+                         * baseline stored y typed, stored SiLU(gate)      \
+                         * typed, then multiplied the reloaded values with \
+                         * one final rounding - reproduce each rounding in \
+                         * place. */                                       \
+                        float g = to_f(proj_gate[(bid * T + t) * gate_stride \
+                                                 + d_inner + did]);          \
+                        T_ACT tg = FROM_F(                                   \
+                            g / (1.0f + exp2f(-g * 1.4426950408889634f)));   \
+                        ty = FROM_F(to_f(ty) * to_f(tg));                    \
+                    }                                                         \
+                    y_out[(bid * T + t) * d_inner + did] = ty;                \
                 }                                                             \
-                y_out[(bid * T + t) * d_inner + did] = ty;                    \
             }                                                                 \
         }                                                                     \
     }                                                                         \

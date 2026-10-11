@@ -335,6 +335,22 @@ pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConf
     }
 }
 
+/// Grid of the t-major transposing kernels, the softplus into t-major rows
+/// and the gate out of them (kernels/activations.cu): one 32 x 32 tile of
+/// (d, t) per block and 32 x 8 threads, each thread four rows of the tile.
+pub fn grid_tmajor_tiles(batch: usize, t: usize, d: usize) -> LaunchConfig {
+    const TILE: u32 = 32;
+    LaunchConfig {
+        grid_dim: (
+            (d as u32).div_ceil(TILE),
+            (t as u32).div_ceil(TILE),
+            batch as u32,
+        ),
+        block_dim: (TILE, 8, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// Grid of the tiled conv backward: tiles of CONV1D_TILE_T = 128, the depth
 /// that also fixes how many partial rows the tap gradients reduce.
 pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {

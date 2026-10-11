@@ -181,14 +181,40 @@ DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
 #define CONV1D_FWD_TILE_T 32
 #define CONV1D_FWD_BATCH 8
 
+// Eight consecutive values of one t-major row from p on, as 16-byte
+// vectors when all eight lie before the row's end and p is 16-byte aligned,
+// element by element otherwise.
+template <typename T>
+__device__ __forceinline__ void conv_store_row8(T* p, int n_valid, const T v[8]) {
+    if (n_valid >= 8 && ((unsigned long long)p & 15ull) == 0) {
+        constexpr int PER16 = 16 / (int)sizeof(T);
+        #pragma unroll
+        for (int k = 0; k < 8 / PER16; k++) {
+            uint4 w;
+            T* e = reinterpret_cast<T*>(&w);
+            #pragma unroll
+            for (int j = 0; j < PER16; j++) e[j] = v[k * PER16 + j];
+            reinterpret_cast<uint4*>(p)[k] = w;
+        }
+    } else {
+        #pragma unroll
+        for (int j = 0; j < 8; j++)
+            if (j < n_valid) p[j] = v[j];
+    }
+}
+
 // The walk of one forward tile over [t0, t_end): WIN holds the window
 // before t0, W takes the taps and bias_d is the bias of channel d. The
 // four-tap walk gets arrays of its own: an array indexed by a runtime bound
-// anywhere lives in local memory everywhere.
-#define CONV1D_FWD_WALK(DC, FROM_F, WIN, W)                                   \
+// anywhere lives in local memory everywhere. UT, when it is not null, takes
+// a second copy of the output in t-major rows [batch, d_inner, UTS], the
+// layout the parallel scan reads one channel's times from: a batch of
+// eight steps goes out as one 32-byte span per channel.
+#define CONV1D_FWD_WALK(DC, TY, FROM_F, WIN, W, UT, UTS)                      \
     for (int k = 0; k < (DC); k++) W[k] = weight[d * d_conv + k];            \
     for (int tb = t0; tb < t_end; tb += CONV1D_FWD_BATCH) {                  \
         float xs[CONV1D_FWD_BATCH];                                          \
+        TY us[CONV1D_FWD_BATCH];                                             \
         _Pragma("unroll")                                                    \
         for (int j = 0; j < CONV1D_FWD_BATCH; j++) {                         \
             int t = tb + j;                                                  \
@@ -203,10 +229,15 @@ DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
                 WIN[(DC) - 1] = xs[j];                                       \
                 float val = bias_d;                                          \
                 for (int k = 0; k < (DC); k++) val += WIN[k] * W[k];         \
-                u_out[(b * T_len + t) * d_inner + d] =                       \
+                TY u_val =                                                   \
                     FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+                u_out[(b * T_len + t) * d_inner + d] = u_val;                \
+                us[j] = u_val;                                               \
             }                                                                \
         }                                                                    \
+        if ((UT) != nullptr)                                                 \
+            conv_store_row8((UT) + ((long long)b * d_inner + d) * (UTS) + tb, \
+                            t_end - tb, us);                                 \
     }
 
 #define DEFINE_CONV1D_BURNIN_TILED(SUFFIX, TY, FROM_F)                        \
@@ -265,10 +296,10 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     if (d_conv == 4) {                                                       \
         float win4[4] = {win[0], win[1], win[2], win[3]};                    \
         float w4[4];                                                         \
-        CONV1D_FWD_WALK(4, FROM_F, win4, w4)                                 \
+        CONV1D_FWD_WALK(4, TY, FROM_F, win4, w4, (TY*)nullptr, 0)            \
     } else {                                                                 \
         float w[8];                                                          \
-        CONV1D_FWD_WALK(d_conv, FROM_F, win, w)                              \
+        CONV1D_FWD_WALK(d_conv, TY, FROM_F, win, w, (TY*)nullptr, 0)         \
     }                                                                        \
 }
 
@@ -281,14 +312,17 @@ DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
 // serial nosave walk - but no conv tape and no post_conv (inference keeps
 // nothing). Only the tile containing t = T-1 writes the carry-out state,
 // so a continued prefill sees exactly the serial walk's final window.
+// u_t, when not null, receives the same values in t-major rows of
+// u_t_stride for the parallel scan.
 #define DEFINE_CONV1D_BURNIN_NOSAVE_TILED(SUFFIX, TY, FROM_F)                 \
 extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
-    TY* __restrict__ u_out, float* __restrict__ state,                       \
+    TY* __restrict__ u_out, TY* __restrict__ u_t, float* __restrict__ state, \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
     const float* __restrict__ bias,                                          \
     int batch, int T_len, int d_inner, int d_conv,                           \
-    int x_stride /* row stride of x_branch; d_inner, or 2*d_inner when     \
-                    reading the in_proj output directly */                   \
+    int x_stride, /* row stride of x_branch; d_inner, or 2*d_inner when    \
+                     reading the in_proj output directly */                  \
+    int u_t_stride /* row stride of u_t, a multiple of eight */              \
 ) {                                                                          \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
     int total = batch * d_inner;                                             \
@@ -330,10 +364,10 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
     if (d_conv == 4) {                                                       \
         float win4[4] = {win[0], win[1], win[2], win[3]};                    \
         float w4[4];                                                         \
-        CONV1D_FWD_WALK(4, FROM_F, win4, w4)                                 \
+        CONV1D_FWD_WALK(4, TY, FROM_F, win4, w4, u_t, u_t_stride)           \
     } else {                                                                 \
         float w[8];                                                          \
-        CONV1D_FWD_WALK(d_conv, FROM_F, win, w)                              \
+        CONV1D_FWD_WALK(d_conv, TY, FROM_F, win, w, u_t, u_t_stride)        \
     }                                                                        \
 }
 

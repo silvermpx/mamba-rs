@@ -23,6 +23,83 @@ DEFINE_SOFTPLUS_FWD(f32,  float,         from_f_f32)
 DEFINE_SOFTPLUS_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SOFTPLUS_FWD(f16,  __half,        from_f_f16)
 
+// The same softplus from row-major rows [batch, T, d] into t-major rows
+// [batch, d, tstride], for the parallel scan, which reads one channel's
+// times in a row. A 32 x 32 tile goes through shared memory, so the loads
+// run along d and the stores along t. Each value is the formula above on
+// the same input.
+#define SOFTPLUS_TILE 32
+#define DEFINE_SOFTPLUS_FWD_TMAJOR(SUFFIX, T, FROM_F)                     \
+extern "C" __global__ void softplus_forward_tmajor_##SUFFIX(              \
+    T* __restrict__ dst, const T* __restrict__ src,                       \
+    int T_len, int d, int tstride                                         \
+) {                                                                       \
+    __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
+    int b = blockIdx.z;                                                   \
+    int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
+    int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
+    for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
+        int t = t0 + r, c = d0 + threadIdx.x;                             \
+        if (t < T_len && c < d) {                                         \
+            float v = to_f(src[((long long)b * T_len + t) * d + c]);      \
+            tile[r][threadIdx.x] =                                        \
+                FROM_F(v > 20.0f ? v : log1pf(exp2f(v * LOG2E)));         \
+        }                                                                 \
+    }                                                                     \
+    __syncthreads();                                                      \
+    for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
+        int c = d0 + r, t = t0 + threadIdx.x;                             \
+        if (c < d && t < T_len)                                           \
+            dst[((long long)b * d + c) * tstride + t] = tile[threadIdx.x][r]; \
+    }                                                                     \
+}
+
+DEFINE_SOFTPLUS_FWD_TMAJOR(f32,  float,         from_f_f32)
+DEFINE_SOFTPLUS_FWD_TMAJOR(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SOFTPLUS_FWD_TMAJOR(f16,  __half,        from_f_f16)
+
+// The scan output from its t-major rows [batch, d, tstride] back into
+// row-major rows [batch, T, d], with the gate the scan applies on the
+// row-major route: y * SiLU(g) with g the gate half of the in_proj row
+// (gate_stride > 0), or y as it is (gate_stride = 0). The value stored is
+// rounded as the scan's own store rounds it: the output rounded once, the
+// SiLU rounded once, their product rounded once, which on f32 is the plain
+// product. The tile runs the loads along t and the stores along d.
+#define DEFINE_GATE_FROM_TMAJOR(SUFFIX, T, FROM_F)                         \
+extern "C" __global__ void gate_from_tmajor_##SUFFIX(                     \
+    T* __restrict__ out, const T* __restrict__ y_t,                       \
+    const T* __restrict__ proj_gate,                                      \
+    int T_len, int d, int tstride, int gate_stride                        \
+) {                                                                       \
+    __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
+    int b = blockIdx.z;                                                   \
+    int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
+    int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
+    for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
+        int c = d0 + r, t = t0 + threadIdx.x;                             \
+        if (c < d && t < T_len)                                           \
+            tile[r][threadIdx.x] = y_t[((long long)b * d + c) * tstride + t]; \
+    }                                                                     \
+    __syncthreads();                                                      \
+    for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
+        int t = t0 + r, c = d0 + threadIdx.x;                             \
+        if (t < T_len && c < d) {                                         \
+            T ty = tile[threadIdx.x][r];                                  \
+            if (gate_stride > 0) {                                        \
+                float g = to_f(proj_gate[((long long)b * T_len + t)       \
+                                         * gate_stride + d + c]);         \
+                T tg = FROM_F(g / (1.0f + exp2f(-g * 1.4426950408889634f))); \
+                ty = FROM_F(to_f(ty) * to_f(tg));                         \
+            }                                                             \
+            out[((long long)b * T_len + t) * d + c] = ty;                 \
+        }                                                                 \
+    }                                                                     \
+}
+
+DEFINE_GATE_FROM_TMAJOR(f32,  float,         from_f_f32)
+DEFINE_GATE_FROM_TMAJOR(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_GATE_FROM_TMAJOR(f16,  __half,        from_f_f16)
+
 // Untyped f32 entry: the training and prefill paths load it as softplus_fwd.
 extern "C" __global__ void softplus_forward(float* x, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;

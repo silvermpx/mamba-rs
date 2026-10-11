@@ -254,6 +254,12 @@ pub struct MambaKernels {
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub softplus_fwd_typed: TypedKernel,
+    /// Softplus from row-major [B, T, d] into t-major [B, d, stride] rows
+    /// for the parallel nosave scan; grid from `launch::grid_tmajor_tiles`.
+    pub softplus_fwd_tmajor: TypedKernel,
+    /// The parallel nosave scan's t-major output back into row-major rows
+    /// with the gate applied; grid from `launch::grid_tmajor_tiles`.
+    pub gate_from_tmajor: TypedKernel,
     /// RMSNorm that first adds a typed branch output into the f32 residual
     /// in place: the previous layer's residual add and this layer's norm in
     /// one launch on the decode routes. The f32 entry takes an f32 branch.
@@ -1699,6 +1705,8 @@ impl MambaKernels {
 
             // typed inference kernels
             softplus_fwd_typed: load_typed("softplus_forward")?,
+            softplus_fwd_tmajor: load_typed("softplus_forward_tmajor")?,
+            gate_from_tmajor: load_typed("gate_from_tmajor")?,
             rmsnorm_fwd_resadd_typed: load_typed("rmsnorm_forward_resadd_f32in")?,
             bias_broadcast_typed: load_typed("bias_broadcast")?,
             elementwise_mul_typed: load_typed("elementwise_mul")?,
