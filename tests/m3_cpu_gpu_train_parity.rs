@@ -618,6 +618,28 @@ fn m3_cpu_gpu_train_parity_chunked_tile_at_its_limit() {
     check_scenario("chunked_ds142_hd16", &scn);
 }
 
+/// Headdim 1, the narrowest warp-tier head, on the chunked route with the
+/// SiLU gate. The gated output norm is left out on purpose: over a group of
+/// one element it computes y / sqrt(y^2 + eps), whose backward subtracts two
+/// nearly equal terms, w * dy * (1 - y_hat^2), so an f32 rounding in y comes
+/// back multiplied by (y^2 + eps) / eps, up to about 1e5. With that norm the
+/// CPU and the GPU both sit within the f32 band of the float64 gradient
+/// (central differences, step 1e-7: rel_l2 6.7e-4 and 1.8e-3 at d_state 16)
+/// and differ from each other by about 1e-3, past this file's tolerance.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_headdim_one() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            headdim: 1,
+            ..base_cfg(false)
+        },
+        batch: 1,
+        seq_len: 128,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_hd1", &scn);
+}
+
 #[test]
 fn m3_cpu_gpu_train_parity_sequential_large_d_state() {
     let scn = Scenario {
